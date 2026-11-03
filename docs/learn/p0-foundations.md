@@ -9,8 +9,8 @@ P0 adds the shared ground for the production-shaped custody core: dev infrastruc
 | Phase 2 schema (ledger, partitions, deposits, withdrawals, sweeps, EVM nonces, sign jobs, approver keys, outbox) | `migrations/0002_custody_core.sql` |
 | Partition key | `internal/partition` |
 | Ledger interface and errors | `internal/ledger/ledger.go` |
-| Chain adapter interface | `internal/chain/adapter.go` |
-| Sign-job types | `internal/signjob/signjob.go` |
+| Chain adapter interface, offline `TxVerifier` | `internal/chain/adapter.go` |
+| Sign-job types, `Intent` (what approvers sign) | `internal/signjob/signjob.go` |
 | Outbox writer | `internal/outbox/outbox.go` |
 | Schema tests | `migrations/migrations_test.go` |
 | Infra smoke test | `internal/infratest` |
@@ -36,6 +36,13 @@ A withdrawal request must create the withdrawal row, put a hold on the customer'
 ## Double entry and zero-sum
 Every ledger transaction is a set of entries (account, signed amount) that sum to zero per (chain, asset). Value only moves between accounts; it is never created or destroyed. The database enforces it: a deferred constraint trigger (`ledger_entries_zero_sum`) checks at COMMIT, so a transaction may insert its entries one at a time but cannot commit unbalanced. Entries are append-only (triggers block UPDATE, DELETE, TRUNCATE), so corrections are new reversing entries. A `CHECK` on `ledger_accounts` stops a non-negative account from dropping below zero available (`posted - held >= 0`).
 
+## Trust: what the signing gateway believes
+Assume an attacker can write the business database. The gateway therefore trusts nothing in it:
+- Approver public keys and signing policy live in signing-zone configuration only (there is no `approver_keys` table). `Approval` holds just `{Actor, Signature}`.
+- Approvers sign `Intent.Hash()`, a readable statement (kind, partition, chain, asset, from, to, amount), not an opaque digest. Fields are length-prefixed so bytes cannot slide between fields.
+- The built transaction must prove it matches the intent: `TxVerifier.Verify` recomputes the digest from the payload and checks destination, asset and amount, offline.
+- Build calls take the caller's `pgx.Tx`, so nonces (EVM) or UTXO reservations (BTC) commit with the withdrawal.
+
 ## Gotchas
 - `NUMERIC(78,0)` holds any uint256 exactly; Go side uses `*big.Int`.
 - Interfaces in `partition`, `ledger.go`, `adapter.go`, `signjob`, `outbox` are frozen: change them only through the lead.
@@ -54,6 +61,7 @@ Every ledger transaction is a set of entries (account, signed amount) that sum t
 8. How do we correct a wrong ledger entry if entries are append-only?
 9. Which constraints keep a customer account from spending held funds?
 10. Why is `deposits.dedup_key` unique, and what is its format for EVM?
+11. Why does the signing gateway not trust approver keys or intents stored in the business database?
 
 <details>
 <summary>Answers</summary>
@@ -68,4 +76,5 @@ Every ledger transaction is a set of entries (account, signed amount) that sum t
 8. Write a new transaction with reversing entries; the old rows stay as history.
 9. `CHECK (held >= 0)` and `CHECK (allow_negative OR posted - held >= 0)` on `ledger_accounts`.
 10. The same on-chain transfer can be seen twice (rescan, reorg, restart); the unique key makes the second insert fail instead of double-crediting. EVM: `chain:tx_hash:log_index`.
+11. An attacker who can write that database could add their own approver key, approve their own withdrawal, or alter the payload. Keys and policy come from signing-zone config, and the gateway verifies approver signatures over the intent and the tx against the intent itself.
 </details>

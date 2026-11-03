@@ -221,6 +221,7 @@ CREATE TABLE sign_jobs (
     partition_id  text NOT NULL REFERENCES partitions (id),
     key_ref       text NOT NULL,
     chain         text NOT NULL,
+    intent        jsonb NOT NULL,           -- signjob.Intent; approvers sign its hash
     digest        bytea NOT NULL,
     payload       jsonb NOT NULL,
     approvals     jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -235,14 +236,6 @@ CREATE TABLE sign_jobs (
 );
 
 CREATE INDEX sign_jobs_pending ON sign_jobs (created_at) WHERE status = 'pending';
-
-CREATE TABLE approver_keys (
-    actor      text NOT NULL,
-    public_key bytea NOT NULL CHECK (octet_length(public_key) = 32), -- Ed25519
-    enabled    boolean NOT NULL DEFAULT true,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (actor, public_key)
-);
 
 -- Transactional outbox: written in the business transaction, published by a polling relay.
 CREATE TABLE outbox (

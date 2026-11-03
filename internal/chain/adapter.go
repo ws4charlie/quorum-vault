@@ -5,8 +5,16 @@ package chain
 
 import (
 	"context"
+	"errors"
 	"math/big"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
+
+// ErrNotSupported is returned by BuildReplacement on chains without replacement.
+var ErrNotSupported = errors.New("chain: operation not supported")
 
 // Adapter is one chain cell: address derivation, deposit scanning, and
 // building, assembling, broadcasting and tracking transactions. It never signs;
@@ -16,8 +24,14 @@ type Adapter interface {
 	DeriveDepositAddress(ctx context.Context, customerID string, index uint64) (DepositAddress, error)
 	// Scan returns deposits observed from fromHeight up to the chain's safe head.
 	Scan(ctx context.Context, fromHeight uint64) (ScanResult, error)
-	BuildWithdrawal(ctx context.Context, w WithdrawalIntent) (UnsignedTx, error)
-	BuildSweep(ctx context.Context, s SweepIntent) (UnsignedTx, error)
+	// BuildWithdrawal and BuildSweep run inside the caller's transaction, so
+	// resources they reserve (EVM nonces, BTC UTXOs) commit or roll back with
+	// the withdrawal or sweep row.
+	BuildWithdrawal(ctx context.Context, tx pgx.Tx, w WithdrawalIntent) (UnsignedTx, error)
+	BuildSweep(ctx context.Context, tx pgx.Tx, s SweepIntent) (UnsignedTx, error)
+	// BuildReplacement builds a fee-bumped replacement of a stuck transaction
+	// owned by (ownerKind, ownerID). Chains without replacement return ErrNotSupported.
+	BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (UnsignedTx, error)
 	Assemble(u UnsignedTx, sig Signature) (SignedTx, error)
 	Broadcast(ctx context.Context, s SignedTx) (txHash string, err error)
 	Status(ctx context.Context, txHash string) (TxStatus, error)
@@ -113,3 +127,11 @@ const (
 	TxFailed    TxStatus = "failed"
 	TxDropped   TxStatus = "dropped"
 )
+
+// TxVerifier checks a built transaction offline. It recomputes the digest from
+// Payload, compares it to u.Digest, decodes Payload, and returns an error
+// unless destination, asset and amount match the intent. The signing gateway
+// runs it in the signing zone, with no chain access.
+type TxVerifier interface {
+	Verify(u UnsignedTx, i signjob.Intent) error
+}

@@ -38,11 +38,19 @@ func TestApplyOnTopOfInit(t *testing.T) {
 	}
 	for _, tbl := range []string{"assets", "partitions", "customers", "ledger_accounts", "ledger_txns",
 		"ledger_entries", "ledger_holds", "deposit_addresses", "deposits", "withdrawals", "sweeps",
-		"evm_nonces", "evm_nonce_allocations", "sign_jobs", "approver_keys", "outbox"} {
+		"evm_nonces", "evm_nonce_allocations", "sign_jobs", "outbox"} {
 		var ok bool
 		if err := pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, tbl).Scan(&ok); err != nil || !ok {
 			t.Errorf("table %s missing (err %v)", tbl, err)
 		}
+	}
+}
+
+func TestNoApproverKeysInBusinessDB(t *testing.T) {
+	pool := dbtest.New(t)
+	var ok bool
+	if err := pool.QueryRow(context.Background(), `SELECT to_regclass('approver_keys') IS NOT NULL`).Scan(&ok); err != nil || ok {
+		t.Errorf("approver_keys exists (err %v): approver keys must live in signing-zone config", err)
 	}
 }
 
