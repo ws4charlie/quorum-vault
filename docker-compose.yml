@@ -1,4 +1,5 @@
-# Dev-only Postgres: no password (trust auth), reachable only from this machine.
+# Dev-only services, reachable only from this machine. Postgres: no password
+# (trust auth).
 services:
   postgres:
     image: postgres:16-alpine
@@ -12,6 +13,21 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U qv -d quorumvault"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Local EVM node impersonating Ethereum Sepolia (chain ID 11155111), so the
+  # Sepolia txs the sign path produces are broadcast unchanged and mined.
+  # Automine: every tx is mined at once in its own block. State is in memory
+  # (lost on restart). Pinned: foundry v1.8.5 (2026-10-05).
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:v1.8.5
+    command: ["anvil --host 0.0.0.0 --chain-id 11155111"]
+    ports:
+      - "127.0.0.1:8545:8545"
+    healthcheck:
+      test: ["CMD", "cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"]
       interval: 2s
       timeout: 3s
       retries: 30
