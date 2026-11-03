@@ -80,6 +80,7 @@ type Service struct {
 	log         *slog.Logger
 
 	walletMu sync.Map // wallet id -> *sync.Mutex; serializes Submit per wallet
+	nonceMu  sync.Map // lowercase sender address -> *sync.Mutex; see sign
 }
 
 func New(cfg Config) *Service {
@@ -97,6 +98,8 @@ func New(cfg Config) *Service {
 // Input is a new sign request. Zero/nil fields take defaults: chain id
 // Sepolia (or the RPC node's), gas 21000, fees 1 gwei tip / 30 gwei cap (or
 // the node's suggestion). Nonce is required unless an RPC node is configured.
+// With broadcast on, a nonce the node has already used by sign time is moved
+// up to the node's pending nonce (see freshNonce).
 type Input struct {
 	WalletID             string
 	ChainID              int64
@@ -116,7 +119,7 @@ type Result struct {
 	Tally     *approval.Tally    `json:"tally,omitempty"`      // Vote only
 	SignError string             `json:"sign_error,omitempty"` // status failed: why
 	Broadcast string             `json:"broadcast,omitempty"`  // "ok" or the broadcast error
-	TimingsMS map[string]float64 `json:"timings_ms,omitempty"` // sign (backend ceremony), total (this call)
+	TimingsMS map[string]float64 `json:"timings_ms,omitempty"` // sign (backend ceremony), broadcast (eth_sendRawTransaction), total (this call)
 }
 
 func (s *Service) lockWallet(id string) func() {
@@ -366,6 +369,15 @@ func (s *Service) sign(ctx context.Context, actor string, req domain.SignRequest
 		return fail("signer", err)
 	}
 	quorum := Quorum(w.Tier)
+	var staleNonce *uint64
+	if s.broadcast {
+		// Hold the sender's nonce from lookup until the broadcast returns, so
+		// two requests of one wallet signing at once never take the same nonce.
+		defer s.lockNonce(key.Address)()
+		if staleNonce, err = s.freshNonce(ctx, &r, key.Address); err != nil {
+			return fail("nonce", err)
+		}
+	}
 	params, err := eth.FromRequest(r)
 	if err != nil {
 		return fail("build_tx", err)
@@ -374,9 +386,12 @@ func (s *Service) sign(ctx context.Context, actor string, req domain.SignRequest
 	if err != nil {
 		return fail("build_tx", err)
 	}
-	s.audit(ctx, actor, domain.EventSignStarted, r, map[string]any{
-		"backend": key.Backend, "tier": w.Tier, "quorum": quorum, "key_version": key.Version,
-		"address": key.Address, "digest": "0x" + hex.EncodeToString(digest[:])})
+	started := map[string]any{"backend": key.Backend, "tier": w.Tier, "quorum": quorum, "key_version": key.Version,
+		"address": key.Address, "nonce": r.Nonce, "digest": "0x" + hex.EncodeToString(digest[:])}
+	if staleNonce != nil {
+		started["nonce_reassigned_from"] = *staleNonce
+	}
+	s.audit(ctx, actor, domain.EventSignStarted, r, started)
 
 	t0 := time.Now()
 	out, err := sg.SignDigest(ctx, digest, signer.SignOptions{Quorum: quorum})
@@ -393,7 +408,7 @@ func (s *Service) sign(ctx context.Context, actor string, req domain.SignRequest
 	if st.From != common.HexToAddress(key.Address) {
 		return fail("verify", fmt.Errorf("%w: got %s, key address %s", eth.ErrSenderMismatch, st.From.Hex(), key.Address))
 	}
-	r, err = s.storeSigned(ctx, r.ID, st.Sig65, st.Raw, st.Hash.Hex())
+	r, err = s.storeSigned(ctx, r.ID, r.Nonce, st.Sig65, st.Raw, st.Hash.Hex())
 	if err != nil {
 		return fail("store", err)
 	}
@@ -404,7 +419,9 @@ func (s *Service) sign(ctx context.Context, actor string, req domain.SignRequest
 		"sign_ms": res.TimingsMS["sign"]})
 
 	if s.broadcast {
+		t1 := time.Now()
 		h, err := s.rpc.Broadcast(ctx, st.Raw)
+		res.timing("broadcast", t1)
 		p := map[string]any{"tx_hash": st.Hash.Hex(), "ok": err == nil}
 		res.Broadcast = "ok"
 		if err != nil {
@@ -415,6 +432,32 @@ func (s *Service) sign(ctx context.Context, actor string, req domain.SignRequest
 		s.audit(ctx, actor, domain.EventTxBroadcast, r, p)
 	}
 	return res
+}
+
+func (s *Service) lockNonce(address string) func() {
+	m, _ := s.nonceMu.LoadOrStore(strings.ToLower(address), &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// freshNonce moves r.Nonce up to the node's pending nonce for from when it is
+// lower, and returns the old value (nil when unchanged). The nonce is filled
+// at Submit, but a request that waits for approval can be overtaken by later
+// requests of the same wallet that are broadcast first; signing the old nonce
+// would then always be refused ("nonce too low"). A nonce at or above the
+// pending one is kept as given.
+func (s *Service) freshNonce(ctx context.Context, r *domain.SignRequest, from string) (*uint64, error) {
+	pending, err := s.rpc.PendingNonce(ctx, common.HexToAddress(from))
+	if err != nil {
+		return nil, err
+	}
+	if r.Nonce >= pending {
+		return nil, nil
+	}
+	old := r.Nonce
+	r.Nonce = pending
+	return &old, nil
 }
 
 // Quorum is the MPC signing quorum for a tier: hot 0 (threshold, 2 of 3),

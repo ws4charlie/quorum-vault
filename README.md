@@ -12,7 +12,8 @@ that party's own HSM token. Every signature passes a policy engine (limits,
 allowlist, velocity), an approval queue with dual control, and a key
 lifecycle check (`active -> sign_only -> retired`). Every step is written to
 a hash-chained, append-only audit log. Each run ends in an EIP-1559 Sepolia
-transaction whose recovered sender is checked locally. The design note
+transaction whose recovered sender is checked locally, and which is broadcast
+and mined on a local anvil node that impersonates Sepolia. The design note
 [DESIGN_SCALE.md](DESIGN_SCALE.md) works out how this design scales to 1M
 wallets.
 
@@ -51,25 +52,29 @@ an MPC cold-wallet signature are in [docs/architecture.md](docs/architecture.md)
 | MPC 2-of-3 GG20: dealerless keygen, sealed shares, threshold sign | [internal/mpc](internal/mpc) | `TestSignRefusesOneParty`, `TestCopiedShareWithOtherTokenFails` |
 | Hot/cold tiering: hot = 2-of-3, cold = 3-of-3 + 2 approvals | [internal/signing](internal/signing) | `TestMPCColdWalletFullQuorum`, demo step 3 |
 | Policy-gated signed Sepolia tx from both backends, verified locally | [internal/chain/eth](internal/chain/eth), [scripts/demo-sepolia.sh](scripts/demo-sepolia.sh) | recovered sender == wallet address, checked by the server and again offline by `quorumvault verify-tx` |
+| Broadcast + receipt: the same Sepolia txs mined on a local node, in CI on every push | [e2e](e2e), [.github/workflows/ci.yml](.github/workflows/ci.yml) job `e2e` | receipt status 1, node-reported `from` == wallet address, exact balance deltas (value + gasUsed × effectiveGasPrice), nonce N+1, denied request sends nothing |
 | Measured latencies, rounds, messages | [docs/measurements](docs/measurements) | tables below |
 | Scale design note | [DESIGN_SCALE.md](DESIGN_SCALE.md) | — |
 
-**Not exercised:** broadcasting to Sepolia. The code can broadcast when
-`SEPOLIA_RPC_URL` is set, but no funded address was used. The deliverable
-is a signed transaction that is well-formed and whose signature recovers to
-the wallet's address, which the brief accepts as a complete demo.
+**Broadcast:** verified on a local [anvil](https://getfoundry.sh/anvil/)
+node started with chain ID 11155111, so it accepts our Sepolia transactions
+byte for byte. The e2e tests broadcast HSM and MPC (2-of-3 and 3-of-3)
+transactions through the real HTTP API, wait for receipts and check them;
+CI runs them on every push (job `e2e`). Real Sepolia is optional: set
+`SEPOLIA_RPC_URL` to a Sepolia node and fund the wallet address from a
+faucet.
 
 ## Quickstart
 
 Prerequisites: Go ≥ 1.25 with CGO (the PKCS#11 binding is cgo), SoftHSM2,
-Docker (for Postgres only), `jq` and `curl` for the demo.
+Docker (Postgres and the local anvil chain), `jq` and `curl` for the demo.
 
 ```bash
 brew install softhsm jq        # Ubuntu: apt-get install softhsm2 jq
 ```
 
 ```bash
-make setup        # SoftHSM tokens in ./data/softhsm + Postgres 16 on localhost:55432
+make setup        # SoftHSM tokens in ./data/softhsm + Postgres 16 on localhost:55432 + anvil on 127.0.0.1:8545
 ```
 
 ```bash
@@ -98,6 +103,29 @@ the audit trail and `{"ok":true}` from the chain check. The first MPC wallet
 takes 10–15 s while each party generates and seals its Paillier pre-params;
 later ones take ~3 s.
 
+### Local chain
+
+`make chain-up` starts anvil (`ghcr.io/foundry-rs/foundry:v1.8.5`) on
+127.0.0.1:8545 with chain ID 11155111: a throwaway in-memory chain that
+impersonates Sepolia and mines each transaction at once. Then:
+
+```bash
+make test-e2e     # HSM + MPC transfers broadcast, mined and checked by receipt (~1 min with cached MPC pre-params)
+```
+
+```bash
+SEPOLIA_RPC_URL=http://127.0.0.1:8545 make run   # server fills nonce/fees from the node and broadcasts
+```
+
+```bash
+./scripts/demo-sepolia.sh --local   # funds the wallets with anvil_setBalance, prints each receipt
+```
+
+The e2e tests and the demo's local mode refuse to run unless the node says
+it is anvil, reports chain ID 11155111 and is on localhost (or the compose
+host `anvil`), so they can never send to a real network. `make chain-down`
+stops it; its state is gone with it.
+
 Configuration (all optional; see [.env.example](.env.example), copy to `.env`):
 
 | Variable | Default | Meaning |
@@ -108,7 +136,7 @@ Configuration (all optional; see [.env.example](.env.example), copy to `.env`):
 | `QV_PKCS11_LIB` | `/opt/homebrew/lib/softhsm/libsofthsm2.so` (macOS), `/usr/lib/softhsm/libsofthsm2.so` (Linux) | PKCS#11 module |
 | `SOFTHSM2_CONF` | `./data/softhsm/softhsm2.conf` | repo-local token store |
 | `QV_HSM_PIN` | `user-dev-1234` (dev only) | user PIN of all tokens |
-| `SEPOLIA_RPC_URL` | empty | if set: nonce/fees from the node, and broadcast (`QV_BROADCAST=0` disables) |
+| `SEPOLIA_RPC_URL` | empty | if set: nonce/fees from the node, and broadcast (`QV_BROADCAST=0` disables); `http://127.0.0.1:8545` = local anvil |
 
 ## API
 
@@ -152,6 +180,7 @@ in Docker. All MPC parties in one process (no network). Sources:
 | MPC sign 3-of-3, median | 494 ms | 9 | 60 | 64 KB |
 | MPC 2-of-3 request end to end | 382 ms | | | |
 | MPC 3-of-3 final approve call (2nd approval → signed) | 500 ms | | | |
+| Broadcast to local anvil (`eth_sendRawTransaction`, mined in the call) | 0.3–1.5 ms | — | — | — |
 
 On a network, add about 9 × RTT per MPC signature (9 sequential rounds); at
 50 ms RTT that is +450 ms. [DESIGN_SCALE.md](DESIGN_SCALE.md#3-key-partitioning-regional-deployment-quorum-geography)
@@ -211,4 +240,4 @@ works through the regional cases.
   with API calls, roles, verification, rollback
 - [docs/measurements/](docs/measurements): raw benchmark and demo output
 - [docs/learn/](docs/learn): study guides per component (foundations, HSM
-  lifecycle, policy and audit, MPC, sign path), each with a quiz
+  lifecycle, policy and audit, MPC, sign path, local chain), each with a quiz

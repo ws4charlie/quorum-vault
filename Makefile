@@ -8,24 +8,39 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-.PHONY: setup softhsm db-up db-down test test-short build vet run
+# Local anvil node impersonating Sepolia (docker-compose.yml service "anvil").
+LOCAL_RPC_URL := http://127.0.0.1:8545
 
-setup: softhsm db-up
+.PHONY: setup softhsm db-up db-down chain-up chain-down test test-short test-e2e build vet run demo-local
+
+setup: softhsm db-up chain-up
 
 softhsm:
 	./scripts/setup-softhsm.sh
 
 db-up:
-	docker compose up -d --wait
+	docker compose up -d --wait postgres
 
 db-down:
 	docker compose down
+
+chain-up:
+	docker compose up -d --wait anvil
+
+chain-down:
+	docker compose rm -sf anvil
 
 test:
 	QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 ./...
 
 test-short:
 	go test -short -p 1 ./...
+
+# Broadcast + receipt checks on the local anvil node (make chain-up first).
+# Not -short: includes the MPC wallets.
+test-e2e:
+	SEPOLIA_RPC_URL=$(LOCAL_RPC_URL) QV_REQUIRE_CHAIN=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 \
+		go test -count=1 -p 1 -timeout 20m -v ./e2e/...
 
 build:
 	go build -o bin/quorumvault ./cmd/quorumvault
@@ -35,3 +50,7 @@ vet:
 
 run:
 	go run ./cmd/quorumvault
+
+# Demo against a server started with SEPOLIA_RPC_URL=$(LOCAL_RPC_URL).
+demo-local:
+	./scripts/demo-sepolia.sh --local
