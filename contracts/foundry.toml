@@ -1,0 +1,12 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = []
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+# Reproducible bytecode: no metadata hash, so the output does not depend on paths.
+bytecode_hash = "none"
+cbor_metadata = false
