@@ -102,7 +102,7 @@ Configuration (all optional; see [.env.example](.env.example), copy to `.env`):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DATABASE_URL` | `postgres://qv:qv-dev@localhost:55432/quorumvault?sslmode=disable` | Postgres (dev credentials) |
+| `DATABASE_URL` | `postgres://qv@localhost:55432/quorumvault?sslmode=disable` | Postgres (dev only: trust auth, bound to 127.0.0.1) |
 | `QV_HTTP_ADDR` | `:8080` | listen address |
 | `QV_DATA_DIR` | `./data` | MPC sealed shares and pre-params |
 | `QV_PKCS11_LIB` | `/opt/homebrew/lib/softhsm/libsofthsm2.so` (macOS), `/usr/lib/softhsm/libsofthsm2.so` (Linux) | PKCS#11 module |

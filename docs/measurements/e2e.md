@@ -130,7 +130,7 @@ client ms = curl time_total; server ms = timings_ms (sign = backend ceremony onl
 
 ```bash
 ./scripts/setup-softhsm.sh
-export DATABASE_URL='postgres://qv:qv-dev@localhost:55432/quorumvault?sslmode=disable'
+export DATABASE_URL='postgres://qv@localhost:55432/quorumvault?sslmode=disable'
 CGO_ENABLED=1 go build -o bin/quorumvault ./cmd/quorumvault
 QV_HTTP_ADDR=127.0.0.1:18080 ./bin/quorumvault &
 QV_URL=http://127.0.0.1:18080 QV_BIN=./bin/quorumvault ./scripts/demo-sepolia.sh

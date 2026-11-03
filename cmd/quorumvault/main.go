@@ -60,7 +60,7 @@ type config struct {
 
 func loadConfig() config {
 	return config{
-		DatabaseURL: getenv("DATABASE_URL", "postgres://qv:qv-dev@localhost:55432/quorumvault?sslmode=disable"),
+		DatabaseURL: getenv("DATABASE_URL", "postgres://qv@localhost:55432/quorumvault?sslmode=disable"),
 		HTTPAddr:    getenv("QV_HTTP_ADDR", ":8080"),
 		PKCS11Lib:   hsm.DefaultLibPath(),
 		HSMPIN:      getenv("QV_HSM_PIN", "user-dev-1234"),
