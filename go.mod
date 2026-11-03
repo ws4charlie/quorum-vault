@@ -6,6 +6,7 @@ require (
 	github.com/bnb-chain/tss-lib/v4 v4.0.0-20260923032227-f204718ae595
 	github.com/ethereum/go-ethereum v1.17.10
 	github.com/google/uuid v1.6.0
+	github.com/ipfs/go-log v1.0.5
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/miekg/pkcs11 v1.1.2
 )
@@ -37,7 +38,6 @@ require (
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
-	github.com/ipfs/go-log v1.0.5 // indirect
 	github.com/ipfs/go-log/v2 v2.1.3 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
