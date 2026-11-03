@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_PASSWORD: qv-dev
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      DATABASE_URL: postgres://qv:qv-dev@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install SoftHSM2
+        run: sudo apt-get update && sudo apt-get install -y softhsm2
+      - name: Set up tokens
+        run: ./scripts/setup-softhsm.sh
+      - run: go vet ./...
+      - run: go test -short -count=1 ./...
