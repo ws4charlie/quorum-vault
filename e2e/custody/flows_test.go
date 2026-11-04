@@ -271,6 +271,12 @@ func TestStuckTransactionIsReplacedOnce(t *testing.T) {
 // with one payout, correct ledger and a clean Reconcile.
 func TestCrashAtEveryBoundary(t *testing.T) {
 	s, _ := funded(t, opts{}, "c-crash", 20)
+	current := "setup"
+	t.Cleanup(func() {
+		if t.Failed() {
+			s.dump("crash test, at " + current)
+		}
+	})
 	type step struct{ kind, point string }
 	var steps []step
 	for _, p := range []string{"after_build", "after_job", "after_broadcast", "after_confirm", "after_settle"} {
@@ -280,6 +286,7 @@ func TestCrashAtEveryBoundary(t *testing.T) {
 
 	for i, st := range steps {
 		fp := st.kind + "." + st.point
+		current = fp
 		s.worker.stop()
 		s.startWorker(fp)
 		s.waitFor(20*time.Second, "worker up", func() bool { return fileContains(s.worker.log, "qv-worker started") })

@@ -272,7 +272,14 @@ func newSystem(t *testing.T, o opts) *system {
 	if o.minSweepWei == "" {
 		o.minSweepWei = "1000000000000000" // 0.001 ETH
 	}
-	s := &system{t: t, o: o, ctx: context.Background(), approv: map[string]ed25519.PrivateKey{}, dir: t.TempDir()}
+	dir := t.TempDir()
+	if keep := os.Getenv("QV_E2E_LOGDIR"); keep != "" { // keep every process log of a run
+		dir = filepath.Join(keep, strings.ReplaceAll(t.Name(), "/", "_")+"-"+uuid.NewString()[:6])
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &system{t: t, o: o, ctx: context.Background(), approv: map[string]ed25519.PrivateKey{}, dir: dir}
 	s.rpcURL = os.Getenv("QV_ANVIL_RPC")
 	if s.rpcURL == "" {
 		s.rpcURL = "http://127.0.0.1:18545"
@@ -874,4 +881,73 @@ func fileContains(path, sub string) bool {
 func readFile(path string) string {
 	b, _ := os.ReadFile(path)
 	return string(b)
+}
+
+// dump prints the state of everything a stuck money flow could be waiting on.
+func (s *system) dump(label string) {
+	s.t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, "==== state dump: %s ====\n", label)
+	q := func(title, sql string) {
+		rows, err := s.pool.Query(context.Background(), sql)
+		if err != nil {
+			fmt.Fprintf(&b, "%s: %v\n", title, err)
+			return
+		}
+		defer rows.Close()
+		fmt.Fprintf(&b, "-- %s\n", title)
+		for rows.Next() {
+			vals, _ := rows.Values()
+			fmt.Fprintf(&b, "   %v\n", vals)
+		}
+	}
+	q("withdrawals (id, status, reason, job, tx)", `SELECT id, status, COALESCE(failure_reason,''), COALESCE(job_id,''), COALESCE(tx_hash,'') FROM withdrawals ORDER BY created_at`)
+	q("open or parked sweeps (id, status, from, reason)", `SELECT id, status, from_address, COALESCE(failure_reason,'') FROM sweeps WHERE status NOT IN ('confirmed','failed') OR failure_reason IS NOT NULL ORDER BY created_at`)
+	q("sign jobs not done (id, status, reject)", `SELECT id, status, COALESCE(reject_reason,'') FROM sign_jobs WHERE status<>'done' ORDER BY created_at`)
+	q("open nonce allocations (address, nonce, owner, status)", `SELECT address, nonce, owner_kind||' '||owner_id, status FROM evm_nonce_allocations WHERE status NOT IN ('confirmed','cancelled') ORDER BY address, nonce`)
+	q("scan cursor", `SELECT chain, next_height FROM chain_cursors`)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, id := range s.openIDs() {
+		if d, err := s.tc.DescribeWorkflowExecution(ctx, id, ""); err == nil {
+			fmt.Fprintf(&b, "workflow %s: %s, %d pending activities\n", id, d.WorkflowExecutionInfo.Status, len(d.PendingActivities))
+			for _, pa := range d.PendingActivities {
+				fmt.Fprintf(&b, "   pending activity %s attempt %d last failure %v\n", pa.ActivityType.Name, pa.Attempt, pa.LastFailure.GetMessage())
+			}
+		}
+	}
+	if head, err := s.ec.BlockNumber(ctx); err == nil {
+		fmt.Fprintf(&b, "chain head %d\n", head)
+	}
+	tail := func(name string, p *proc) {
+		if p == nil {
+			return
+		}
+		lines := strings.Split(strings.TrimSpace(readFile(p.log)), "\n")
+		if len(lines) > 12 {
+			lines = lines[len(lines)-12:]
+		}
+		fmt.Fprintf(&b, "-- last log lines of %s (%s)\n%s\n", name, p.log, strings.Join(lines, "\n"))
+	}
+	tail("worker", s.worker)
+	tail("gateway", s.gateway)
+	s.t.Log(b.String())
+}
+
+func (s *system) openIDs() []string {
+	var ids []string
+	for _, q := range []string{`SELECT id FROM withdrawals WHERE status NOT IN ('confirmed','failed')`, `SELECT id FROM sweeps WHERE status NOT IN ('confirmed','failed')`} {
+		rows, err := s.pool.Query(context.Background(), q)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				ids = append(ids, id)
+			}
+		}
+		rows.Close()
+	}
+	return ids
 }
