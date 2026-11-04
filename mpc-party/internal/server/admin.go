@@ -5,21 +5,20 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	"sync"
 	"time"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
 
-// AdminMessage is what an operator signs: the operation, the keyset and a fresh timestamp.
+// AdminMessage and SignAdmin live in the api module (api/admin) so operator tooling can use them; these are aliases.
 func AdminMessage(op, keysetID string, unixSeconds int64) []byte {
-	return []byte(fmt.Sprintf("qv-mpc-admin-v1\n%s\n%s\n%d", op, keysetID, unixSeconds))
+	return admin.Message(op, keysetID, unixSeconds)
 }
 
-// SignAdmin builds an AdminAuth with an operator key (used by tooling and tests).
 func SignAdmin(priv ed25519.PrivateKey, op, keysetID string, now time.Time) *pb.AdminAuth {
-	ts := now.Unix()
-	return &pb.AdminAuth{UnixSeconds: ts, PublicKey: priv.Public().(ed25519.PublicKey), Signature: ed25519.Sign(priv, AdminMessage(op, keysetID, ts))}
+	return admin.Sign(priv, op, keysetID, now)
 }
 
 // adminVerifier checks AdminAuth against this party's own configured keys. A signature is accepted once.
