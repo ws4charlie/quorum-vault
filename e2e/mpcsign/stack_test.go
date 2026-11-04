@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
@@ -207,6 +209,7 @@ type stack struct {
 	peerForA                string // where A dials: B's peer port, or the tamper proxy
 	sock                    string
 
+	proxy          *tamperProxy
 	a, b, cosigner *proc
 	cfgA, cfgB     string
 	cosignerArgs   []string
@@ -259,8 +262,13 @@ func newStack(t *testing.T, o stackOpts) *stack {
 	s.peerForA = s.peerB
 	s.sock = filepath.Join(os.TempDir(), fmt.Sprintf("qvcs-%d.sock", time.Now().UnixNano()%1e9))
 	t.Cleanup(func() { os.Remove(s.sock) })
-	_ = seal
-	s.cfgA, s.cfgB = s.writeParty(t, "A", seal, ""), s.writeParty(t, "B", seal, "")
+	pin := ""
+	if o.proxy {
+		// A believes the proxy is party B; B believes the proxy is party A.
+		s.proxy, s.peerForA = startProxy(t, s)
+		pin = s.certProx.pin
+	}
+	s.cfgA, s.cfgB = s.writeParty(t, "A", seal, pin), s.writeParty(t, "B", seal, pin)
 	s.startParties(t)
 	return s
 }
@@ -438,4 +446,105 @@ func newAdminKey() (ed25519.PublicKey, ed25519.PrivateKey) {
 
 func signWith(priv ed25519.PrivateKey, op, keyset string, at time.Time) *pb.AdminAuth {
 	return admin.Sign(priv, op, keyset, at)
+}
+
+func signerPub(s *stack) (*ecdsa.PublicKey, error) { return crypto.UnmarshalPubkey(s.pub65) }
+
+func kindOfErr(err error) (pb.ErrorKind, bool) {
+	st, ok := grpcstatus.FromError(err)
+	if !ok {
+		return 0, false
+	}
+	for _, d := range st.Details() {
+		if ed, ok := d.(*pb.ErrorDetail); ok {
+			return ed.Kind, true
+		}
+	}
+	return 0, false
+}
+
+// tamperProxy is a man in the middle at the session layer (TLS terminated on both sides with the proxy's own certificate,
+// pinned by A and by B). It forwards frames and flips one byte in the payload of the n-th DATA frame going in direction
+// dir (0: A to B, 1: B to A) after set(dir, n); n < 0 forwards faithfully.
+type tamperProxy struct {
+	pb.UnimplementedPeerServer
+	client pb.PeerClient
+	dir, n atomic.Int32
+	count  [2]atomic.Int32
+}
+
+func (p *tamperProxy) set(dir, n int) {
+	p.count[0].Store(0)
+	p.count[1].Store(0)
+	p.dir.Store(int32(dir))
+	p.n.Store(int32(n))
+}
+
+func (p *tamperProxy) mutate(dir int, f *pb.Frame) {
+	if f.Kind != pb.FrameKind_FRAME_KIND_DATA || len(f.Payload) == 0 {
+		return
+	}
+	idx := p.count[dir].Add(1) - 1
+	if int(p.dir.Load()) == dir && idx == p.n.Load() {
+		f.Payload = append([]byte(nil), f.Payload...)
+		f.Payload[len(f.Payload)/2] ^= 0x01
+	}
+}
+
+func (p *tamperProxy) Session(in pb.Peer_SessionServer) error {
+	out, err := p.client.Session(in.Context())
+	if err != nil {
+		return err
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		for {
+			f, err := in.Recv()
+			if err != nil {
+				out.CloseSend()
+				break
+			}
+			p.mutate(0, f)
+			if out.Send(f) != nil {
+				break
+			}
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		for {
+			f, err := out.Recv()
+			if err != nil {
+				break
+			}
+			p.mutate(1, f)
+			if in.Send(f) != nil {
+				break
+			}
+		}
+		done <- struct{}{}
+	}()
+	<-done
+	return nil
+}
+
+func startProxy(t *testing.T, s *stack) (*tamperProxy, string) {
+	conn, err := grpc.NewClient(s.peerB, grpc.WithTransportCredentials(credentials.NewTLS(pinnedTLS(s.certProx, s.certB.pin))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	p := &tamperProxy{client: pb.NewPeerClient(conn)}
+	p.n.Store(-1)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := pinnedTLS(s.certProx, s.certA.pin)
+	cfg.ClientAuth = tls.RequireAnyClientCert
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(cfg)))
+	pb.RegisterPeerServer(srv, p)
+	go srv.Serve(ln)
+	t.Cleanup(srv.Stop)
+	return p, ln.Addr().String()
 }
