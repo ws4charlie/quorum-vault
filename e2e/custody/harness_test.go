@@ -188,6 +188,7 @@ type system struct {
 	gateway, relay, worker, core *proc
 	apiURL                       string
 	extraEnv                     []string
+	tag                          string // makes withdrawal IDs unique to this system (see withdraw)
 }
 
 func freePort(t *testing.T) int {
@@ -279,7 +280,7 @@ func newSystem(t *testing.T, o opts) *system {
 			t.Fatal(err)
 		}
 	}
-	s := &system{t: t, o: o, ctx: context.Background(), approv: map[string]ed25519.PrivateKey{}, dir: dir}
+	s := &system{t: t, o: o, ctx: context.Background(), approv: map[string]ed25519.PrivateKey{}, dir: dir, tag: uuid.NewString()[:8]}
 	s.rpcURL = os.Getenv("QV_ANVIL_RPC")
 	if s.rpcURL == "" {
 		s.rpcURL = "http://127.0.0.1:18545"
@@ -765,6 +766,11 @@ type wd struct {
 
 func (s *system) withdraw(actor, key, customer, asset string, to common.Address, amount *big.Int) wd {
 	s.t.Helper()
+	// A withdrawal's workflow ID is derived from (actor, key). Tests share one
+	// Temporal server, so identical keys in two runs would give identical workflow
+	// IDs, and a workflow left running by an earlier (killed) run would be joined
+	// instead of a new one started. A per-system tag keeps IDs unique.
+	key += "~" + s.tag
 	code, out := s.call("POST", "/v2/withdrawals", map[string]string{"X-Actor": actor, "Idempotency-Key": key},
 		map[string]any{"customer": customer, "asset": asset, "to": to.Hex(), "amount": amount.String()})
 	w := wd{Code: code, Raw: out}
@@ -914,7 +920,8 @@ func (s *system) dump(label string) {
 	defer cancel()
 	for _, id := range s.openIDs() {
 		if d, err := s.tc.DescribeWorkflowExecution(ctx, id, ""); err == nil {
-			fmt.Fprintf(&b, "workflow %s: %s, %d pending activities\n", id, d.WorkflowExecutionInfo.Status, len(d.PendingActivities))
+			fmt.Fprintf(&b, "workflow %s: %s on task queue %q (this system's is %q), %d events, %d pending activities\n", id, d.WorkflowExecutionInfo.Status,
+				d.ExecutionConfig.GetTaskQueue().GetName(), s.queue, d.WorkflowExecutionInfo.HistoryLength, len(d.PendingActivities))
 			for _, pa := range d.PendingActivities {
 				fmt.Fprintf(&b, "   pending activity %s attempt %d last failure %v\n", pa.ActivityType.Name, pa.Attempt, pa.LastFailure.GetMessage())
 			}
