@@ -93,3 +93,38 @@ jobs:
       - name: anvil logs
         if: failure()
         run: docker logs anvil
+
+  # cb-mpc wrapper (C++ via cgo). Separate Go module in mpc-party/: the jobs above never see C++.
+  # Same commands as mpc-party/scripts/ci.sh (which can be run in a linux/amd64 container).
+  mpc-party:
+    # Pinned: ubuntu-latest moved to a release that apt.llvm.org has no clang-20 repository for.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mpc-party/go.mod
+      - name: Install C++ toolchain
+        run: mpc-party/scripts/install-toolchain-linux.sh
+      # Key: pinned cb-mpc commit + build script. Changing either rebuilds OpenSSL and the library (about 2 minutes).
+      - name: Cache cb-mpc build
+        uses: actions/cache@v4
+        with:
+          path: mpc-party/.deps
+          key: cbmpc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mpc-party/cbmpc.pin', 'mpc-party/scripts/fetch-build-cbmpc.sh') }}
+      - name: Build cb-mpc at the pinned commit
+        run: mpc-party/scripts/fetch-build-cbmpc.sh
+      - name: go vet
+        working-directory: mpc-party
+        run: go vet ./...
+      - name: go test -race
+        working-directory: mpc-party
+        run: go test -race -count=1 -timeout 15m ./...
+      - name: Fuzz entry points (short)
+        working-directory: mpc-party
+        run: go test -run '^$' -fuzz FuzzEntryPoints -fuzztime 30s ./internal/cbmpc
