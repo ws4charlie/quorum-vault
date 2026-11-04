@@ -1,0 +1,32 @@
+{
+  "_comment": "PLACEHOLDER business-zone config. Every address below is a dummy. Never commit real values. The signing zone has its own config (internal/gateway/config.example.json) with its own copy of the trust-relevant parts.",
+  "entity": "qv-us",
+  "chain": {
+    "name": "evm-example",
+    "chain_id": 11155111,
+    "rpc_url": "http://127.0.0.1:8545",
+    "confirmations": 2,
+    "factory": "0x0000000000000000000000000000000000000001",
+    "sweep_destination": "0x0000000000000000000000000000000000000003",
+    "hot_shards": ["0x0000000000000000000000000000000000000003"],
+    "max_tx_fee_wei": "10000000000000000",
+    "assets": {
+      "ETH":  { "decimals": 18, "min_deposit": "0", "price_wei": "1" },
+      "USDT": { "address": "0x0000000000000000000000000000000000000004", "decimals": 6, "min_deposit": "1000", "price_wei": "300000000" }
+    }
+  },
+  "sweep": { "k": 20, "min_sweep_wei": "1000000000000000", "plan_interval": "5s" },
+  "withdrawal": {
+    "approval_window": "1h",
+    "approval_timeout": "55m",
+    "sign_timeout": "30s",
+    "stuck_after": "2m",
+    "hot_wait": "30m",
+    "max_replacements": 5,
+    "tiers": {
+      "ETH":  [ { "min_amount": "0", "approvals": 1, "auto": true }, { "min_amount": "1000000000000000000", "approvals": 2 } ],
+      "USDT": [ { "min_amount": "0", "approvals": 1, "auto": true }, { "min_amount": "2000000000", "approvals": 2 } ]
+    }
+  },
+  "scan": { "interval": "2s", "start_height": 0 }
+}

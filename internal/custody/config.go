@@ -23,6 +23,7 @@ import (
 // File is the JSON form of Config. Amounts are canonical decimal strings,
 // durations are Go duration strings.
 type File struct {
+	Comment    string         `json:"_comment,omitempty"`
 	Entity     string         `json:"entity"` // default "qv-us"
 	Chain      ChainFile      `json:"chain"`
 	Sweep      SweepFile      `json:"sweep"`

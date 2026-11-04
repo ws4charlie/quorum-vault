@@ -82,3 +82,18 @@ test-gateway:
 # Relay tests against Redpanda (`make infra-up`).
 test-relay:
 	QV_REQUIRE_DB=1 QV_REQUIRE_INFRA=1 go test -count=1 -p 1 ./internal/outbox/...
+
+# Phase 2 / P3b: the closed loop (deposit, sweep, withdrawal).
+.PHONY: build-core build-worker test-custody
+build-core:
+	go build -o bin/qv-core ./cmd/qv-core
+
+build-worker:
+	go build -o bin/qv-worker ./cmd/qv-worker
+
+# End-to-end closed loop with real everything. Needs: Postgres (`make db-up`), SoftHSM
+# (`make softhsm`), Temporal + Redpanda (`make infra-up`) and an anvil node with chain ID
+# 11155111 on QV_ANVIL_RPC (default http://127.0.0.1:18545, e.g.
+# `docker run -d --rm -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111"`).
+test-custody:
+	QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 30m -v ./e2e/custody/...
