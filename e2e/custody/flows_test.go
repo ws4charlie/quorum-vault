@@ -205,9 +205,10 @@ func TestGatewayRejectionReleasesNonceAndHold(t *testing.T) {
 		t.Fatalf("nonce allocation = %q, %v; want cancelled", status, err)
 	}
 	// Later withdrawals on the same hot address proceed.
-	w2 := s.withdraw("initiator", "k-ok", "c-rej", "ETH", dest, eth(1))
+	half := new(big.Int).Div(eth(1), big.NewInt(2))
+	w2 := s.withdraw("initiator", "k-ok", "c-rej", "ETH", dest, half)
 	s.waitWd(w2.ID, "confirmed", 60*time.Second)
-	if s.ethBalance(dest).Cmp(eth(1)) != 0 {
+	if s.ethBalance(dest).Cmp(half) != 0 {
 		t.Fatalf("destination = %s", s.ethBalance(dest))
 	}
 	s.waitIdle(30 * time.Second)

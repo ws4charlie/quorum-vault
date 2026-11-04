@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/client"
+	sdklog "go.temporal.io/sdk/log"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
@@ -71,7 +72,7 @@ func run(log *slog.Logger) error {
 	if err := svc.Bootstrap(ctx); err != nil {
 		return err
 	}
-	tc, err := client.DialContext(ctx, client.Options{HostPort: *temporalAddr, Namespace: *namespace})
+	tc, err := client.DialContext(ctx, client.Options{HostPort: *temporalAddr, Namespace: *namespace, Logger: sdklog.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})))})
 	if err != nil {
 		return fmt.Errorf("dial temporal: %w", err)
 	}
