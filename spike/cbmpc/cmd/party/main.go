@@ -72,6 +72,11 @@ func main() {
 		_, err = p.call(m, Req{Op: "hd-derive", Ecdsa: args[1] == "ecdsa", KS: args[2], Name: args[3], HP: u32s(args[4]), NHP: u32s(args[5])})
 		die(err)
 		fmt.Printf("hd-derive %s ok in %v\n", args[3], time.Since(t0))
+	case "sign-hex": // sign-hex ecdsa|eddsa|schnorr KEY HEXMSG -> prints sig hex only
+		msg, _ := hex.DecodeString(args[3])
+		sig, err := signWith(p, m, algOf(args[1]), args[2], msg)
+		die(err)
+		fmt.Println(hex.EncodeToString(sig))
 	case "sign": // sign ecdsa|eddsa|schnorr KEY MSGTEXT
 		sig, err := signWith(p, m, algOf(args[1]), args[2], digestOf(args[1], args[3]))
 		die(err)
