@@ -49,10 +49,20 @@ var (
 type countingSigner struct {
 	signer.Signer
 	calls atomic.Int32
+	// before runs ahead of every signing call (tests block or delay here). It
+	// may return an error to make the signer fail.
+	before atomic.Pointer[func(d [32]byte) error]
 }
+
+func (c *countingSigner) setBefore(f func(d [32]byte) error) { c.before.Store(&f) }
 
 func (c *countingSigner) SignDigest(ctx context.Context, d [32]byte, o signer.SignOptions) (signer.Result, error) {
 	c.calls.Add(1)
+	if f := c.before.Load(); f != nil {
+		if err := (*f)(d); err != nil {
+			return signer.Result{}, err
+		}
+	}
 	return c.Signer.SignDigest(ctx, d, o)
 }
 
@@ -71,6 +81,11 @@ type harness struct {
 	mu  sync.Mutex
 	now time.Time
 	seq int
+
+	// notAfter overrides the default expiry of withdrawal intents built by job():
+	// 0 = now+1h; use noExpiry for a literal zero.
+	notAfter int64
+	noExpiry bool
 }
 
 func newGuardDB(t *testing.T) *pgxpool.Pool {
@@ -272,6 +287,9 @@ func (h *harness) job(id string, in signjob.Intent, s txSpec, approvers ...strin
 	}
 	if in.PartitionID == "" {
 		in.PartitionID = testPartition
+	}
+	if in.Kind == "withdrawal" && in.NotAfter == 0 && !h.noExpiry {
+		in.NotAfter = h.clock().Add(time.Hour).Unix()
 	}
 	payload, digest := h.payloadFor(s)
 	return signjob.Job{ID: id, PartitionID: in.PartitionID, KeyRef: "m/0", Chain: in.Chain, Intent: mustJSON(in),

@@ -184,7 +184,8 @@ func TestTwoGatewaysRaceOnOneJob(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			d := gws[i%2].decide(ctx, claimed)
-			if d.Outcome != OutcomeSigned && d.Outcome != OutcomeReplayed {
+			// While one instance is signing, the others see a reservation and retry.
+			if d.Outcome != OutcomeSigned && d.Outcome != OutcomeReplayed && d.Outcome != OutcomeRetry {
 				t.Errorf("outcome %s %s", d.Outcome, d.Reason)
 			}
 			sigs[i] = d.Sig
@@ -194,8 +195,12 @@ func TestTwoGatewaysRaceOnOneJob(t *testing.T) {
 	if c := h.signer.calls.Load(); c != 1 {
 		t.Fatalf("signer called %d times, want exactly 1", c)
 	}
+	final := gws[0].decide(ctx, claimed)
+	if final.Outcome != OutcomeReplayed {
+		t.Fatalf("after the race: %s %s", final.Outcome, final.Reason)
+	}
 	for _, s := range sigs {
-		if string(s) != string(sigs[0]) {
+		if s != nil && string(s) != string(final.Sig) {
 			t.Fatal("instances returned different signatures")
 		}
 	}

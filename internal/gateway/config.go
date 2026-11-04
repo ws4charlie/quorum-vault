@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"os"
 	"sort"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
@@ -32,6 +33,11 @@ type File struct {
 	// Signers maps partition ID to the HSM key that signs for it. Optional for
 	// tests, required by cmd/qv-gateway.
 	Signers map[string]SignerFile `json:"signers"`
+	// MaxIntentAge bounds how far ahead a new withdrawal's not_after may be
+	// (Go duration, default "24h"). SignTimeout bounds one signer call and is
+	// also how long a reservation counts as "being signed" (default "30s").
+	MaxIntentAge string `json:"max_intent_age,omitempty"`
+	SignTimeout  string `json:"sign_timeout,omitempty"`
 }
 
 // SignerFile locates a partition's key in an HSM token.
@@ -92,6 +98,9 @@ type Config struct {
 	Approvers map[string]Approver
 	Chains    map[string]*ChainConfig
 	Signers   map[string]SignerFile
+
+	MaxIntentAge time.Duration
+	SignTimeout  time.Duration
 }
 
 // Approver is a configured approver key.
@@ -157,7 +166,22 @@ func ParseConfig(b []byte) (*Config, error) {
 }
 
 func (f File) build() (*Config, error) {
-	c := &Config{Approvers: map[string]Approver{}, Chains: map[string]*ChainConfig{}, Signers: f.Signers}
+	c := &Config{Approvers: map[string]Approver{}, Chains: map[string]*ChainConfig{}, Signers: f.Signers,
+		MaxIntentAge: 24 * time.Hour, SignTimeout: 30 * time.Second}
+	for _, d := range []struct {
+		name, val string
+		dst       *time.Duration
+	}{{"max_intent_age", f.MaxIntentAge, &c.MaxIntentAge}, {"sign_timeout", f.SignTimeout, &c.SignTimeout}} {
+		if d.val == "" {
+			continue
+		}
+		v, err := time.ParseDuration(d.val)
+		if err != nil || v <= 0 {
+			return nil, fmt.Errorf("gateway: config: %s %q is not a positive duration", d.name, d.val)
+		}
+		*d.dst = v
+	}
+	keys := map[string]string{}
 	enabled := 0
 	for name, a := range f.Approvers {
 		if name == "" {
@@ -167,6 +191,10 @@ func (f File) build() (*Config, error) {
 		if err != nil || len(raw) != ed25519.PublicKeySize {
 			return nil, fmt.Errorf("gateway: config: approver %q: public_key must be %d hex bytes", name, ed25519.PublicKeySize)
 		}
+		if other, dup := keys[string(raw)]; dup {
+			return nil, fmt.Errorf("gateway: config: approvers %q and %q share one public key", other, name)
+		}
+		keys[string(raw)] = name
 		c.Approvers[name] = Approver{Key: ed25519.PublicKey(raw), Enabled: a.Enabled}
 		if a.Enabled {
 			enabled++

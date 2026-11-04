@@ -15,16 +15,19 @@ CREATE TABLE IF NOT EXISTS signed_intents (
 );
 CREATE INDEX IF NOT EXISTS signed_intents_window ON signed_intents (chain, kind, created_at);
 
--- One row per signature released. A replacement at the same nonce adds a row.
+-- One row per transaction digest. Reserved first (signature NULL), finished after signing.
+-- A replacement at the same nonce adds a row.
 CREATE TABLE IF NOT EXISTS signed_digests (
     digest      bytea PRIMARY KEY,
     intent_id   text NOT NULL REFERENCES signed_intents (intent_id),
     nonce       numeric(20,0) NOT NULL,
     tip         numeric(78,0) NOT NULL,
     fee_cap     numeric(78,0) NOT NULL,
-    signature   bytea NOT NULL,
-    signed_at   timestamptz NOT NULL
+    signature   bytea,                    -- NULL while reserved: caps and nonce are taken, signer not done
+    reserved_at timestamptz NOT NULL,
+    signed_at   timestamptz
 );
+ALTER TABLE signed_digests ALTER COLUMN signature DROP NOT NULL;
 
 -- Which intent owns a (chain, sender, nonce). A cancel consumes the nonce.
 CREATE TABLE IF NOT EXISTS nonce_claims (

@@ -46,7 +46,8 @@ type SigRecord struct {
 	Nonce     uint64
 	Tip       *big.Int
 	FeeCap    *big.Int
-	Signature []byte
+	Signature []byte // nil while the digest is only reserved
+	Reserved  time.Time
 }
 
 // NonceClaim is a nonce_claims row.
@@ -112,21 +113,21 @@ func (t *GuardTx) Intent(ctx context.Context, id string) (*IntentRecord, error) 
 	return &r, nil
 }
 
-// Digest returns the signature released for digest, or nil.
+// Digest returns the record of digest (signature nil while only reserved), or nil.
 func (t *GuardTx) Digest(ctx context.Context, digest []byte) (*SigRecord, error) {
 	return t.sig(ctx, `WHERE digest=$1`, digest)
 }
 
-// LatestSig returns the highest-fee signature released for an intent, or nil.
+// LatestSig returns the highest-fee record (reserved or signed) of an intent, or nil.
 func (t *GuardTx) LatestSig(ctx context.Context, intentID string) (*SigRecord, error) {
-	return t.sig(ctx, `WHERE intent_id=$1 ORDER BY fee_cap DESC, tip DESC, signed_at DESC LIMIT 1`, intentID)
+	return t.sig(ctx, `WHERE intent_id=$1 ORDER BY fee_cap DESC, tip DESC, reserved_at DESC LIMIT 1`, intentID)
 }
 
 func (t *GuardTx) sig(ctx context.Context, where string, arg any) (*SigRecord, error) {
 	var r SigRecord
 	var nonce, tip, feeCap string
-	err := t.tx.QueryRow(ctx, `SELECT digest, intent_id, nonce::text, tip::text, fee_cap::text, signature FROM signed_digests `+where, arg).
-		Scan(&r.Digest, &r.IntentID, &nonce, &tip, &feeCap, &r.Signature)
+	err := t.tx.QueryRow(ctx, `SELECT digest, intent_id, nonce::text, tip::text, fee_cap::text, signature, reserved_at FROM signed_digests `+where, arg).
+		Scan(&r.Digest, &r.IntentID, &nonce, &tip, &feeCap, &r.Signature, &r.Reserved)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -171,7 +172,8 @@ func (t *GuardTx) CountSince(ctx context.Context, kind string, since time.Time) 
 	return n, err
 }
 
-// Release is everything recorded before a signature leaves the signing zone.
+// Release is everything recorded when a digest is reserved, before the signer
+// runs. Signature stays nil until Guard.Finish stores it.
 type Release struct {
 	IntentID   string
 	IntentHash []byte
@@ -183,10 +185,10 @@ type Release struct {
 	Digest     []byte
 	Tip        *big.Int
 	FeeCap     *big.Int
-	Signature  []byte
-	At         time.Time
-	NewIntent  bool // false: another signature for an intent already recorded
-	TakeNonce  bool // a cancel replacing a different intent's claim
+	Signature  []byte    // nil: reservation
+	At         time.Time // reservation time
+	NewIntent  bool      // false: another signature for an intent already recorded
+	TakeNonce  bool      // a cancel replacing a different intent's claim
 }
 
 // Record stores the release. Unique keys on the intent ID, the digest and the
@@ -199,8 +201,8 @@ func (t *GuardTx) Record(ctx context.Context, r Release) error {
 			return fmt.Errorf("record intent: %w", err)
 		}
 	}
-	if _, err := t.tx.Exec(ctx, `INSERT INTO signed_digests (digest, intent_id, nonce, tip, fee_cap, signature, signed_at)
-		VALUES ($1,$2,$3::numeric,$4::numeric,$5::numeric,$6,$7)`, r.Digest, r.IntentID, bigOf(r.Nonce), r.Tip.String(), r.FeeCap.String(), r.Signature, r.At); err != nil {
+	if _, err := t.tx.Exec(ctx, `INSERT INTO signed_digests (digest, intent_id, nonce, tip, fee_cap, signature, reserved_at, signed_at)
+		VALUES ($1,$2,$3::numeric,$4::numeric,$5::numeric,$6,$7,NULL)`, r.Digest, r.IntentID, bigOf(r.Nonce), r.Tip.String(), r.FeeCap.String(), r.Signature, r.At); err != nil {
 		return fmt.Errorf("record digest: %w", err)
 	}
 	switch {
@@ -216,4 +218,27 @@ func (t *GuardTx) Record(ctx context.Context, r Release) error {
 		}
 	}
 	return nil
+}
+
+// Touch marks a stale reservation as being signed again from at.
+func (t *GuardTx) Touch(ctx context.Context, digest []byte, at time.Time) error {
+	_, err := t.tx.Exec(ctx, `UPDATE signed_digests SET reserved_at=$2 WHERE digest=$1 AND signature IS NULL`, digest, at)
+	return err
+}
+
+// Finish stores sig for a reserved digest and returns the signature that is
+// stored: the first one written wins, a later one is discarded and the stored
+// bytes are returned instead. Only the returned value may be released.
+func (g *Guard) Finish(ctx context.Context, digest, sig []byte, at time.Time) ([]byte, error) {
+	if _, err := g.pool.Exec(ctx, `UPDATE signed_digests SET signature=$2, signed_at=$3 WHERE digest=$1 AND signature IS NULL`, digest, sig, at); err != nil {
+		return nil, fmt.Errorf("gateway: store signature: %w", err)
+	}
+	var stored []byte
+	if err := g.pool.QueryRow(ctx, `SELECT signature FROM signed_digests WHERE digest=$1`, digest).Scan(&stored); err != nil {
+		return nil, fmt.Errorf("gateway: read stored signature: %w", err)
+	}
+	if stored == nil {
+		return nil, errors.New("gateway: digest has no reservation")
+	}
+	return stored, nil
 }

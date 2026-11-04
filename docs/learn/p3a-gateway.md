@@ -30,9 +30,13 @@ For each claimed job the gateway runs six steps. The first failing step rejects,
 | 3 | Ed25519 approvals over `Intent.Hash()`, configured and enabled actors only, each actor once | `approval_invalid` | Approvals prove people agreed to the intent. They are meaningless until step 2 says the tx is that intent |
 | 4 | Policy: per-transaction cap, rolling cap, approvals required for the amount, sweep and cancel rate | `policy_*` | Needs a trusted amount (step 2) and a count of valid approvers (step 3) |
 | 5 | Replay guard | `replay_*` | Last check before signing, under the guard's lock, so the answer it gives is still true when we sign |
-| 6 | Sign, verify the signature locally, record it, then release | `signer failed` (job `failed`) | Nothing is signed until every refusal had its chance |
+| 6 | Reserve the digest, sign outside the lock, verify locally, store, then release | `signer failed` (job `failed`) | Nothing is signed until every refusal had its chance |
+
+Steps 4 and 5 and the reservation of step 6 run in one guard transaction under a per-chain lock. The signer call runs after it commits (section 3, "Reserve, sign, finish").
 
 Cheap, local, stateless checks come first; checks that read state come later; the one check that must not race (5) runs together with the signing under a lock.
+
+Approvals expire. `Intent.NotAfter` (Unix seconds) is part of what approvers sign. A first-time withdrawal whose `NotAfter` is zero, already past, or further ahead than `max_intent_age` (config, default 24h) is refused with `intent_expired`. Without this, an approved withdrawal that was cancelled before signing (so the guard never saw it) could be re-enqueued by an attacker later and signed, though the customer's hold was already released. A known intent (already in the guard) skips the check, because replacing a stuck transaction must work after expiry; it still cannot move to another nonce.
 
 Intent rules: a withdrawal needs at least one valid approval and the number its amount tier asks for. A sweep needs no approval but must pass the rate limit, and the verifier pins its destination to the signing-zone config. A cancel needs no approval, passes a rate limit, and must be sent from a hot address the gateway owns.
 
@@ -50,7 +54,19 @@ The guard records, before a signature is released: intent ID and hash, kind, ass
 - One intent per `(chain, sender, nonce)`. A cancel may take a nonce from a pending transaction; after that no withdrawal can sign there (`replay_nonce_cancelled`). A cancel is how a stuck nonce is released.
 - Caps and rate limits are sums over the guard's own rows. Deleting `sign_jobs` history, or editing timestamps there, changes nothing. A replacement is counted once, not per signature.
 
-Two gateway instances: every decision runs in a guard transaction that first takes a per-chain advisory lock. The second instance waits, then sees the first one's record and returns its signature. Unique keys on the intent ID, the digest and the nonce claim are a second barrier if someone bypasses the lock. The test calls two instances concurrently on one job and counts exactly one signer call.
+### Reserve, sign, finish
+
+Signing is slow (an HSM call now, MPC rounds later). Holding the chain lock and a transaction during it would make one hung signer stop every signature on the chain, and cap throughput at 1 / sign-latency. So a decision has three phases:
+
+1. **Reserve** (guard transaction, per-chain advisory lock): steps 4 and 5, then write the intent, the nonce claim and a `signed_digests` row with `signature` NULL and `reserved_at`. Commit. Caps and the nonce are now taken.
+2. **Sign** (no lock, no transaction), under `sign_timeout` (default 30s); verify the signature locally. A signer that ignores its context is abandoned and the job fails.
+3. **Finish**: `UPDATE ... SET signature WHERE digest=$1 AND signature IS NULL`, then read the row back and release only that stored value. If two signatures race, the first stored wins; the other is discarded and never leaves the zone.
+
+A repeat of a digest finds: a signature, so return it; a reservation younger than `sign_timeout`, so another worker is signing and the result is `retry` (the job stays with its lease); an older reservation, so the signer died, and the same digest is signed again. If the signer fails, the reservation stays and the job is `failed`: its amount still counts toward the caps and its nonce stays taken, until a cancel releases the nonce. Replacement fee comparison includes reserved rows, so a replacement cannot undercut an unsigned reservation. Measured: 48 jobs, 8 workers, 100 ms signer, one chain: about 52 signatures/s (ideal 80/s).
+
+Two gateway instances: the reserve step is serialized by the lock. The second instance waits, then sees the first one's reservation and retries, or the signature and returns it. Unique keys on the intent ID, the digest and the nonce claim are a second barrier if someone bypasses the lock. The test calls two instances concurrently on one job and counts exactly one signer call.
+
+Approver keys must be distinct: config is refused if two actors share a public key, so one key cannot satisfy a 2-of-N tier.
 
 ## 4. Queue and crash safety
 

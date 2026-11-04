@@ -1,5 +1,7 @@
 {
   "_comment": "PLACEHOLDER signing-zone config. Every key and address below is a dummy; replace all of them in the signing zone. Never commit real values.",
+  "max_intent_age": "24h",
+  "sign_timeout": "30s",
   "approvers": {
     "alice": { "public_key": "0000000000000000000000000000000000000000000000000000000000000001", "enabled": true },
     "bob":   { "public_key": "0000000000000000000000000000000000000000000000000000000000000002", "enabled": true },
