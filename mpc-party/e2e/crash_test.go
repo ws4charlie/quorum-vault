@@ -190,23 +190,28 @@ func TestCrashMatrixDKG(t *testing.T) {
 				cl.restartB(t)
 			}
 			cl.waitReady(t)
-			// converge: either the keyset exists on both and works, or on neither
+			// converge: party A has no pending entry. Either the keyset exists on both and works (committed), or party A has
+			// none (aborted; party B may still hold an orphaned candidate, which a new DKG replaces).
 			deadline := time.Now().Add(60 * time.Second)
 			var exists bool
 			for time.Now().Before(deadline) {
 				ha, hb := cl.health(t)
 				sa, sb := status(ha, "k"), status(hb, "k")
+				if ha == nil {
+					time.Sleep(200 * time.Millisecond)
+					continue
+				}
 				if sa != nil && sb != nil && sa.Resolved && sb.Resolved && sa.Generation == 1 && sb.Generation == 1 {
 					exists = true
 					break
 				}
-				if ha != nil && hb != nil && sa == nil && sb == nil {
+				if sa == nil && hb != nil {
 					break
 				}
 				time.Sleep(200 * time.Millisecond)
 			}
 			if !exists {
-				// nothing half-created: the id is free and a new DKG works
+				// nothing half-created on A: the id is free and a new DKG works
 				_, err := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: pb.Curve_CURVE_SECP256K1, Admin: cl.env.Admin("dkg", "k")})
 				must(t, err)
 				cl.waitConverged(t, "k", true)

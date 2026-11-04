@@ -164,6 +164,7 @@ func (s *FileStore) PutCandidate(_ context.Context, id string, gen uint64, ks *c
 		return err
 	}
 	st.Candidate = gen
+	st.Decision = 0             // a new candidate never inherits an old decision
 	return s.writeState(id, st) // the candidate exists only once this write is durable
 }
 

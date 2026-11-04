@@ -50,6 +50,11 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 	}
 	if st, e := s.store.State(ctx, r.KeysetId); e == nil && st.Current != 0 {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.AlreadyExists, "dkg", "keyset %q already exists", r.KeysetId)
+	} else if e == nil && !s.rt(r.KeysetId).isResolved() {
+		// An unfinished DKG (a candidate, maybe with a commit decision) must be reconciled first: starting over now could
+		// leave a stale decision beside a new candidate.
+		s.unresolve(r.KeysetId)
+		return nil, unresolvedFail("dkg", r.KeysetId)
 	} else if e != nil && !errors.Is(e, ErrNotFound) {
 		return nil, fromWrapper("dkg", e)
 	}
@@ -146,7 +151,7 @@ func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthRes
 	ids, _ := s.store.List(ctx)
 	for _, id := range ids {
 		st, err := s.store.State(ctx, id)
-		if err != nil || st.Current == 0 { // an unfinished DKG candidate is not a keyset yet
+		if err != nil {
 			continue
 		}
 		bk := ReadBackup(s.cfg.DataDir, id)
