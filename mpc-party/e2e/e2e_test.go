@@ -4,6 +4,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -191,4 +192,11 @@ func retry(t *testing.T, d time.Duration, f func() error) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("did not recover within %v: %v", d, err)
+}
+
+func verifyEd25519(t testing.TB, pub, msg, sig []byte) {
+	t.Helper()
+	if !ed25519.Verify(ed25519.PublicKey(pub), msg, sig) {
+		t.Fatal("Ed25519 signature does not verify")
+	}
 }
