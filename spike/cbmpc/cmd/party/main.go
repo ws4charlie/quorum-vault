@@ -68,6 +68,10 @@ func main() {
 		_, err = p.call(m, Req{Op: "hd-dkg", Ecdsa: args[1] == "ecdsa", Curve: curveFor(args[1]), Name: args[2]})
 		die(err)
 		fmt.Printf("hd-dkg %s %s ok in %v\n", args[1], args[2], time.Since(t0))
+	case "refresh": // refresh ecdsa|eddsa KS
+		_, err = p.call(m, Req{Op: "hd-refresh", Ecdsa: args[1] == "ecdsa", KS: args[2]})
+		die(err)
+		fmt.Printf("hd-refresh %s ok in %v\n", args[2], time.Since(t0))
 	case "derive": // derive ecdsa|eddsa KS NAME HP NHP   (paths comma separated)
 		_, err = p.call(m, Req{Op: "hd-derive", Ecdsa: args[1] == "ecdsa", KS: args[2], Name: args[3], HP: u32s(args[4]), NHP: u32s(args[5])})
 		die(err)
