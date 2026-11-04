@@ -292,6 +292,10 @@ func Restore(f *File, recoveryPrivate []byte) (*cbmpc.Keyset, error) {
 	px, _ := hex.DecodeString(f.PubX)
 	pk, _ := hex.DecodeString(f.PubK)
 	alg := algOf(f.Alg)
+	// Decrypting does not check the ciphertext: verify it first, with the public parts of the recovery key.
+	if err := cbmpc.PVEVerify(alg, priv.PVEEk, f.PVE, f.label(), px, pk); err != nil {
+		return nil, fmt.Errorf("the PVE ciphertext does not verify (tampered backup): %w", err)
+	}
 	sp, err := cbmpc.NewKeysetSplit(alg, roleOf(f.Role), stripped, px, pk) // wipes stripped
 	if err != nil {
 		return nil, err
