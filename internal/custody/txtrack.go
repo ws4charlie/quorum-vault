@@ -240,6 +240,23 @@ type NonceOutcome struct {
 // NonceState looks at all attempts. A final mined transaction decides it, and
 // which one it was matters: the withdrawal itself, or the cancel.
 func (s *Service) NonceState(ctx context.Context, o Owner) (NonceOutcome, error) {
+	n, err := s.nonceState(ctx, o)
+	if err != nil || n.State != NonceConsumed {
+		return n, err
+	}
+	// evm.Adapter.Status reads the receipt, then the sender's nonce; a transaction
+	// that mines between the two reads looks "dropped" for a moment (seen under
+	// load: a sweep was parked as consumed while it was mining). A real
+	// consumption is still there a second later; a race is not.
+	select {
+	case <-ctx.Done():
+		return NonceOutcome{}, ctx.Err()
+	case <-time.After(1500 * time.Millisecond):
+	}
+	return s.nonceState(ctx, o)
+}
+
+func (s *Service) nonceState(ctx context.Context, o Owner) (NonceOutcome, error) {
 	atts, err := s.Attempts(ctx, o)
 	if err != nil {
 		return NonceOutcome{}, err
