@@ -125,7 +125,16 @@ func (s *Service) unswept(ctx context.Context) (map[[2]string]*big.Int, error) {
 // frozen factory stops planning quietly: it returns ErrSweepFrozen and creates
 // nothing. It returns the sweeps it created.
 func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, error) {
-	const maxPerPass = 25 // bounds one pass (each candidate costs node calls); the rest wait for the next pass
+	// Bounds: one pass asks the node about each candidate, and every open sweep
+	// takes row locks on the same few ledger accounts (dep, sweep, hot, fee) and
+	// a nonce on the one sweep destination, so more than a handful in flight only
+	// queues. The rest wait for a later pass.
+	const maxPerPass, maxOpen = 25, 12
+	var open int
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed')`, s.Cfg.Chain).Scan(&open); err != nil {
+		return nil, err
+	}
+	room := min(maxPerPass, maxOpen-open)
 	c := s.Cfg
 	un, err := s.unswept(ctx)
 	if err != nil {
@@ -141,7 +150,7 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 	sortPairs(keys)
 	var created []Sweep
 	for _, k := range keys {
-		if len(created) >= maxPerPass {
+		if len(created) >= room {
 			break
 		}
 		addr, asset := k[0], k[1]
