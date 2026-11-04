@@ -25,8 +25,9 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 )
 
-// TaskQueue is the one task queue of the business zone's worker.
-const TaskQueue = "qv-core"
+// DefaultTaskQueue is the task queue of the business zone's worker unless a
+// deployment (or a test that shares one Temporal server) names another.
+const DefaultTaskQueue = "qv-core"
 
 // Error types the workflows branch on.
 const (
@@ -43,6 +44,7 @@ type Deps struct {
 	AutoKey ed25519.PrivateKey // the worker's automated approver, lowest tier only
 	Log     *slog.Logger
 	T       Timings // handed to the workflows this package starts
+	Queue   string  // task queue; default DefaultTaskQueue
 }
 
 // Activities is the activity set. Register one instance with the worker.
@@ -107,7 +109,7 @@ func (a *Activities) ScanOnce(ctx context.Context) (ScanResult, error) {
 
 func (a *Activities) start(ctx context.Context, id string, wf any, arg any) error {
 	_, err := a.D.Client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		ID: id, TaskQueue: TaskQueue,
+		ID: id, TaskQueue: a.D.queue(),
 		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 	}, wf, arg)
@@ -403,3 +405,10 @@ func (a *Activities) EnqueueCancel(ctx context.Context, o OwnerArg) (string, err
 }
 
 var _ = big.NewInt
+
+func (d Deps) queue() string {
+	if d.Queue == "" {
+		return DefaultTaskQueue
+	}
+	return d.Queue
+}

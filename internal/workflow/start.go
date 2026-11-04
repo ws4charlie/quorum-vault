@@ -42,7 +42,7 @@ func RegisterNamespace(ctx context.Context, addr, namespace string) error {
 
 // NewWorker registers every workflow and the activities on a worker.
 func NewWorker(c client.Client, d Deps) worker.Worker {
-	w := worker.New(c, TaskQueue, worker.Options{})
+	w := worker.New(c, d.queue(), worker.Options{})
 	w.RegisterWorkflow(ScanWorkflow)
 	w.RegisterWorkflow(SweepPlannerWorkflow)
 	w.RegisterWorkflow(WithdrawalReconcilerWorkflow)
@@ -53,14 +53,17 @@ func NewWorker(c client.Client, d Deps) worker.Worker {
 }
 
 // EnsureLoops starts the three per-chain loops if they are not running.
-func EnsureLoops(ctx context.Context, c client.Client, cfg *custody.Config, log *slog.Logger) error {
+func EnsureLoops(ctx context.Context, c client.Client, queue string, cfg *custody.Config, log *slog.Logger) error {
+	if queue == "" {
+		queue = DefaultTaskQueue
+	}
 	t := DefaultTimings(cfg)
 	for _, l := range []struct {
 		id string
 		wf any
 	}{{ScanID(cfg.Chain), ScanWorkflow}, {PlannerID(cfg.Chain), SweepPlannerWorkflow}, {ReconcilerID(cfg.Chain), WithdrawalReconcilerWorkflow}} {
 		_, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-			ID: l.id, TaskQueue: TaskQueue,
+			ID: l.id, TaskQueue: queue,
 			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 			WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 		}, l.wf, Input{ID: l.id, T: t})
@@ -74,14 +77,19 @@ func EnsureLoops(ctx context.Context, c client.Client, cfg *custody.Config, log 
 
 // Orch implements custody.Orchestrator on a Temporal client.
 type Orch struct {
-	C client.Client
-	T Timings
+	C     client.Client
+	T     Timings
+	Queue string // default DefaultTaskQueue
 }
 
 var _ custody.Orchestrator = Orch{}
 
 func (o Orch) opts(id string) client.StartWorkflowOptions {
-	return client.StartWorkflowOptions{ID: id, TaskQueue: TaskQueue,
+	q := o.Queue
+	if q == "" {
+		q = DefaultTaskQueue
+	}
+	return client.StartWorkflowOptions{ID: id, TaskQueue: q,
 		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE}
 }

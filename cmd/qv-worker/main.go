@@ -41,6 +41,7 @@ func run(log *slog.Logger) error {
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "business database DSN (env DATABASE_URL)")
 	temporalAddr := flag.String("temporal", envOr("QV_TEMPORAL_ADDR", "127.0.0.1:7233"), "Temporal address (env QV_TEMPORAL_ADDR)")
 	namespace := flag.String("namespace", "default", "Temporal namespace")
+	queue := flag.String("task-queue", workflow.DefaultTaskQueue, "Temporal task queue")
 	autoKey := flag.String("auto-approver-key-file", os.Getenv("QV_AUTO_APPROVER_KEY_FILE"),
 		"file with the automated approver's Ed25519 seed (64 hex chars); optional (env QV_AUTO_APPROVER_KEY_FILE)")
 	flag.Parse()
@@ -91,12 +92,12 @@ func run(log *slog.Logger) error {
 	}
 	defer tc.Close()
 
-	w := workflow.NewWorker(tc, workflow.Deps{Svc: svc, Client: tc, AutoKey: key, Log: log, T: workflow.DefaultTimings(cfg)})
+	w := workflow.NewWorker(tc, workflow.Deps{Svc: svc, Client: tc, AutoKey: key, Log: log, T: workflow.DefaultTimings(cfg), Queue: *queue})
 	if err := w.Start(); err != nil {
 		return err
 	}
 	defer w.Stop()
-	if err := workflow.EnsureLoops(ctx, tc, cfg, log); err != nil {
+	if err := workflow.EnsureLoops(ctx, tc, *queue, cfg, log); err != nil {
 		return err
 	}
 	log.Info("qv-worker started", "chain", cfg.Chain, "failpoint", os.Getenv("QV_FAILPOINT"))

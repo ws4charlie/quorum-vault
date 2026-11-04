@@ -37,6 +37,7 @@ func run(log *slog.Logger) error {
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "business database DSN (env DATABASE_URL)")
 	temporalAddr := flag.String("temporal", envOr("QV_TEMPORAL_ADDR", "127.0.0.1:7233"), "Temporal address (env QV_TEMPORAL_ADDR)")
 	namespace := flag.String("namespace", "default", "Temporal namespace")
+	queue := flag.String("task-queue", workflow.DefaultTaskQueue, "Temporal task queue")
 	flag.Parse()
 	if *cfgPath == "" || *dsn == "" {
 		return errors.New("-config and -dsn (or DATABASE_URL) are required")
@@ -76,7 +77,7 @@ func run(log *slog.Logger) error {
 	}
 	defer tc.Close()
 
-	api := custody.NewAPI(svc, workflow.Orch{C: tc, T: workflow.DefaultTimings(cfg)}, log)
+	api := custody.NewAPI(svc, workflow.Orch{C: tc, T: workflow.DefaultTimings(cfg), Queue: *queue}, log)
 	srv := &http.Server{Addr: *addr, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
