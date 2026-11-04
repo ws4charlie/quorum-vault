@@ -13,12 +13,14 @@ contract ForwarderTest is Base {
     address constant DEST2 = address(0xD358);
     address constant ADMIN = address(0xAD41);
     address constant ADMIN2 = address(0xAD42);
+    address constant GUARDIAN = address(0x6A4D);
+    address constant GUARDIAN2 = address(0x6A4E);
     address constant ATTACKER = address(0xBAD);
     ForwarderFactory factory;
     UsdtLike usdt;
 
     function setUp() public {
-        factory = new ForwarderFactory(DEST, ADMIN);
+        factory = new ForwarderFactory(DEST, ADMIN, GUARDIAN);
         usdt = new UsdtLike();
     }
 
@@ -269,6 +271,101 @@ contract ForwarderTest is Base {
         vm.prank(ADMIN2);
         factory.setDestination(DEST2);
         assertEq(factory.destination(), DEST2, "new admin works");
+    }
+
+    // ---- guardian, frozen by default ----
+
+    function testGuardianFreezesButCannotDoAnythingElse() public {
+        bytes32 salt = keccak256("g1");
+        address f = factory.deployAndFlush(salt, _none());
+        vm.deal(address(this), 3 ether);
+        _send(f, 1 ether);
+
+        vm.prank(ATTACKER);
+        vm.expectRevert();
+        factory.freeze();
+        assertEq(factory.destination(), DEST, "non-guardian could not freeze");
+
+        vm.prank(GUARDIAN);
+        factory.freeze();
+        assertEq(factory.destination(), address(0), "guardian froze");
+        vm.expectRevert();
+        factory.deployAndFlush(salt, _none());
+        assertEq(f.balance, 1 ether, "funds stay in the deposit address");
+
+        vm.prank(GUARDIAN);
+        factory.freeze(); // already frozen: no-op
+        assertEq(factory.destination(), address(0), "still frozen");
+
+        // Guardian can do nothing else.
+        vm.prank(GUARDIAN);
+        vm.expectRevert();
+        factory.setDestination(DEST);
+        vm.prank(GUARDIAN);
+        vm.expectRevert();
+        factory.transferAdmin(GUARDIAN);
+        vm.prank(GUARDIAN);
+        vm.expectRevert();
+        factory.setGuardian(GUARDIAN2);
+        assertEq(factory.destination(), address(0), "guardian cannot unfreeze");
+        assertEq(factory.admin(), ADMIN, "admin untouched");
+
+        vm.prank(ADMIN);
+        factory.setDestination(DEST);
+        factory.deployAndFlush(salt, _none());
+        assertEq(DEST.balance, 1 ether, "admin unfroze and sweep worked");
+    }
+
+    function testAdminCanFreezeAndRotateGuardian() public {
+        vm.prank(ADMIN);
+        factory.freeze();
+        assertEq(factory.destination(), address(0), "admin froze");
+
+        vm.prank(ATTACKER);
+        vm.expectRevert();
+        factory.setGuardian(ATTACKER);
+        vm.prank(ADMIN);
+        vm.expectRevert();
+        factory.setGuardian(address(0));
+        vm.prank(ADMIN);
+        factory.setGuardian(GUARDIAN2);
+
+        vm.prank(ADMIN);
+        factory.setDestination(DEST);
+        vm.prank(GUARDIAN); // the old guardian lost its power
+        vm.expectRevert();
+        factory.freeze();
+        assertEq(factory.destination(), DEST, "old guardian could not freeze");
+        vm.prank(GUARDIAN2);
+        factory.freeze();
+        assertEq(factory.destination(), address(0), "new guardian can");
+    }
+
+    function testZeroAdminOrGuardianRevertsAtDeployment() public {
+        vm.expectRevert();
+        new ForwarderFactory(DEST, address(0), GUARDIAN);
+        vm.expectRevert();
+        new ForwarderFactory(DEST, ADMIN, address(0));
+    }
+
+    function testDeployedFrozenDepositsArriveThenAdminStartsSweeping() public {
+        ForwarderFactory fz = new ForwarderFactory(address(0), ADMIN, GUARDIAN);
+        bytes32 salt = keccak256("frozen-start");
+        address a = fz.predict(salt);
+        vm.deal(address(this), 3 ether);
+        usdt.mint(a, 6);
+        _send(a, 1 ether); // before deployment, while frozen
+        assertEq(a.balance, 1 ether, "deposit arrived");
+        vm.expectRevert();
+        fz.deployAndFlush(salt, _one(address(usdt)));
+        assertEq(a.balance, 1 ether, "funds stay");
+        assertEq(a.code.length, 0, "nothing deployed while frozen");
+
+        vm.prank(ADMIN);
+        fz.setDestination(DEST);
+        fz.deployAndFlush(salt, _one(address(usdt)));
+        assertEq(DEST.balance, 1 ether, "swept");
+        assertEq(usdt.balanceOf(DEST), 6, "tokens swept");
     }
 
     // ---- gas ----

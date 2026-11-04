@@ -40,21 +40,22 @@ var (
 )
 
 type tenv struct {
-	t        *testing.T
-	ctx      context.Context
-	url      string
-	ec       *ethclient.Client
-	rpc      *rpc.Client
-	pool     *pgxpool.Pool
-	cfg      Config
-	ad       *Adapter
-	deployer *ecdsa.PrivateKey
-	hotKey   *ecdsa.PrivateKey
-	adminKey *ecdsa.PrivateKey // factory admin (the "cold" key)
-	hot      common.Address
-	dest     common.Address
-	usdt     common.Address // returns no bool
-	dai      common.Address // returns bool
+	t           *testing.T
+	ctx         context.Context
+	url         string
+	ec          *ethclient.Client
+	rpc         *rpc.Client
+	pool        *pgxpool.Pool
+	cfg         Config
+	ad          *Adapter
+	deployer    *ecdsa.PrivateKey
+	hotKey      *ecdsa.PrivateKey
+	adminKey    *ecdsa.PrivateKey // factory admin (the "cold" key)
+	guardianKey *ecdsa.PrivateKey
+	hot         common.Address
+	dest        common.Address
+	usdt        common.Address // returns no bool
+	dai         common.Address // returns bool
 }
 
 func requireAnvil(t *testing.T) string {
@@ -111,7 +112,12 @@ func newEnv(t *testing.T) *tenv {
 	if err := e2e.SetBalance(ctx, url, crypto.PubkeyToAddress(e.adminKey.PublicKey), new(big.Int).Mul(big.NewInt(10), ether)); err != nil {
 		t.Fatal(err)
 	}
-	factory := e.deploy(FactoryDeployData(e.dest, crypto.PubkeyToAddress(e.adminKey.PublicKey)))
+	e.guardianKey, _ = crypto.GenerateKey()
+	if err := e2e.SetBalance(ctx, url, crypto.PubkeyToAddress(e.guardianKey.PublicKey), new(big.Int).Mul(big.NewInt(10), ether)); err != nil {
+		t.Fatal(err)
+	}
+	// Frozen by default: deployed with destination zero; the admin sets the hot address below.
+	factory := e.deploy(FactoryDeployData(common.Address{}, crypto.PubkeyToAddress(e.adminKey.PublicKey), crypto.PubkeyToAddress(e.guardianKey.PublicKey)))
 	e.usdt = e.deploy(readBin(t, "testdata/UsdtLike.bin"))
 	e.dai = e.deploy(readBin(t, "testdata/BoolToken.bin"))
 	e.cfg = Config{
@@ -119,6 +125,12 @@ func newEnv(t *testing.T) *tenv {
 		Factory: factory, SweepDestination: e.dest,
 		HotAddresses: map[string]common.Address{"hot-0": e.hot},
 		Assets:       map[string]Token{"USDT": {Address: e.usdt, Decimals: 6}, "DAI": {Address: e.dai, Decimals: 18}},
+	}
+	if err := loadABIs(); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.factoryTx(e.adminKey, "setDestination", e.dest); r.Status != 1 {
+		t.Fatal("admin could not set the destination")
 	}
 	e.ad, err = New(ctx, e.cfg, pool)
 	if err != nil {
@@ -705,6 +717,141 @@ func TestDestinationChangeMovesNoAddressAndNeedsMatchingConfig(t *testing.T) {
 	}
 	if e.receipt(common.HexToHash(h)).Status != 1 || e.balance(newDest).Int64() != 100 || e.balance(e.dest).Sign() != 0 {
 		t.Fatal("old address did not pay the new destination")
+	}
+}
+
+func TestDeployedFrozenDepositsArriveThenAdminStartsSweeping(t *testing.T) {
+	e := newEnv(t)
+	// A second factory, frozen by default (its destination is zero).
+	frozen := e.deploy(FactoryDeployData(common.Address{}, crypto.PubkeyToAddress(e.adminKey.PublicKey), crypto.PubkeyToAddress(e.guardianKey.PublicKey)))
+	cfg := e.cfg
+	cfg.Factory = frozen
+	cfg.Chain = "evm-anvil-frozen"
+	ad, err := New(e.ctx, cfg, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ad.Close()
+	d, _ := ad.DeriveDepositAddress(e.ctx, "cust-fz", 0)
+	if _, err := e.pool.Exec(e.ctx, `INSERT INTO customers (id, entity) VALUES ('cust-fz','qv-us')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(e.ctx, `INSERT INTO deposit_addresses (customer_id, chain, address, derivation_index, kind) VALUES ('cust-fz',$1,$2,0,'forwarder')`, d.Chain, d.Address); err != nil {
+		t.Fatal(err)
+	}
+	addr := common.HexToAddress(d.Address)
+	start := e.head() + 1
+	e.send(e.deployer, &addr, big.NewInt(7000), nil) // deposits arrive while frozen
+	e.mint(e.usdt, addr, 3)
+	e.mine(cfg.Confirmations)
+	res, err := ad.Scan(e.ctx, start)
+	if err != nil || len(res.Deposits) != 2 {
+		t.Fatalf("scan while frozen: %+v %v", res.Deposits, err)
+	}
+	tx, _ := e.pool.Begin(e.ctx)
+	_, err = ad.BuildSweep(e.ctx, tx, chain.SweepIntent{ID: "s", Asset: "USDT", From: addr.Hex(), ToPartition: "hot-0", Amount: big.NewInt(3)})
+	_ = tx.Rollback(e.ctx)
+	if !errors.Is(err, ErrSweepFrozen) {
+		t.Fatalf("BuildSweep on a frozen-by-default factory: %v", err)
+	}
+	data, _ := packDeployAndFlush(DeriveSalt("cust-fz", 0), []common.Address{e.usdt})
+	if r := e.receipt(e.sendRaw(e.deployer, &frozen, new(big.Int), data, 3_000_000).Hash()); r.Status != 0 {
+		t.Fatal("deployAndFlush succeeded on a frozen factory")
+	}
+	if e.balance(addr).Int64() != 7000 {
+		t.Fatal("funds moved while frozen")
+	}
+	// The cold key sets the hot address; the same sweep now works.
+	setData, _ := factoryABI.Pack("setDestination", e.dest)
+	if r := e.receipt(e.sendRaw(e.adminKey, &frozen, new(big.Int), setData, 3_000_000).Hash()); r.Status != 1 {
+		t.Fatal("admin setDestination failed")
+	}
+	tx, _ = e.pool.Begin(e.ctx)
+	u, err := ad.BuildSweep(e.ctx, tx, chain.SweepIntent{ID: "s2", Asset: "USDT", From: addr.Hex(), ToPartition: "hot-0", Amount: big.NewInt(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tx.Commit(e.ctx)
+	s, _ := ad.Assemble(u, sign(t, u, e.hotKey))
+	h, err := ad.Broadcast(e.ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.receipt(common.HexToHash(h)).Status != 1 || e.balance(e.dest).Int64() != 7000 || e.tokenBalance(e.usdt, e.dest).Int64() != 3 {
+		t.Fatal("sweep after the admin set the destination failed")
+	}
+}
+
+func TestGuardianFreezesOnlyAdminUnfreezes(t *testing.T) {
+	e := newEnv(t)
+	addr := e.addCustomer("cust-gd", 0)
+	e.send(e.deployer, &addr, big.NewInt(4000), nil)
+
+	if r := e.factoryTx(e.deployer, "freeze"); r.Status != 0 {
+		t.Fatal("a stranger froze the factory")
+	}
+	if e.factoryDestination() != e.dest {
+		t.Fatal("destination changed by a stranger")
+	}
+	if r := e.factoryTx(e.guardianKey, "freeze"); r.Status != 1 {
+		t.Fatal("guardian could not freeze")
+	}
+	if e.factoryDestination() != (common.Address{}) {
+		t.Fatal("not frozen")
+	}
+	if err := e.buildSweepErr("g", "ETH", addr); !errors.Is(err, ErrSweepFrozen) {
+		t.Fatalf("BuildSweep after guardian freeze: %v", err)
+	}
+	if e.balance(addr).Int64() != 4000 {
+		t.Fatal("freeze moved funds")
+	}
+	// Freezing again is harmless.
+	if r := e.factoryTx(e.guardianKey, "freeze"); r.Status != 1 {
+		t.Fatal("second freeze reverted")
+	}
+	// The guardian cannot unfreeze, rotate itself, or touch admin.
+	other, _ := crypto.GenerateKey()
+	oa := crypto.PubkeyToAddress(other.PublicKey)
+	for name, args := range map[string][]any{"setDestination": {e.dest}, "transferAdmin": {oa}, "setGuardian": {oa}} {
+		if r := e.factoryTx(e.guardianKey, name, args...); r.Status != 0 {
+			t.Fatalf("guardian could call %s", name)
+		}
+	}
+	if e.factoryDestination() != (common.Address{}) {
+		t.Fatal("guardian unfroze")
+	}
+	// Admin rotates the guardian: the old one loses power. Admin unfreezes.
+	k2, _ := crypto.GenerateKey()
+	if err := e2e.SetBalance(e.ctx, e.url, crypto.PubkeyToAddress(k2.PublicKey), new(big.Int).Mul(big.NewInt(10), ether)); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.factoryTx(e.deployer, "setGuardian", crypto.PubkeyToAddress(k2.PublicKey)); r.Status != 0 {
+		t.Fatal("non-admin rotated the guardian")
+	}
+	if r := e.factoryTx(e.adminKey, "setGuardian", crypto.PubkeyToAddress(k2.PublicKey)); r.Status != 1 {
+		t.Fatal("admin could not rotate the guardian")
+	}
+	if r := e.factoryTx(e.adminKey, "setDestination", e.dest); r.Status != 1 {
+		t.Fatal("admin could not unfreeze")
+	}
+	if r := e.factoryTx(e.guardianKey, "freeze"); r.Status != 0 {
+		t.Fatal("the old guardian kept its power")
+	}
+	if r := e.factoryTx(k2, "freeze"); r.Status != 1 {
+		t.Fatal("the new guardian cannot freeze")
+	}
+	// Unfrozen sweep of what stayed in the deposit address.
+	if r := e.factoryTx(e.adminKey, "setDestination", e.dest); r.Status != 1 {
+		t.Fatal("unfreeze")
+	}
+	tx, _ := e.pool.Begin(e.ctx)
+	u, err := e.ad.BuildSweep(e.ctx, tx, chain.SweepIntent{ID: "g2", Asset: "ETH", From: addr.Hex(), ToPartition: "hot-0", Amount: big.NewInt(4000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tx.Commit(e.ctx)
+	if e.receipt(common.HexToHash(e.mustBroadcast(u))).Status != 1 || e.balance(e.dest).Int64() != 4000 {
+		t.Fatal("funds left in the deposit address were not swept after unfreezing")
 	}
 }
 

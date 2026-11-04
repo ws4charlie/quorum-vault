@@ -59,10 +59,13 @@ func ForwarderCreationCode() []byte { return common.FromHex(strings.TrimSpace(fo
 func FactoryCreationCode() []byte { return common.FromHex(strings.TrimSpace(factoryBinHex)) }
 
 // FactoryDeployData returns creation code plus the constructor arguments
-// (destination, admin), ready to send as the data of a contract-creation transaction.
-func FactoryDeployData(destination, admin common.Address) []byte {
+// (destination, admin, guardian), ready to send as the data of a contract-creation
+// transaction. Deploy with a zero destination to start frozen: deposits still arrive,
+// and the admin (cold key) sets the hot address when sweeping should begin.
+func FactoryDeployData(destination, admin, guardian common.Address) []byte {
 	d := append(FactoryCreationCode(), common.LeftPadBytes(destination.Bytes(), 32)...)
-	return append(d, common.LeftPadBytes(admin.Bytes(), 32)...)
+	d = append(d, common.LeftPadBytes(admin.Bytes(), 32)...)
+	return append(d, common.LeftPadBytes(guardian.Bytes(), 32)...)
 }
 
 // DeriveSalt is keccak256("qv-evm-forwarder-v1" || len(customer) as uint32 ||

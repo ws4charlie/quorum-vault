@@ -16,6 +16,8 @@
 The forwarder has no constructor arguments: `factory` is its deployer. Its init code, and so its address, depends on the factory and the salt only, never on the destination. The factory stores `destination`; a forwarder asks the factory at flush time. Consequences:
 - **Changeable without moving addresses.** The factory `admin` (a cold-key address) calls `setDestination`; every old deposit address then pays the new one. A stolen hot key cannot change it.
 - **Freeze.** Destination zero makes every flush and `deployAndFlush` revert `SweepFrozen()`: funds stay where they are, nothing deploys. It reverts instead of returning, so a worker never records a sweep that moved nothing. The adapter returns `ErrSweepFrozen` from `BuildSweep` and `EstimateSweepFee` (read via `destination()`), so P3 can stop sweeping without treating it as an outage. A stale configuration (`SweepDestination` differs) returns `ErrDestinationMismatch`.
+- **Guardian (freeze only).** One operations key per chain. `freeze()` (guardian or admin) sets the destination to zero; freezing twice is a no-op. The guardian cannot set a destination, unfreeze, or touch the admin; only the admin's `setDestination` unfreezes, and only the admin rotates the guardian (`setGuardian`; the old one loses power at once). A freeze leaves everything in the deposit addresses where it is.
+- **Frozen by default.** The factory is deployed with destination zero; deposits still arrive (the forwarder accepts ETH and tokens regardless) and every sweep reverts `SweepFrozen` until the cold key sets the hot address.
 - **Two-step admin.** `transferAdmin` nominates; the nominee must `acceptAdmin`. Until then it has no power; afterwards the old admin has none.
 - **Signing-zone config must follow.** The Verifier checks `intent.To == Config.SweepDestination`, a value it reads only from the signing zone's own config. When the cold key changes the destination, update that config by hand; until then every sweep is refused, which is the point.
 
@@ -77,6 +79,8 @@ The signing gateway sits in a different trust zone from the business database. I
 14. Why can the destination change without moving any deposit address, and who can change it?
 15. What happens to a sweep when the destination is zero, and why a revert instead of a quiet return?
 16. After a destination change, why are sweeps refused until the signing zone's config is updated?
+17. What can the guardian do, and what can it not do? Who unfreezes?
+18. Why deploy the factory with destination zero?
 
 <details><summary>Answers</summary>
 
@@ -96,4 +100,6 @@ The signing gateway sits in a different trust zone from the business database. I
 14. The forwarder's init code has no arguments (address = factory + salt) and it reads the destination from the factory; only the cold-key admin can change it.
 15. It is frozen: flushes revert `SweepFrozen()` and nothing deploys or moves; reverting means a worker can never record a sweep that moved nothing.
 16. The Verifier compares `intent.To` with its own configured sweep destination, which it never learns from the business side.
+17. It can only `freeze()` (destination to zero). It cannot set a destination, unfreeze, or touch admin or guardian. The admin unfreezes with `setDestination`.
+18. Nothing can be swept to a wrong place before the cold key chooses the hot address; deposits still arrive meanwhile.
 </details>

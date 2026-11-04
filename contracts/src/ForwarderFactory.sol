@@ -6,26 +6,50 @@ import {Forwarder} from "./Forwarder.sol";
 /// @notice Deploys Forwarders with CREATE2 and owns the one destination every
 /// forwarder pays to. `admin` (meant to be a cold-key address) is the only account
 /// that can change it; destination zero freezes all sweeping (funds stay where they are).
+/// `guardian` (an operations key, one per chain) can only freeze; unfreezing is `setDestination`
+/// by the admin. Deploy with destination zero to start frozen: deposits still arrive.
 contract ForwarderFactory {
     address public destination;
     address public admin;
     address public pendingAdmin;
+    address public guardian;
 
     event DestinationChanged(address indexed previous, address indexed current);
     event AdminTransferStarted(address indexed admin, address indexed pendingAdmin);
     event AdminChanged(address indexed previous, address indexed current);
+    event GuardianChanged(address indexed previous, address indexed current);
 
     error NotAdmin();
+    error NotGuardianOrAdmin();
     error NotPendingAdmin();
     error ZeroAddress();
     error SweepFrozen();
 
-    constructor(address destination_, address admin_) {
-        if (admin_ == address(0)) revert ZeroAddress();
+    constructor(address destination_, address admin_, address guardian_) {
+        if (admin_ == address(0) || guardian_ == address(0)) revert ZeroAddress();
         destination = destination_;
         admin = admin_;
+        guardian = guardian_;
         emit DestinationChanged(address(0), destination_);
         emit AdminChanged(address(0), admin_);
+        emit GuardianChanged(address(0), guardian_);
+    }
+
+    /// @notice Stops all sweeping by setting the destination to zero. Guardian or admin.
+    /// Already frozen: a harmless no-op. Only the admin can unfreeze (setDestination).
+    function freeze() external {
+        if (msg.sender != guardian && msg.sender != admin) revert NotGuardianOrAdmin();
+        if (destination == address(0)) return;
+        emit DestinationChanged(destination, address(0));
+        destination = address(0);
+    }
+
+    /// @notice Rotates the guardian; the old one loses its power at once.
+    function setGuardian(address newGuardian) external {
+        if (msg.sender != admin) revert NotAdmin();
+        if (newGuardian == address(0)) revert ZeroAddress();
+        emit GuardianChanged(guardian, newGuardian);
+        guardian = newGuardian;
     }
 
     /// @notice Zero is allowed: it freezes sweeping.

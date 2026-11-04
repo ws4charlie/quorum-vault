@@ -9,14 +9,14 @@ Reproduce: `forge test -vv` in `contracts/` (via the Foundry image, see `contrac
 
 | Operation | Gas | Source |
 |---|---:|---|
-| `deployAndFlush`: deploy forwarder + flush ETH + 1 token | 369,088 | forge --isolate |
-| same, mined on anvil (ETH + 1 token) | 359,236 | Go e2e |
-| `deployAndFlush` on a deployed forwarder (ETH + 1 token) | 58,840 | forge |
-| same, mined on anvil (1 token, no ETH) | 44,066 | Go e2e |
-| `flushTokens(token)` direct | 44,422 | forge |
-| `flushETH()` direct | 36,426 | forge |
-| `deployAndFlushMany`, 10 addresses, first (ETH + 1 token each) | 2,915,623 | forge |
-| `deployAndFlushMany`, 10 addresses, repeat | 280,298 | forge |
+| `deployAndFlush`: deploy forwarder + flush ETH + 1 token | 369,221 | forge --isolate |
+| same, mined on anvil (ETH + 1 token) | 359,369 | Go e2e |
+| `deployAndFlush` on a deployed forwarder (ETH + 1 token) | 58,973 | forge |
+| same, mined on anvil (1 token, no ETH) | 44,199 | Go e2e |
+| `flushTokens(token)` direct | 44,444 | forge |
+| `flushETH()` direct | 36,448 | forge |
+| `deployAndFlushMany`, 10 addresses, first (ETH + 1 token each) | 2,916,085 | forge |
+| `deployAndFlushMany`, 10 addresses, repeat | 280,760 | forge |
 
 Rough cost of a first sweep at 30 gwei: 369k x 30 gwei = 0.011 ETH; later sweeps about 59k x 30 gwei = 0.0018 ETH. The sweep rule `value >= k x fee` (PLAN, k 20-50) uses `EstimateSweepFee`.
 
