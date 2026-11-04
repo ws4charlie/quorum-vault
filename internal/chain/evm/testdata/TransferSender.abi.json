@@ -1,0 +1,15 @@
+[
+  {
+    "type": "function",
+    "name": "pay",
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address",
+        "internalType": "address payable"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  }
+]

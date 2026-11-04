@@ -32,5 +32,114 @@ services:
       timeout: 3s
       retries: 30
 
+  # ---- Phase 2 infrastructure (profile "infra"; `make infra-up`) ----
+  # Temporal keeps its own Postgres, separate from the business database.
+  # Pinned: temporalio/server + admin-tools 1.32.1 (2026-10-08), ui 2.56.0
+  # (2026-10-13), redpanda v26.2.4 (2026-10-06). temporalio/auto-setup is
+  # deprecated upstream, so schema setup is an explicit one-shot job.
+  temporal-db:
+    profiles: ["infra"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: temporal
+      POSTGRES_USER: temporal
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - temporal-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  temporal-schema:
+    profiles: ["infra"]
+    image: temporalio/admin-tools:1.32.1
+    depends_on:
+      temporal-db:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      SQL_PLUGIN: postgres12
+      SQL_HOST: temporal-db
+      SQL_PORT: "5432"
+      SQL_USER: temporal
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        temporal-sql-tool --db temporal create-database || true
+        temporal-sql-tool --db temporal setup-schema -v 0.0
+        temporal-sql-tool --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
+        temporal-sql-tool --db temporal_visibility create-database || true
+        temporal-sql-tool --db temporal_visibility setup-schema -v 0.0
+        temporal-sql-tool --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+
+  temporal:
+    profiles: ["infra"]
+    image: temporalio/server:1.32.1
+    depends_on:
+      temporal-schema:
+        condition: service_completed_successfully
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: temporal-db
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ""
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      BIND_ON_IP: 0.0.0.0
+      TEMPORAL_BROADCAST_ADDRESS: 127.0.0.1
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig.yaml
+    configs:
+      - source: temporal-dynamicconfig
+        target: /etc/temporal/dynamicconfig.yaml
+    ports:
+      - "127.0.0.1:7233:7233"
+    healthcheck:
+      # the server image ships no temporal CLI, so check the frontend port
+      test: ["CMD-SHELL", "nc -z $$(hostname -i) 7233"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  temporal-ui:
+    profiles: ["infra"]
+    image: temporalio/ui:2.56.0
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "127.0.0.1:8233:8080"
+
+  # Single-node Kafka-API broker for the outbox relay. Kafka API on 19092.
+  redpanda:
+    profiles: ["infra"]
+    image: redpandadata/redpanda:v26.2.4
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=512M
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://127.0.0.1:19092
+    ports:
+      - "127.0.0.1:19092:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+# The server image needs a dynamic-config file; an empty one means defaults.
+configs:
+  temporal-dynamicconfig:
+    content: "{}\n"
+
 volumes:
   pgdata:
+  temporal-pgdata:

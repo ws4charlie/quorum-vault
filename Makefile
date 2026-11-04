@@ -11,7 +11,7 @@ export DATABASE_URL
 # Local anvil node impersonating Sepolia (docker-compose.yml service "anvil").
 LOCAL_RPC_URL := http://127.0.0.1:8545
 
-.PHONY: setup softhsm db-up db-down chain-up chain-down test test-short test-e2e build vet run demo-local
+.PHONY: setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short test-e2e build vet run demo-local
 
 setup: softhsm db-up chain-up
 
@@ -29,6 +29,17 @@ chain-up:
 
 chain-down:
 	docker compose rm -sf anvil
+
+# Phase 2 infra (profile "infra"): Temporal + its own Postgres + UI, and Redpanda.
+infra-up:
+	docker compose --profile infra up -d --wait temporal-db temporal temporal-ui redpanda
+
+infra-down:
+	docker compose --profile infra rm -sfv temporal-ui temporal temporal-schema temporal-db redpanda
+
+# Smoke test against `make infra-up`: a Temporal workflow and a Redpanda round trip.
+test-infra:
+	QV_REQUIRE_INFRA=1 go test -count=1 -v ./internal/infratest/...
 
 test:
 	QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 ./...
@@ -54,3 +65,35 @@ run:
 # Demo against a server started with SEPOLIA_RPC_URL=$(LOCAL_RPC_URL).
 demo-local:
 	./scripts/demo-sepolia.sh --local
+
+# Phase 2 / P3a: signing gateway and outbox relay.
+.PHONY: build-gateway build-relay test-gateway test-relay
+
+build-gateway:
+	go build -o bin/qv-gateway ./cmd/qv-gateway
+
+build-relay:
+	go build -o bin/qv-relay ./cmd/qv-relay
+
+# Gateway attack tests and queue tests (needs Postgres and SoftHSM; `make db-up softhsm`).
+test-gateway:
+	QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 ./internal/gateway/... ./internal/signjob/...
+
+# Relay tests against Redpanda (`make infra-up`).
+test-relay:
+	QV_REQUIRE_DB=1 QV_REQUIRE_INFRA=1 go test -count=1 -p 1 ./internal/outbox/...
+
+# Phase 2 / P3b: the closed loop (deposit, sweep, withdrawal).
+.PHONY: build-core build-worker test-custody
+build-core:
+	go build -o bin/qv-core ./cmd/qv-core
+
+build-worker:
+	go build -o bin/qv-worker ./cmd/qv-worker
+
+# End-to-end closed loop with real everything. Needs: Postgres (`make db-up`), SoftHSM
+# (`make softhsm`), Temporal + Redpanda (`make infra-up`) and an anvil node with chain ID
+# 11155111 on QV_ANVIL_RPC (default http://127.0.0.1:18545, e.g.
+# `docker run -d --rm -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111"`).
+test-custody:
+	QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 30m -v ./e2e/custody/...

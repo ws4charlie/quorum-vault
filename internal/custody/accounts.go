@@ -1,0 +1,93 @@
+package custody
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/ws4charlie/quorum-vault/internal/ledger"
+)
+
+// The chart of accounts (docs/learn/p3b-closed-loop.md). The ledger sums to
+// zero per (chain, asset): customer liabilities are positive, and every
+// on-chain holding is mirrored by a negative balance.
+
+func custAcct(customer, chain, asset string) string {
+	return "cust:" + customer + ":" + chain + ":" + asset
+}
+func depAcct(chain, asset string) string      { return "dep:" + chain + ":" + asset }
+func sweepAcct(chain, asset string) string    { return "sweep:" + chain + ":" + asset }
+func wdAcct(chain, asset string) string       { return "wd:" + chain + ":" + asset }
+func suspenseAcct(chain, asset string) string { return "suspense:" + chain + ":" + asset }
+func feeAcct(chain, native string) string     { return "fee:" + chain + ":" + native }
+func hotAcct(partitionID string) string       { return "hot:" + partitionID }
+
+// CustomerAccount is the ledger account owing a customer an asset.
+func CustomerAccount(customer, chain, asset string) string { return custAcct(customer, chain, asset) }
+
+// DepAccount, SweepAccount, WdAccount, SuspenseAccount, FeeAccount and
+// HotAccount expose the other accounts to tests and tools.
+func DepAccount(chain, asset string) string      { return depAcct(chain, asset) }
+func SweepAccount(chain, asset string) string    { return sweepAcct(chain, asset) }
+func WdAccount(chain, asset string) string       { return wdAcct(chain, asset) }
+func SuspenseAccount(chain, asset string) string { return suspenseAcct(chain, asset) }
+func FeeAccount(chain, native string) string     { return feeAcct(chain, native) }
+func HotAccount(partitionID string) string       { return hotAcct(partitionID) }
+
+// ensureCustomerAccount creates a customer's account for asset.
+func (s *Service) ensureCustomerAccount(ctx context.Context, tx pgx.Tx, customer, asset string) error {
+	return s.Led.EnsureAccount(ctx, tx, ledger.Account{
+		ID: custAcct(customer, s.Cfg.Chain, asset), Kind: ledger.KindCustomer, Chain: s.Cfg.Chain, Asset: asset, CustomerID: customer})
+}
+
+// Bootstrap creates the assets, hot partitions and the fixed ledger accounts.
+// It is idempotent and safe to run from every process at start.
+func (s *Service) Bootstrap(ctx context.Context) error {
+	c := s.Cfg
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		for _, sym := range c.AssetList {
+			a := c.Assets[sym]
+			var contract any
+			if !a.Native() {
+				contract = a.Address.Hex()
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO assets (chain, symbol, decimals, contract_address, min_deposit) VALUES ($1,$2,$3,$4,$5::numeric)
+				ON CONFLICT (chain, symbol) DO UPDATE SET decimals = EXCLUDED.decimals, contract_address = EXCLUDED.contract_address, min_deposit = EXCLUDED.min_deposit`,
+				c.Chain, sym, a.Decimals, contract, a.MinDeposit.String()); err != nil {
+				return fmt.Errorf("custody: bootstrap asset %s: %w", sym, err)
+			}
+			for _, kind := range []struct {
+				id   string
+				kind string
+				neg  bool
+			}{
+				{depAcct(c.Chain, sym), ledger.KindClearing, true},
+				{sweepAcct(c.Chain, sym), ledger.KindClearing, true},
+				{wdAcct(c.Chain, sym), ledger.KindClearing, true},
+				{suspenseAcct(c.Chain, sym), ledger.KindSuspense, false},
+			} {
+				if err := s.Led.EnsureAccount(ctx, tx, ledger.Account{ID: kind.id, Kind: kind.kind, Chain: c.Chain, Asset: sym, AllowNegative: kind.neg}); err != nil {
+					return err
+				}
+			}
+			if sym == c.Native {
+				if err := s.Led.EnsureAccount(ctx, tx, ledger.Account{ID: feeAcct(c.Chain, sym), Kind: ledger.KindFee, Chain: c.Chain, Asset: sym, AllowNegative: true}); err != nil {
+					return err
+				}
+			}
+			for i := range c.HotShards {
+				k := c.PartitionKey(sym, i)
+				if _, err := tx.Exec(ctx, `INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ($1,$2,$3,$4,$5,$6,$7)
+					ON CONFLICT (id) DO NOTHING`, k.String(), k.Entity, k.Chain, k.Asset, k.Tier, k.Pool, k.Shard); err != nil {
+					return fmt.Errorf("custody: bootstrap partition %s: %w", k, err)
+				}
+				if err := s.Led.EnsureAccount(ctx, tx, ledger.Account{ID: hotAcct(k.String()), Kind: ledger.KindHot, Chain: c.Chain, Asset: sym,
+					PartitionID: k.String(), AllowNegative: true}); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}

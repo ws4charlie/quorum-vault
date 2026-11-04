@@ -1,0 +1,45 @@
+{
+  "_comment": "PLACEHOLDER signing-zone config. Every key and address below is a dummy; replace all of them in the signing zone. Never commit real values.",
+  "max_intent_age": "24h",
+  "sign_timeout": "30s",
+  "approvers": {
+    "alice": { "public_key": "0000000000000000000000000000000000000000000000000000000000000001", "enabled": true },
+    "bob":   { "public_key": "0000000000000000000000000000000000000000000000000000000000000002", "enabled": true },
+    "auto":  { "public_key": "0000000000000000000000000000000000000000000000000000000000000003", "enabled": true }
+  },
+  "signers": {
+    "PLACEHOLDER-partition-id": { "token": "PLACEHOLDER-token-label", "key_id": "00", "public_key": "04" }
+  },
+  "chains": {
+    "evm-example": {
+      "evm": {
+        "chain_id": 1,
+        "factory": "0x0000000000000000000000000000000000000001",
+        "sweep_destination": "0x0000000000000000000000000000000000000002",
+        "hot_addresses": { "PLACEHOLDER-partition-id": "0x0000000000000000000000000000000000000003" },
+        "tokens": { "USDT": { "address": "0x0000000000000000000000000000000000000004", "decimals": 6 } },
+        "max_tx_fee_wei": "10000000000000000"
+      },
+      "assets": {
+        "ETH": {
+          "per_tx_cap": "5000000000000000000",
+          "daily_cap": "20000000000000000000",
+          "tiers": [
+            { "min_amount": "0", "approvals": 1 },
+            { "min_amount": "1000000000000000000", "approvals": 2 }
+          ]
+        },
+        "USDT": {
+          "per_tx_cap": "10000000000",
+          "daily_cap": "40000000000",
+          "tiers": [
+            { "min_amount": "0", "approvals": 1 },
+            { "min_amount": "2000000000", "approvals": 2 }
+          ]
+        }
+      },
+      "sweeps_per_hour": 60,
+      "cancels_per_hour": 5
+    }
+  }
+}

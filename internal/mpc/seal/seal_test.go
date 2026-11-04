@@ -29,7 +29,8 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(env, []byte("Xi")) || bytes.Contains(env, []byte("ShareID")) {
+	// Long markers only: a short one such as "Xi" appears in random base64 by chance.
+	if bytes.Contains(env, []byte("ShareID")) || bytes.Contains(env, []byte("pretend save data")) {
 		t.Fatalf("envelope leaks plaintext: %s", env)
 	}
 	var e map[string]any
