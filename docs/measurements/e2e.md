@@ -136,6 +136,166 @@ QV_HTTP_ADDR=127.0.0.1:18080 ./bin/quorumvault &
 QV_URL=http://127.0.0.1:18080 QV_BIN=./bin/quorumvault ./scripts/demo-sepolia.sh
 ```
 
-To broadcast as well, start the server with `SEPOLIA_RPC_URL` set and fund
-the printed wallet addresses from a faucet first (nonce and fees then come
-from the node).
+To broadcast as well, see the next section (local anvil, no faucet), or start
+the server with `SEPOLIA_RPC_URL` pointing to a real Sepolia node and fund the
+printed wallet addresses from a faucet first (nonce and fees then come from
+the node).
+
+## Broadcast on local anvil (chain ID 11155111)
+
+The same demo in local-chain mode: the server runs with
+`SEPOLIA_RPC_URL=http://127.0.0.1:8545`, a local anvil node started with
+`--chain-id 11155111` so it accepts the Sepolia transactions unchanged. The
+script refuses unless the node reports `anvil` and chain ID 11155111 on a
+local host, funds each wallet with `anvil_setBalance`, leaves nonce and fees
+to the server (filled from the node), and fetches every receipt.
+
+- Date: 2026-11-02 (CST); same machine and versions as above
+- anvil 1.8.5 (`ghcr.io/foundry-rs/foundry:v1.8.5`, Docker), automine (each tx
+  is mined in its own block as soon as it arrives)
+
+| Step | Latency |
+|---|---:|
+| Broadcast, HSM tx (`eth_sendRawTransaction`, server-side) | 0.28–0.44 ms |
+| Broadcast, MPC tx (server-side) | 1.3–1.5 ms |
+| Receipt available | first poll |
+| HSM end-to-end request with broadcast, allow -> signed -> sent | 26.0 ms |
+| MPC 2-of-3 end-to-end request with broadcast | 392 ms |
+| MPC 3-of-3 final approve with broadcast | 485 ms |
+
+Reading the numbers:
+- Broadcast adds about 1 ms to a request: anvil validates the tx (signature,
+  chain ID, nonce, balance) and mines it inside the `eth_sendRawTransaction`
+  call. All 4 receipts were there on the first `eth_getTransactionReceipt`
+  (the ~45 ms "receipt fetched" client times in the table are curl + jq
+  process start-up, not chain time). On real Sepolia a receipt takes one or
+  more 12 s slots instead.
+- `gasUsed` is 21000 for each plain transfer; `effectiveGasPrice` = base fee +
+  tip (1 gwei tip; anvil's base fee starts at 1 gwei and falls while blocks
+  are nearly empty), always below the `max_fee_per_gas` the server signed
+  (2 × base fee + tip).
+- The HSM wallet's second tx (1c) got nonce 1 from the node: the first had
+  already been mined. The e2e test `ApprovedAfterLaterTransferGetsFreshNonce`
+  covers the harder order (approved request overtaken by a later one).
+- The same flows run as Go tests on every push: `make test-e2e`, CI job `e2e`.
+
+Run output (trimmed: raw txs and most of the offline `verify-tx` JSON cut):
+
+```text
+== health
+{"ok":true,"db":{"ok":true},"hsm":{"ok":true,"token":"quorumvault"}}
+local chain: anvil/v1.8.5 at http://127.0.0.1:8545, chain id 11155111 (Sepolia), block 18
+
+== 1a. HSM hot wallet: create, policy (approval over 0.01 ETH), allowlist
+wallet demo-hsm-hot (hot/hsm) id=b7830fa0-868d-4dbe-918e-214fa18b59de address=0xbe47F11D79d40D2d84814c05492802dB62110B7C create=18.6ms
+funded 0xbe47F11D79d40D2d84814c05492802dB62110B7C with 10 ETH via anvil_setBalance (balance 0x8ac7230489e80000)
+policy {"approval_threshold_wei":"10000000000000000","per_tx_limit_wei":"500000000000000000","daily_limit_wei":"1000000000000000000","required_approvals":1}
+allowlist ["0x000000000000000000000000000000000000dead"]
+
+== 1b. HSM: 0.001 ETH -> allowed, signed in-token
+request c682249a-158e-4cc7-9abf-6e3a94d7943a value=1000000000000000 wei -> status=signed decision={"outcome":"allow","reasons":[],"required_approvals":1} http=26.0ms
+  signed: tx_hash=0x1f5826f9f1a9c0cf07efa1a13104b8842a784de0c0e052230f754f3a8dfdceda
+  from (server-recovered) = 0xbe47F11D79d40D2d84814c05492802dB62110B7C   wallet = 0xbe47F11D79d40D2d84814c05492802dB62110B7C
+  broadcast: ok
+  receipt (poll 1): block=19 status=1 gasUsed=21000 effectiveGasPrice=1090721093 wei from=0xbe47f11d79d40d2d84814c05492802db62110b7c
+  offline verify-tx:
+      "nonce": 0,
+      "recovered_sender": "0xbe47F11D79d40D2d84814c05492802dB62110B7C",
+      "sender_matches": true,
+
+== 1c. HSM: 0.1 ETH -> pending_approval; alice cannot self-approve; bob approves
+request fc7e34d2-83f2-4fae-925d-2163c9bb29b3 value=100000000000000000 wei -> status=pending_approval decision={"outcome":"needs_approval","reasons":["exceeds approval threshold"],"required_approvals":1} http=15.9ms
+self-approve by alice -> HTTP 403 {"error":"approval: requester cannot vote on own request"}
+approve by bob -> status=signed tally={"approvals":1,"rejected":false,"required":1,"done":true} http=10.7ms
+  signed: tx_hash=0x3dcad5bd9f5fd01446d8125cfe3e96e7434501107f21b2891440b98d0b2322e6
+  from (server-recovered) = 0xbe47F11D79d40D2d84814c05492802dB62110B7C   wallet = 0xbe47F11D79d40D2d84814c05492802dB62110B7C
+  broadcast: ok
+  receipt (poll 1): block=20 status=1 gasUsed=21000 effectiveGasPrice=1079396833 wei from=0xbe47f11d79d40d2d84814c05492802db62110b7c
+  offline verify-tx:
+      "nonce": 1,
+      "recovered_sender": "0xbe47F11D79d40D2d84814c05492802dB62110B7C",
+      "sender_matches": true,
+
+== 2. MPC hot wallet: 2-of-3 threshold signing
+wallet demo-mpc-hot (hot/mpc) id=160a1220-f9ee-4342-af8c-0ac70903436c address=0xA3E3Fd5533e906f24c45A1dd0c0C8c5D1A3Bd3A5 create=2690.5ms
+funded 0xA3E3Fd5533e906f24c45A1dd0c0C8c5D1A3Bd3A5 with 10 ETH via anvil_setBalance (balance 0x8ac7230489e80000)
+policy {"approval_threshold_wei":"10000000000000000","per_tx_limit_wei":"500000000000000000","daily_limit_wei":"1000000000000000000","required_approvals":1}
+allowlist ["0x000000000000000000000000000000000000dead"]
+request 31ed6a36-5080-41c9-bc50-b6172a933183 value=1000000000000000 wei -> status=signed decision={"outcome":"allow","reasons":[],"required_approvals":1} http=391.6ms
+  signed: tx_hash=0xeadfad3b8d7c711530c6cf6526e83a67e751a1fc0ac988058d7223bd8797043b
+  from (server-recovered) = 0xA3E3Fd5533e906f24c45A1dd0c0C8c5D1A3Bd3A5   wallet = 0xA3E3Fd5533e906f24c45A1dd0c0C8c5D1A3Bd3A5
+  broadcast: ok
+  receipt (poll 1): block=21 status=1 gasUsed=21000 effectiveGasPrice=1069486124 wei from=0xa3e3fd5533e906f24c45a1dd0c0c8c5d1a3bd3a5
+  offline verify-tx:
+      "nonce": 0,
+      "recovered_sender": "0xA3E3Fd5533e906f24c45A1dd0c0C8c5D1A3Bd3A5",
+      "sender_matches": true,
+  participants: ["party-1","party-2"]
+
+== 3. MPC cold wallet: 1 wei still needs 2 approvals; full 3-of-3 quorum
+wallet demo-mpc-cold (cold/mpc) id=66515561-d882-4e5f-bf5a-57a9dfa4c11e address=0xaac8494C5e3E97dBAD70ac5a6a3A6a01d80807D1 create=2704.8ms
+funded 0xaac8494C5e3E97dBAD70ac5a6a3A6a01d80807D1 with 10 ETH via anvil_setBalance (balance 0x8ac7230489e80000)
+policy {"approval_threshold_wei":"10000000000000000","per_tx_limit_wei":"500000000000000000","daily_limit_wei":"1000000000000000000","required_approvals":2}
+allowlist ["0x000000000000000000000000000000000000dead"]
+request e3943db3-0362-404f-9843-dfb288b84e03 value=1 wei -> status=pending_approval decision={"outcome":"needs_approval","reasons":["cold wallet requires approval"],"required_approvals":2} http=8.0ms
+approve by bob -> status=pending_approval tally={"approvals":1,"rejected":false,"required":2,"done":false} http=5.6ms
+approve by carol -> status=signed tally={"approvals":2,"rejected":false,"required":2,"done":true} http=484.7ms
+  signed: tx_hash=0x176c87160ebd87f58abb1cb6df5470dfab3a85678a2a68fb356a3e9579893945
+  from (server-recovered) = 0xaac8494C5e3E97dBAD70ac5a6a3A6a01d80807D1   wallet = 0xaac8494C5e3E97dBAD70ac5a6a3A6a01d80807D1
+  broadcast: ok
+  receipt (poll 1): block=22 status=1 gasUsed=21000 effectiveGasPrice=1060812519 wei from=0xaac8494c5e3e97dbad70ac5a6a3a6a01d80807d1
+  offline verify-tx:
+      "nonce": 0,
+      "recovered_sender": "0xaac8494C5e3E97dBAD70ac5a6a3A6a01d80807D1",
+      "sender_matches": true,
+  participants: ["party-1","party-2","party-3"]
+
+== 4. audit trail for the cold request, and chain verification
+  #71 request.created by alice
+  #72 policy.decision by alice
+  #73 approval.voted by bob
+  #74 approval.voted by carol
+  #75 request.approved by carol
+  #76 sign.started by carol
+  #77 sign.completed by carol
+  #78 tx.broadcast by carol
+audit verify: {"ok":true}
+
+== summary: Sepolia (chain 11155111) EIP-1559 txs, mined on local anvil
+  HSM (hot, allow)             0x1f5826f9f1a9c0cf07efa1a13104b8842a784de0c0e052230f754f3a8dfdceda  from 0xbe47F11D79d40D2d84814c05492802dB62110B7C
+  HSM (hot, approved)          0x3dcad5bd9f5fd01446d8125cfe3e96e7434501107f21b2891440b98d0b2322e6  from 0xbe47F11D79d40D2d84814c05492802dB62110B7C
+  MPC 2-of-3 (hot, allow)      0xeadfad3b8d7c711530c6cf6526e83a67e751a1fc0ac988058d7223bd8797043b  from 0xA3E3Fd5533e906f24c45A1dd0c0C8c5D1A3Bd3A5
+  MPC 3-of-3 (cold, approved)  0x176c87160ebd87f58abb1cb6df5470dfab3a85678a2a68fb356a3e9579893945  from 0xaac8494C5e3E97dBAD70ac5a6a3A6a01d80807D1
+
+client ms = curl time_total; server ms = timings_ms (sign = backend ceremony only, else whole call)
+| Step                                                       | client ms | server ms |
+|------------------------------------------------------------|----------:|----------:|
+| HSM (hot, allow): broadcast (eth_sendRawTransaction)       |         - |     0.442 |
+| HSM (hot, allow): receipt fetched (poll 1, curl+jq)        |      47.3 |         - |
+| HSM (hot, allow): sign ceremony                            |         - |     2.607 |
+| HSM e2e request (POST, allow -> signed)                    |      26.0 |     25.55 |
+| HSM (hot, approved): broadcast (eth_sendRawTransaction)    |         - |     0.282 |
+| HSM (hot, approved): receipt fetched (poll 1, curl+jq)     |      42.9 |         - |
+| HSM (hot, approved): sign ceremony                         |         - |       0.9 |
+| HSM approve call (vote -> signed)                          |      10.7 |    10.353 |
+| MPC DKG keygen (POST /wallets hot)                         |    2690.5 |         - |
+| MPC 2-of-3 (hot, allow): broadcast (eth_sendRawTransaction) |         - |     1.547 |
+| MPC 2-of-3 (hot, allow): receipt fetched (poll 1, curl+jq) |      42.1 |         - |
+| MPC 2-of-3 (hot, allow): sign ceremony                     |         - |   360.185 |
+| MPC 2-of-3 e2e request (POST, allow -> signed)             |     391.6 |   390.973 |
+| MPC DKG keygen (POST /wallets cold)                        |    2704.8 |         - |
+| MPC 3-of-3 (cold, approved): broadcast (eth_sendRawTransaction) |         - |     1.302 |
+| MPC 3-of-3 (cold, approved): receipt fetched (poll 1, curl+jq) |      46.3 |         - |
+| MPC 3-of-3 (cold, approved): sign ceremony                 |         - |   461.201 |
+| MPC 3-of-3 final approve (vote -> signed)                  |     484.7 |   484.175 |
+```
+
+Reproduce:
+
+```bash
+make chain-up            # or: docker run -d --rm --name qv-anvil -p 127.0.0.1:8545:8545 \
+                         #   ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111"
+CGO_ENABLED=1 go build -o bin/quorumvault ./cmd/quorumvault
+SEPOLIA_RPC_URL=http://127.0.0.1:8545 QV_HTTP_ADDR=127.0.0.1:18080 ./bin/quorumvault &
+QV_URL=http://127.0.0.1:18080 QV_BIN=./bin/quorumvault ./scripts/demo-sepolia.sh --local
+```

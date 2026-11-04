@@ -126,11 +126,12 @@ func (s *Service) transition(ctx context.Context, id string, to domain.RequestSt
 	return r, true, nil
 }
 
-// storeSigned writes the signature and raw tx and moves signing -> signed.
-func (s *Service) storeSigned(ctx context.Context, id string, sig65, raw []byte, txHash string) (domain.SignRequest, error) {
+// storeSigned writes the signature, raw tx and the nonce actually signed
+// (see Service.freshNonce) and moves signing -> signed.
+func (s *Service) storeSigned(ctx context.Context, id string, nonce uint64, sig65, raw []byte, txHash string) (domain.SignRequest, error) {
 	r, err := scanRequest(s.pool.QueryRow(ctx, `UPDATE sign_requests
-		SET status = 'signed', signature = $2, raw_tx = $3, tx_hash = $4, updated_at = now()
-		WHERE id = $1 AND status = 'signing' RETURNING `+reqCols, id, sig65, raw, txHash))
+		SET status = 'signed', nonce = $5, signature = $2, raw_tx = $3, tx_hash = $4, updated_at = now()
+		WHERE id = $1 AND status = 'signing' RETURNING `+reqCols, id, sig65, raw, txHash, int64(nonce)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, fmt.Errorf("%w: request %s left status signing while being signed", ErrConflict, id)
 	}

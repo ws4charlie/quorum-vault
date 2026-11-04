@@ -336,6 +336,6 @@ Where it fits in this repo's orchestrator
 | Retiring an MPC key changes only its state; sealed share files stay on disk | destroy the shares (and the party backups) under dual control |
 | One MPC key per wallet | master key per partition + derived child keys (§1) |
 | GG20 via tss-lib, all 9 rounds per signature (message bound from round 1) | an implementation with pre-signature pools; or a newer protocol (CGGMP21 with identifiable abort, or OT-based DKLs) |
-| Caller supplies the nonce; broadcast was not exercised (no funded testnet address) | per-address nonce manager, fee bumping, stuck-tx replacement, confirmation tracking, reorg handling |
+| Nonce from the node at submit, re-checked at sign time under an in-process per-sender lock; broadcast + receipt verified only on a local anvil node (automine), nothing waits for confirmations | per-address nonce manager, fee bumping, stuck-tx replacement, confirmation tracking, reorg handling |
 | No queue, no rate limits | per-partition sign queues, back-pressure, per-tenant quotas (§2) |
 | Allowlist checks the transaction `to` only | decode calldata; screen the beneficiary (§6) |

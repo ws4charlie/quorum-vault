@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -234,6 +235,17 @@ func (c *Client) Suggest(ctx context.Context, from common.Address) (nonce uint64
 	return nonce, tip, feeCap, nil
 }
 
+// PendingNonce returns the next nonce of from, counting txs in the node's pool.
+func (c *Client) PendingNonce(ctx context.Context, from common.Address) (uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	n, err := c.ec.PendingNonceAt(ctx, from)
+	if err != nil {
+		return 0, fmt.Errorf("eth: nonce: %w", err)
+	}
+	return n, nil
+}
+
 // Broadcast sends a raw signed transaction and returns its hash.
 func (c *Client) Broadcast(ctx context.Context, raw []byte) (common.Hash, error) {
 	tx, err := DecodeRaw(raw)
@@ -246,6 +258,31 @@ func (c *Client) Broadcast(ctx context.Context, raw []byte) (common.Hash, error)
 		return common.Hash{}, fmt.Errorf("eth: broadcast: %w", err)
 	}
 	return tx.Hash(), nil
+}
+
+// WaitReceipt polls for the receipt of hash every poll interval (0 = 200 ms)
+// until it is mined or ctx ends. A mined tx with status 0 (reverted) is
+// returned without error; the caller checks receipt.Status.
+func (c *Client) WaitReceipt(ctx context.Context, hash common.Hash, poll time.Duration) (*types.Receipt, error) {
+	if poll <= 0 {
+		poll = 200 * time.Millisecond
+	}
+	t := time.NewTicker(poll)
+	defer t.Stop()
+	for {
+		r, err := c.ec.TransactionReceipt(ctx, hash)
+		if err == nil {
+			return r, nil
+		}
+		if !errors.Is(err, ethereum.NotFound) {
+			return nil, fmt.Errorf("eth: receipt %s: %w", hash.Hex(), err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("eth: receipt %s: %w", hash.Hex(), ctx.Err())
+		case <-t.C:
+		}
+	}
 }
 
 // Broadcast dials rpcURL once and sends raw (convenience for one-off use).
