@@ -2,6 +2,7 @@
 #include "shim.h"
 
 #include <cstdlib>
+#include <new>
 #include <cstring>
 #include <vector>
 
@@ -94,23 +95,30 @@ void qv_free(void* p) { free(p); }
 void qv_wipe(void* p, size_t n) { volatile uint8_t* v = (volatile uint8_t*)p; while (n--) *v++ = 0; }
 
 int qv_hd_dkg(int ecdsa, int role, uintptr_t h, int curve, uint8_t** ks, size_t* ksl) {
+  try {
   ctx_t c(role, h);
   buf_t b;
   error_t rv = ecdsa ? api::hd_keyset_ecdsa_2p::dkg(c.job, (curve_id)curve, b)
                      : api::hd_keyset_eddsa_2p::dkg(c.job, (curve_id)curve, b);
   return rv ? rv : out(b, ks, ksl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_hd_refresh(int ecdsa, int role, uintptr_t h, const uint8_t* ks, size_t ksl, uint8_t** nks, size_t* nksl) {
+  try {
   ctx_t c(role, h);
   buf_t b;
   error_t rv = ecdsa ? api::hd_keyset_ecdsa_2p::refresh(c.job, M(ks, ksl), b)
                      : api::hd_keyset_eddsa_2p::refresh(c.job, M(ks, ksl), b);
   return rv ? rv : out(b, nks, nksl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_hd_derive(int ecdsa, int role, uintptr_t h, const uint8_t* ks, size_t ksl, const uint32_t* hp, size_t hpn,
                  const uint32_t* nhp, size_t nhpn, uint8_t** sid, size_t* sidl, uint8_t** key, size_t* keyl) {
+  try {
   ctx_t c(role, h);
   buf_t s(M(*sid, *sidl));
   std::vector<api::bip32_path_t> nh{P(nhp, nhpn)};
@@ -120,10 +128,13 @@ int qv_hd_derive(int ecdsa, int role, uintptr_t h, const uint8_t* ks, size_t ksl
   if (rv) return rv;
   out(s, sid, sidl);
   return out(keys[0], key, keyl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_hd_node_ecdsa(int role, uintptr_t h, const uint8_t* ks, size_t ksl, const uint32_t* hp, size_t hpn,
                      uint8_t** sid, size_t* sidl, uint8_t Q33[33], uint8_t cc32[32]) {
+  try {
   // Copy of the VRF part of key_share_ecdsa_hdmpc_2p_t::derive_keys (src/cbmpc/protocol/hd_keyset_ecdsa_2p.cpp),
   // exporting the account node (Q_derived, chain_code), which the public API discards.
   ctx_t c(role, h);
@@ -168,50 +179,68 @@ int qv_hd_node_ecdsa(int role, uintptr_t h, const uint8_t* ks, size_t ksl, const
   memcpy(cc32, cc.data(), 32);
   out(sidb, sid, sidl);
   return 0;
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_hd_root_pub(int ecdsa, const uint8_t* ks, size_t ksl, uint8_t** q, size_t* ql) {
+  try {
   buf_t b;
   error_t rv = ecdsa ? api::hd_keyset_ecdsa_2p::extract_root_public_key_compressed(M(ks, ksl), b)
                      : api::hd_keyset_eddsa_2p::extract_root_public_key_compressed(M(ks, ksl), b);
   return rv ? rv : out(b, q, ql);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_2p_dkg(int alg, int role, uintptr_t h, int curve, uint8_t** key, size_t* keyl) {
+  try {
   ctx_t c(role, h);
   buf_t b;
   error_t rv = alg == 0   ? api::ecdsa_2p::dkg(c.job, (curve_id)curve, b)
                : alg == 1 ? api::eddsa_2p::dkg(c.job, (curve_id)curve, b)
                           : api::schnorr_2p::dkg(c.job, (curve_id)curve, b);
   return rv ? rv : out(b, key, keyl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_2p_sign(int alg, int role, uintptr_t h, const uint8_t* key, size_t keyl, const uint8_t* msg, size_t msgl,
                uint8_t** sig, size_t* sigl) {
+  try {
   ctx_t c(role, h);
   buf_t s, sid;
   error_t rv = alg == 0   ? api::ecdsa_2p::sign(c.job, M(key, keyl), M(msg, msgl), sid, s)
                : alg == 1 ? api::eddsa_2p::sign(c.job, M(key, keyl), M(msg, msgl), s)
                           : api::schnorr_2p::sign(c.job, M(key, keyl), M(msg, msgl), s);
   return rv ? rv : out(s, sig, sigl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_2p_pub(int alg, const uint8_t* key, size_t keyl, uint8_t** pub, size_t* publ) {
+  try {
   buf_t b;
   error_t rv = alg == 0   ? api::ecdsa_2p::get_public_key_compressed(M(key, keyl), b)
                : alg == 1 ? api::eddsa_2p::get_public_key_compressed(M(key, keyl), b)
                           : api::schnorr_2p::get_public_key_compressed(M(key, keyl), b);
   return rv ? rv : out(b, pub, publ);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_schnorr_xonly(const uint8_t* key, size_t keyl, uint8_t** pub, size_t* publ) {
+  try {
   buf_t b;
   error_t rv = api::schnorr_2p::extract_public_key_xonly(M(key, keyl), b);
   return rv ? rv : out(b, pub, publ);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_ks_split(int ecdsa, const uint8_t* ks, size_t ksl, uint8_t** stripped, size_t* sl, uint8_t** x, size_t* xl,
                 uint8_t** k, size_t* kl, uint8_t** Qx33, uint8_t** Qk33) {
+  try {
   if (!ecdsa) return E_NOT_SUPPORTED;
   ks_blob_t blob;
   if (error_t rv = convert(blob, M(ks, ksl))) return rv;
@@ -226,44 +255,59 @@ int qv_ks_split(int ecdsa, const uint8_t* ks, size_t ksl, uint8_t** stripped, si
   blob.x_share = 0;
   blob.k_share = 0;
   return out(convert(blob), stripped, sl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_ks_join(int ecdsa, const uint8_t* stripped, size_t sl, const uint8_t* x, size_t xl, const uint8_t* k,
                size_t kl, uint8_t** ks, size_t* ksl) {
+  try {
   if (!ecdsa) return E_NOT_SUPPORTED;
   ks_blob_t blob;
   if (error_t rv = convert(blob, M(stripped, sl))) return rv;
   blob.x_share = bn_t::from_bin(M(x, xl));
   blob.k_share = bn_t::from_bin(M(k, kl));
   return out(convert(blob), ks, ksl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_pve_keygen(int curve, uint8_t** ek, size_t* ekl, uint8_t** dk, size_t* dkl) {
+  try {
   (void)curve;
   buf_t e, d;
   if (error_t rv = api::pve::generate_base_pke_rsa_keypair(e, d)) return rv;
   out(e, ek, ekl);
   return out(d, dk, dkl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_pve_encrypt(int curve, const uint8_t* ek, size_t ekl, const uint8_t* label, size_t labell, const uint8_t* xs[],
                    const size_t xsl[], size_t n, uint8_t** ct, size_t* ctl) {
+  try {
   std::vector<mem_t> v;
   for (size_t i = 0; i < n; i++) v.push_back(M(xs[i], xsl[i]));
   buf_t b;
   error_t rv = api::pve::encrypt_batch((curve_id)curve, M(ek, ekl), M(label, labell), v, b);
   return rv ? rv : out(b, ct, ctl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_pve_verify(int curve, const uint8_t* ek, size_t ekl, const uint8_t* ct, size_t ctl, const uint8_t* Qs[],
                   const size_t Qsl[], size_t n, const uint8_t* label, size_t labell) {
+  try {
   std::vector<mem_t> v;
   for (size_t i = 0; i < n; i++) v.push_back(M(Qs[i], Qsl[i]));
   return api::pve::verify_batch((curve_id)curve, M(ek, ekl), M(ct, ctl), v, M(label, labell));
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 int qv_pve_decrypt(int curve, const uint8_t* dk, size_t dkl, const uint8_t* ek, size_t ekl, const uint8_t* ct,
                    size_t ctl, const uint8_t* label, size_t labell, uint8_t** xs, size_t* xsl, size_t* n) {
+  try {
   std::vector<buf_t> v;
   error_t rv = api::pve::decrypt_batch((curve_id)curve, M(dk, dkl), M(ek, ekl), M(ct, ctl),
                                                               M(label, labell), v);
@@ -272,6 +316,8 @@ int qv_pve_decrypt(int curve, const uint8_t* dk, size_t dkl, const uint8_t* ek, 
   for (auto& b : v) flat.insert(flat.end(), b.data(), b.data() + b.size());
   *n = v.size();
   return out(flat, xs, xsl);
+  } catch (const std::bad_alloc&) { return E_INSUFFICIENT;
+  } catch (...) { return E_GENERAL; }  // cb_assert throws: never let it cross cgo
 }
 
 }  // extern "C"
