@@ -50,6 +50,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v2/withdrawals", a.requestWithdrawal)
 	mux.HandleFunc("GET /v2/withdrawals/{id}", a.getWithdrawal)
 	mux.HandleFunc("POST /v2/withdrawals/{id}/approvals", a.approve)
+	mux.HandleFunc("POST /v2/withdrawals/{id}/rejections", a.reject)
 	mux.HandleFunc("GET /v2/withdrawals/{id}/intent", a.intent)
 	mux.HandleFunc("GET /v2/reconcile", a.reconcile)
 	return mux
@@ -272,4 +273,44 @@ func (a *API) reconcile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rep)
+}
+
+// rejecter is implemented by orchestrators that can deliver a human rejection.
+type rejecter interface {
+	RejectWithdrawal(ctx context.Context, id, reason string) error
+}
+
+func (a *API) reject(w http.ResponseWriter, r *http.Request) {
+	actor, ok := a.actor(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	id := r.PathValue("id")
+	wd, err := a.svc.GetWithdrawal(r.Context(), id)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	if wd.Status != WdRequested && wd.Status != WdApproved {
+		a.fail(w, ErrNotPending)
+		return
+	}
+	rj, ok := a.orch.(rejecter)
+	if !ok {
+		a.fail(w, fmt.Errorf("%w: rejections are not available", ErrInvalid))
+		return
+	}
+	// Signal-with-start: delivered even if the workflow has not started yet.
+	if err := rj.RejectWithdrawal(r.Context(), id, actor+": "+body.Reason); err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"withdrawal": id, "rejected_by": actor})
 }
