@@ -1047,10 +1047,15 @@ func TestReplacementMinesAndOriginalDoesNot(t *testing.T) {
 	if d := new(big.Int).Sub(e.balance(e.dest), before); d.Int64() != 1234 {
 		t.Fatalf("destination got %s, want exactly one transfer of 1234", d)
 	}
+	// The nonce counts as used only at the safe head (Confirmations deep), so the
+	// original is still "pending" until then and cannot be mistaken for consumed.
+	if st, _ := e.ad.Status(e.ctx, origHash); st != chain.TxPending {
+		t.Fatalf("original status %s one block after the replacement, want pending", st)
+	}
+	e.mine(e.cfg.Confirmations)
 	if st, _ := e.ad.Status(e.ctx, origHash); st != chain.TxDropped {
 		t.Fatalf("original status %s, want dropped", st)
 	}
-	e.mine(e.cfg.Confirmations)
 	if st, _ := e.ad.Status(e.ctx, replHash); st != chain.TxConfirmed {
 		t.Fatalf("replacement status %s, want confirmed", st)
 	}

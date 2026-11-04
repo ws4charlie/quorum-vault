@@ -526,34 +526,36 @@ func (a *Adapter) safeHead(ctx context.Context) (head, safe uint64, ok bool, err
 	return head, head - a.cfg.Confirmations, true, nil
 }
 
+// statusClient is the part of the node client Status needs, so a test can make
+// a transaction mine between two reads.
+type statusClient interface {
+	TransactionReceipt(ctx context.Context, h common.Hash) (*types.Receipt, error)
+	TransactionByHash(ctx context.Context, h common.Hash) (*types.Transaction, bool, error)
+	BlockNumber(ctx context.Context) (uint64, error)
+	NonceAt(ctx context.Context, a common.Address, block *big.Int) (uint64, error)
+}
+
 // Status reports a transaction's state. Confirmed needs Confirmations blocks on
 // top of the mining block; failed is receipt status 0; dropped is no receipt
-// while the sender's confirmed nonce has passed the transaction's nonce.
+// while the sender's nonce **at the safe head** has passed the transaction's
+// nonce and a receipt read made after that nonce read still finds nothing: a
+// different transaction used the nonce. A transaction the node merely forgot
+// (nonce unused) stays pending.
 func (a *Adapter) Status(ctx context.Context, txHash string) (chain.TxStatus, error) {
+	return a.statusWith(ctx, a.ec, txHash)
+}
+
+func (a *Adapter) statusWith(ctx context.Context, c statusClient, txHash string) (chain.TxStatus, error) {
 	h := common.HexToHash(txHash)
-	r, err := a.ec.TransactionReceipt(ctx, h)
+	r, err := c.TransactionReceipt(ctx, h)
 	switch {
 	case err == nil:
-		_, safe, ok, serr := a.safeHead(ctx)
-		if serr != nil {
-			return "", serr
-		}
-		final := ok && r.BlockNumber.Uint64() <= safe
-		if final {
-			a.finalize(ctx, h.Hex())
-		}
-		if r.Status != types.ReceiptStatusSuccessful {
-			return chain.TxFailed, nil
-		}
-		if final {
-			return chain.TxConfirmed, nil
-		}
-		return chain.TxPending, nil
+		return a.fromReceipt(ctx, c, h, r)
 	case !errors.Is(err, ethereum.NotFound):
 		return "", fmt.Errorf("evm: receipt: %w", err)
 	}
 	// No receipt: pending in the node's pool, or dropped.
-	if _, pending, err := a.ec.TransactionByHash(ctx, h); err == nil && pending {
+	if _, pending, err := c.TransactionByHash(ctx, h); err == nil && pending {
 		return chain.TxPending, nil
 	}
 	var addr string
@@ -566,14 +568,62 @@ func (a *Adapter) Status(ctx context.Context, txHash string) (chain.TxStatus, er
 	if err != nil {
 		return "", err
 	}
-	n, err := a.ec.NonceAt(ctx, common.HexToAddress(addr), nil)
+	// Judge "the nonce has passed" at the safe head, so a reorg of the last few
+	// blocks cannot make a live transaction look consumed.
+	_, safe, ok, err := a.safeHeadOf(ctx, c)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return chain.TxPending, nil
+	}
+	n, err := c.NonceAt(ctx, common.HexToAddress(addr), new(big.Int).SetUint64(safe))
 	if err != nil {
 		return "", fmt.Errorf("evm: nonce: %w", err)
 	}
-	if n > uint64(nonce) {
-		return chain.TxDropped, nil
+	if n <= uint64(nonce) {
+		return chain.TxPending, nil
+	}
+	// The nonce passed. Our transaction may be the one that passed it, and mined
+	// after the first receipt read: read the receipt again, now that the nonce
+	// has been read. Only a miss here means someone else used the nonce.
+	r, err = c.TransactionReceipt(ctx, h)
+	switch {
+	case err == nil:
+		return a.fromReceipt(ctx, c, h, r)
+	case !errors.Is(err, ethereum.NotFound):
+		return "", fmt.Errorf("evm: receipt: %w", err)
+	}
+	return chain.TxDropped, nil
+}
+
+func (a *Adapter) fromReceipt(ctx context.Context, c statusClient, h common.Hash, r *types.Receipt) (chain.TxStatus, error) {
+	_, safe, ok, err := a.safeHeadOf(ctx, c)
+	if err != nil {
+		return "", err
+	}
+	final := ok && r.BlockNumber.Uint64() <= safe
+	if final {
+		a.finalize(ctx, h.Hex())
+	}
+	if r.Status != types.ReceiptStatusSuccessful {
+		return chain.TxFailed, nil
+	}
+	if final {
+		return chain.TxConfirmed, nil
 	}
 	return chain.TxPending, nil
+}
+
+func (a *Adapter) safeHeadOf(ctx context.Context, c statusClient) (head, safe uint64, ok bool, err error) {
+	head, err = c.BlockNumber(ctx)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("evm: block number: %w", err)
+	}
+	if head < a.cfg.Confirmations {
+		return head, 0, false, nil
+	}
+	return head, head - a.cfg.Confirmations, true, nil
 }
 
 // finalize marks the allocation of a final transaction: 'cancelled' when the
