@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"qvspike/cbmpc/cbmpc"
@@ -45,6 +46,7 @@ type Mux struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	closeErr  error
+	TxBytes, TxFrames, RxBytes, RxFrames atomic.Int64
 }
 
 func NewMux(c net.Conn, role int, delay, recvTO time.Duration, onOpen func(*Session, []byte)) *Mux {
@@ -66,6 +68,10 @@ func (m *Mux) writer() {
 			binary.BigEndian.PutUint32(hdr[0:], uint32(len(f.payload)+5))
 			binary.BigEndian.PutUint32(hdr[4:], f.sid)
 			hdr[8] = f.kind
+			if f.kind == kData {
+				m.TxBytes.Add(int64(len(f.payload)))
+				m.TxFrames.Add(1)
+			}
 			if _, err := m.conn.Write(append(hdr, f.payload...)); err != nil {
 				m.fail(err)
 				return
@@ -99,6 +105,8 @@ func (m *Mux) reader() {
 			s := m.newSession(sid)
 			go m.onOpen(s, payload)
 		case kData:
+			m.RxBytes.Add(int64(len(payload)))
+			m.RxFrames.Add(1)
 			if s := m.get(sid); s != nil {
 				s.in <- payload
 			}

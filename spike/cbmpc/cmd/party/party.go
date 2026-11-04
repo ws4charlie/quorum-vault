@@ -182,6 +182,10 @@ func (p *Party) exec(s *Session, r Req) (string, error) {
 		}
 		return hex.EncodeToString(sig), nil
 	case "rusage":
+		if role == 0 {
+			b, err := s.Recv(1)
+			return string(b), err
+		}
 		var ru syscall.Rusage
 		syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
 		cpu := float64(ru.Utime.Sec+ru.Stime.Sec) + float64(ru.Utime.Usec+ru.Stime.Usec)/1e6
