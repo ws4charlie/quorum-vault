@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
@@ -305,6 +306,7 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 	last := map[string]time.Time{}
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
+	wasReady := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -312,10 +314,20 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 		case <-t.C:
 		case <-s.kick:
 		}
+		// Keep the connection to B alive (a gRPC channel goes idle after a drop) and notice a new connection: B may have
+		// restarted or been restored, so every keyset is reconciled again before it serves.
+		s.peerConn.Connect()
+		ready := s.peerConn.GetState() == connectivity.Ready
 		ids, err := s.store.List(ctx)
 		if err != nil {
 			continue
 		}
+		if ready && !wasReady {
+			for _, id := range ids {
+				s.rt(id).setResolved(false)
+			}
+		}
+		wasReady = ready
 		for _, id := range ids {
 			if s.rt(id).isResolved() || time.Since(last[id]) < time.Second {
 				continue

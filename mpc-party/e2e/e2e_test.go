@@ -63,9 +63,10 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
-func start(t *testing.T, bin, cfg string) *proc {
+func start(t *testing.T, bin, cfg string, env ...string) *proc {
 	t.Helper()
 	p := &proc{cmd: exec.Command(bin, "-config", cfg), stderr: &syncBuf{}, done: make(chan struct{})}
+	p.cmd.Env = append(os.Environ(), env...)
 	p.cmd.Stderr = p.stderr
 	if err := p.cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -142,12 +143,12 @@ func (cl *cluster) waitReady(t *testing.T) {
 	t.Fatalf("parties not ready.\nA: %s\nB: %s", cl.a.stderr, cl.b.stderr)
 }
 
-func (cl *cluster) restartB(t *testing.T) {
-	cl.b = start(t, binDev, cl.cfgB)
+func (cl *cluster) restartB(t *testing.T, env ...string) {
+	cl.b = start(t, binDev, cl.cfgB, env...)
 }
 
-func (cl *cluster) restartA(t *testing.T) {
-	cl.a = start(t, binDev, cl.cfgA)
+func (cl *cluster) restartA(t *testing.T, env ...string) {
+	cl.a = start(t, binDev, cl.cfgA, env...)
 }
 
 func ctx(t testing.TB, d time.Duration) context.Context {
