@@ -48,7 +48,7 @@ func main() {
 			m := NewMux(c, 1, *delay, *timeout, p.serve)
 			<-m.Done() // one p1 connection at a time
 		}
-	case "backup-export", "recover":
+	case "backup-export", "recover", "backup-keygen":
 		die(backupCmd(cmd, args[1:]))
 		return
 	}
@@ -80,7 +80,7 @@ func main() {
 	case "sign": // sign ecdsa|eddsa|schnorr KEY MSGTEXT
 		sig, err := signWith(p, m, algOf(args[1]), args[2], digestOf(args[1], args[3]))
 		die(err)
-		fmt.Printf("sig=%x\nsign ok in %v\n", sig, time.Since(t0))
+		fmt.Printf("sig=%x\nsign ok in %v\nverified=%v\n", sig, time.Since(t0), verifySig(p, args[1], args[2], digestOf(args[1], args[3]), sig))
 	default:
 		die(runScenario(cmd, p, m, args[1:]))
 	}

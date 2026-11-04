@@ -162,3 +162,35 @@ func xpubDemo(p *Party, m *Mux) error {
 	fmt.Println("PASS: non-hardened children from (Q, chain code) agree with stock BIP32 CKDpub")
 	return nil
 }
+
+func verifySig(p *Party, alg, key string, msg, sig []byte) bool {
+	kb, ok := p.Get(key)
+	if !ok {
+		return false
+	}
+	pub, err := cbmpc.Pub2P(algOf(alg), kb)
+	if err != nil {
+		return false
+	}
+	switch alg {
+	case "ecdsa":
+		pk, err := btcec.ParsePubKey(pub)
+		if err != nil {
+			return false
+		}
+		sg, err := ecdsa.ParseDERSignature(sig)
+		return err == nil && sg.Verify(msg, pk)
+	case "eddsa":
+		return ed25519.Verify(pub, msg, sig)
+	}
+	xo, err := cbmpc.SchnorrXOnly(kb)
+	if err != nil {
+		return false
+	}
+	pk, err := schnorr.ParsePubKey(xo)
+	if err != nil {
+		return false
+	}
+	sg, err := schnorr.ParseSignature(sig)
+	return err == nil && sg.Verify(msg, pk)
+}

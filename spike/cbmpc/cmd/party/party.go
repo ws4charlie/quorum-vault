@@ -191,6 +191,10 @@ func (p *Party) exec(s *Session, r Req) (string, error) {
 		cpu := float64(ru.Utime.Sec+ru.Stime.Sec) + float64(ru.Utime.Usec+ru.Stime.Usec)/1e6
 		return fmt.Sprintf("%f", cpu), nil
 	case "crash":
+		if role == 0 { // only the PEER crashes; the caller just waits for the outcome
+			_, err := s.Recv(1)
+			return "", err
+		}
 		return "", crashNow(r.Kind)
 	}
 	return "", fmt.Errorf("unknown op %q", r.Op)
