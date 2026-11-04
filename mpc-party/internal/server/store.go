@@ -189,16 +189,19 @@ func (s *FileStore) GetJob(_ context.Context, jobID string) (JobRecord, error) {
 
 func (s *FileStore) PutJob(_ context.Context, r JobRecord) error {
 	raw, _ := json.Marshal(r)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p := jobPath(s.dir, r.JobID)
-	if _, err := os.Stat(p); err == nil {
-		return ErrExists
-	}
-	return writeAtomic(p, raw)
+	// No store-wide lock: writeExclusive is atomic by itself (hard link fails if the record exists), so concurrent
+	// signs do not queue behind each other's fsync.
+	return writeExclusive(jobPath(s.dir, r.JobID), raw)
 }
 
-func writeAtomic(path string, data []byte) error {
+// writeExclusive writes data to path durably unless path exists (ErrExists).
+func writeExclusive(path string, data []byte) error {
+	return writeFile(path, data, true)
+}
+
+func writeAtomic(path string, data []byte) error { return writeFile(path, data, false) }
+
+func writeFile(path string, data []byte, exclusive bool) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
@@ -207,7 +210,7 @@ func writeAtomic(path string, data []byte) error {
 	tmp := f.Name()
 	ok := false
 	defer func() {
-		if !ok {
+		if !ok || exclusive {
 			os.Remove(tmp)
 		}
 	}()
@@ -226,7 +229,14 @@ func writeAtomic(path string, data []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if exclusive {
+		if err := os.Link(tmp, path); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				return ErrExists
+			}
+			return err
+		}
+	} else if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
 	ok = true

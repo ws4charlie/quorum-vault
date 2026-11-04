@@ -45,6 +45,14 @@ func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rat
 	tr := newSessTransport(sid, stream, s.cfg.Limits.MaxFrameBytes, &s.stats)
 	go tr.pump()
 	defer stream.CloseSend()
+	// Hold our slot until B has finished with the session too (its handler returning ends the stream). Otherwise A could
+	// start a new session while B still counts the old one, and B would refuse it as over the limit.
+	defer func() {
+		select {
+		case <-tr.done:
+		case <-time.After(s.cfg.Limits.RecvTimeout()):
+		}
+	}()
 
 	fail := func(mine error) error {
 		f := fromWrapper(name, mine)
