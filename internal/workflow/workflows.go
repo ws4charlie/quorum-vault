@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
@@ -45,18 +46,37 @@ type Input struct {
 
 var a *Activities // only used to name activities
 
+// call runs an activity and waits for it. A task that was dispatched to a worker
+// that died (so no worker ever starts it) times out in the queue after
+// ScheduleToStart; call schedules it again, so a crash costs seconds, not the
+// server's poll timeout. Other errors (including the retry policy's) are returned.
+func call(ctx, optx workflow.Context, res any, act any, args ...any) error {
+	for {
+		err := workflow.ExecuteActivity(optx, act, args...).Get(ctx, res)
+		var te *temporal.TimeoutError
+		if errors.As(err, &te) && te.TimeoutType() == enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START {
+			continue
+		}
+		return err
+	}
+}
+
+const queueTimeout = 20 * time.Second
+
 func opts(ctx workflow.Context) workflow.Context {
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 20 * time.Second,
-		RetryPolicy:         &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
+		StartToCloseTimeout:    20 * time.Second,
+		ScheduleToStartTimeout: queueTimeout,
+		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
 	})
 }
 
 // planOpts gives the planner room: one pass asks the node about each candidate.
 func planOpts(ctx workflow.Context) workflow.Context {
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
-		RetryPolicy:         &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
+		StartToCloseTimeout:    2 * time.Minute,
+		ScheduleToStartTimeout: queueTimeout,
+		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
 	})
 }
 
@@ -65,17 +85,19 @@ func planOpts(ctx workflow.Context) workflow.Context {
 // allocated, because the build and the nonce share one transaction.
 func buildOpts(ctx workflow.Context) workflow.Context {
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: 30 * time.Second,
-		RetryPolicy:         &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second, MaximumAttempts: 10},
+		StartToCloseTimeout:    30 * time.Second,
+		ScheduleToStartTimeout: queueTimeout,
+		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second, MaximumAttempts: 10},
 	})
 }
 
 // longOpts is for polling activities that heartbeat.
 func longOpts(ctx workflow.Context, wait time.Duration) workflow.Context {
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: wait + 20*time.Second,
-		HeartbeatTimeout:    8 * time.Second,
-		RetryPolicy:         &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
+		StartToCloseTimeout:    wait + 20*time.Second,
+		ScheduleToStartTimeout: queueTimeout,
+		HeartbeatTimeout:       8 * time.Second,
+		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
 	})
 }
 
@@ -85,7 +107,7 @@ func longOpts(ctx workflow.Context, wait time.Duration) workflow.Context {
 func ScanWorkflow(ctx workflow.Context, in Input) error {
 	for i := 0; i < 300; i++ {
 		var r ScanResult
-		if err := workflow.ExecuteActivity(opts(ctx), a.ScanOnce).Get(ctx, &r); err != nil {
+		if err := call(ctx, opts(ctx), &r, a.ScanOnce); err != nil {
 			return err
 		}
 		if err := workflow.Sleep(ctx, in.T.ScanInterval); err != nil {
@@ -100,11 +122,11 @@ func ScanWorkflow(ctx workflow.Context, in Input) error {
 func SweepPlannerWorkflow(ctx workflow.Context, in Input) error {
 	for i := 0; i < 300; i++ {
 		var frozen bool
-		if err := workflow.ExecuteActivity(planOpts(ctx), a.PlanSweeps).Get(ctx, &frozen); err != nil {
+		if err := call(ctx, planOpts(ctx), &frozen, a.PlanSweeps); err != nil {
 			return err
 		}
 		var n int
-		if err := workflow.ExecuteActivity(opts(ctx), a.StartOpenSweeps).Get(ctx, &n); err != nil {
+		if err := call(ctx, opts(ctx), &n, a.StartOpenSweeps); err != nil {
 			return err
 		}
 		if err := workflow.Sleep(ctx, in.T.PlanInterval); err != nil {
@@ -119,7 +141,7 @@ func SweepPlannerWorkflow(ctx workflow.Context, in Input) error {
 func WithdrawalReconcilerWorkflow(ctx workflow.Context, in Input) error {
 	for i := 0; i < 300; i++ {
 		var n int
-		if err := workflow.ExecuteActivity(opts(ctx), a.StartOpenWithdrawals).Get(ctx, &n); err != nil {
+		if err := call(ctx, opts(ctx), &n, a.StartOpenWithdrawals); err != nil {
 			return err
 		}
 		if err := workflow.Sleep(ctx, in.T.PlanInterval); err != nil {
@@ -151,7 +173,7 @@ func waitJob(ctx workflow.Context, jobID string) (JobResult, error) {
 	const slice = 20 * time.Second
 	for {
 		var r JobResult
-		if err := workflow.ExecuteActivity(longOpts(ctx, slice), a.WaitJob, jobID, slice).Get(ctx, &r); err != nil {
+		if err := call(ctx, longOpts(ctx, slice), &r, a.WaitJob, jobID, slice); err != nil {
 			return r, err
 		}
 		if r.Status != custody.JobPending {
@@ -191,7 +213,7 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 			return txResult{}, err
 		}
 		next := track.Retry()
-		if err := workflow.ExecuteActivity(opts(ctx), a.RequeueJob, jobID, next).Get(ctx, nil); err != nil {
+		if err := call(ctx, opts(ctx), nil, a.RequeueJob, jobID, next); err != nil {
 			return txResult{}, err
 		}
 		jobID = next
@@ -199,14 +221,14 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 
 	broadcast := func(job string) error {
 		var hash string
-		if err := workflow.ExecuteActivity(opts(ctx), a.BroadcastJob, o, job).Get(ctx, &hash); err != nil {
+		if err := call(ctx, opts(ctx), &hash, a.BroadcastJob, o, job); err != nil {
 			return err
 		}
 		if hash == "" {
 			return nil // the nonce was already decided; the wait loop below reports how
 		}
 		if record {
-			return workflow.ExecuteActivity(opts(ctx), a.RecordBroadcast, o, hash).Get(ctx, nil)
+			return call(ctx, opts(ctx), nil, a.RecordBroadcast, o, hash)
 		}
 		return nil
 	}
@@ -227,7 +249,7 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 	const slice = 10 * time.Second
 	for {
 		var n NonceResult
-		if err := workflow.ExecuteActivity(longOpts(ctx, slice), a.WaitNonce, o, slice).Get(ctx, &n); err != nil {
+		if err := call(ctx, longOpts(ctx, slice), &n, a.WaitNonce, o, slice); err != nil {
 			return txResult{}, err
 		}
 		switch n.State {
@@ -243,10 +265,10 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 			// outside this system. Our transaction can never mine. Keep the hold,
 			// alert, park the row so the reconciler leaves it alone, and stop.
 			var where string
-			_ = workflow.ExecuteActivity(opts(ctx), a.ConsumedInfo, o).Get(ctx, &where)
+			_ = call(ctx, opts(ctx), &where, a.ConsumedInfo, o)
 			workflow.GetLogger(ctx).Error("ALERT: the hot wallet nonce was used by a transaction this system did not make; possible key compromise",
 				"owner", o.Kind+" "+o.ID, "where", where)
-			if err := workflow.ExecuteActivity(opts(ctx), a.Park, o, "nonce consumed by an unknown transaction ("+where+")").Get(ctx, nil); err != nil {
+			if err := call(ctx, opts(ctx), nil, a.Park, o, "nonce consumed by an unknown transaction ("+where+")"); err != nil {
 				return txResult{}, err
 			}
 			return txResult{}, temporal.NewNonRetryableApplicationError("nonce consumed by an unknown transaction", "nonce_consumed", nil)
@@ -257,7 +279,7 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 		if !workflow.Now(ctx).Before(stuckAt) && replacements < t.MaxReplacements {
 			replacements++
 			var rj string
-			if err := workflow.ExecuteActivity(buildOpts(ctx), a.EnqueueReplacement, o, string(track), replacements).Get(ctx, &rj); err != nil {
+			if err := call(ctx, buildOpts(ctx), &rj, a.EnqueueReplacement, o, string(track), replacements); err != nil {
 				// Typically the fee cap: the bumped fee is above what the gateway allows.
 				replacements--
 				alert("replacement could not be built: " + err.Error())
@@ -283,7 +305,7 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 // transaction after all (txMined / txReverted). Only then may money be released.
 func cancelNonce(ctx workflow.Context, t Timings, o OwnerArg) (txResult, error) {
 	var cj string
-	if err := workflow.ExecuteActivity(opts(ctx), a.EnqueueCancel, o).Get(ctx, &cj); err != nil {
+	if err := call(ctx, opts(ctx), &cj, a.EnqueueCancel, o); err != nil {
 		return txResult{}, err
 	}
 	ow := custody.Owner{Kind: o.Kind, ID: o.ID, PartitionID: o.Part}
@@ -294,7 +316,7 @@ func cancelNonce(ctx workflow.Context, t Timings, o OwnerArg) (txResult, error) 
 	if r.Kind == txRefused {
 		// A refused cancel leaves a live nonce; never release the money. Park for an operator.
 		workflow.GetLogger(ctx).Error("ALERT: the gateway refused to cancel a nonce; manual intervention needed", "owner", o.ID, "reason", r.Reason)
-		if err := workflow.ExecuteActivity(opts(ctx), a.Park, o, "the gateway refused to cancel the nonce: "+r.Reason).Get(ctx, nil); err != nil {
+		if err := call(ctx, opts(ctx), nil, a.Park, o, "the gateway refused to cancel the nonce: "+r.Reason); err != nil {
 			return r, err
 		}
 		return r, temporal.NewNonRetryableApplicationError("cancel refused: "+r.Reason, "cancel_refused", nil)
@@ -310,7 +332,7 @@ func cancelNonce(ctx workflow.Context, t Timings, o OwnerArg) (txResult, error) 
 func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 	id, t := in.ID, in.T
 	var st WdState
-	if err := workflow.ExecuteActivity(opts(ctx), a.LoadWithdrawal, id).Get(ctx, &st); err != nil {
+	if err := call(ctx, opts(ctx), &st, a.LoadWithdrawal, id); err != nil {
 		return err
 	}
 	if st.Status == custody.WdConfirmed || st.Status == custody.WdFailed || st.Parked {
@@ -318,13 +340,13 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 	}
 	o := OwnerArg{Kind: "withdrawal", ID: id, Part: st.Part}
 	void := func(reason, feeTx string) error {
-		return workflow.ExecuteActivity(opts(ctx), a.VoidWithdrawal, id, reason, feeTx).Get(ctx, nil)
+		return call(ctx, opts(ctx), nil, a.VoidWithdrawal, id, reason, feeTx)
 	}
 
 	// 2. Approvals. Skipped when the job already exists (a restarted workflow).
 	if st.Status == custody.WdRequested {
 		if st.Auto {
-			if err := workflow.ExecuteActivity(opts(ctx), a.AutoApprove, id).Get(ctx, nil); err != nil {
+			if err := call(ctx, opts(ctx), nil, a.AutoApprove, id); err != nil {
 				return err
 			}
 		}
@@ -335,7 +357,7 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 		if !approved {
 			return void(reason, "")
 		}
-		if err := workflow.ExecuteActivity(opts(ctx), a.MarkApproved, id).Get(ctx, nil); err != nil {
+		if err := call(ctx, opts(ctx), nil, a.MarkApproved, id); err != nil {
 			return err
 		}
 	}
@@ -346,7 +368,7 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 		deadline := workflow.Now(ctx).Add(t.HotWait)
 		for {
 			var ok bool
-			if err := workflow.ExecuteActivity(opts(ctx), a.ReserveHot, id).Get(ctx, &ok); err != nil {
+			if err := call(ctx, opts(ctx), &ok, a.ReserveHot, id); err != nil {
 				return err
 			}
 			if ok {
@@ -362,7 +384,7 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 
 		// 4. Build and enqueue, in one transaction.
 		var job string
-		if err := workflow.ExecuteActivity(buildOpts(ctx), a.BuildWithdrawalJob, id).Get(ctx, &job); err != nil {
+		if err := call(ctx, buildOpts(ctx), &job, a.BuildWithdrawalJob, id); err != nil {
 			if isType(err, errExpired) {
 				return void("approval window passed before signing", "")
 			}
@@ -393,7 +415,7 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 	}
 	switch r.Kind {
 	case txMined:
-		return workflow.ExecuteActivity(opts(ctx), a.SettleWithdrawal, id, r.Hash).Get(ctx, nil)
+		return call(ctx, opts(ctx), nil, a.SettleWithdrawal, id, r.Hash)
 	case txReverted:
 		return void("transaction reverted", r.Hash)
 	case txCancelled:
@@ -411,7 +433,7 @@ func awaitApprovals(ctx workflow.Context, t Timings, id string, st WdState) (app
 	rejects := workflow.GetSignalChannel(ctx, SignalReject)
 	for {
 		var have int
-		if err := workflow.ExecuteActivity(opts(ctx), a.ApprovalsHave, id).Get(ctx, &have); err != nil {
+		if err := call(ctx, opts(ctx), &have, a.ApprovalsHave, id); err != nil {
 			return false, "", err
 		}
 		if have >= st.Required {
@@ -446,7 +468,7 @@ func awaitApprovals(ctx workflow.Context, t Timings, id string, st WdState) (app
 func SweepWorkflow(ctx workflow.Context, in Input) error {
 	id, t := in.ID, in.T
 	var st SweepState
-	if err := workflow.ExecuteActivity(opts(ctx), a.LoadSweep, id).Get(ctx, &st); err != nil {
+	if err := call(ctx, opts(ctx), &st, a.LoadSweep, id); err != nil {
 		return err
 	}
 	if st.Status == "confirmed" || st.Status == "failed" || st.Parked {
@@ -456,12 +478,12 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 	ow := custody.Owner{Kind: "sweep", ID: id, PartitionID: st.Part}
 
 	var job string
-	if err := workflow.ExecuteActivity(buildOpts(ctx), a.BuildSweepJob, id).Get(ctx, &job); err != nil {
+	if err := call(ctx, buildOpts(ctx), &job, a.BuildSweepJob, id); err != nil {
 		if isType(err, errFrozen) {
 			return nil // marked failed; the planner plans it again after unfreezing
 		}
 		workflow.GetLogger(ctx).Warn("could not build the sweep; it will be planned again", "sweep", id, "error", err.Error())
-		return workflow.ExecuteActivity(opts(ctx), a.FailSweep, id, "could not build: "+err.Error()).Get(ctx, nil)
+		return call(ctx, opts(ctx), nil, a.FailSweep, id, "could not build: "+err.Error())
 	}
 	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
 	if err != nil {
@@ -473,22 +495,22 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 			return err
 		}
 		if cr.Kind == txCancelled {
-			return workflow.ExecuteActivity(opts(ctx), a.FailSweep, id, "gateway refused: "+r.Reason).Get(ctx, nil)
+			return call(ctx, opts(ctx), nil, a.FailSweep, id, "gateway refused: "+r.Reason)
 		}
 		r = cr
 	}
 	switch r.Kind {
 	case txMined, txReverted:
-		if err := workflow.ExecuteActivity(opts(ctx), a.SettleSweep, id, r.Hash, r.Kind == txReverted).Get(ctx, nil); err != nil {
+		if err := call(ctx, opts(ctx), nil, a.SettleSweep, id, r.Hash, r.Kind == txReverted); err != nil {
 			return err
 		}
 	case txCancelled:
-		return workflow.ExecuteActivity(opts(ctx), a.FailSweep, id, "cancelled").Get(ctx, nil)
+		return call(ctx, opts(ctx), nil, a.FailSweep, id, "cancelled")
 	}
 	// Excess that no deposit explains goes to suspense once the scan is past it.
 	for i := 0; i < 600; i++ {
 		var done bool
-		if err := workflow.ExecuteActivity(opts(ctx), a.TrueUp, id).Get(ctx, &done); err != nil {
+		if err := call(ctx, opts(ctx), &done, a.TrueUp, id); err != nil {
 			return err
 		}
 		if done {

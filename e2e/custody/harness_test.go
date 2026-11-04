@@ -599,6 +599,10 @@ func (s *system) startRelay() {
 func (s *system) startWorker(failpoint string) {
 	env := []string{"QV_FAILPOINT=" + failpoint}
 	s.worker = s.spawn("qv-worker", env, "-config", s.cfgPath, "-dsn", s.bizDSN, "-task-queue", s.queue, "-auto-approver-key-file", s.keyPath)
+	// Never stop a worker before it is polling: a task dispatched to a poller
+	// that dies at once is stranded until the server gives up on it.
+	p := s.worker
+	s.waitFor(30*time.Second, "worker started", func() bool { return fileContains(p.log, "qv-worker started") })
 }
 
 func (s *system) startCore() {
