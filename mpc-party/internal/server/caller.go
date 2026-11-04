@@ -53,7 +53,10 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 	} else if !errors.Is(e, ErrNotFound) {
 		return nil, fromWrapper("dkg", e)
 	}
-	res, err := s.coordinate(ctx, "dkg", &pb.Open{Op: pb.Op_OP_DKG, KeysetId: r.KeysetId, Curve: r.Curve}, r.KeysetId)
+	if _, e := s.admin.check("dkg", r.KeysetId, r.Admin); e != nil {
+		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "dkg", "%v", e)
+	}
+	res, err := s.coordinate(ctx, "dkg", &pb.Open{Op: pb.Op_OP_DKG, KeysetId: r.KeysetId, Curve: r.Curve, Admin: r.Admin}, r.KeysetId)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +69,13 @@ func (s *Server) Refresh(ctx context.Context, r *pb.RefreshRequest) (_ *pb.Refre
 	if _, e := s.cache.get(ctx, s.store, r.KeysetId); e != nil {
 		return nil, e
 	}
-	res, err := s.coordinate(ctx, "refresh", &pb.Open{Op: pb.Op_OP_REFRESH, KeysetId: r.KeysetId}, r.KeysetId)
+	if frozen, why := s.freeze.Frozen(r.KeysetId); frozen {
+		return nil, frozenFail("refresh", r.KeysetId, why)
+	}
+	if _, e := s.admin.check("refresh", r.KeysetId, r.Admin); e != nil {
+		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "refresh", "%v", e)
+	}
+	res, err := s.coordinate(ctx, "refresh", &pb.Open{Op: pb.Op_OP_REFRESH, KeysetId: r.KeysetId, Admin: r.Admin}, r.KeysetId)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +124,9 @@ func (s *Server) Derive(ctx context.Context, r *pb.DeriveRequest) (_ *pb.DeriveR
 	ks, err := s.cache.get(ctx, s.store, r.KeysetId)
 	if err != nil {
 		return nil, err
+	}
+	if frozen, why := s.freeze.Frozen(r.KeysetId); frozen {
+		return nil, frozenFail("derive", r.KeysetId, why)
 	}
 	keyID := keyIDOf(r.KeysetId, r.HardenedPath, r.Path)
 	res, err := s.coordinate(ctx, "derive", &pb.Open{Op: pb.Op_OP_DERIVE, KeysetId: r.KeysetId, HardenedPath: r.HardenedPath, Path: r.Path}, keyID)
@@ -165,6 +177,12 @@ func (s *Server) Sign(ctx context.Context, r *pb.SignRequest) (resp *pb.SignResp
 		return nil, invalid("sign", "algorithm does not match the key")
 	}
 	pub, _ := hex.DecodeString(meta.PublicKey)
+	if len(pub) == 0 {
+		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, "sign", "key %q has no recorded public key", r.KeyId)
+	}
+	if frozen, why := s.freeze.Frozen(meta.KeysetID); frozen {
+		return nil, frozenFail("sign", meta.KeysetID, why)
+	}
 
 	// Party A's own check, before anything else happens (B repeats it on its side).
 	if e := s.authz.Authorize(ctx, AuthRequest{Role: "A", JobID: r.JobId, KeyID: r.KeyId, KeysetID: meta.KeysetID,
@@ -223,4 +241,24 @@ func (s *Server) signLeader(ctx context.Context, r *pb.SignRequest, meta KeyMeta
 		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, "sign", "cannot store the signature durably: %v", err)
 	}
 	return &pb.SignResponse{Signature: res.signature}, nil
+}
+
+func (s *Server) Unfreeze(ctx context.Context, r *pb.UnfreezeRequest) (_ *pb.UnfreezeResponse, err error) {
+	start := time.Now()
+	defer func() { s.logOp("unfreeze", start, err, "keyset_id", r.GetKeysetId()); err = toStatus("unfreeze", err) }()
+	if !validID(r.KeysetId) {
+		return nil, invalid("unfreeze", "invalid keyset id")
+	}
+	key, e := s.admin.check("unfreeze", r.KeysetId, r.Admin)
+	if e != nil {
+		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "unfreeze", "%v", e)
+	}
+	if e := s.unfreezeSession(ctx, r.KeysetId, r.Admin); e != nil {
+		return nil, e
+	}
+	if e := s.freeze.Unfreeze(r.KeysetId); e != nil {
+		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, "unfreeze", "B unfroze but A could not: %v", e)
+	}
+	s.log.Warn("AUDIT keyset unfrozen", "role", "A", "keyset_id", r.KeysetId, "admin_key", key)
+	return &pb.UnfreezeResponse{}, nil
 }

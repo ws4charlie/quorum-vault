@@ -79,25 +79,62 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		return reject(pb.ErrorKind_ERROR_KIND_LIMIT, "session rate limit exceeded for this key")
 	}
 
-	// Pre-checks that decide whether anything may start.
+	// Pre-checks that decide whether anything may start. B trusts nothing A says: admin operations need an operator
+	// signature that B verifies against its own keys, a frozen keyset refuses work, and a Sign must name the key it will
+	// use.
 	switch open.Op {
 	case pb.Op_OP_DKG:
 		if !validID(open.KeysetId) {
 			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "invalid keyset id")
+		}
+		if _, err := s.admin.check("dkg", open.KeysetId, open.Admin); err != nil {
+			return reject(pb.ErrorKind_ERROR_KIND_REFUSED, err.Error())
 		}
 		if _, err := s.store.GetKeyset(ctx, open.KeysetId); err == nil {
 			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "keyset already exists on B")
 		} else if !errors.Is(err, ErrNotFound) {
 			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "keyset store error")
 		}
-	case pb.Op_OP_REFRESH, pb.Op_OP_NODE, pb.Op_OP_DERIVE, pb.Op_OP_SIGN:
+	case pb.Op_OP_REFRESH, pb.Op_OP_NODE, pb.Op_OP_DERIVE, pb.Op_OP_SIGN, pb.Op_OP_UNFREEZE:
+		if !validID(open.KeysetId) {
+			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "invalid keyset id")
+		}
 		if _, err := s.cache.get(ctx, s.store, open.KeysetId); err != nil {
 			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "unknown keyset on B")
+		}
+		frozen, why := s.freeze.Frozen(open.KeysetId)
+		switch open.Op {
+		case pb.Op_OP_REFRESH:
+			if _, err := s.admin.check("refresh", open.KeysetId, open.Admin); err != nil {
+				return reject(pb.ErrorKind_ERROR_KIND_REFUSED, err.Error())
+			}
+			if frozen {
+				return reject(pb.ErrorKind_ERROR_KIND_FROZEN, "keyset is frozen: "+why)
+			}
+		case pb.Op_OP_DERIVE, pb.Op_OP_SIGN:
+			if frozen {
+				return reject(pb.ErrorKind_ERROR_KIND_FROZEN, "keyset is frozen: "+why)
+			}
+		case pb.Op_OP_UNFREEZE:
+			key, err := s.admin.check("unfreeze", open.KeysetId, open.Admin)
+			if err != nil {
+				return reject(pb.ErrorKind_ERROR_KIND_REFUSED, err.Error())
+			}
+			if err := s.freeze.Unfreeze(open.KeysetId); err != nil {
+				return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "cannot unfreeze: "+err.Error())
+			}
+			s.log.Warn("AUDIT keyset unfrozen", "role", "B", "keyset_id", open.KeysetId, "admin_key", key, "session", sid)
+			b, _ := proto.Marshal(&pb.Fin{Ok: true})
+			stream.Send(&pb.Frame{SessionId: sid, Kind: pb.FrameKind_FRAME_KIND_FIN, Payload: b})
+			return nil
 		}
 	default:
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "unknown op")
 	}
 	if open.Op == pb.Op_OP_SIGN {
+		if len(open.ExpectedPublicKey) == 0 {
+			return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "sign without an expected public key: B cannot tell which key it would sign with")
+		}
 		// B re-verifies what it is asked to sign BEFORE it joins the protocol: without this, compromising A alone would
 		// be enough to make B sign anything.
 		if err := s.authz.Authorize(ctx, AuthRequest{Role: "B", JobID: open.JobId, KeyID: open.KeyId, KeysetID: open.KeysetId,
@@ -126,8 +163,14 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 			}())
 	}()
 	failOut := func(f *Fail) error {
+		if pf := tr.peerFin.Load(); pf != nil { // the peer named a cause: the worse kind wins
+			if cand := peerFail(opName, pf); severity(cand.Kind) > severity(f.Kind) {
+				f = cand
+			}
+		}
 		ferr = f
 		outcome = "failed"
+		s.maybeFreeze(&open, f)
 		tr.sendFin(&pb.Fin{Ok: false, Kind: f.Kind, Code: f.CB, Message: f.Msg})
 		return nil
 	}
@@ -152,6 +195,7 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 	if !afin.GetOk() {
 		outcome = "peer-rejected"
 		ferr = peerFail(opName, afin)
+		s.maybeFreeze(&open, ferr)
 		return nil
 	}
 	if afin.GetCommit() {
@@ -164,4 +208,18 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		tr.sendFin(&pb.Fin{Ok: true})
 	}
 	return nil
+}
+
+// maybeFreeze freezes the keyset after a cryptographic failure (either party's finding). Durable; unfreezing needs an
+// operator signature. DKG has no keyset yet.
+func (s *Server) maybeFreeze(open *pb.Open, f *Fail) {
+	if f == nil || f.Kind != pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC || open.KeysetId == "" || open.Op == pb.Op_OP_DKG {
+		return
+	}
+	if err := s.freeze.Freeze(open.KeysetId, f.Msg); err != nil {
+		s.log.Error("ALERT cannot persist keyset freeze", "role", s.cfg.Role, "keyset_id", open.KeysetId, "err", err.Error())
+		return
+	}
+	s.log.Error("ALERT keyset frozen after a cryptographic failure", "role", s.cfg.Role, "keyset_id", open.KeysetId, "op", open.Op.String(),
+		"job_id", open.JobId, "peer_reported", f.Peer, "message", f.Msg)
 }

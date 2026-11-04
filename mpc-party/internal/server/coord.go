@@ -17,6 +17,12 @@ import (
 // coordinate runs one protocol session as party A: open on B, wait for B's ACK, run our side, compare results with B,
 // and for DKG/Refresh commit on B first and on ourselves second. It never returns a result unless both parties agree.
 func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rateKey string) (res *opResult, err error) {
+	defer func() {
+		var f *Fail
+		if err != nil && errors.As(err, &f) {
+			s.maybeFreeze(open, f)
+		}
+	}()
 	if s.peerClient == nil {
 		return nil, invalid(name, "this party has no peer connection")
 	}
@@ -56,11 +62,20 @@ func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rat
 
 	fail := func(mine error) error {
 		f := fromWrapper(name, mine)
-		tr.abortPeer(f.Msg)
+		if f.Kind == pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC {
+			// Tell B in a FIN, not just an abort, so that B freezes its side too.
+			tr.sendFin(&pb.Fin{Ok: false, Kind: f.Kind, Code: f.CB, Message: f.Msg})
+		} else {
+			tr.abortPeer(f.Msg)
+		}
 		// The peer may have named the real cause (e.g. it detected tampering first): the worse kind wins.
 		wait, c2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer c2()
-		if fin, err := tr.waitFin(wait); err == nil && !fin.GetOk() {
+		if pf := tr.peerFin.Load(); pf != nil {
+			if cand := peerFail(name, pf); severity(cand.Kind) > severity(f.Kind) {
+				return cand
+			}
+		} else if fin, err := tr.waitFin(wait); err == nil && !fin.GetOk() {
 			if pf := peerFail(name, fin); severity(pf.Kind) > severity(f.Kind) {
 				return pf
 			}
@@ -135,3 +150,42 @@ type transportErr struct{ error }
 func (t *transportErr) Unwrap() error { return t.error }
 
 var _ = grpc.WaitForReady
+
+// unfreeze asks B to lift the freeze (B verifies the operator signature itself), then lifts ours.
+func (s *Server) unfreezeSession(ctx context.Context, keysetID string, admin *pb.AdminAuth) error {
+	if s.peerClient == nil {
+		return invalid("unfreeze", "this party has no peer connection")
+	}
+	var sidRaw [16]byte
+	if _, err := rand.Read(sidRaw[:]); err != nil {
+		return err
+	}
+	sid := hex.EncodeToString(sidRaw[:])
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.Limits.SessionTimeout())
+	defer cancel()
+	stream, err := s.peerClient.Session(ctx)
+	if err != nil {
+		return fromWrapper("unfreeze", &transportErr{err})
+	}
+	tr := newSessTransport(sid, stream, s.cfg.Limits.MaxFrameBytes, &s.stats)
+	go tr.pump()
+	defer stream.CloseSend()
+	b, _ := proto.Marshal(&pb.Open{Op: pb.Op_OP_UNFREEZE, KeysetId: keysetID, Admin: admin})
+	if err := stream.Send(&pb.Frame{SessionId: sid, Kind: pb.FrameKind_FRAME_KIND_OPEN, Payload: b}); err != nil {
+		return fromWrapper("unfreeze", &transportErr{err})
+	}
+	wctx, c := context.WithTimeout(ctx, s.cfg.Limits.RecvTimeout())
+	defer c()
+	fin, err := tr.waitFin(wctx)
+	if err != nil {
+		var f *Fail
+		if errors.As(err, &f) {
+			return f
+		}
+		return fromWrapper("unfreeze", &transportErr{err})
+	}
+	if !fin.GetOk() {
+		return peerFail("unfreeze", fin)
+	}
+	return nil
+}

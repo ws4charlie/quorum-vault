@@ -49,7 +49,7 @@ func TestEndToEndBothAlgorithms(t *testing.T) {
 	if len(root) != 33 {
 		t.Fatalf("root %x", root)
 	}
-	if _, err := p.Client.DKG(ctx, &pb.DKGRequest{KeysetId: "ks-e", Curve: pb.Curve_CURVE_SECP256K1}); statusCode(err) != codes.AlreadyExists {
+	if _, err := p.Client.DKG(ctx, &pb.DKGRequest{KeysetId: "ks-e", Curve: pb.Curve_CURVE_SECP256K1, Admin: p.Env.Admin("dkg", "ks-e")}); statusCode(err) != codes.AlreadyExists {
 		t.Fatalf("duplicate DKG: %v", err)
 	}
 	hard := []uint32{44, 60, 0}
@@ -73,7 +73,7 @@ func TestEndToEndBothAlgorithms(t *testing.T) {
 	verifyECDSA(t, d.PublicKey, dg, s.Signature)
 
 	// Refresh, then sign again with the same key id
-	r2, err := p.Client.Refresh(ctx, &pb.RefreshRequest{KeysetId: "ks-e"})
+	r2, err := p.Client.Refresh(ctx, &pb.RefreshRequest{KeysetId: "ks-e", Admin: p.Env.Admin("refresh", "ks-e")})
 	mustOK(t, err)
 	if !bytes.Equal(r2.RootPublicKey, root) {
 		t.Fatal("refresh changed the root key")
@@ -92,7 +92,7 @@ func TestEndToEndBothAlgorithms(t *testing.T) {
 	if !edVerify(ds.PublicKey, msg, ss.Signature) {
 		t.Fatal("ed25519 signature does not verify")
 	}
-	if _, err := p.Client.Refresh(ctx, &pb.RefreshRequest{KeysetId: "ks-s"}); err != nil {
+	if _, err := p.Client.Refresh(ctx, &pb.RefreshRequest{KeysetId: "ks-s", Admin: p.Env.Admin("refresh", "ks-s")}); err != nil {
 		t.Fatal(err)
 	}
 	ss2, err := p.Client.Sign(ctx, &pb.SignRequest{KeyId: ds.KeyId, Algorithm: pb.Algorithm_ALGORITHM_ED25519, Digest: msg, JobId: "job-s2"})
@@ -215,7 +215,7 @@ func TestSelfTestFailureKeepsOldState(t *testing.T) {
 	ctx := ctx30(t)
 
 	failDKG.Store(true)
-	_, err := p.Client.DKG(ctx, &pb.DKGRequest{KeysetId: "ks", Curve: pb.Curve_CURVE_SECP256K1})
+	_, err := p.Client.DKG(ctx, &pb.DKGRequest{KeysetId: "ks", Curve: pb.Curve_CURVE_SECP256K1, Admin: p.Env.Admin("dkg", "ks")})
 	wantKind(t, err, codes.Aborted, pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC)
 	// Nothing was stored on either side: Derive finds no keyset, and the id is free again.
 	if _, err := p.Client.Derive(ctx, &pb.DeriveRequest{KeysetId: "ks", HardenedPath: []uint32{1}}); statusCode(err) != codes.NotFound {
@@ -230,14 +230,19 @@ func TestSelfTestFailureKeepsOldState(t *testing.T) {
 	verifyECDSA(t, d.PublicKey, dg, before.Signature)
 
 	failRefresh.Store(true)
-	_, err = p.Client.Refresh(ctx, &pb.RefreshRequest{KeysetId: "ks"})
+	_, err = p.Client.Refresh(ctx, &pb.RefreshRequest{KeysetId: "ks", Admin: p.Env.Admin("refresh", "ks")})
 	wantKind(t, err, codes.Aborted, pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC)
 	failRefresh.Store(false)
+	// A cryptographic failure freezes the keyset on both parties; an operator signature lifts it.
+	_, err = p.Client.Sign(ctx, &pb.SignRequest{KeyId: d.KeyId, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: dg, JobId: "while-frozen"})
+	wantKind(t, err, codes.FailedPrecondition, pb.ErrorKind_ERROR_KIND_FROZEN)
+	_, err = p.Client.Unfreeze(ctx, &pb.UnfreezeRequest{KeysetId: "ks", Admin: p.Env.Admin("unfreeze", "ks")})
+	mustOK(t, err)
 	// The old shares are still current on both sides: signing works and the key is unchanged.
 	after, err := p.Client.Sign(ctx, &pb.SignRequest{KeyId: d.KeyId, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: dg, JobId: "after"})
 	mustOK(t, err)
 	verifyECDSA(t, d.PublicKey, dg, after.Signature)
-	r, err := p.Client.Refresh(ctx, &pb.RefreshRequest{KeysetId: "ks"})
+	r, err := p.Client.Refresh(ctx, &pb.RefreshRequest{KeysetId: "ks", Admin: p.Env.Admin("refresh", "ks")})
 	mustOK(t, err)
 	if !bytes.Equal(r.RootPublicKey, root) {
 		t.Fatal("root key changed")

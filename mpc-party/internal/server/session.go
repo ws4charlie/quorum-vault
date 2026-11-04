@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 
@@ -18,6 +19,7 @@ import (
 var (
 	ErrPeerAborted       = errors.New("peer aborted the session")
 	ErrPeerGone          = errors.New("peer closed the session")
+	ErrPeerFailed        = errors.New("peer reported a failure")
 	ErrProtocolViolation = errors.New("peer violated the session protocol")
 )
 
@@ -41,6 +43,8 @@ type sessTransport struct {
 	done    chan struct{}
 	errOnce sync.Once
 	err     error
+
+	peerFin atomic.Pointer[pb.Fin] // a failing FIN received from the peer
 
 	stats *frameStats
 }
@@ -121,6 +125,11 @@ func (t *sessTransport) pump() {
 			case t.fins <- &fin:
 			default:
 				t.fail(fmt.Errorf("%w: too many FIN frames", ErrProtocolViolation))
+				return
+			}
+			if !fin.GetOk() { // the peer gave up: wake anything blocked on this session
+				t.peerFin.Store(&fin)
+				t.fail(fmt.Errorf("%w: %s", ErrPeerFailed, fin.GetMessage()))
 				return
 			}
 		case pb.FrameKind_FRAME_KIND_ABORT:

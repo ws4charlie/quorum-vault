@@ -5,8 +5,10 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
@@ -168,6 +170,18 @@ func TestTamperingProxyYieldsCryptographicNoSignature(t *testing.T) {
 					t.Errorf("%s: want a typed CRYPTOGRAPHIC error, got kind %v typed=%v: %v", job, k, typed, err)
 				}
 				outcomes[k.String()]++
+				// The keyset is frozen on both parties: any further work is refused as FROZEN until an operator unfreezes it.
+				_, ferr := p2.Client.Sign(ctx30(t), c.req(job+"-after"))
+				wantKind(t, ferr, codes.FailedPrecondition, pb.ErrorKind_ERROR_KIND_FROZEN)
+				keyset := "ks-e"
+				if c.name == "ed25519" {
+					keyset = "ks-s"
+				}
+				// A forged or wrong-key unfreeze is refused; the real one works and signing resumes.
+				_, uerr := p2.Client.Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: keyset, Admin: server.SignAdmin(p2.Env.CertCallerKey(), "unfreeze", keyset, time.Now())})
+				wantKind(t, uerr, codes.PermissionDenied, pb.ErrorKind_ERROR_KIND_REFUSED)
+				_, uerr = p2.Client.Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: keyset, Admin: p2.Env.Admin("unfreeze", keyset)})
+				mustOK(t, uerr)
 			}
 		}
 	}
