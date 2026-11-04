@@ -252,12 +252,49 @@ func (s *PKCS11Sealer) Open(aad, sealed []byte) ([]byte, error) {
 			if isDeviceError(err) {
 				return &UnavailableError{Msg: fmt.Sprintf("hsm: C_Decrypt: %v", err)}
 			}
+			// Token implementations differ in the code they return for a failed GCM check (SoftHSM on macOS and Linux
+			// differ). A decryption failure is "the blob is wrong" only if the token still works: prove it with a round trip.
+			if perr := s.probe(sess, key); perr != nil {
+				return &UnavailableError{Msg: fmt.Sprintf("hsm: C_Decrypt failed (%v) and the token failed a self-check: %v", err, perr)}
+			}
 			return fmt.Errorf("%w: C_Decrypt on %q failed", ErrOpen, s.label)
 		}
 		return nil
 	})
 	return pt, err
 }
+
+// probe encrypts and decrypts a random value with the wrap key in the given session.
+func (s *PKCS11Sealer) probe(sess pkcs11.SessionHandle, key pkcs11.ObjectHandle) error {
+	iv := make([]byte, envelopeIVLen)
+	val := make([]byte, 16)
+	rand.Read(iv)
+	rand.Read(val)
+	params := pkcs11.NewGCMParams(iv, []byte("probe"), envelopeTagBits)
+	defer params.Free()
+	if err := s.ctx.EncryptInit(sess, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_AES_GCM, params)}, key); err != nil {
+		return err
+	}
+	ct, err := s.ctx.Encrypt(sess, val)
+	if err != nil {
+		return err
+	}
+	params2 := pkcs11.NewGCMParams(iv, []byte("probe"), envelopeTagBits)
+	defer params2.Free()
+	if err := s.ctx.DecryptInit(sess, []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_AES_GCM, params2)}, key); err != nil {
+		return err
+	}
+	pt, err := s.ctx.Decrypt(sess, ct)
+	if err != nil {
+		return err
+	}
+	if !bytesEqual(pt, val) {
+		return errors.New("probe mismatch")
+	}
+	return nil
+}
+
+func bytesEqual(a, b []byte) bool { return string(a) == string(b) }
 
 func isDeviceError(err error) bool {
 	var pe pkcs11.Error
@@ -266,7 +303,7 @@ func isDeviceError(err error) bool {
 	}
 	switch uint(pe) {
 	case pkcs11.CKR_DEVICE_ERROR, pkcs11.CKR_DEVICE_MEMORY, pkcs11.CKR_DEVICE_REMOVED, pkcs11.CKR_TOKEN_NOT_PRESENT, pkcs11.CKR_TOKEN_NOT_RECOGNIZED,
-		pkcs11.CKR_SESSION_CLOSED, pkcs11.CKR_SESSION_HANDLE_INVALID, pkcs11.CKR_USER_NOT_LOGGED_IN, pkcs11.CKR_GENERAL_ERROR, pkcs11.CKR_CRYPTOKI_NOT_INITIALIZED:
+		pkcs11.CKR_SESSION_CLOSED, pkcs11.CKR_SESSION_HANDLE_INVALID, pkcs11.CKR_USER_NOT_LOGGED_IN, pkcs11.CKR_CRYPTOKI_NOT_INITIALIZED:
 		return true
 	}
 	return false

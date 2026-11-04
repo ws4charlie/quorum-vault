@@ -219,6 +219,12 @@ func (s *Server) reconcileA(ctx context.Context, id string) (err error) {
 	}
 	failpoint("reconcile_a_before_confirm")
 	tr.sendFin(&pb.Fin{Ok: true, Confirm: true})
+	// Wait for B to finish (its handler returning ends the stream) before this call returns and cancels the stream: B must
+	// have read the confirmation.
+	select {
+	case <-tr.done:
+	case <-time.After(s.cfg.Limits.RecvTimeout()):
+	}
 	s.store.DeleteGenerationsBelow(ctx, id, p.Target)
 	rt.setResolved(true)
 	s.log.Info("keyset reconciled and proven", "role", "A", "keyset_id", id, "generation", p.Target)
