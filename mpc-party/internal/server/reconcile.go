@@ -122,8 +122,8 @@ func (s *Server) applyPlanA(ctx context.Context, id string, p plan, isA bool) er
 // reconcileA runs one reconciliation of keyset id with party B. It returns nil when the keyset is resolved.
 func (s *Server) reconcileA(ctx context.Context, id string) (err error) {
 	rt := s.rt(id)
-	if !rt.tryBusy() {
-		return errors.New("another operation on this keyset is running")
+	if holder, ok := rt.tryBusy("reconcile"); !ok {
+		return fmt.Errorf("a %s of this keyset is running", holder)
 	}
 	defer rt.done()
 	rt.gate.Lock()
@@ -229,8 +229,8 @@ func (s *Server) reconcileA(ctx context.Context, id string) (err error) {
 func (s *Server) reconcileB(ctx context.Context, stream pb.Peer_SessionServer, sid string, open *pb.Open, reject func(pb.ErrorKind, string) error) error {
 	id := open.KeysetId
 	rt := s.rt(id)
-	if !rt.tryBusy() {
-		return reject(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, "another operation on this keyset is running")
+	if holder, ok := rt.tryBusy("reconcile"); !ok {
+		return reject(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, "a "+holder+" of this keyset is running")
 	}
 	defer rt.done()
 	rt.gate.Lock()
@@ -306,7 +306,7 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 	last := map[string]time.Time{}
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
-	wasReady := false
+	wasReady, everReady := false, false
 	for {
 		select {
 		case <-ctx.Done():
@@ -322,12 +322,13 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		if ready && !wasReady {
+		if ready && !wasReady && everReady { // a RE-connection (the first one is covered by the initial unresolved state)
 			for _, id := range ids {
 				s.rt(id).setResolved(false)
 			}
 		}
 		wasReady = ready
+		everReady = everReady || ready
 		for _, id := range ids {
 			if s.rt(id).isResolved() || time.Since(last[id]) < time.Second {
 				continue

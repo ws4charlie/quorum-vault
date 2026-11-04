@@ -214,9 +214,6 @@ func cmdRestore(args []string) error {
 		return fmt.Errorf("this backup is for party %s but the config is for party %s: a share restored into the wrong slot is refused", f.Role, cfg.Role)
 	}
 	ctx := context.Background()
-	if state, err := st.State(ctx, f.KeysetID); err == nil {
-		return fmt.Errorf("the target data directory %s already has keyset %q (generation %d): restore into an empty directory", filepath.Clean(cfg.DataDir), f.KeysetID, state.Current)
-	}
 	priv, err := os.ReadFile(*privPath)
 	if err != nil {
 		return err
@@ -226,6 +223,9 @@ func cmdRestore(args []string) error {
 		return err
 	}
 	defer ks.Wipe()
+	if state, err := st.State(ctx, f.KeysetID); err == nil {
+		return fmt.Errorf("the target data directory %s already has keyset %q (generation %d): restore into an empty directory", filepath.Clean(cfg.DataDir), f.KeysetID, state.Current)
+	}
 	if err := st.PutCandidate(ctx, f.KeysetID, f.Generation, ks); err != nil {
 		return err
 	}

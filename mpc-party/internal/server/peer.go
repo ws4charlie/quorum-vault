@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -199,8 +200,8 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		rt = s.rt(open.KeysetId)
 		switch open.Op {
 		case pb.Op_OP_DKG, pb.Op_OP_REFRESH:
-			if !rt.tryBusy() {
-				return failOut(limitFail(opName, "a %s of keyset %q is already running", opName, open.KeysetId))
+			if holder, ok := rt.tryBusy(strings.ToLower(strings.TrimPrefix(opName, "OP_"))); !ok {
+				return failOut(busyFail(opName, open.KeysetId, holder))
 			}
 			defer rt.done()
 		default:

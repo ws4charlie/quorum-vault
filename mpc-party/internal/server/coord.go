@@ -36,8 +36,8 @@ func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rat
 		rt = s.rt(open.KeysetId)
 		switch open.Op {
 		case pb.Op_OP_DKG, pb.Op_OP_REFRESH:
-			if !rt.tryBusy() {
-				return nil, limitFail(name, "a %s of keyset %q is already running", name, open.KeysetId)
+			if holder, ok := rt.tryBusy(name); !ok {
+				return nil, busyFail(name, open.KeysetId, holder)
 			}
 			defer rt.done()
 			if open.Op == pb.Op_OP_REFRESH && !rt.isResolved() {

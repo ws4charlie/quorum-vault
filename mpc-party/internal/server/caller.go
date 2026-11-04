@@ -146,7 +146,7 @@ func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthRes
 	ids, _ := s.store.List(ctx)
 	for _, id := range ids {
 		st, err := s.store.State(ctx, id)
-		if err != nil {
+		if err != nil || st.Current == 0 { // an unfinished DKG candidate is not a keyset yet
 			continue
 		}
 		bk := ReadBackup(s.cfg.DataDir, id)

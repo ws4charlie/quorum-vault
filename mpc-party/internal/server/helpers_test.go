@@ -28,23 +28,44 @@ func (f authFunc) Authorize(_ context.Context, r server.AuthRequest) error { ret
 var allowAll = authFunc(func(server.AuthRequest) error { return nil })
 
 type pairOpts struct {
-	tweak     func(role string, c *server.Config)
-	authA     server.Authorizer
-	authB     server.Authorizer
-	fiA, fiB  *server.FaultInjection
-	aPeerAddr func(env *testenv.Env, bPeer string) string
-	beforeA   func(env *testenv.Env)
+	tweak            func(role string, c *server.Config)
+	authA            server.Authorizer
+	authB            server.Authorizer
+	fiA, fiB         *server.FaultInjection
+	aPeerAddr        func(env *testenv.Env, bPeer string) string
+	beforeA          func(env *testenv.Env)
+	sealerA, sealerB server.Sealer // override the test sealer
+	logA, logB       io.Writer     // capture logs
 }
 
 type pair struct {
-	Env    *testenv.Env
-	A, B   *server.Server
-	Client pb.MpcPartyClient // caller -> A
-	BCall  pb.MpcPartyClient // caller -> B (health only)
-	ConnA  *grpc.ClientConn
+	storeA, storeB *server.FileStore
+	Env            *testenv.Env
+	A, B           *server.Server
+	Client         pb.MpcPartyClient // caller -> A
+	BCall          pb.MpcPartyClient // caller -> B (health only)
+	ConnA          *grpc.ClientConn
 }
 
 func quiet() *slog.Logger { return slog.New(slog.NewJSONHandler(io.Discard, nil)) }
+
+func logTo(w io.Writer) *slog.Logger {
+	if w == nil {
+		return quiet()
+	}
+	return slog.New(slog.NewJSONHandler(w, nil))
+}
+
+func storeFor(t *testing.T, cfg *server.Config, sealer server.Sealer) *server.FileStore {
+	if sealer == nil {
+		return testenv.Store(t, cfg)
+	}
+	fs, err := server.NewFileStore(cfg.DataDir, cfg.Role, sealer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fs
+}
 
 func startPair(t *testing.T, o pairOpts) *pair {
 	t.Helper()
@@ -59,7 +80,8 @@ func startPair(t *testing.T, o pairOpts) *pair {
 	if o.tweak != nil {
 		o.tweak("B", cb)
 	}
-	b, err := server.New(server.Options{Config: cb, Authorizer: o.authB, Logger: quiet(), FaultInjection: o.fiB, Store: testenv.Store(t, cb)})
+	storeB := storeFor(t, cb, o.sealerB)
+	b, err := server.New(server.Options{Config: cb, Authorizer: o.authB, Logger: logTo(o.logB), FaultInjection: o.fiB, Store: storeB})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +96,8 @@ func startPair(t *testing.T, o pairOpts) *pair {
 	if o.tweak != nil {
 		o.tweak("A", ca)
 	}
-	a, err := server.New(server.Options{Config: ca, Authorizer: o.authA, Logger: quiet(), FaultInjection: o.fiA, Store: testenv.Store(t, ca)})
+	storeA := storeFor(t, ca, o.sealerA)
+	a, err := server.New(server.Options{Config: ca, Authorizer: o.authA, Logger: logTo(o.logA), FaultInjection: o.fiA, Store: storeA})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +112,7 @@ func startPair(t *testing.T, o pairOpts) *pair {
 	})
 	cl, conn := testenv.Dial(t, a.CallerAddr(), env.CertCaller, env.CertA.Pin)
 	bc, _ := testenv.Dial(t, b.CallerAddr(), env.CertCaller, env.CertB.Pin)
-	return &pair{Env: env, A: a, B: b, Client: cl, BCall: bc, ConnA: conn}
+	return &pair{storeA: storeA, storeB: storeB, Env: env, A: a, B: b, Client: cl, BCall: bc, ConnA: conn}
 }
 
 func ctx30(t testing.TB) context.Context {
@@ -171,4 +194,27 @@ func dkgPairForTest(t testing.TB) (*cbmpc.Keyset, *cbmpc.Keyset) {
 		t.Fatal(e1, e2)
 	}
 	return k1, k2
+}
+
+// PlainKeyset returns the plaintext keyset blob of the current generation of a party (test only: reads through the store).
+func (p *pair) PlainKeyset(t *testing.T, role, id string) []byte {
+	t.Helper()
+	st := p.storeA
+	if role == "B" {
+		st = p.storeB
+	}
+	state, err := st.State(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ks, err := st.GetKeyset(context.Background(), id, state.Current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ks.Wipe()
+	b, err := ks.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

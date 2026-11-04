@@ -25,8 +25,8 @@ type ksRT struct {
 	// session ever runs while the parties switch generation.
 	gate     sync.RWMutex
 	mu       sync.Mutex
-	busy     bool // a DKG, Refresh or reconciliation is running
-	resolved bool // reconciled with the peer (and proven by a SelfTest) since this process started, or created here
+	busy     string // "dkg", "refresh" or "reconcile" while one is running
+	resolved bool   // reconciled with the peer (and proven by a SelfTest) since this process started, or created here
 }
 
 func (s *Server) rt(id string) *ksRT {
@@ -40,17 +40,26 @@ func (s *Server) rt(id string) *ksRT {
 	return r
 }
 
-func (r *ksRT) tryBusy() bool {
+// tryBusy claims the keyset for kind. It returns the kind that holds it if it is taken.
+func (r *ksRT) tryBusy(kind string) (holder string, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.busy {
-		return false
+	if r.busy != "" {
+		return r.busy, false
 	}
-	r.busy = true
-	return true
+	r.busy = kind
+	return "", true
 }
 
-func (r *ksRT) done() { r.mu.Lock(); r.busy = false; r.mu.Unlock() }
+func (r *ksRT) done() { r.mu.Lock(); r.busy = ""; r.mu.Unlock() }
+
+// busyFail: a DKG/Refresh already running is a refusal (LIMIT); a reconciliation in progress is a short outage (retry).
+func busyFail(op, id, holder string) *Fail {
+	if holder == "reconcile" {
+		return unresolvedFail(op, id)
+	}
+	return limitFail(op, "a %s of keyset %q is already running", holder, id)
+}
 
 func (r *ksRT) isResolved() bool { r.mu.Lock(); defer r.mu.Unlock(); return r.resolved }
 
