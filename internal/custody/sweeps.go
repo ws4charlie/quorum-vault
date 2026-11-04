@@ -120,6 +120,7 @@ func (s *Service) unswept(ctx context.Context) (map[[2]string]*big.Int, error) {
 // frozen factory stops planning quietly: it returns ErrSweepFrozen and creates
 // nothing. It returns the sweeps it created.
 func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, error) {
+	const maxPerPass = 25 // bounds one pass (each candidate costs node calls); the rest wait for the next pass
 	c := s.Cfg
 	un, err := s.unswept(ctx)
 	if err != nil {
@@ -135,6 +136,9 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 	sortPairs(keys)
 	var created []Sweep
 	for _, k := range keys {
+		if len(created) >= maxPerPass {
+			break
+		}
 		addr, asset := k[0], k[1]
 		amt := un[k]
 		value := s.valueWei(asset, amt)

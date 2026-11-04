@@ -52,6 +52,24 @@ func opts(ctx workflow.Context) workflow.Context {
 	})
 }
 
+// planOpts gives the planner room: one pass asks the node about each candidate.
+func planOpts(ctx workflow.Context) workflow.Context {
+	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 2 * time.Minute,
+		RetryPolicy:         &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
+	})
+}
+
+// buildOpts bounds the retries of a build: an estimate that keeps failing (the
+// chain refuses the call) is not going to start working, and nothing was
+// allocated, because the build and the nonce share one transaction.
+func buildOpts(ctx workflow.Context) workflow.Context {
+	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 30 * time.Second,
+		RetryPolicy:         &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second, MaximumAttempts: 10},
+	})
+}
+
 // longOpts is for polling activities that heartbeat.
 func longOpts(ctx workflow.Context, wait time.Duration) workflow.Context {
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
@@ -82,7 +100,7 @@ func ScanWorkflow(ctx workflow.Context, in Input) error {
 func SweepPlannerWorkflow(ctx workflow.Context, in Input) error {
 	for i := 0; i < 300; i++ {
 		var frozen bool
-		if err := workflow.ExecuteActivity(opts(ctx), a.PlanSweeps).Get(ctx, &frozen); err != nil {
+		if err := workflow.ExecuteActivity(planOpts(ctx), a.PlanSweeps).Get(ctx, &frozen); err != nil {
 			return err
 		}
 		var n int
@@ -316,11 +334,13 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 
 		// 4. Build and enqueue, in one transaction.
 		var job string
-		if err := workflow.ExecuteActivity(opts(ctx), a.BuildWithdrawalJob, id).Get(ctx, &job); err != nil {
+		if err := workflow.ExecuteActivity(buildOpts(ctx), a.BuildWithdrawalJob, id).Get(ctx, &job); err != nil {
 			if isType(err, errExpired) {
 				return void("approval window passed before signing", "")
 			}
-			return err
+			// Nothing was allocated (the build rolled back), so the hold can go.
+			workflow.GetLogger(ctx).Error("ALERT: could not build the withdrawal transaction; voiding", "withdrawal", id, "error", err.Error())
+			return void("could not build the transaction: "+err.Error(), "")
 		}
 	}
 
@@ -408,11 +428,12 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 	ow := custody.Owner{Kind: "sweep", ID: id, PartitionID: st.Part}
 
 	var job string
-	if err := workflow.ExecuteActivity(opts(ctx), a.BuildSweepJob, id).Get(ctx, &job); err != nil {
+	if err := workflow.ExecuteActivity(buildOpts(ctx), a.BuildSweepJob, id).Get(ctx, &job); err != nil {
 		if isType(err, errFrozen) {
 			return nil // marked failed; the planner plans it again after unfreezing
 		}
-		return err
+		workflow.GetLogger(ctx).Warn("could not build the sweep; it will be planned again", "sweep", id, "error", err.Error())
+		return workflow.ExecuteActivity(opts(ctx), a.FailSweep, id, "could not build: "+err.Error()).Get(ctx, nil)
 	}
 	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
 	if err != nil {
