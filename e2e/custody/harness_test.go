@@ -870,3 +870,8 @@ func fileContains(path, sub string) bool {
 	b, err := os.ReadFile(path)
 	return err == nil && strings.Contains(string(b), sub)
 }
+
+func readFile(path string) string {
+	b, _ := os.ReadFile(path)
+	return string(b)
+}

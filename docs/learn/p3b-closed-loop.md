@@ -90,7 +90,10 @@ One workflow per business object; the workflow ID equals the object ID (`wd-...`
 5. **Wait for the job** (a polling activity that heartbeats). `done`: continue. `rejected`: cancel the nonce, then void. `failed`: wait `sign_timeout`, enqueue the same digest once more (the gateway returns the same signature, never a second one); a second failure goes to cancel.
 6. **Assemble and broadcast**, then record the hash.
 7. **Wait for the transaction.** Stuck past `stuck_after`: build a replacement (same nonce, fees up by at least 15%), a new job with the same intent and approvals, broadcast. **Every attempt is checked**, because any of them may be the one that mines (`NonceState` looks at the original, every replacement and any cancel).
-8. **Confirmed**: settle. **Reverted**: void and book the fee. **Dropped from the node's pool**: send the stored signed transaction again.
+8. **Confirmed**: settle. **Reverted**: void and book the fee (the customer can spend the amount again). **Forgotten by the node** (pool restart, `anvil_dropTransaction`): it is just a stuck transaction; `stuck_after` plus a replacement rebuilt from stored data handles it. **Nonce consumed**: the chain's nonce passed ours and none of our attempts mined, so a transaction this system did not make used it, which means the hot key signed something outside the system. The workflow logs `ALERT ... possible key compromise` once, keeps the hold, **parks** the row (`failure_reason` starts with `parked:`) and ends with a non-retryable error. The reconcilers skip parked rows, so it is not restarted and does not repeat the alert; an operator clears `failure_reason` to resume. A refused cancel parks the same way.
+9. **Stuck for good**: when replacements run out, or the fee cap stops a replacement, the workflow logs one `ALERT` and keeps waiting. It never voids, because the transaction may still mine.
+
+Before sending a job, `BroadcastJob` checks the nonce: if it is already decided (a replacement mined, say, and this workflow is a fresh execution starting from the first job), it sends nothing and the wait loop reports the result. Without that check the send would fail with "nonce too low" for ever.
 
 ### The rule that prevents paying twice
 **Never void until the original can no longer mine.** `VoidWithdrawal` itself refuses (`ErrNonceOpen`) while the withdrawal still has a nonce allocation that is not final. After a cancel, void only when a transaction at that nonce has confirmed, and look at **which** one: if the withdrawal itself mined, settle it instead. A nonce that was signed but never broadcast is still a live signature, so it is treated the same way: it must be resolved (mined, or cancelled by a mined cancel) before the money is released.
@@ -126,6 +129,7 @@ Also tested: kill the **gateway** with a job waiting (the job stays queued; rest
 - The API cannot check approval signatures (the approver public keys live only in the signing zone). A forged approval is refused by the gateway.
 - One factory destination means all sweeps land on one shard (`sweep_destination`); other shards are for withdrawals and need funding from the operator. Refilling them (cold tier) is a later task.
 - The sweep planner may under-sweep dust that rode along on an earlier sweep; the ledger is still exact because it follows what moved.
+- A withdrawal that reverts on chain, a forgotten transaction, a consumed nonce and a restart after a mined replacement each have an end-to-end test (`e2e/custody/failure_test.go`).
 - EVM only: `NonceState` reads `evm_tx_attempts`. BTC and Solana will need the same idea behind the adapter.
 
 ## Quiz

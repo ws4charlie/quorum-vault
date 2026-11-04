@@ -104,7 +104,7 @@ func (s *Service) GetWithdrawal(ctx context.Context, id string) (Withdrawal, err
 
 // OpenWithdrawals lists withdrawals that are not finished.
 func (s *Service) OpenWithdrawals(ctx context.Context) ([]Withdrawal, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT `+wdCols+` FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed') ORDER BY created_at`, s.Cfg.Chain)
+	rows, err := s.Pool.Query(ctx, `SELECT `+wdCols+` FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed') AND COALESCE(failure_reason,'') NOT LIKE 'parked:%' ORDER BY created_at`, s.Cfg.Chain)
 	if err != nil {
 		return nil, err
 	}
@@ -563,3 +563,17 @@ func (s *Service) VoidWithdrawal(ctx context.Context, id, reason, feeTx string) 
 var _ = errors.New
 var _ = time.Second
 var _ partition.Key
+
+// ParkedPrefix marks a row that needs an operator: its workflow stopped on
+// purpose, the money stays where it is, and the reconcilers leave it alone.
+// An operator resumes it by clearing failure_reason.
+const ParkedPrefix = "parked:"
+
+// Parked reports whether the withdrawal is parked.
+func (w Withdrawal) Parked() bool { return strings.HasPrefix(w.FailureReason, ParkedPrefix) }
+
+// ParkWithdrawal records that the withdrawal needs a person. The hold is kept.
+func (s *Service) ParkWithdrawal(ctx context.Context, id, reason string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE withdrawals SET failure_reason=$2, updated_at=now() WHERE id=$1 AND status NOT IN ('confirmed','failed')`, id, ParkedPrefix+" "+reason)
+	return err
+}

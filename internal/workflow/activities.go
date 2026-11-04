@@ -170,6 +170,7 @@ type WdState struct {
 	Expired  bool
 	NotAfter int64
 	Part     string
+	Parked   bool
 }
 
 // LoadWithdrawal reads the withdrawal.
@@ -183,7 +184,7 @@ func (a *Activities) LoadWithdrawal(ctx context.Context, id string) (WdState, er
 		return WdState{}, err
 	}
 	return WdState{Status: w.Status, Asset: w.Asset, Amount: w.Amount.String(), Required: st.Required, Auto: st.Auto, Have: st.Have,
-		Expired: st.Expired, NotAfter: w.NotAfter, Part: w.PartitionID}, nil
+		Expired: st.Expired, NotAfter: w.NotAfter, Part: w.PartitionID, Parked: w.Parked()}, nil
 }
 
 // AutoApprove adds the worker's automated approval if the amount is in the lowest tier.
@@ -241,12 +242,13 @@ func (a *Activities) SettleWithdrawal(ctx context.Context, id, txHash string) er
 type SweepState struct {
 	Status string
 	Part   string
+	Parked bool
 }
 
 // LoadSweep reads the sweep.
 func (a *Activities) LoadSweep(ctx context.Context, id string) (SweepState, error) {
 	sw, err := a.D.Svc.GetSweep(ctx, id)
-	return SweepState{Status: sw.Status, Part: sw.PartitionID}, err
+	return SweepState{Status: sw.Status, Part: sw.PartitionID, Parked: sw.Parked()}, err
 }
 
 // BuildSweepJob builds the sweep and enqueues its sign job in one transaction.
@@ -331,13 +333,15 @@ func (a *Activities) RequeueJob(ctx context.Context, failedID, newID string) err
 }
 
 // BroadcastJob assembles the signed job and sends it. Safe to repeat.
-func (a *Activities) BroadcastJob(ctx context.Context, jobID string) (string, error) {
-	h, err := a.D.Svc.SubmitJob(ctx, jobID)
+func (a *Activities) BroadcastJob(ctx context.Context, o OwnerArg, jobID string) (string, error) {
+	h, err := a.D.Svc.SubmitJob(ctx, jobID, o.owner())
 	if err != nil {
 		return "", err
 	}
-	k, _ := killKind(jobID)
-	Hit(k, "after_broadcast")
+	if h != "" {
+		k, _ := killKind(jobID)
+		Hit(k, "after_broadcast")
+	}
 	return h, nil
 }
 
@@ -373,7 +377,7 @@ func (a *Activities) WaitNonce(ctx context.Context, o OwnerArg, wait time.Durati
 		case custody.NonceMined, custody.NonceReverted, custody.NonceCancelled:
 			Hit(o.Kind, "after_confirm")
 			return NonceResult{State: n.State, Hash: n.Hash, Kind: n.Kind}, nil
-		case custody.NonceDropped:
+		case custody.NonceConsumed:
 			return NonceResult{State: n.State}, nil
 		}
 		if time.Now().After(deadline) {
@@ -388,10 +392,25 @@ func (a *Activities) WaitNonce(ctx context.Context, o OwnerArg, wait time.Durati
 	}
 }
 
-// Rebroadcast sends the newest signed transaction again (every attempt was dropped from the pool).
-func (a *Activities) Rebroadcast(ctx context.Context, o OwnerArg) (string, error) {
-	ow := o.owner()
-	return a.D.Svc.RebroadcastLatest(ctx, custody.OwnerTrack(ow), custody.CancelTrack(ow))
+// Park records that a withdrawal or sweep needs an operator and logs the ALERT.
+func (a *Activities) Park(ctx context.Context, o OwnerArg, reason string) error {
+	a.log().Error("ALERT: parked for an operator", "owner", o.Kind+" "+o.ID, "reason", reason)
+	if o.Kind == "withdrawal" {
+		return a.D.Svc.ParkWithdrawal(ctx, o.ID, reason)
+	}
+	return a.D.Svc.ParkSweep(ctx, o.ID, reason)
+}
+
+// ConsumedInfo describes a nonce someone else used, for the alert.
+func (a *Activities) ConsumedInfo(ctx context.Context, o OwnerArg) (string, error) {
+	var addr string
+	var nonce int64
+	err := a.D.Svc.Pool.QueryRow(ctx, `SELECT address, nonce FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 ORDER BY nonce DESC LIMIT 1`,
+		a.D.Svc.Cfg.Chain, o.Kind, o.ID).Scan(&addr, &nonce)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("address %s nonce %d", addr, nonce), nil
 }
 
 // EnqueueReplacement builds and enqueues the n-th fee-bumped replacement on a track.

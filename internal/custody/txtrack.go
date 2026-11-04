@@ -3,7 +3,6 @@ package custody
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -82,14 +81,26 @@ func unsignedOf(j signjob.Job) chain.UnsignedTx {
 
 // SubmitJob assembles a done job's signature into a transaction and broadcasts
 // it. Rebroadcasting a transaction the node already knows is not an error, so
-// this is safe to repeat after a crash.
-func (s *Service) SubmitJob(ctx context.Context, jobID string) (string, error) {
+// this is safe to repeat after a crash. It returns "" and sends nothing when the
+// owner's nonce is already decided.
+func (s *Service) SubmitJob(ctx context.Context, jobID string, o Owner) (string, error) {
 	j, err := signjob.Get(ctx, s.Pool, jobID)
 	if err != nil {
 		return "", err
 	}
 	if j.Status != signjob.StatusDone {
 		return "", fmt.Errorf("custody: job %s is %s, not done", jobID, j.Status)
+	}
+	// A restarted workflow may submit an old job whose transaction was replaced
+	// and the replacement mined: sending it would fail with "nonce too low" for
+	// ever. If the nonce is already decided, send nothing; the wait loop reports it.
+	n, err := s.NonceState(ctx, o)
+	if err != nil {
+		return "", err
+	}
+	switch n.State {
+	case NonceMined, NonceReverted, NonceCancelled, NonceConsumed:
+		return "", nil
 	}
 	st, err := s.Chain.Assemble(unsignedOf(j), chain.Signature{Bytes: j.Signature})
 	if err != nil {
@@ -215,7 +226,7 @@ const (
 	NonceMined     = "mined"     // the owner's own transaction mined and succeeded
 	NonceReverted  = "reverted"  // the owner's own transaction mined and reverted
 	NonceCancelled = "cancelled" // a cancel mined: the nonce is free and the owner's transaction never will
-	NonceDropped   = "dropped"   // no attempt is known to the node and the nonce is still unused
+	NonceConsumed  = "consumed"  // the chain's nonce passed ours but none of our attempts mined: someone else used it
 )
 
 // NonceOutcome is the combined state of every attempt at an owner's nonce.
@@ -258,7 +269,10 @@ func (s *Service) NonceState(ctx context.Context, o Owner) (NonceOutcome, error)
 		}
 	}
 	if dropped == len(atts) {
-		return NonceOutcome{State: NonceDropped}, nil
+		// Status reports dropped only when the sender's nonce has already passed
+		// the attempt's and the attempt has no receipt: a transaction we did not
+		// make used our nonce. A merely forgotten transaction stays pending.
+		return NonceOutcome{State: NonceConsumed}, nil
 	}
 	return NonceOutcome{State: NoncePending}, nil
 }
@@ -273,38 +287,6 @@ func (s *Service) NonceOpen(ctx context.Context, q interface {
 	err := q.QueryRow(ctx, `SELECT count(*) FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3
 		AND status IN ('allocated','broadcast')`, s.Cfg.Chain, o.Kind, o.ID).Scan(&n)
 	return n > 0, err
-}
-
-// RebroadcastLatest sends again the newest signed transaction of the owner's
-// given tracks. Used when every attempt was dropped from the node's pool.
-func (s *Service) RebroadcastLatest(ctx context.Context, tracks ...Track) (string, error) {
-	var best signjob.Job
-	found := false
-	for _, t := range tracks {
-		rows, err := s.Pool.Query(ctx, `SELECT id FROM sign_jobs WHERE id LIKE $1 AND status='done' ORDER BY created_at DESC, id DESC LIMIT 1`, string(t)+":%")
-		if err != nil {
-			return "", err
-		}
-		var id string
-		if rows.Next() {
-			_ = rows.Scan(&id)
-		}
-		rows.Close()
-		if id == "" {
-			continue
-		}
-		j, err := signjob.Get(ctx, s.Pool, id)
-		if err != nil {
-			return "", err
-		}
-		if !found || j.CreatedAt.After(best.CreatedAt) {
-			best, found = j, true
-		}
-	}
-	if !found {
-		return "", errors.New("custody: no signed transaction to rebroadcast")
-	}
-	return s.SubmitJob(ctx, best.ID)
 }
 
 // WaitJob polls a job until it is no longer pending or max elapses, and returns

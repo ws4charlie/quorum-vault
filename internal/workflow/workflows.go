@@ -199,8 +199,11 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 
 	broadcast := func(job string) error {
 		var hash string
-		if err := workflow.ExecuteActivity(opts(ctx), a.BroadcastJob, job).Get(ctx, &hash); err != nil {
+		if err := workflow.ExecuteActivity(opts(ctx), a.BroadcastJob, o, job).Get(ctx, &hash); err != nil {
 			return err
+		}
+		if hash == "" {
+			return nil // the nonce was already decided; the wait loop below reports how
 		}
 		if record {
 			return workflow.ExecuteActivity(opts(ctx), a.RecordBroadcast, o, hash).Get(ctx, nil)
@@ -213,6 +216,14 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 
 	stuckAt := workflow.Now(ctx).Add(t.StuckAfter)
 	replacements := 0
+	alerted := false
+	alert := func(why string) {
+		if !alerted {
+			alerted = true
+			workflow.GetLogger(ctx).Error("ALERT: transaction is stuck and cannot be replaced; still waiting, never voiding while it may mine",
+				"owner", o.Kind+" "+o.ID, "why", why)
+		}
+	}
 	const slice = 10 * time.Second
 	for {
 		var n NonceResult
@@ -226,18 +237,32 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 			return txResult{Kind: txReverted, Hash: n.Hash}, nil
 		case custody.NonceCancelled:
 			return txResult{Kind: txCancelled, Hash: n.Hash}, nil
-		case custody.NonceDropped:
-			// The node forgot every attempt: send the stored signed transaction again.
-			var h string
-			if err := workflow.ExecuteActivity(opts(ctx), a.Rebroadcast, o).Get(ctx, &h); err != nil {
+		case custody.NonceConsumed:
+			// The chain's nonce is past ours and none of our attempts mined: a
+			// transaction we did not make used it, so the hot key signed something
+			// outside this system. Our transaction can never mine. Keep the hold,
+			// alert, park the row so the reconciler leaves it alone, and stop.
+			var where string
+			_ = workflow.ExecuteActivity(opts(ctx), a.ConsumedInfo, o).Get(ctx, &where)
+			workflow.GetLogger(ctx).Error("ALERT: the hot wallet nonce was used by a transaction this system did not make; possible key compromise",
+				"owner", o.Kind+" "+o.ID, "where", where)
+			if err := workflow.ExecuteActivity(opts(ctx), a.Park, o, "nonce consumed by an unknown transaction ("+where+")").Get(ctx, nil); err != nil {
 				return txResult{}, err
 			}
+			return txResult{}, temporal.NewNonRetryableApplicationError("nonce consumed by an unknown transaction", "nonce_consumed", nil)
+		}
+		if !workflow.Now(ctx).Before(stuckAt) && replacements >= t.MaxReplacements {
+			alert("replacements exhausted")
 		}
 		if !workflow.Now(ctx).Before(stuckAt) && replacements < t.MaxReplacements {
 			replacements++
 			var rj string
-			if err := workflow.ExecuteActivity(opts(ctx), a.EnqueueReplacement, o, string(track), replacements).Get(ctx, &rj); err != nil {
-				return txResult{}, err
+			if err := workflow.ExecuteActivity(buildOpts(ctx), a.EnqueueReplacement, o, string(track), replacements).Get(ctx, &rj); err != nil {
+				// Typically the fee cap: the bumped fee is above what the gateway allows.
+				replacements--
+				alert("replacement could not be built: " + err.Error())
+				stuckAt = workflow.Now(ctx).Add(t.StuckAfter)
+				continue
 			}
 			rr, err := waitJob(ctx, rj)
 			if err != nil {
@@ -269,7 +294,10 @@ func cancelNonce(ctx workflow.Context, t Timings, o OwnerArg) (txResult, error) 
 	if r.Kind == txRefused {
 		// A refused cancel leaves a live nonce; never release the money. Park for an operator.
 		workflow.GetLogger(ctx).Error("ALERT: the gateway refused to cancel a nonce; manual intervention needed", "owner", o.ID, "reason", r.Reason)
-		return r, temporal.NewApplicationError("cancel refused: "+r.Reason, "cancel_refused")
+		if err := workflow.ExecuteActivity(opts(ctx), a.Park, o, "the gateway refused to cancel the nonce: "+r.Reason).Get(ctx, nil); err != nil {
+			return r, err
+		}
+		return r, temporal.NewNonRetryableApplicationError("cancel refused: "+r.Reason, "cancel_refused", nil)
 	}
 	return r, nil
 }
@@ -285,7 +313,7 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 	if err := workflow.ExecuteActivity(opts(ctx), a.LoadWithdrawal, id).Get(ctx, &st); err != nil {
 		return err
 	}
-	if st.Status == custody.WdConfirmed || st.Status == custody.WdFailed {
+	if st.Status == custody.WdConfirmed || st.Status == custody.WdFailed || st.Parked {
 		return nil
 	}
 	o := OwnerArg{Kind: "withdrawal", ID: id, Part: st.Part}
@@ -421,7 +449,7 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 	if err := workflow.ExecuteActivity(opts(ctx), a.LoadSweep, id).Get(ctx, &st); err != nil {
 		return err
 	}
-	if st.Status == "confirmed" || st.Status == "failed" {
+	if st.Status == "confirmed" || st.Status == "failed" || st.Parked {
 		return nil
 	}
 	o := OwnerArg{Kind: "sweep", ID: id, Part: st.Part}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
@@ -28,16 +29,20 @@ type Sweep struct {
 	Status      string
 	TxHash      string
 	JobID       string
+	Reason      string // failure_reason; ParkedPrefix when it needs an operator
 }
+
+// Parked reports whether the sweep needs an operator.
+func (sw Sweep) Parked() bool { return strings.HasPrefix(sw.Reason, ParkedPrefix) }
 
 func (sw Sweep) Owner() Owner { return Owner{Kind: "sweep", ID: sw.ID, PartitionID: sw.PartitionID} }
 
-const sweepCols = `id, asset, from_address, to_partition_id, amount::text, status, COALESCE(tx_hash,''), COALESCE(job_id,'')`
+const sweepCols = `id, asset, from_address, to_partition_id, amount::text, status, COALESCE(tx_hash,''), COALESCE(job_id,''), COALESCE(failure_reason,'')`
 
 func scanSweep(row pgx.Row) (Sweep, error) {
 	var sw Sweep
 	var amt string
-	if err := row.Scan(&sw.ID, &sw.Asset, &sw.From, &sw.PartitionID, &amt, &sw.Status, &sw.TxHash, &sw.JobID); err != nil {
+	if err := row.Scan(&sw.ID, &sw.Asset, &sw.From, &sw.PartitionID, &amt, &sw.Status, &sw.TxHash, &sw.JobID, &sw.Reason); err != nil {
 		return sw, err
 	}
 	sw.Amount = parseBig(amt)
@@ -55,7 +60,7 @@ func (s *Service) GetSweep(ctx context.Context, id string) (Sweep, error) {
 
 // OpenSweeps lists sweeps that are not finished.
 func (s *Service) OpenSweeps(ctx context.Context) ([]Sweep, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT `+sweepCols+` FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed') ORDER BY created_at`, s.Cfg.Chain)
+	rows, err := s.Pool.Query(ctx, `SELECT `+sweepCols+` FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed') AND COALESCE(failure_reason,'') NOT LIKE 'parked:%' ORDER BY created_at`, s.Cfg.Chain)
 	if err != nil {
 		return nil, err
 	}
@@ -489,3 +494,10 @@ func (s *Service) cursorTx(ctx context.Context, tx pgx.Tx) (uint64, error) {
 }
 
 var _ = common.Address{}
+
+// ParkSweep records that the sweep needs a person (see ParkWithdrawal). The
+// open-sweep index keeps the planner from starting another one meanwhile.
+func (s *Service) ParkSweep(ctx context.Context, id, reason string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE sweeps SET failure_reason=$2, updated_at=now() WHERE id=$1 AND status NOT IN ('confirmed','failed')`, id, ParkedPrefix+" "+reason)
+	return err
+}
