@@ -10,8 +10,10 @@ require (
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/miekg/pkcs11 v1.1.2
 	github.com/twmb/franz-go v1.22.2
+	github.com/ws4charlie/quorum-vault/mpc-party/api v0.0.0
 	go.temporal.io/api v1.64.1
 	go.temporal.io/sdk v1.50.0
+	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 	pgregory.net/rapid v1.3.0
 )
@@ -82,7 +84,8 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
-	google.golang.org/grpc v1.83.2 // indirect
 )
 
 replace github.com/agl/ed25519 => github.com/binance-chain/edwards25519 v0.0.0-20200305024217-f36fc4b53d43
+
+replace github.com/ws4charlie/quorum-vault/mpc-party/api => ./mpc-party/api

@@ -40,11 +40,23 @@ type File struct {
 	SignTimeout  string `json:"sign_timeout,omitempty"`
 }
 
-// SignerFile locates a partition's key in an HSM token.
+// SignerFile locates a partition's key: in an HSM token (backend "hsm", the default) or in the cb-mpc service
+// (backend "mpc": party A's key id and address, in MPC).
 type SignerFile struct {
-	Token     string `json:"token"`      // token label
-	KeyID     string `json:"key_id"`     // CKA_ID, hex
-	PublicKey string `json:"public_key"` // 65-byte uncompressed secp256k1, hex
+	Backend   string         `json:"backend,omitempty"` // "hsm" (default) or "mpc"
+	Token     string         `json:"token,omitempty"`   // hsm: token label
+	KeyID     string         `json:"key_id"`            // hsm: CKA_ID, hex; mpc: key id returned by party A's Derive
+	PublicKey string         `json:"public_key"`        // 65-byte uncompressed secp256k1, hex
+	MPC       *MPCSignerFile `json:"mpc,omitempty"`
+}
+
+// MPCSignerFile is how the gateway reaches party A (the caller port of mpc-party).
+type MPCSignerFile struct {
+	Address    string `json:"address"`   // host:port of party A's caller port
+	CertFile   string `json:"cert_file"` // the gateway's client certificate (pinned by party A)
+	KeyFile    string `json:"key_file"`
+	ServerPin  string `json:"server_pin"`  // sha256 hex of party A's certificate
+	MaxRetries int    `json:"max_retries"` // transport/limit retries inside sign_timeout (default 3)
 }
 
 // ApproverFile is one approver. Disabled approvers never count.
@@ -180,6 +192,20 @@ func (f File) build() (*Config, error) {
 			return nil, fmt.Errorf("gateway: config: %s %q is not a positive duration", d.name, d.val)
 		}
 		*d.dst = v
+	}
+	for p, sf := range f.Signers {
+		switch sf.Backend {
+		case "", "hsm":
+			if sf.Token == "" {
+				return nil, fmt.Errorf("gateway: config: signer %q: token is required for the hsm backend", p)
+			}
+		case "mpc":
+			if sf.MPC == nil || sf.MPC.Address == "" || sf.MPC.CertFile == "" || sf.MPC.KeyFile == "" || sf.MPC.ServerPin == "" || sf.KeyID == "" {
+				return nil, fmt.Errorf("gateway: config: signer %q: the mpc backend needs key_id and mpc.{address,cert_file,key_file,server_pin}", p)
+			}
+		default:
+			return nil, fmt.Errorf("gateway: config: signer %q: unknown backend %q", p, sf.Backend)
+		}
 	}
 	keys := map[string]string{}
 	enabled := 0

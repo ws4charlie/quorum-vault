@@ -19,6 +19,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
+	"github.com/ws4charlie/quorum-vault/internal/signer"
 )
 
 func main() {
@@ -51,16 +52,37 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	lib, err := hsm.LoadLib(hsm.DefaultLibPath())
-	if err != nil {
-		return fmt.Errorf("load pkcs11: %w", err)
+	signers := map[string]signer.Signer{}
+	if gateway.HasHSMSigners(cfg) {
+		lib, err := hsm.LoadLib(hsm.DefaultLibPath())
+		if err != nil {
+			return fmt.Errorf("load pkcs11: %w", err)
+		}
+		defer lib.Close()
+		hs, closeSigners, err := gateway.HSMSigners(cfg, lib, os.Getenv("QV_HSM_PIN"))
+		if err != nil {
+			return err
+		}
+		defer closeSigners()
+		for k, v := range hs {
+			signers[k] = v
+		}
 	}
-	defer lib.Close()
-	signers, closeSigners, err := gateway.HSMSigners(cfg, lib, os.Getenv("QV_HSM_PIN"))
+	ms, closeMPC, err := gateway.MPCSigners(cfg)
 	if err != nil {
 		return err
 	}
-	defer closeSigners()
+	defer closeMPC()
+	for k, v := range ms {
+		signers[k] = v
+	}
+	for name, cc := range cfg.Chains {
+		for p := range cc.EVM.HotAddresses {
+			if signers[p] == nil {
+				return fmt.Errorf("chain %q: hot partition %q has no signer", name, p)
+			}
+		}
+	}
 
 	jobs, err := pgxpool.New(ctx, *jobsDSN)
 	if err != nil {

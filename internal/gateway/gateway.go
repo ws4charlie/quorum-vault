@@ -34,6 +34,7 @@ const (
 	ReasonFeeNotHigher  = "replay_fee_not_higher"  // 5 same intent, new digest, fees not higher
 	ReasonNonceTaken    = "replay_nonce_taken"     // 5 another intent already signed at this nonce
 	ReasonNonceCancel   = "replay_nonce_cancelled" // 5 a cancel consumed this nonce
+	ReasonSignerRefused = "signer_refused"         // 6 the signer's other party (cb-mpc party B) refused; nothing was signed
 )
 
 // Outcomes of processing one job.
@@ -277,6 +278,17 @@ func (g *Gateway) signWith(ctx context.Context, s signer.Signer, digest []byte, 
 	select {
 	case r := <-ch:
 		if r.err != nil {
+			// A signer may say that the other party refused (cb-mpc: party B's cosigner), or that an operator must look.
+			var ref interface{ SignerRefusal() (string, bool) }
+			if errors.As(r.err, &ref) {
+				if why, ok := ref.SignerRefusal(); ok {
+					return nil, reject(ReasonSignerRefused, "%s", why)
+				}
+			}
+			var al interface{ SignerAlert() bool }
+			if errors.As(r.err, &al) && al.SignerAlert() {
+				g.opt.Logger.Error("ALERT signer failure: an operator must look (keyset may be frozen)", "error", r.err.Error())
+			}
 			return nil, fmt.Errorf("%w: %v", errSigner, r.err)
 		}
 		if !signer.Verify(s.PublicKey(), dg, r.res.Sig) {
