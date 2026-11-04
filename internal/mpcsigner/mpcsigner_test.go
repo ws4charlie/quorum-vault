@@ -7,6 +7,9 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,5 +158,26 @@ func TestSignDigestRetriesTransportAndKeepsJobID(t *testing.T) {
 	// job id and package are mandatory
 	if _, err := s.SignDigest(context.Background(), [32]byte{1}, signer.SignOptions{}); err == nil {
 		t.Fatal("signed without job id and package")
+	}
+}
+
+// The root module must never link cb-mpc or any mpc-party internals: it talks to the service over gRPC with the pure-Go
+// api module only (cb-mpc's libsecp256k1 collides with go-ethereum's, and the root build has no C++ toolchain).
+func TestRootModuleIsFreeOfCbmpc(t *testing.T) {
+	cmd := exec.Command("go", "list", "-deps", "-test", "./...")
+	cmd.Dir = "../.."
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list: %v\n%s", err, out)
+	}
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.Contains(l, "mpc-party/internal") || strings.Contains(l, "internal/cbmpc") || strings.Contains(l, "cb-mpc") {
+			t.Fatalf("the root module depends on cb-mpc code: %s", l)
+		}
+	}
+	mod, _ := os.ReadFile("../../go.mod")
+	if !strings.Contains(string(mod), "mpc-party/api") {
+		t.Fatal("expected the replace to mpc-party/api")
 	}
 }

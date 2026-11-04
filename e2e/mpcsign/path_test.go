@@ -230,6 +230,12 @@ func TestThroughputWholePath(t *testing.T) {
 	el := time.Since(start)
 	t.Logf("THROUGHPUT whole path: %d signatures by %d gateway workers in %v = %.1f sig/s (failed %d)", jobs, workers, el.Round(time.Millisecond), float64(jobs)/el.Seconds(), failed)
 	_ = gws
+	if os.Getenv("QV_MPC_DEBUG") == "1" {
+		for _, g := range gws[:2] {
+			t.Logf("%s:\n%s", g.name, tail(g.out.String(), 2500))
+		}
+		t.Logf("A:\n%s", tail(s.a.out.String(), 1500))
+	}
 }
 
 var _ = context.Background
