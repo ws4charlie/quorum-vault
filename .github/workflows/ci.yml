@@ -97,7 +97,8 @@ jobs:
   # cb-mpc wrapper (C++ via cgo). Separate Go module in mpc-party/: the jobs above never see C++.
   # Same commands as mpc-party/scripts/ci.sh (which can be run in a linux/amd64 container).
   mpc-party:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to a release that apt.llvm.org has no clang-20 repository for.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       CGO_ENABLED: "1"
