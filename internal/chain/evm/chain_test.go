@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"os"
 	"sort"
@@ -49,6 +50,7 @@ type tenv struct {
 	ad       *Adapter
 	deployer *ecdsa.PrivateKey
 	hotKey   *ecdsa.PrivateKey
+	adminKey *ecdsa.PrivateKey // factory admin (the "cold" key)
 	hot      common.Address
 	dest     common.Address
 	usdt     common.Address // returns no bool
@@ -105,7 +107,11 @@ func newEnv(t *testing.T) *tenv {
 		}
 	}
 	e.cfg.ChainID = 11155111
-	factory := e.deploy(FactoryDeployData(e.dest))
+	e.adminKey, _ = crypto.GenerateKey()
+	if err := e2e.SetBalance(ctx, url, crypto.PubkeyToAddress(e.adminKey.PublicKey), new(big.Int).Mul(big.NewInt(10), ether)); err != nil {
+		t.Fatal(err)
+	}
+	factory := e.deploy(FactoryDeployData(e.dest, crypto.PubkeyToAddress(e.adminKey.PublicKey)))
 	e.usdt = e.deploy(readBin(t, "testdata/UsdtLike.bin"))
 	e.dai = e.deploy(readBin(t, "testdata/BoolToken.bin"))
 	e.cfg = Config{
@@ -506,30 +512,233 @@ func TestScanIgnoresRevertedAndUnrelated(t *testing.T) {
 	}
 }
 
-// Known limit: a plain send with the 21,000-gas minimum reverts once the
-// forwarder is deployed. Report the gas a sender needs.
-func TestPlainSendNeedsMoreThan21000Gas(t *testing.T) {
+// Deposit gas: before deployment the address is an empty account, so a plain
+// 21,000-gas send works. After deployment the (empty) receive() still has to run, so
+// exactly 21,000 reverts; report the smallest limit that works. A contract using
+// Solidity transfer() (2,300 gas) works too.
+func TestPlainSendGasBeforeAndAfterDeployment(t *testing.T) {
 	e := newEnv(t)
 	addr := e.addCustomer("cust-g", 0)
+
+	// Before deployment: 21,000 succeeds.
+	if r := e.receipt(e.sendRaw(e.deployer, &addr, big.NewInt(1), nil, 21000).Hash()); r.Status != 1 {
+		t.Fatal("21,000-gas send to an undeployed forwarder address reverted")
+	}
 	d, _ := packDeployAndFlush(DeriveSalt("cust-g", 0), nil)
 	e.send(e.deployer, &e.cfg.Factory, new(big.Int), d)
 
+	// After deployment: exactly 21,000 reverts and the value stays with the sender.
+	before := e.balance(addr)
 	r := e.receipt(e.sendRaw(e.deployer, &addr, big.NewInt(1), nil, 21000).Hash())
 	if r.Status != 0 {
 		t.Fatal("21,000-gas send to a deployed forwarder must revert")
 	}
-	est, err := e.ec.EstimateGas(e.ctx, ethereum.CallMsg{From: crypto.PubkeyToAddress(e.deployer.PublicKey), To: &addr, Value: big.NewInt(1)})
+	if e.balance(addr).Cmp(before) != 0 {
+		t.Fatal("a reverted send moved value")
+	}
+	// Smallest gas limit that succeeds (real transactions, binary search).
+	lo, hi := uint64(21000), uint64(60000)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if e.receipt(e.sendRaw(e.deployer, &addr, big.NewInt(1), nil, mid).Hash()).Status == 1 {
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	est, _ := e.ec.EstimateGas(e.ctx, ethereum.CallMsg{From: crypto.PubkeyToAddress(e.deployer.PublicKey), To: &addr, Value: big.NewInt(1)})
+	t.Logf("plain send to a deployed forwarder: 21000 reverts; minimum gas limit that succeeds = %d; eth_estimateGas = %d", lo, est)
+	if lo <= 21000 {
+		t.Fatalf("minimum %d", lo)
+	}
+
+	// Solidity transfer() (2,300 gas) from a contract works.
+	sender := e.deploy(readBin(t, "testdata/TransferSender.bin"))
+	raw, _ := os.ReadFile("testdata/TransferSender.abi.json")
+	sabi, err := abi.JSON(strings.NewReader(string(raw)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if est <= 21000 {
-		t.Fatalf("estimate %d", est)
+	data, _ := sabi.Pack("pay", addr)
+	bal := e.balance(addr)
+	if r := e.receipt(e.sendRaw(e.deployer, &sender, big.NewInt(1000), data, 200000).Hash()); r.Status != 1 {
+		t.Fatal("transfer() from a contract to a deployed forwarder reverted")
 	}
-	ok := e.receipt(e.sendRaw(e.deployer, &addr, big.NewInt(1), nil, est).Hash())
-	if ok.Status != 1 {
-		t.Fatal("send with the estimated gas reverted")
+	if d := new(big.Int).Sub(e.balance(addr), bal); d.Int64() != 1000 {
+		t.Fatalf("forwarder received %s", d)
 	}
-	t.Logf("plain send to a deployed forwarder: 21000 gas reverts; eth_estimateGas = %d, used = %d", est, ok.GasUsed)
+}
+
+// admin sends a factory call as the admin key (or key) with a generous fixed gas limit.
+func (e *tenv) factoryTx(key *ecdsa.PrivateKey, method string, args ...any) *types.Receipt {
+	e.t.Helper()
+	data, err := factoryABI.Pack(method, args...)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return e.receipt(e.sendRaw(key, &e.cfg.Factory, new(big.Int), data, 3_000_000).Hash())
+}
+
+func (e *tenv) factoryDestination() common.Address {
+	data, _ := factoryABI.Pack("destination")
+	out, err := e.ec.CallContract(e.ctx, ethereum.CallMsg{To: &e.cfg.Factory, Data: data}, nil)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return common.BytesToAddress(out)
+}
+
+func (e *tenv) buildSweepErr(id, asset string, from common.Address) error {
+	tx, _ := e.pool.Begin(e.ctx)
+	defer tx.Rollback(e.ctx) //nolint:errcheck
+	_, err := e.ad.BuildSweep(e.ctx, tx, chain.SweepIntent{ID: id, Asset: asset, From: from.Hex(), ToPartition: "hot-0", Amount: big.NewInt(1)})
+	return err
+}
+
+func TestFrozenFactoryStopsSweepsAndKeepsFunds(t *testing.T) {
+	e := newEnv(t)
+	if err := loadABIs(); err != nil {
+		t.Fatal(err)
+	}
+	addr := e.addCustomer("cust-z", 0)
+	e.send(e.deployer, &addr, big.NewInt(5000), nil)
+	e.mint(e.usdt, addr, 8)
+
+	// A non-admin cannot freeze or redirect.
+	if r := e.factoryTx(e.deployer, "setDestination", common.Address{}); r.Status != 0 {
+		t.Fatal("non-admin setDestination succeeded")
+	}
+	if e.factoryDestination() != e.dest {
+		t.Fatal("destination changed by a non-admin")
+	}
+
+	// Build a sweep while unfrozen, then freeze.
+	if err := e.buildSweepErr("s0", "USDT", addr); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.factoryTx(e.adminKey, "setDestination", common.Address{}); r.Status != 1 {
+		t.Fatal("admin freeze failed")
+	}
+	if err := e.buildSweepErr("s1", "USDT", addr); !errors.Is(err, ErrSweepFrozen) {
+		t.Fatalf("BuildSweep when frozen: %v", err)
+	}
+	if _, err := e.ad.EstimateSweepFee(e.ctx, chain.SweepIntent{ID: "s1", Asset: "USDT", From: addr.Hex(), ToPartition: "hot-0"}); !errors.Is(err, ErrSweepFrozen) {
+		t.Fatalf("EstimateSweepFee when frozen: %v", err)
+	}
+	// On chain: deployAndFlush and a direct flush revert; funds stay.
+	d, _ := packDeployAndFlush(DeriveSalt("cust-z", 0), []common.Address{e.usdt})
+	if r := e.receipt(e.sendRaw(e.deployer, &e.cfg.Factory, new(big.Int), d, 3_000_000).Hash()); r.Status != 0 {
+		t.Fatal("deployAndFlush succeeded while frozen")
+	}
+	if e.balance(addr).Int64() != 5000 || e.tokenBalance(e.usdt, addr).Int64() != 8 || e.balance(e.dest).Sign() != 0 {
+		t.Fatal("funds moved while frozen")
+	}
+	if c, _ := e.ec.CodeAt(e.ctx, addr, nil); len(c) != 0 {
+		t.Fatal("frozen deployAndFlush deployed the forwarder")
+	}
+
+	// Unfreeze: the same sweep works.
+	if r := e.factoryTx(e.adminKey, "setDestination", e.dest); r.Status != 1 {
+		t.Fatal("admin unfreeze failed")
+	}
+	tx, _ := e.pool.Begin(e.ctx)
+	u, err := e.ad.BuildSweep(e.ctx, tx, chain.SweepIntent{ID: "s2", Asset: "USDT", From: addr.Hex(), ToPartition: "hot-0", Amount: big.NewInt(8)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tx.Commit(e.ctx)
+	if r := e.receipt(common.HexToHash(e.mustBroadcast(u))); r.Status != 1 {
+		t.Fatal("sweep after unfreeze reverted")
+	}
+	if e.balance(e.dest).Int64() != 5000 || e.tokenBalance(e.usdt, e.dest).Int64() != 8 {
+		t.Fatal("funds did not arrive after unfreeze")
+	}
+}
+
+func TestDestinationChangeMovesNoAddressAndNeedsMatchingConfig(t *testing.T) {
+	e := newEnv(t)
+	if err := loadABIs(); err != nil {
+		t.Fatal(err)
+	}
+	addr := e.addCustomer("cust-d", 0)
+	before := addr
+	e.send(e.deployer, &addr, big.NewInt(100), nil)
+	newKey, _ := crypto.GenerateKey()
+	newDest := crypto.PubkeyToAddress(newKey.PublicKey)
+	if r := e.factoryTx(e.adminKey, "setDestination", newDest); r.Status != 1 {
+		t.Fatal("admin setDestination failed")
+	}
+	if d, _ := e.ad.DeriveDepositAddress(e.ctx, "cust-d", 0); d.Address != before.Hex() {
+		t.Fatal("deposit address moved when the destination changed")
+	}
+	// Configuration still names the old destination: refuse to build.
+	if err := e.buildSweepErr("s", "ETH", addr); !errors.Is(err, ErrDestinationMismatch) {
+		t.Fatalf("stale config: %v", err)
+	}
+	// With the configuration (and the signing zone's) updated, the old address pays the new destination.
+	cfg := e.cfg
+	cfg.SweepDestination = newDest
+	ad, err := New(e.ctx, cfg, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ad.Close()
+	tx, _ := e.pool.Begin(e.ctx)
+	u, err := ad.BuildSweep(e.ctx, tx, chain.SweepIntent{ID: "s-new", Asset: "ETH", From: addr.Hex(), ToPartition: "hot-0", Amount: big.NewInt(100)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tx.Commit(e.ctx)
+	v, _ := NewVerifier(cfg)
+	if err := v.Verify(u, signjob.Intent{Kind: "sweep", ID: "s-new", PartitionID: "hot-0", Chain: "evm-anvil", Asset: "ETH", From: addr.Hex(), To: newDest.Hex(), Amount: "100"}); err != nil {
+		t.Fatal(err)
+	}
+	// The old configuration's verifier refuses the new destination.
+	vOld, _ := NewVerifier(e.cfg)
+	if err := vOld.Verify(u, signjob.Intent{Kind: "sweep", ID: "s-new", PartitionID: "hot-0", Chain: "evm-anvil", Asset: "ETH", From: addr.Hex(), To: newDest.Hex(), Amount: "100"}); err == nil {
+		t.Fatal("verifier with the old sweep destination accepted the new one")
+	}
+	s, _ := ad.Assemble(u, sign(t, u, e.hotKey))
+	h, err := ad.Broadcast(e.ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.receipt(common.HexToHash(h)).Status != 1 || e.balance(newDest).Int64() != 100 || e.balance(e.dest).Sign() != 0 {
+		t.Fatal("old address did not pay the new destination")
+	}
+}
+
+func TestAdminTransferIsTwoStep(t *testing.T) {
+	e := newEnv(t)
+	if err := loadABIs(); err != nil {
+		t.Fatal(err)
+	}
+	k2, _ := crypto.GenerateKey()
+	admin2 := crypto.PubkeyToAddress(k2.PublicKey)
+	if err := e2e.SetBalance(e.ctx, e.url, admin2, new(big.Int).Mul(big.NewInt(10), ether)); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.factoryTx(e.deployer, "transferAdmin", admin2); r.Status != 0 {
+		t.Fatal("non-admin transferAdmin succeeded")
+	}
+	if r := e.factoryTx(e.adminKey, "transferAdmin", admin2); r.Status != 1 {
+		t.Fatal("transferAdmin failed")
+	}
+	if r := e.factoryTx(k2, "setDestination", admin2); r.Status != 0 {
+		t.Fatal("nominated admin had power before accepting")
+	}
+	if r := e.factoryTx(e.deployer, "acceptAdmin"); r.Status != 0 {
+		t.Fatal("a non-pending caller accepted")
+	}
+	if r := e.factoryTx(k2, "acceptAdmin"); r.Status != 1 {
+		t.Fatal("acceptAdmin failed")
+	}
+	if r := e.factoryTx(e.adminKey, "setDestination", admin2); r.Status != 0 {
+		t.Fatal("the old admin kept its power")
+	}
+	if r := e.factoryTx(k2, "setDestination", e.dest); r.Status != 1 {
+		t.Fatal("the new admin cannot act")
+	}
 }
 
 func TestNonceConcurrentBuildsAreConsecutive(t *testing.T) {

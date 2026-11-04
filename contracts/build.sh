@@ -16,9 +16,9 @@ docker run --rm -v "$root":/repo -w /repo/contracts --entrypoint sh "$image" -c 
   forge inspect ForwarderFactory abi --json > /repo/$art/ForwarderFactory.abi.json
   forge inspect Forwarder abi --json      > /repo/$art/Forwarder.abi.json
   forge inspect UsdtLike bytecode         > /repo/internal/chain/evm/testdata/UsdtLike.bin
-  forge inspect SweepFactory bytecode     > /repo/internal/chain/evm/testdata/SweepFactory.bin
-  forge inspect SweepFactory abi --json   > /repo/internal/chain/evm/testdata/SweepFactory.abi.json
   forge inspect FalseToken bytecode       > /repo/internal/chain/evm/testdata/FalseToken.bin
+  forge inspect TransferSender bytecode   > /repo/internal/chain/evm/testdata/TransferSender.bin
+  forge inspect TransferSender abi --json > /repo/internal/chain/evm/testdata/TransferSender.abi.json
   forge inspect BoolToken bytecode        > /repo/internal/chain/evm/testdata/BoolToken.bin
   forge inspect UsdtLike abi --json       > /repo/internal/chain/evm/testdata/Token.abi.json
   rm -rf out cache

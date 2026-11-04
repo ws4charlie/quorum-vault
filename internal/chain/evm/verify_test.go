@@ -86,7 +86,7 @@ func sweep(t *testing.T, tokens []common.Address, asset string) (chain.UnsignedT
 		t.Fatal(err)
 	}
 	u := mkUnsigned(t, tFactory, new(big.Int), data, nil)
-	from := PredictAddress(tFactory, tDest, salt)
+	from := PredictAddress(tFactory, salt)
 	return u, signjob.Intent{Kind: "sweep", ID: "s1", PartitionID: "p-hot", Chain: "evm-test", Asset: asset, From: from.Hex(), To: tDest.Hex(), Amount: "5"}
 }
 

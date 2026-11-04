@@ -20,6 +20,14 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 )
 
+// ErrSweepFrozen: the factory's destination is zero (its admin froze sweeping).
+// Funds stay where they are; stop sweeping rather than treating this as an outage.
+var ErrSweepFrozen = errors.New("evm: sweeping is frozen (factory destination is zero)")
+
+// ErrDestinationMismatch: the factory pays somewhere other than Config.SweepDestination.
+// The admin changed it and the configuration (including the signing zone's) is stale.
+var ErrDestinationMismatch = errors.New("evm: factory destination differs from the configured sweep destination")
+
 // DefaultCancelGas is the gas limit of a cancel (a plain self-send).
 const DefaultCancelGas uint64 = 21000
 
@@ -76,7 +84,7 @@ func (a *Adapter) DeriveDepositAddress(_ context.Context, customerID string, ind
 }
 
 func deriveAddress(cfg Config, customerID string, index uint64) chain.DepositAddress {
-	addr := PredictAddress(cfg.Factory, cfg.SweepDestination, DeriveSalt(customerID, index))
+	addr := PredictAddress(cfg.Factory, DeriveSalt(customerID, index))
 	return chain.DepositAddress{Chain: cfg.Chain, Address: addr.Hex(), Kind: chain.KindForwarder, DerivationIndex: index}
 }
 
@@ -164,7 +172,33 @@ type queryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// checkDestination reads factory.destination() and maps zero to ErrSweepFrozen.
+func (a *Adapter) checkDestination(ctx context.Context) error {
+	if err := loadABIs(); err != nil {
+		return err
+	}
+	data, err := factoryABI.Pack("destination")
+	if err != nil {
+		return err
+	}
+	out, err := a.ec.CallContract(ctx, ethereum.CallMsg{To: &a.cfg.Factory, Data: data}, nil)
+	if err != nil {
+		return fmt.Errorf("evm: read factory destination: %w", err)
+	}
+	dest := common.BytesToAddress(out)
+	switch {
+	case dest == (common.Address{}):
+		return ErrSweepFrozen
+	case dest != a.cfg.SweepDestination:
+		return fmt.Errorf("%w: factory %s, config %s", ErrDestinationMismatch, dest, a.cfg.SweepDestination)
+	}
+	return nil
+}
+
 func (a *Adapter) sweepData(ctx context.Context, q queryer, s chain.SweepIntent) ([]byte, error) {
+	if err := a.checkDestination(ctx); err != nil {
+		return nil, err
+	}
 	tok, native, err := a.cfg.asset(s.Asset)
 	if err != nil {
 		return nil, err
@@ -184,7 +218,7 @@ func (a *Adapter) sweepData(ctx context.Context, q queryer, s chain.SweepIntent)
 		return nil, fmt.Errorf("evm: lookup deposit address: %w", err)
 	}
 	salt := DeriveSalt(customer, uint64(idx))
-	if got := PredictAddress(a.cfg.Factory, a.cfg.SweepDestination, salt); got != src {
+	if got := PredictAddress(a.cfg.Factory, salt); got != src {
 		return nil, fmt.Errorf("evm: deposit address %s does not match its derivation (%s)", src.Hex(), got.Hex())
 	}
 	var tokens []common.Address

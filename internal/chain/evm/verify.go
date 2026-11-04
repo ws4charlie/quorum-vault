@@ -171,9 +171,13 @@ func (v *Verifier) verifySweep(to *common.Address, value *big.Int, data []byte, 
 	if err != nil {
 		return reject("sweep source: %v", err)
 	}
-	if got := PredictAddress(cfg.Factory, cfg.SweepDestination, salt); got != from {
+	if got := PredictAddress(cfg.Factory, salt); got != from {
 		return reject("salt resolves to %s, intent source is %s", got, from)
 	}
+	// The destination itself lives in the factory (changed by its cold-key admin).
+	// The signing zone's Config.SweepDestination must be updated by hand whenever the
+	// admin changes it; until then every sweep is refused here, which is the point:
+	// the gateway never learns the destination from the business side.
 	dest, err := parseIntentAddress(i.To)
 	if err != nil {
 		return reject("%v", err)

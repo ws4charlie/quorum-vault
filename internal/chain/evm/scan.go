@@ -50,7 +50,8 @@ func (a *Adapter) depositSet(ctx context.Context) (map[common.Address]depositAdd
 //
 // ERC-20: Transfer logs of configured tokens whose `to` is a deposit address.
 // Native: successful transactions whose `to` is a deposit address and whose value
-// is > 0. Limit: ETH that reaches a deposit address through an internal call
+// is > 0. ETH is not forwarded on receipt (the forwarder's receive() is empty), so a
+// deposit looks the same before and after the forwarder is deployed. Limit: ETH that reaches a deposit address through an internal call
 // from another contract (no top-level transaction to it) is not seen here and
 // is left to balance reconciliation.
 func (a *Adapter) Scan(ctx context.Context, fromHeight uint64) (chain.ScanResult, error) {

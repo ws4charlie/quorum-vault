@@ -58,10 +58,11 @@ func ForwarderCreationCode() []byte { return common.FromHex(strings.TrimSpace(fo
 // FactoryCreationCode is the ForwarderFactory's creation bytecode (without constructor args).
 func FactoryCreationCode() []byte { return common.FromHex(strings.TrimSpace(factoryBinHex)) }
 
-// FactoryDeployData returns creation code plus the constructor argument
-// (destination), ready to send as the data of a contract-creation transaction.
-func FactoryDeployData(destination common.Address) []byte {
-	return append(FactoryCreationCode(), common.LeftPadBytes(destination.Bytes(), 32)...)
+// FactoryDeployData returns creation code plus the constructor arguments
+// (destination, admin), ready to send as the data of a contract-creation transaction.
+func FactoryDeployData(destination, admin common.Address) []byte {
+	d := append(FactoryCreationCode(), common.LeftPadBytes(destination.Bytes(), 32)...)
+	return append(d, common.LeftPadBytes(admin.Bytes(), 32)...)
 }
 
 // DeriveSalt is keccak256("qv-evm-forwarder-v1" || len(customer) as uint32 ||
@@ -77,10 +78,10 @@ func DeriveSalt(customerID string, index uint64) [32]byte {
 }
 
 // PredictAddress is ForwarderFactory.predict(salt), computed locally: the
-// CREATE2 address of the Forwarder with init code creationCode ++ abi.encode(destination).
-func PredictAddress(factory, destination common.Address, salt [32]byte) common.Address {
-	init := append(ForwarderCreationCode(), common.LeftPadBytes(destination.Bytes(), 32)...)
-	return crypto.CreateAddress2(factory, salt, crypto.Keccak256(init))
+// CREATE2 address of the Forwarder. Its init code has no arguments, so the address
+// depends on the factory and the salt only, never on the destination.
+func PredictAddress(factory common.Address, salt [32]byte) common.Address {
+	return crypto.CreateAddress2(factory, salt, crypto.Keccak256(ForwarderCreationCode()))
 }
 
 func packDeployAndFlush(salt [32]byte, tokens []common.Address) ([]byte, error) {

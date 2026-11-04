@@ -50,3 +50,35 @@ contract FalseToken {
         return false;
     }
 }
+
+/// @dev Sends ETH with Solidity transfer() (2,300 gas to the receiver).
+contract TransferSender {
+    function pay(address payable to) external payable {
+        to.transfer(msg.value);
+    }
+}
+
+/// @dev Re-enters the forwarder's flushTokens from inside transfer().
+contract ReentrantToken {
+    mapping(address => uint256) public balanceOf;
+    bool private entered;
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    function mint(address to, uint256 amt) external {
+        balanceOf[to] += amt;
+        emit Transfer(address(0), to, amt);
+    }
+
+    function transfer(address to, uint256 amt) external returns (bool) {
+        if (!entered) {
+            entered = true;
+            (bool ok,) = msg.sender.call(abi.encodeWithSignature("flushTokens(address)", address(this)));
+            ok;
+        }
+        balanceOf[msg.sender] -= amt;
+        balanceOf[to] += amt;
+        emit Transfer(msg.sender, to, amt);
+        return true;
+    }
+}

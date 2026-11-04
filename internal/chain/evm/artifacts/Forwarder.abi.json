@@ -1,13 +1,7 @@
 [
   {
     "type": "constructor",
-    "inputs": [
-      {
-        "name": "destination_",
-        "type": "address",
-        "internalType": "address payable"
-      }
-    ],
+    "inputs": [],
     "stateMutability": "nonpayable"
   },
   {
@@ -16,13 +10,13 @@
   },
   {
     "type": "function",
-    "name": "destination",
+    "name": "factory",
     "inputs": [],
     "outputs": [
       {
         "name": "",
         "type": "address",
-        "internalType": "address payable"
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -46,6 +40,11 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "error",
+    "name": "SweepFrozen",
+    "inputs": []
   },
   {
     "type": "error",
