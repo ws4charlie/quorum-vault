@@ -58,6 +58,11 @@ func (s *Server) opts() []cbmpc.Option {
 	return []cbmpc.Option{cbmpc.WithRecvTimeout(s.cfg.Limits.RecvTimeout()), cbmpc.WithMaxFrame(s.cfg.Limits.MaxFrameBytes)}
 }
 
+// keygenOpts is opts with the longer receive timeout of DKG and Refresh.
+func (s *Server) keygenOpts() []cbmpc.Option {
+	return []cbmpc.Option{cbmpc.WithRecvTimeout(s.cfg.Limits.KeygenRecvTimeout()), cbmpc.WithMaxFrame(s.cfg.Limits.MaxFrameBytes)}
+}
+
 func roleOf(r string) cbmpc.Role {
 	if r == "A" {
 		return cbmpc.P1
@@ -86,7 +91,7 @@ func (s *Server) execOp(ctx context.Context, open *pb.Open, tr cbmpc.Transport) 
 		if err != nil {
 			return nil, invalid("dkg", "%v", err)
 		}
-		ks, err := cbmpc.DKG(ctx, tr, role, alg, s.opts()...)
+		ks, err := cbmpc.DKG(ctx, tr, role, alg, s.keygenOpts()...)
 		if err != nil {
 			return nil, fromWrapper("dkg", err)
 		}
@@ -110,7 +115,7 @@ func (s *Server) execOp(ctx context.Context, open *pb.Open, tr cbmpc.Transport) 
 		if err != nil {
 			return nil, err
 		}
-		nk, err := old.Refresh(ctx, tr, s.opts()...)
+		nk, err := old.Refresh(ctx, tr, s.keygenOpts()...)
 		if err != nil {
 			return nil, fromWrapper("refresh", err)
 		}

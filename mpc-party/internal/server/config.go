@@ -69,14 +69,15 @@ const DevAllowAllRiskPhrase = "I UNDERSTAND THIS PARTY SIGNS ANYTHING WITHOUT PO
 
 // Limits. Zero values take the defaults.
 type Limits struct {
-	RecvTimeoutMS     int     `json:"recv_timeout_ms"`      // per protocol message from the peer; default 5000
-	SessionTimeoutMS  int     `json:"session_timeout_ms"`   // whole session; default 30000
-	MaxPeerSessions   int     `json:"max_peer_sessions"`    // concurrent sessions, each direction; default 2 x cores
-	MaxFrameBytes     int     `json:"max_frame_bytes"`      // largest protocol message; default 1 MiB
-	SessionsPerSecKey float64 `json:"sessions_per_sec_key"` // per key id or keyset id; default 200
-	MaxIntentBytes    int     `json:"max_intent_bytes"`     // intent_package; default 256 KiB
-	ShutdownGraceMS   int     `json:"shutdown_grace_ms"`    // default 10000
-	ReplayCacheSize   int     `json:"replay_cache_size"`    // remembered session ids; default 200000
+	RecvTimeoutMS       int     `json:"recv_timeout_ms"`        // per protocol message from the peer; default 5000
+	KeygenRecvTimeoutMS int     `json:"keygen_recv_timeout_ms"` // DKG and Refresh: a peer may spend seconds generating a Paillier key between messages
+	SessionTimeoutMS    int     `json:"session_timeout_ms"`     // whole session; default 30000
+	MaxPeerSessions     int     `json:"max_peer_sessions"`      // concurrent sessions, each direction; default 2 x cores
+	MaxFrameBytes       int     `json:"max_frame_bytes"`        // largest protocol message; default 1 MiB
+	SessionsPerSecKey   float64 `json:"sessions_per_sec_key"`   // per key id or keyset id; default 200
+	MaxIntentBytes      int     `json:"max_intent_bytes"`       // intent_package; default 256 KiB
+	ShutdownGraceMS     int     `json:"shutdown_grace_ms"`      // default 10000
+	ReplayCacheSize     int     `json:"replay_cache_size"`      // remembered session ids; default 200000
 }
 
 func (l *Limits) applyDefaults() {
@@ -109,6 +110,15 @@ func (l *Limits) applyDefaults() {
 func (l Limits) RecvTimeout() time.Duration { return time.Duration(l.RecvTimeoutMS) * time.Millisecond }
 func (l Limits) SessionTimeout() time.Duration {
 	return time.Duration(l.SessionTimeoutMS) * time.Millisecond
+}
+
+// KeygenRecvTimeout bounds each message wait in DKG and Refresh.
+func (l Limits) KeygenRecvTimeout() time.Duration {
+	d := time.Duration(l.KeygenRecvTimeoutMS) * time.Millisecond
+	if d <= 0 {
+		d = 60 * time.Second
+	}
+	return d
 }
 func (l Limits) ShutdownGrace() time.Duration {
 	return time.Duration(l.ShutdownGraceMS) * time.Millisecond
