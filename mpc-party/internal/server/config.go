@@ -42,9 +42,15 @@ type Config struct {
 }
 
 type SealerConfig struct {
-	// Type: "insecure-static-key-for-tests" is the only one until P5b-4 adds the HSM sealer.
-	Type    string `json:"type"`
-	KeyFile string `json:"key_file"` // hex, 32 bytes
+	// Type: "pkcs11" (production). "insecure-static-key-for-tests" exists only in binaries built with -tags devauth.
+	Type string `json:"type"`
+	// pkcs11: Token is the token label (A: qv-party-1, B: qv-party-2), Lib the module path (default: SoftHSM2). The PIN is
+	// never in this file: PinEnv names an environment variable, or PinFile a file readable only by its owner.
+	Token   string `json:"token"`
+	Lib     string `json:"lib"`
+	PinEnv  string `json:"pin_env"`
+	PinFile string `json:"pin_file"`
+	KeyFile string `json:"key_file"` // devauth sealer only: hex, 32 bytes
 }
 
 type AuthorizerConfig struct {
@@ -188,3 +194,7 @@ func (c *Config) Validate() error {
 	}
 	return errors.Join(errs...)
 }
+
+// InsecureSealerType is the config name of the insecure test sealer: it only exists in binaries built with -tags devauth,
+// and a production binary refuses it.
+const InsecureSealerType = "insecure-static-key-for-tests"

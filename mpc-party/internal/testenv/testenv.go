@@ -3,6 +3,8 @@
 package testenv
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -13,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -187,4 +190,41 @@ func (e *Env) Admin(op, keysetID string) *pb.AdminAuth {
 func (e *Env) CertCallerKey() ed25519.PrivateKey {
 	_, k, _ := ed25519.GenerateKey(rand.Reader)
 	return k
+}
+
+// StaticSealer is a test-only AES-256-GCM sealer with an in-memory key. It lives here, not in the server package, so that a
+// production build of the service contains no insecure sealer at all.
+type StaticSealer struct{ gcm cipher.AEAD }
+
+func NewStaticSealer(t testing.TB) *StaticSealer {
+	t.Helper()
+	k := make([]byte, 32)
+	rand.Read(k)
+	b, _ := aes.NewCipher(k)
+	g, _ := cipher.NewGCM(b)
+	return &StaticSealer{g}
+}
+
+func (s *StaticSealer) Seal(aad, pt []byte) ([]byte, error) {
+	n := make([]byte, s.gcm.NonceSize())
+	rand.Read(n)
+	return s.gcm.Seal(n, n, pt, aad), nil
+}
+
+func (s *StaticSealer) Open(aad, ct []byte) ([]byte, error) {
+	n := s.gcm.NonceSize()
+	if len(ct) < n+s.gcm.Overhead() {
+		return nil, errors.New("short")
+	}
+	return s.gcm.Open(nil, ct[:n], ct[n:], aad)
+}
+
+// Store builds a file store for one party with a fresh StaticSealer.
+func Store(t testing.TB, cfg *server.Config) *server.FileStore {
+	t.Helper()
+	fs, err := server.NewFileStore(cfg.DataDir, cfg.Role, NewStaticSealer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fs
 }

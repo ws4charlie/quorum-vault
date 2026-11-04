@@ -13,7 +13,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
@@ -44,12 +43,16 @@ type Server struct {
 		KeyStore
 		JobStore
 	}
-	fi     *FaultInjection
-	admin  *adminVerifier
-	freeze FreezeStore
-	cert   tls.Certificate
-	cache  *keyCache
-	stats  frameStats
+	fi         *FaultInjection
+	admin      *adminVerifier
+	freeze     FreezeStore
+	cert       tls.Certificate
+	cache      *keyCache
+	rtMu       sync.Mutex
+	rts        map[string]*ksRT
+	kick       chan struct{}
+	loopCancel context.CancelFunc
+	stats      frameStats
 
 	rl      *rateLimiter
 	slots   *slots // concurrent sessions: outgoing on A, incoming on B
@@ -118,7 +121,7 @@ func New(o Options) (*Server, error) {
 		return nil, err
 	}
 	return &Server{cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
-		cache: newKeyCache(), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
+		cache: newKeyCache(), rts: map[string]*ksRT{}, kick: make(chan struct{}, 1), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
 		replay: newReplayCache(c.Limits.ReplayCacheSize), inflight: map[string]*flight{}}, nil
 }
 
@@ -178,6 +181,9 @@ func (s *Server) Start() error {
 		s.peerConn = conn
 		s.peerClient = pb.NewPeerClient(conn)
 		conn.Connect()
+		lctx, lcancel := context.WithCancel(context.Background())
+		s.loopCancel = lcancel
+		go s.reconcileLoop(lctx)
 	} else {
 		pb.RegisterMpcPartyServer(s.callerSrv, healthOnly{s: s})
 		s.peerLn, err = net.Listen("tcp", c.PeerListen)
@@ -196,6 +202,9 @@ func (s *Server) Start() error {
 
 // Shutdown stops accepting, waits for running sessions until ctx ends, then stops hard and wipes all keysets.
 func (s *Server) Shutdown(ctx context.Context) {
+	if s.loopCancel != nil {
+		s.loopCancel()
+	}
 	s.stopMu.Lock()
 	if s.stopped {
 		s.stopMu.Unlock()
@@ -244,51 +253,4 @@ type healthOnly struct {
 
 func (h healthOnly) Health(ctx context.Context, r *pb.HealthRequest) (*pb.HealthResponse, error) {
 	return h.s.Health(ctx, r)
-}
-
-// keyCache keeps unsealed keysets (secrets in C memory) so a session does not unseal and parse on every call.
-type keyCache struct {
-	mu sync.Mutex
-	m  map[string]*cbmpc.Keyset
-}
-
-func newKeyCache() *keyCache { return &keyCache{m: map[string]*cbmpc.Keyset{}} }
-
-func (c *keyCache) get(ctx context.Context, st KeyStore, id string) (*cbmpc.Keyset, error) {
-	if !validID(id) {
-		return nil, invalid("keyset", "invalid keyset id")
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if ks, ok := c.m[id]; ok {
-		return ks, nil
-	}
-	ks, err := st.GetKeyset(ctx, id)
-	if errors.Is(err, ErrNotFound) {
-		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.NotFound, "keyset", "keyset %q not found", id)
-	}
-	if err != nil {
-		return nil, fromWrapper("keyset", err)
-	}
-	c.m[id] = ks
-	return ks, nil
-}
-
-func (c *keyCache) drop(id string) {
-	c.mu.Lock()
-	old := c.m[id]
-	delete(c.m, id)
-	c.mu.Unlock()
-	if old != nil {
-		go old.Wipe() // waits for sessions still using it
-	}
-}
-
-func (c *keyCache) wipeAll() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for id, ks := range c.m {
-		ks.Wipe()
-		delete(c.m, id)
-	}
 }

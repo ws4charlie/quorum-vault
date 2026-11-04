@@ -48,8 +48,10 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		return nil
 	}
 	sid := fr.GetSessionId()
-	reject := func(kind pb.ErrorKind, msg string) error {
-		b, _ := proto.Marshal(&pb.Fin{Ok: false, Kind: kind, Message: msg})
+	var rejectCode func(kind pb.ErrorKind, code uint32, msg string) error
+	reject := func(kind pb.ErrorKind, msg string) error { return rejectCode(kind, 0, msg) }
+	rejectCode = func(kind pb.ErrorKind, code uint32, msg string) error {
+		b, _ := proto.Marshal(&pb.Fin{Ok: false, Kind: kind, Code: code, Message: msg})
 		stream.Send(&pb.Frame{SessionId: sid, Kind: pb.FrameKind_FRAME_KIND_FIN, Payload: b})
 		s.log.Warn("session rejected", "role", "B", "session", sid, "kind", kind.String(), "reason", msg)
 		return nil
@@ -90,17 +92,29 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		if _, err := s.admin.check("dkg", open.KeysetId, open.Admin); err != nil {
 			return reject(pb.ErrorKind_ERROR_KIND_REFUSED, err.Error())
 		}
-		if _, err := s.store.GetKeyset(ctx, open.KeysetId); err == nil {
+		if st, err := s.store.State(ctx, open.KeysetId); err == nil && st.Current != 0 {
 			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "keyset already exists on B")
-		} else if !errors.Is(err, ErrNotFound) {
+		} else if err != nil && !errors.Is(err, ErrNotFound) {
 			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "keyset store error")
 		}
+	case pb.Op_OP_RECONCILE:
+		if !validID(open.KeysetId) {
+			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "invalid keyset id")
+		}
+		return s.reconcileB(ctx, stream, sid, &open, reject)
 	case pb.Op_OP_REFRESH, pb.Op_OP_NODE, pb.Op_OP_DERIVE, pb.Op_OP_SIGN, pb.Op_OP_UNFREEZE:
 		if !validID(open.KeysetId) {
 			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "invalid keyset id")
 		}
-		if _, err := s.cache.get(ctx, s.store, open.KeysetId); err != nil {
+		if _, _, err := s.keyset(ctx, open.KeysetId, 0); err != nil {
+			var f *Fail
+			if errors.As(err, &f) && f.Kind == pb.ErrorKind_ERROR_KIND_UNAVAILABLE {
+				return reject(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, f.Msg)
+			}
 			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "unknown keyset on B")
+		}
+		if open.Op != pb.Op_OP_UNFREEZE && !s.rt(open.KeysetId).isResolved() {
+			return rejectCode(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, CodeUnresolved, "keyset is not reconciled with the peer yet (after a restart or restore)")
 		}
 		frozen, why := s.freeze.Frozen(open.KeysetId)
 		switch open.Op {
@@ -179,6 +193,22 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		return nil
 	}
 
+	// Sessions that use the keyset hold the gate shared, so a generation switch never happens under them.
+	var rt *ksRT
+	if open.KeysetId != "" {
+		rt = s.rt(open.KeysetId)
+		switch open.Op {
+		case pb.Op_OP_DKG, pb.Op_OP_REFRESH:
+			if !rt.tryBusy() {
+				return failOut(limitFail(opName, "a %s of keyset %q is already running", opName, open.KeysetId))
+			}
+			defer rt.done()
+		default:
+			rt.gate.RLock()
+			defer rt.gate.RUnlock()
+		}
+	}
+
 	res, err := s.execOp(ctx, &open, tr)
 	if err != nil {
 		return failOut(fromWrapper(opName, err))
@@ -186,7 +216,17 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 	if res.cleanup != nil {
 		defer res.cleanup()
 	}
-	if err := tr.sendFin(&pb.Fin{Ok: true, Result: res.compare}); err != nil {
+	if res.cand != nil {
+		// Phase 1 on B: the candidate generation is durable BEFORE B says it is prepared.
+		if err := s.store.PutCandidate(ctx, res.cand.id, res.cand.gen, res.cand.ks); err != nil {
+			return failOut(failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, opName, "B cannot store the new generation: %v", err))
+		}
+		failpoint("b_after_candidate_stored")
+	}
+	if err := tr.sendFin(&pb.Fin{Ok: true, Result: res.compare, Prepared: res.cand != nil}); err != nil {
+		if res.cand != nil {
+			s.store.DropCandidate(context.Background(), res.cand.id)
+		}
 		return failOut(fromWrapper(opName, &transportErr{err}))
 	}
 	// A decides. Wait for its FIN within the receive timeout (A answers right after comparing).
@@ -194,22 +234,50 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 	afin, err := tr.waitFin(wctx)
 	c2()
 	if err != nil {
+		// A candidate stays on disk if A may have decided: reconciliation (A's decision is durable before it asks us to
+		// commit) settles it. Without a decision A drops its side and tells us to drop ours.
 		return failOut(fromWrapper(opName, &transportErr{err}))
 	}
 	if !afin.GetOk() {
+		if res.cand != nil {
+			s.store.DropCandidate(context.Background(), res.cand.id)
+		}
 		outcome = "peer-rejected"
 		ferr = peerFail(opName, afin)
 		s.maybeFreeze(&open, ferr)
 		return nil
 	}
 	if afin.GetCommit() {
-		if res.apply == nil {
+		if res.cand == nil {
 			return failOut(failf(pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, codes.Aborted, opName, "A asked to commit an operation that has nothing to commit"))
 		}
-		if err := res.apply(ctx); err != nil {
-			return failOut(failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, opName, "commit failed on B: %v", err))
+		failpoint("b_after_commit_received")
+		// Phase 2 on B: switch. B's own sessions on this keyset are none (only A starts them, and A holds its gate); Lock
+		// waits for any that is still finishing.
+		rt.setResolved(false) // until A confirmed that both are on the new generation
+		rt.gate.Lock()
+		perr := s.store.Promote(ctx, res.cand.id, res.cand.gen)
+		s.cache.drop(res.cand.id)
+		rt.gate.Unlock()
+		if perr != nil {
+			return failOut(failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, opName, "B cannot switch to the new generation: %v", perr))
 		}
-		tr.sendFin(&pb.Fin{Ok: true})
+		failpoint("b_after_promote")
+		if err := tr.sendFin(&pb.Fin{Ok: true, Switched: true}); err != nil {
+			return failOut(fromWrapper(opName, &transportErr{err}))
+		}
+		cctx, c3 := context.WithTimeout(ctx, s.cfg.Limits.RecvTimeout())
+		cfin, err := tr.waitFin(cctx)
+		c3()
+		if err != nil || !cfin.GetOk() || !cfin.GetConfirm() {
+			// A's confirmation is missing: stay unresolved; A's reconciliation confirms (or finishes) it.
+			outcome = "switched-unconfirmed"
+			return nil
+		}
+		failpoint("b_after_confirm_recv")
+		s.store.DeleteGenerationsBelow(ctx, res.cand.id, res.cand.gen)
+		rt.setResolved(true)
+		s.log.Warn("keyset moved to a new generation: existing backups are STALE, export new backups", "role", "B", "keyset_id", res.cand.id, "generation", res.cand.gen)
 	}
 	return nil
 }

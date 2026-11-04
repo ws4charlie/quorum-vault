@@ -48,9 +48,9 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 	if _, e := algForCurve(r.Curve); e != nil {
 		return nil, invalid("dkg", "%v", e)
 	}
-	if _, e := s.store.GetKeyset(ctx, r.KeysetId); e == nil {
+	if st, e := s.store.State(ctx, r.KeysetId); e == nil && st.Current != 0 {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.AlreadyExists, "dkg", "keyset %q already exists", r.KeysetId)
-	} else if !errors.Is(e, ErrNotFound) {
+	} else if e != nil && !errors.Is(e, ErrNotFound) {
 		return nil, fromWrapper("dkg", e)
 	}
 	if _, e := s.admin.check("dkg", r.KeysetId, r.Admin); e != nil {
@@ -66,7 +66,7 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 func (s *Server) Refresh(ctx context.Context, r *pb.RefreshRequest) (_ *pb.RefreshResponse, err error) {
 	start := time.Now()
 	defer func() { s.logOp("refresh", start, err, "keyset_id", r.GetKeysetId()); err = toStatus("refresh", err) }()
-	if _, e := s.cache.get(ctx, s.store, r.KeysetId); e != nil {
+	if _, _, e := s.keyset(ctx, r.KeysetId, 0); e != nil {
 		return nil, e
 	}
 	if frozen, why := s.freeze.Frozen(r.KeysetId); frozen {
@@ -88,7 +88,7 @@ func (s *Server) Node(ctx context.Context, r *pb.NodeRequest) (_ *pb.NodeRespons
 	if f := checkPath("node", r.HardenedPath, nil, true); f != nil {
 		return nil, f
 	}
-	ks, err := s.cache.get(ctx, s.store, r.KeysetId)
+	ks, _, err := s.keyset(ctx, r.KeysetId, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func (s *Server) Derive(ctx context.Context, r *pb.DeriveRequest) (_ *pb.DeriveR
 	if f := checkPath("derive", r.HardenedPath, r.Path, true); f != nil {
 		return nil, f
 	}
-	ks, err := s.cache.get(ctx, s.store, r.KeysetId)
+	ks, _, err := s.keyset(ctx, r.KeysetId, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -140,9 +140,21 @@ func (s *Server) Derive(ctx context.Context, r *pb.DeriveRequest) (_ *pb.DeriveR
 	return &pb.DeriveResponse{KeyId: keyID, PublicKey: res.public}, nil
 }
 
-func (s *Server) Health(_ context.Context, _ *pb.HealthRequest) (*pb.HealthResponse, error) {
-	return &pb.HealthResponse{Role: s.cfg.Role, PeerReachable: s.peerReachable(), ActiveSessions: int32(s.slots.active()),
-		Version: Version, CbmpcCommit: cbmpc.PinnedCommit}, nil
+func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthResponse, error) {
+	h := &pb.HealthResponse{Role: s.cfg.Role, PeerReachable: s.peerReachable(), ActiveSessions: int32(s.slots.active()),
+		Version: Version, CbmpcCommit: cbmpc.PinnedCommit}
+	ids, _ := s.store.List(ctx)
+	for _, id := range ids {
+		st, err := s.store.State(ctx, id)
+		if err != nil {
+			continue
+		}
+		bk := ReadBackup(s.cfg.DataDir, id)
+		frozen, _ := s.freeze.Frozen(id)
+		h.Keysets = append(h.Keysets, &pb.KeysetStatus{KeysetId: id, Generation: st.Current, Resolved: s.rt(id).isResolved(),
+			BackupGeneration: bk.Generation, BackupStale: st.Current != 0 && bk.Generation < st.Current, Frozen: frozen})
+	}
+	return h, nil
 }
 
 func (s *Server) Sign(ctx context.Context, r *pb.SignRequest) (resp *pb.SignResponse, err error) {

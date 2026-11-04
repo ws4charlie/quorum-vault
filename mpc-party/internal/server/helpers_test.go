@@ -58,7 +58,7 @@ func startPair(t *testing.T, o pairOpts) *pair {
 	if o.tweak != nil {
 		o.tweak("B", cb)
 	}
-	b, err := server.New(server.Options{Config: cb, Authorizer: o.authB, Logger: quiet(), FaultInjection: o.fiB})
+	b, err := server.New(server.Options{Config: cb, Authorizer: o.authB, Logger: quiet(), FaultInjection: o.fiB, Store: testenv.Store(t, cb)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func startPair(t *testing.T, o pairOpts) *pair {
 	if o.tweak != nil {
 		o.tweak("A", ca)
 	}
-	a, err := server.New(server.Options{Config: ca, Authorizer: o.authA, Logger: quiet(), FaultInjection: o.fiA})
+	a, err := server.New(server.Options{Config: ca, Authorizer: o.authA, Logger: quiet(), FaultInjection: o.fiA, Store: testenv.Store(t, ca)})
 	if err != nil {
 		t.Fatal(err)
 	}

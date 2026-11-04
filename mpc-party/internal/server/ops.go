@@ -27,11 +27,11 @@ type FaultInjection struct {
 
 // opResult is what one party's side of an operation produced.
 type opResult struct {
-	public    []byte                          // what the caller gets (root key, node, derived key); signature for sign
-	compare   []byte                          // what both parties must agree on
-	signature []byte                          // sign, party A only
-	apply     func(ctx context.Context) error // commit (DKG, Refresh); nil for other ops
-	cleanup   func()                          // always called
+	public    []byte     // what the caller gets (root key, node, derived key); signature for sign
+	compare   []byte     // what both parties must agree on
+	signature []byte     // sign, party A only
+	cand      *candidate // DKG, Refresh: the new generation, waiting for the two-phase commit
+	cleanup   func()     // always called
 }
 
 func algForCurve(c pb.Curve) (cbmpc.Alg, error) {
@@ -101,19 +101,12 @@ func (s *Server) execOp(ctx context.Context, open *pb.Open, tr cbmpc.Transport) 
 			ks.Wipe()
 			return nil, fromWrapper("dkg.selftest", err)
 		}
-		id := open.KeysetId
+		failpoint("after_selftest")
 		return &opResult{public: root, compare: append(append([]byte{}, root...), st...),
-			apply: func(ctx context.Context) error {
-				if err := s.store.PutKeyset(ctx, id, ks, false); err != nil {
-					return err
-				}
-				s.cache.drop(id)
-				return nil
-			},
-			cleanup: ks.Wipe}, nil
+			cand: &candidate{id: open.KeysetId, gen: 1, ks: ks}, cleanup: ks.Wipe}, nil
 
 	case pb.Op_OP_REFRESH:
-		old, err := s.cache.get(ctx, s.store, open.KeysetId)
+		old, gen, err := s.keyset(ctx, open.KeysetId, open.Generation)
 		if err != nil {
 			return nil, err
 		}
@@ -132,19 +125,12 @@ func (s *Server) execOp(ctx context.Context, open *pb.Open, tr cbmpc.Transport) 
 			nk.Wipe() // the old shares stay in force
 			return nil, fromWrapper("refresh.selftest", err)
 		}
-		id := open.KeysetId
+		failpoint("after_selftest")
 		return &opResult{public: root, compare: append(append([]byte{}, root...), st...),
-			apply: func(ctx context.Context) error {
-				if err := s.store.PutKeyset(ctx, id, nk, true); err != nil {
-					return err
-				}
-				s.cache.drop(id)
-				return nil
-			},
-			cleanup: nk.Wipe}, nil
+			cand: &candidate{id: open.KeysetId, gen: gen + 1, ks: nk}, cleanup: nk.Wipe}, nil
 
 	case pb.Op_OP_NODE:
-		ks, err := s.cache.get(ctx, s.store, open.KeysetId)
+		ks, _, err := s.keyset(ctx, open.KeysetId, open.Generation)
 		if err != nil {
 			return nil, err
 		}
@@ -156,7 +142,7 @@ func (s *Server) execOp(ctx context.Context, open *pb.Open, tr cbmpc.Transport) 
 		return &opResult{public: res, compare: res}, nil
 
 	case pb.Op_OP_DERIVE:
-		ks, err := s.cache.get(ctx, s.store, open.KeysetId)
+		ks, _, err := s.keyset(ctx, open.KeysetId, open.Generation)
 		if err != nil {
 			return nil, err
 		}
@@ -172,7 +158,7 @@ func (s *Server) execOp(ctx context.Context, open *pb.Open, tr cbmpc.Transport) 
 		return &opResult{public: pub, compare: pub}, nil
 
 	case pb.Op_OP_SIGN:
-		ks, err := s.cache.get(ctx, s.store, open.KeysetId)
+		ks, _, err := s.keyset(ctx, open.KeysetId, open.Generation)
 		if err != nil {
 			return nil, err
 		}

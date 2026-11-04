@@ -37,18 +37,39 @@ type KeyMeta struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// KeyStore persists keysets (secret) and key metadata (public). Implementations must write atomically.
+// KeysetState is the durable state of one keyset on one party. Generations only grow. During a refresh there is one
+// candidate beside the current generation; the old generation's file stays until both parties confirmed the new one.
+type KeysetState struct {
+	Alg       cbmpc.Alg `json:"alg"`
+	Current   uint64    `json:"current"`   // 0 while a DKG is still a candidate
+	Candidate uint64    `json:"candidate"` // 0 = none
+	Decision  uint64    `json:"decision"`  // party A only: the generation whose commit A decided (durable before B is told)
+}
+
+// KeyStore persists keysets (secret, sealed) and key metadata (public). Implementations must write atomically.
 type KeyStore interface {
-	// PutKeyset stores the keyset under id, replacing a previous one only if replace is true (else ErrExists).
-	PutKeyset(ctx context.Context, id string, ks *cbmpc.Keyset, replace bool) error
+	// PutCandidate durably stores ks as candidate generation gen (the current generation is untouched).
+	PutCandidate(ctx context.Context, id string, gen uint64, ks *cbmpc.Keyset) error
 	// GetKeyset returns a keyset the caller must Wipe.
-	GetKeyset(ctx context.Context, id string) (*cbmpc.Keyset, error)
+	GetKeyset(ctx context.Context, id string, gen uint64) (*cbmpc.Keyset, error)
+	// State returns ErrNotFound if the keyset has no state at all.
+	State(ctx context.Context, id string) (KeysetState, error)
+	RecordDecision(ctx context.Context, id string, gen uint64) error
+	// Promote makes the candidate gen current. The previous generation's file is kept.
+	Promote(ctx context.Context, id string, gen uint64) error
+	// DropCandidate deletes the candidate and clears the decision.
+	DropCandidate(ctx context.Context, id string) error
+	// DeleteGenerationsBelow deletes sealed files of generations older than gen.
+	DeleteGenerationsBelow(ctx context.Context, id string, gen uint64) error
+	// RemoveKeyset deletes everything of a keyset (an aborted DKG).
+	RemoveKeyset(ctx context.Context, id string) error
+	List(ctx context.Context) ([]string, error)
 	PutKey(ctx context.Context, m KeyMeta) error
 	GetKey(ctx context.Context, keyID string) (KeyMeta, error)
 }
 
-// FileStore keeps one sealed file per keyset under dir/keysets and one JSON file per key under dir/keys. Files are 0600,
-// directories 0700, writes are atomic (temp file in the same directory, fsync, rename, fsync of the directory).
+// FileStore keeps, per keyset, dir/keysets/<id>/state.json (public) and one sealed file per generation g<N>.json. Files are
+// 0600, directories 0700, writes are atomic (temp file in the same directory, fsync, rename, fsync of the directory).
 type FileStore struct {
 	dir    string
 	role   string
@@ -57,7 +78,7 @@ type FileStore struct {
 }
 
 func NewFileStore(dir, role string, sealer Sealer) (*FileStore, error) {
-	for _, d := range []string{dir, filepath.Join(dir, "keysets"), filepath.Join(dir, "keys"), filepath.Join(dir, "jobs")} {
+	for _, d := range []string{dir, filepath.Join(dir, "keysets"), filepath.Join(dir, "keys"), filepath.Join(dir, "jobs"), filepath.Join(dir, "backups")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
@@ -72,14 +93,46 @@ type keysetFile struct {
 	V      int       `json:"v"`
 	Alg    cbmpc.Alg `json:"alg"`
 	Role   string    `json:"role"`
+	Gen    uint64    `json:"gen"`
 	Sealed []byte    `json:"sealed"`
 }
 
-func aadKeyset(role, id string, alg cbmpc.Alg) []byte {
-	return []byte(fmt.Sprintf("qv-mpc-party|keyset|v1|%s|%s|%s", role, id, alg))
+// AAD binds role, keyset id, generation and algorithm: a sealed blob moved to another party, keyset or generation does not open.
+func aadKeyset(role, id string, gen uint64, alg cbmpc.Alg) []byte {
+	return []byte(fmt.Sprintf("qv-mpc-party|keyset|v2|%s|%s|%d|%s", role, id, gen, alg))
 }
 
-func (s *FileStore) PutKeyset(_ context.Context, id string, ks *cbmpc.Keyset, replace bool) error {
+func (s *FileStore) kdir(id string) string { return filepath.Join(s.dir, "keysets", id) }
+
+func (s *FileStore) readState(id string) (KeysetState, error) {
+	var st KeysetState
+	raw, err := os.ReadFile(filepath.Join(s.kdir(id), "state.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return st, ErrNotFound
+	} else if err != nil {
+		return st, err
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return st, fmt.Errorf("keyset %s: bad state file", id)
+	}
+	return st, nil
+}
+
+func (s *FileStore) writeState(id string, st KeysetState) error {
+	raw, _ := json.Marshal(st)
+	return writeAtomic(filepath.Join(s.kdir(id), "state.json"), raw)
+}
+
+func (s *FileStore) State(_ context.Context, id string) (KeysetState, error) {
+	if !validID(id) {
+		return KeysetState{}, ErrNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readState(id)
+}
+
+func (s *FileStore) PutCandidate(_ context.Context, id string, gen uint64, ks *cbmpc.Keyset) error {
 	if !validID(id) {
 		return fmt.Errorf("invalid keyset id %q", id)
 	}
@@ -88,43 +141,153 @@ func (s *FileStore) PutKeyset(_ context.Context, id string, ks *cbmpc.Keyset, re
 		return err
 	}
 	defer cbmpc.WipeBytes(blob)
-	sealed, err := s.sealer.Seal(aadKeyset(s.role, id, ks.Alg()), blob)
+	sealed, err := s.sealer.Seal(aadKeyset(s.role, id, gen, ks.Alg()), blob)
 	if err != nil {
 		return err
 	}
-	raw, _ := json.Marshal(keysetFile{V: 1, Alg: ks.Alg(), Role: s.role, Sealed: sealed})
+	raw, _ := json.Marshal(keysetFile{V: 2, Alg: ks.Alg(), Role: s.role, Gen: gen, Sealed: sealed})
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	path := filepath.Join(s.dir, "keysets", id+".json")
-	if _, err := os.Stat(path); err == nil && !replace {
-		return ErrExists
+	if err := os.MkdirAll(s.kdir(id), 0o700); err != nil {
+		return err
 	}
-	return writeAtomic(path, raw)
+	st, err := s.readState(id)
+	if errors.Is(err, ErrNotFound) {
+		st = KeysetState{Alg: ks.Alg()}
+	} else if err != nil {
+		return err
+	}
+	if gen <= st.Current || (st.Candidate != 0 && st.Candidate != gen) {
+		return fmt.Errorf("keyset %s: cannot store candidate generation %d (current %d, candidate %d)", id, gen, st.Current, st.Candidate)
+	}
+	if err := writeAtomic(filepath.Join(s.kdir(id), fmt.Sprintf("g%d.json", gen)), raw); err != nil {
+		return err
+	}
+	st.Candidate = gen
+	return s.writeState(id, st) // the candidate exists only once this write is durable
 }
 
-func (s *FileStore) GetKeyset(_ context.Context, id string) (*cbmpc.Keyset, error) {
+func (s *FileStore) GetKeyset(_ context.Context, id string, gen uint64) (*cbmpc.Keyset, error) {
 	if !validID(id) {
 		return nil, fmt.Errorf("invalid keyset id %q", id)
 	}
-	raw, err := os.ReadFile(filepath.Join(s.dir, "keysets", id+".json"))
+	raw, err := os.ReadFile(filepath.Join(s.kdir(id), fmt.Sprintf("g%d.json", gen)))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound
 	} else if err != nil {
 		return nil, err
 	}
 	var f keysetFile
-	if err := json.Unmarshal(raw, &f); err != nil || f.V != 1 || f.Role != s.role {
-		return nil, fmt.Errorf("keyset %s: bad file", id)
+	if err := json.Unmarshal(raw, &f); err != nil || f.V != 2 || f.Role != s.role || f.Gen != gen {
+		return nil, fmt.Errorf("keyset %s generation %d: bad file", id, gen)
 	}
-	blob, err := s.sealer.Open(aadKeyset(s.role, id, f.Alg), f.Sealed)
+	blob, err := s.sealer.Open(aadKeyset(s.role, id, gen, f.Alg), f.Sealed)
 	if err != nil {
-		return nil, fmt.Errorf("keyset %s: cannot unseal: %w", id, err)
+		return nil, fmt.Errorf("keyset %s generation %d: cannot unseal: %w", id, gen, err)
 	}
 	role := cbmpc.P1
 	if s.role == "B" {
 		role = cbmpc.P2
 	}
 	return cbmpc.LoadKeyset(f.Alg, role, blob) // wipes blob
+}
+
+func (s *FileStore) RecordDecision(_ context.Context, id string, gen uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.readState(id)
+	if err != nil {
+		return err
+	}
+	if st.Candidate != gen {
+		return fmt.Errorf("keyset %s: cannot decide generation %d (candidate %d)", id, gen, st.Candidate)
+	}
+	st.Decision = gen
+	return s.writeState(id, st)
+}
+
+func (s *FileStore) Promote(_ context.Context, id string, gen uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.readState(id)
+	if err != nil {
+		return err
+	}
+	if st.Current == gen && st.Candidate == 0 {
+		return nil // already done (idempotent)
+	}
+	if st.Candidate != gen {
+		return fmt.Errorf("keyset %s: cannot promote generation %d (candidate %d)", id, gen, st.Candidate)
+	}
+	if _, err := os.Stat(filepath.Join(s.kdir(id), fmt.Sprintf("g%d.json", gen))); err != nil {
+		return fmt.Errorf("keyset %s: candidate file missing: %w", id, err)
+	}
+	st.Current, st.Candidate, st.Decision = gen, 0, 0
+	return s.writeState(id, st)
+}
+
+func (s *FileStore) DropCandidate(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.readState(id)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if st.Candidate == 0 {
+		st.Decision = 0
+		return s.writeState(id, st)
+	}
+	g := st.Candidate
+	if st.Current == 0 { // an unfinished DKG: nothing of the keyset remains
+		return os.RemoveAll(s.kdir(id))
+	}
+	st.Candidate, st.Decision = 0, 0
+	if err := s.writeState(id, st); err != nil { // forget it first; the file is garbage once the state no longer names it
+		return err
+	}
+	os.Remove(filepath.Join(s.kdir(id), fmt.Sprintf("g%d.json", g)))
+	return nil
+}
+
+func (s *FileStore) DeleteGenerationsBelow(_ context.Context, id string, gen uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ents, err := os.ReadDir(s.kdir(id))
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		var g uint64
+		if n, _ := fmt.Sscanf(e.Name(), "g%d.json", &g); n == 1 && g < gen {
+			os.Remove(filepath.Join(s.kdir(id), e.Name()))
+		}
+	}
+	return nil
+}
+
+func (s *FileStore) RemoveKeyset(_ context.Context, id string) error {
+	if !validID(id) {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return os.RemoveAll(s.kdir(id))
+}
+
+func (s *FileStore) List(_ context.Context) ([]string, error) {
+	ents, err := os.ReadDir(filepath.Join(s.dir, "keysets"))
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range ents {
+		if e.IsDir() && validID(e.Name()) {
+			out = append(out, e.Name())
+		}
+	}
+	return out, nil
 }
 
 func (s *FileStore) PutKey(_ context.Context, m KeyMeta) error {
