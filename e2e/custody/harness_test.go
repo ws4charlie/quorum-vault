@@ -863,3 +863,10 @@ func randAddr() common.Address {
 	k, _ := crypto.GenerateKey()
 	return crypto.PubkeyToAddress(k.PublicKey)
 }
+
+func common20(hex string) common.Address { return common.HexToAddress(hex) }
+
+func fileContains(path, sub string) bool {
+	b, err := os.ReadFile(path)
+	return err == nil && strings.Contains(string(b), sub)
+}
