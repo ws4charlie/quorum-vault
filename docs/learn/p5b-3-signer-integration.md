@@ -64,15 +64,30 @@ file on each party: it survives restart.
 
 | Service error | Gateway |
 |---|---|
-| `TRANSPORT`, `LIMIT` | retried inside `sign_timeout` with the same job id (safe: the first stored signature is returned), then the job fails |
-| `REFUSED` (A's or B's authorizer) | job `rejected` with the reason, so the workflow cancels the nonce |
+| `TRANSPORT`, `LIMIT`, `UNAVAILABLE` (cosigner socket down or slow, its database down, party B down) | **never finishes the job**: bounded retry inside `sign_timeout`, then `OutcomeRetry`; the job stays `signing` and is reclaimed when its lease ends, for as long as the outage lasts |
+| `REFUSED` (A's or B's authorizer decided no) | job `rejected` with the reason, so the workflow cancels the nonce |
 | `CRYPTOGRAPHIC`, `FROZEN`, `INTERNAL` | job `failed` and an `ALERT` log line |
+
+Why availability must not finish the job: a rejected or failed job sends the withdrawal to the cancel path, which needs the same
+cosigner and party B. During an outage the cancel fails too and the withdrawal is parked for an operator. A two-minute restart
+would park everything in flight. Fail closed is unchanged (nothing is signed); only the outcome differs.
+
+The cosigner's answer keeps *decision* and *outage* in separate fields (`allow`/`reason` versus `unavailable`), so nobody
+matches on text: a guard-database failure or a deadline is `unavailable`; a policy refusal is not.
+
+**How long can a job wait?** The workflow polls `sign_jobs` while the status is pending or signing, so it waits as long as the
+gateway keeps the job in `signing`. The approval's `not_after` is checked only the first time a party sees an intent (the
+gateway, and the cosigner): if the cosigner first sees the intent after `not_after` it refuses `intent_expired`, which is a real
+refusal and goes through the normal cancel path. A job whose intent the cosigner already reserved keeps its reservation and is
+re-signed after `sign_timeout` without a new expiry check. Nothing is voided or cancelled without going through the cancel path.
+
+One `ALERT signer unavailable` is logged per chain per outage, and `signer available again: signing resumed` when it ends.
 
 ## Threats this does not cover
 
 - A fully compromised A plus a compromised cosigner host.
 - Denial of service: a malicious A can freeze a keyset or exhaust B's decision rate.
-- Cosigner outage looks like a refusal (the job is rejected, not retried): operations must monitor the socket.
+- A long cosigner outage leaves jobs waiting: monitor the ALERT line and the cosigner socket.
 
 ## Gotchas hit
 
@@ -88,12 +103,12 @@ file on each party: it survives restart.
 1. Why does the cosigner have its own database instead of reading the gateway's?
 2. Why can the `Decider` allow a repeat of a reserved digest in cosigner mode but not in gateway mode?
 3. What did the P5b-2 review find about the expected public key, and how is it closed?
-4. Which gRPC error kinds make the gateway reject a job, and which fail it?
+4. Which service error kinds make the gateway reject a job, which fail it, and which only make it wait?
 5. A rogue A replays an approved intent at nonce+1. Who stops it?
 6. Why is the cosigner a separate binary and not a library inside `mpc-party`?
 7. What happens to a keyset when party B sees a cryptographic failure, and how does A learn?
 8. What does an operator need to unfreeze, and who checks it?
-9. How is "cosigner down" handled and why that way?
+9. How is "cosigner down" handled and why not as a refusal?
 10. Why does the root module import `mpc-party/api` and not `mpc-party/internal/...`?
 
 <details>
@@ -102,12 +117,12 @@ file on each party: it survives restart.
 1. If an attacker can rewrite the gateway's database they could erase what was signed or reset caps; the cosigner's counts must not depend on it.
 2. In gateway mode a fresh unsigned reservation means another worker is signing it; in cosigner mode nobody stores a signature, so the same digest again is a retry of the same signing, while a different digest follows the replay rules.
 3. B checked the expected key only if present; B now refuses an empty one and aborts if its derived key differs, so the judged key is the signing key.
-4. `REFUSED` rejects (nonce cancelled). `CRYPTOGRAPHIC`, `FROZEN`, `INTERNAL` fail with an ALERT; `TRANSPORT`/`LIMIT` are retried and then fail.
+4. `REFUSED` rejects (nonce cancelled). `CRYPTOGRAPHIC`, `FROZEN`, `INTERNAL` fail with an ALERT. `TRANSPORT`, `LIMIT`, `UNAVAILABLE` only make the job wait and be retried.
 5. B's cosigner, from its own guard: the intent was signed at nonce 0, so nonce+1 is `replay_nonce_changed`.
 6. It needs go-ethereum's chain verifier, which cannot link with cb-mpc's secp256k1.
 7. It freezes the keyset durably and sends a failing FIN with the kind; A freezes its side on receiving it.
 8. An Ed25519 signature by a configured admin key over (unfreeze, keyset, timestamp); both parties check it against their own admin keys.
-9. B's authorizer fails closed: the Sign is refused with kind `REFUSED`, and signing resumes when the cosigner returns.
+9. B does not sign (fail closed) and reports `UNAVAILABLE`; the gateway leaves the job waiting. A refusal would reject the job and the cancel would fail for the same reason, parking the withdrawal.
 10. Go's `internal` rule: only code under `mpc-party/` may import it, and it must stay free of go-ethereum/cgo concerns in the other direction.
 
 </details>

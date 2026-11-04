@@ -34,6 +34,16 @@ func NewCosignerAuthorizer(socket string, timeout time.Duration) Authorizer {
 	return &cosignerAuthorizer{client: &http.Client{Transport: tr}, timeout: timeout}
 }
 
+// UnavailableError: the authorizer could not decide (cosigner socket down, timeout, non-200, bad body, or the cosigner
+// itself reports an operational failure). B does not sign, but the caller must treat it as an outage, not a refusal.
+type UnavailableError struct{ Msg string }
+
+func (e *UnavailableError) Error() string { return e.Msg }
+
+func unavailable(format string, a ...any) error {
+	return &UnavailableError{Msg: fmt.Sprintf(format, a...)}
+}
+
 func (c *cosignerAuthorizer) Authorize(ctx context.Context, r AuthRequest) error {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -46,18 +56,21 @@ func (c *cosignerAuthorizer) Authorize(ctx context.Context, r AuthRequest) error
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("cosigner unreachable (refusing): %w", err)
+		return unavailable("cosigner unreachable (refusing, will not sign): %v", err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
-		return fmt.Errorf("cosigner response (refusing): %w", err)
+		return unavailable("cosigner response unreadable (refusing): %v", err)
 	}
 	var out wire.Response
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if resp.StatusCode != http.StatusOK || dec.Decode(&out) != nil {
-		return fmt.Errorf("cosigner answered %d with an unusable body (refusing)", resp.StatusCode)
+		return unavailable("cosigner answered %d with an unusable body (refusing)", resp.StatusCode)
+	}
+	if !out.Allow && out.Unavailable {
+		return unavailable("cosigner could not decide (refusing): %s", out.Reason)
 	}
 	if !out.Allow {
 		if out.Reason == "" {

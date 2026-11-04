@@ -187,6 +187,10 @@ func (s *Server) Sign(ctx context.Context, r *pb.SignRequest) (resp *pb.SignResp
 	// Party A's own check, before anything else happens (B repeats it on its side).
 	if e := s.authz.Authorize(ctx, AuthRequest{Role: "A", JobID: r.JobId, KeyID: r.KeyId, KeysetID: meta.KeysetID,
 		Algorithm: r.Algorithm, Digest: r.Digest, IntentPackage: r.IntentPackage, PublicKey: pub}); e != nil {
+		var ue *UnavailableError
+		if errors.As(e, &ue) {
+			return nil, failf(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, codes.Unavailable, "sign", "authorizer on A unavailable: %v", e)
+		}
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "sign", "refused by the authorizer on A: %v", e)
 	}
 

@@ -14,10 +14,14 @@ type Request struct {
 	PublicKey     []byte `json:"public_key"` // compressed point of the key that will sign
 }
 
-// Response is the decision. Anything but a well-formed Allow=true is a refusal.
+// Response is the answer. Allow=true allows. Allow=false with Unavailable=false is a DECISION: a policy refusal (Reason has
+// the code and detail). Unavailable=true means the cosigner could not decide (its guard database failed, a deadline
+// passed): nothing is allowed, but it is an outage, not a refusal. The two are separate fields on purpose: nobody
+// matches on reason strings. A transport failure, a non-200 answer or a malformed body count as unavailable too.
 type Response struct {
-	Allow  bool   `json:"allow"`
-	Reason string `json:"reason"`
+	Allow       bool   `json:"allow"`
+	Unavailable bool   `json:"unavailable,omitempty"`
+	Reason      string `json:"reason"`
 }
 
 // Path of the only endpoint.

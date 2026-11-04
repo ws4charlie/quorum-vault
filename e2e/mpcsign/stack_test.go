@@ -210,6 +210,7 @@ type stack struct {
 	sock                    string
 
 	proxy          *tamperProxy
+	cosignerTweak  func(gateway.File) gateway.File
 	a, b, cosigner *proc
 	cfgA, cfgB     string
 	cosignerArgs   []string
@@ -368,7 +369,13 @@ func (s *stack) provision(t *testing.T, noCosigner bool) {
 	_, s.gwGuardDSN = gatewaytest.NewGuardDB(t)
 	_, s.csGuardDSN = gatewaytest.NewGuardDB(t)
 
-	s.cosignerCfg = s.h.WriteConfig(filepath.Join(s.dir, "cosigner.json"))
+	s.cosignerCfg = filepath.Join(s.dir, "cosigner.json")
+	cf := s.h.File
+	if s.cosignerTweak != nil { // the cosigner has its own config: tests make it stricter than the gateway's
+		cf = s.cosignerTweak(cf)
+	}
+	raw, _ := json.MarshalIndent(cf, "", " ")
+	os.WriteFile(s.cosignerCfg, raw, 0o600)
 	if !noCosigner {
 		s.startCosigner(t)
 	}
@@ -392,7 +399,7 @@ func (s *stack) gatewayConfig() string {
 	f := s.h.File
 	f.Signers = map[string]gateway.SignerFile{gatewaytest.Partition: {Backend: "mpc", KeyID: s.keyID, PublicKey: hex.EncodeToString(s.pub65),
 		MPC: &gateway.MPCSignerFile{Address: s.callerA, CertFile: filepath.Join(s.dir, "gateway.crt"), KeyFile: filepath.Join(s.dir, "gateway.key"), ServerPin: s.certA.pin}}}
-	f.SignTimeout = "20s"
+	f.SignTimeout = "4s" // short on purpose: outage tests wait past it
 	s.certGW.write(s.t, s.dir)
 	raw, _ := json.MarshalIndent(f, "", " ")
 	p := filepath.Join(s.dir, "gateway.json")
@@ -402,7 +409,7 @@ func (s *stack) gatewayConfig() string {
 
 func (s *stack) startGateway(id string) *proc {
 	return startProc(s.t, "gateway-"+id, binGateway, nil, "-config", s.gatewayConfig(), "-jobs-dsn", s.bizDSN, "-guard-dsn", s.gwGuardDSN,
-		"-worker-id", id, "-interval", "100ms")
+		"-worker-id", id, "-interval", "100ms", "-lease", "3s")
 }
 
 func (s *stack) enqueue(j signjob.Job) {
@@ -547,4 +554,35 @@ func startProxy(t *testing.T, s *stack) (*tamperProxy, string) {
 	go srv.Serve(ln)
 	t.Cleanup(srv.Stop)
 	return p, ln.Addr().String()
+}
+
+func (s *stack) restartB(t *testing.T) {
+	s.b = startProc(t, "B", binMPC, nil, "-config", s.cfgB)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		h, err := s.client.Health(c, &pb.HealthRequest{})
+		cancel()
+		if err == nil && h.PeerReachable {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("B did not come back")
+}
+
+func (s *stack) countLog(b *syncBuf, parts ...string) int {
+	n := 0
+	for _, l := range strings.Split(b.String(), "\n") {
+		ok := true
+		for _, p := range parts {
+			if !strings.Contains(l, p) {
+				ok = false
+			}
+		}
+		if ok {
+			n++
+		}
+	}
+	return n
 }

@@ -139,6 +139,10 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		// be enough to make B sign anything.
 		if err := s.authz.Authorize(ctx, AuthRequest{Role: "B", JobID: open.JobId, KeyID: open.KeyId, KeysetID: open.KeysetId,
 			Algorithm: open.Algorithm, Digest: open.Digest, IntentPackage: open.IntentPackage, PublicKey: open.ExpectedPublicKey}); err != nil {
+			var ue *UnavailableError
+			if errors.As(err, &ue) {
+				return reject(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, "authorizer on B unavailable: "+err.Error())
+			}
 			return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "authorizer on B refused: "+err.Error())
 		}
 	}

@@ -117,6 +117,7 @@ enum ErrorKind {
   ERROR_KIND_INTERNAL = 3;      // bad request, local fault, unsupported: alert
   ERROR_KIND_REFUSED = 4;       // an Authorizer (local or the peer's) refused the request; nothing ran
   ERROR_KIND_LIMIT = 5;         // a configured limit was exceeded; nothing ran
+  ERROR_KIND_UNAVAILABLE = 7;   // a dependency of this party is down (B's cosigner, its guard database): NOTHING was signed, fail closed, but this is an outage, not a refusal: retry later
   ERROR_KIND_FROZEN = 6;        // the keyset is frozen after a cryptographic failure; nothing ran; unfreezing needs an admin signature
 }
 

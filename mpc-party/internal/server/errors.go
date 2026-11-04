@@ -94,6 +94,8 @@ func severity(k pb.ErrorKind) int {
 		return 4
 	case pb.ErrorKind_ERROR_KIND_FROZEN:
 		return 6
+	case pb.ErrorKind_ERROR_KIND_UNAVAILABLE:
+		return 1
 	case pb.ErrorKind_ERROR_KIND_LIMIT:
 		return 3
 	case pb.ErrorKind_ERROR_KIND_INTERNAL:
@@ -116,6 +118,8 @@ func peerFail(op string, fin *pb.Fin) *Fail {
 		f.Code = codes.PermissionDenied
 	case pb.ErrorKind_ERROR_KIND_FROZEN:
 		f.Code = codes.FailedPrecondition
+	case pb.ErrorKind_ERROR_KIND_UNAVAILABLE:
+		f.Code = codes.Unavailable
 	case pb.ErrorKind_ERROR_KIND_LIMIT:
 		f.Code = codes.ResourceExhausted
 		f.Err = ErrLimit

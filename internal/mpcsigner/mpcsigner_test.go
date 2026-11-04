@@ -41,6 +41,7 @@ func TestClassifyMapsKinds(t *testing.T) {
 		{typed(codes.Aborted, pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, "x"), KindCryptographic, false, true},
 		{typed(codes.FailedPrecondition, pb.ErrorKind_ERROR_KIND_FROZEN, "x"), KindFrozen, false, true},
 		{typed(codes.Internal, pb.ErrorKind_ERROR_KIND_INTERNAL, "x"), KindInternal, false, true},
+		{typed(codes.Unavailable, pb.ErrorKind_ERROR_KIND_UNAVAILABLE, "cosigner down"), KindUnavailable, false, false},
 		{status.Error(codes.Unavailable, "connection refused"), KindTransport, false, false}, // no detail: link failure
 		{errors.New("plain"), KindTransport, false, false},
 	}
@@ -57,6 +58,11 @@ func TestClassifyMapsKinds(t *testing.T) {
 		}
 		if e.SignerAlert() != c.alert {
 			t.Errorf("case %d: alert %v", i, e.SignerAlert())
+		}
+		// availability failures never finish a job; nothing else is availability
+		wantUnavail := c.kind == KindTransport || c.kind == KindLimit || c.kind == KindUnavailable
+		if e.SignerUnavailable() != wantUnavail {
+			t.Errorf("case %d: unavailable %v", i, e.SignerUnavailable())
 		}
 	}
 }
@@ -140,6 +146,14 @@ func TestSignDigestRetriesTransportAndKeepsJobID(t *testing.T) {
 	}
 	if res.Sig.S.Cmp(big.NewInt(9)) != 0 {
 		t.Fatal("signature was not normalized to low S")
+	}
+	// UNAVAILABLE is retried like transport, and never yields a signature
+	fu := &fakeA{failures: 100, failKind: pb.ErrorKind_ERROR_KIND_UNAVAILABLE, der: der}
+	su := newTestSigner(t, fu, 2)
+	res2, err := su.SignDigest(context.Background(), [32]byte{1}, signer.SignOptions{JobID: "j", IntentPackage: []byte("p")})
+	var ue *Error
+	if !errors.As(err, &ue) || ue.Kind != KindUnavailable || !ue.SignerUnavailable() || res2.Sig.R != nil || fu.calls != 3 {
+		t.Fatalf("unavailable: err %v calls %d sig %v", err, fu.calls, res2.Sig)
 	}
 	// refusals and cryptographic failures are not retried
 	for _, k := range []pb.ErrorKind{pb.ErrorKind_ERROR_KIND_REFUSED, pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC} {

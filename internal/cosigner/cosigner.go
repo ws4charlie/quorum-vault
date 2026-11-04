@@ -47,7 +47,7 @@ func New(cfg *gateway.Config, guard *gateway.Guard, log *slog.Logger, now func()
 // Decide answers one request. Every doubt is a refusal.
 func (c *Cosigner) Decide(ctx context.Context, r wire.Request) wire.Response {
 	resp := c.decide(ctx, r)
-	attrs := []any{"job_id", r.JobID, "key_id", r.KeyID, "allow", resp.Allow}
+	attrs := []any{"job_id", r.JobID, "key_id", r.KeyID, "allow", resp.Allow, "unavailable", resp.Unavailable}
 	if !resp.Allow {
 		attrs = append(attrs, "reason", resp.Reason)
 	}
@@ -93,12 +93,14 @@ func (c *Cosigner) verdict(ctx context.Context, job signjob.Job, pub *ecdsa.Publ
 		if errors.Is(err, gateway.ErrSigner) {
 			return wire.Response{Reason: "signer_key_mismatch: " + err.Error()}
 		}
-		c.log.Error("cosigner error, refusing", "job_id", job.ID, "error", err.Error())
-		return wire.Response{Reason: "cosigner_error: " + err.Error()}
+		// Not a decision: the guard database failed, a deadline passed. Nothing is allowed, but this is an outage and the
+		// caller must retry later, not treat it as a refusal.
+		c.log.Error("cosigner could not decide (unavailable)", "job_id", job.ID, "error", err.Error())
+		return wire.Response{Unavailable: true, Reason: "cosigner_error: " + err.Error()}
 	}
 	if !v.NeedSign {
 		// Gateway mode only: a signature already stored. The cosigner never stores one.
-		return wire.Response{Reason: "cosigner_error: unexpected stored signature"}
+		return wire.Response{Unavailable: true, Reason: "cosigner_error: unexpected stored signature"}
 	}
 	return wire.Response{Allow: true}
 }

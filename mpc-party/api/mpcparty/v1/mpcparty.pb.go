@@ -128,6 +128,7 @@ const (
 	ErrorKind_ERROR_KIND_INTERNAL      ErrorKind = 3 // bad request, local fault, unsupported: alert
 	ErrorKind_ERROR_KIND_REFUSED       ErrorKind = 4 // an Authorizer (local or the peer's) refused the request; nothing ran
 	ErrorKind_ERROR_KIND_LIMIT         ErrorKind = 5 // a configured limit was exceeded; nothing ran
+	ErrorKind_ERROR_KIND_UNAVAILABLE   ErrorKind = 7 // a dependency of this party is down (B's cosigner, its guard database): NOTHING was signed, fail closed, but this is an outage, not a refusal: retry later
 	ErrorKind_ERROR_KIND_FROZEN        ErrorKind = 6 // the keyset is frozen after a cryptographic failure; nothing ran; unfreezing needs an admin signature
 )
 
@@ -140,6 +141,7 @@ var (
 		3: "ERROR_KIND_INTERNAL",
 		4: "ERROR_KIND_REFUSED",
 		5: "ERROR_KIND_LIMIT",
+		7: "ERROR_KIND_UNAVAILABLE",
 		6: "ERROR_KIND_FROZEN",
 	}
 	ErrorKind_value = map[string]int32{
@@ -149,6 +151,7 @@ var (
 		"ERROR_KIND_INTERNAL":      3,
 		"ERROR_KIND_REFUSED":       4,
 		"ERROR_KIND_LIMIT":         5,
+		"ERROR_KIND_UNAVAILABLE":   7,
 		"ERROR_KIND_FROZEN":        6,
 	}
 )
@@ -1560,14 +1563,15 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\tAlgorithm\x12\x19\n" +
 	"\x15ALGORITHM_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19ALGORITHM_ECDSA_SECP256K1\x10\x01\x12\x15\n" +
-	"\x11ALGORITHM_ED25519\x10\x02*\xbd\x01\n" +
+	"\x11ALGORITHM_ED25519\x10\x02*\xd9\x01\n" +
 	"\tErrorKind\x12\x1a\n" +
 	"\x16ERROR_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14ERROR_KIND_TRANSPORT\x10\x01\x12\x1c\n" +
 	"\x18ERROR_KIND_CRYPTOGRAPHIC\x10\x02\x12\x17\n" +
 	"\x13ERROR_KIND_INTERNAL\x10\x03\x12\x16\n" +
 	"\x12ERROR_KIND_REFUSED\x10\x04\x12\x14\n" +
-	"\x10ERROR_KIND_LIMIT\x10\x05\x12\x15\n" +
+	"\x10ERROR_KIND_LIMIT\x10\x05\x12\x1a\n" +
+	"\x16ERROR_KIND_UNAVAILABLE\x10\a\x12\x15\n" +
 	"\x11ERROR_KIND_FROZEN\x10\x06*\x8f\x01\n" +
 	"\tFrameKind\x12\x1a\n" +
 	"\x16FRAME_KIND_UNSPECIFIED\x10\x00\x12\x13\n" +

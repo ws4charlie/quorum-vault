@@ -250,3 +250,31 @@ func TestSocketHandlerAndMode(t *testing.T) {
 		t.Fatal("ListenUnix replaced a regular file")
 	}
 }
+
+// A guard database failure is an outage, not a refusal: no decision field is set, Unavailable is.
+func TestGuardDatabaseDownIsUnavailableNotRefused(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	hot := crypto.PubkeyToAddress(key.PublicKey)
+	h := gatewaytest.New(t, 31337, hot)
+	pool, _ := gatewaytest.NewGuardDB(t)
+	guard, err := gateway.OpenGuard(context.Background(), pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cosigner.New(h.Cfg, guard, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &env{t: t, h: h, c: c, pub: crypto.CompressPubkey(&key.PublicKey), hot: hot}
+	e.allow(h.Withdrawal("up", gatewaytest.AddrUser, 100, 0, "alice"))
+	pool.Close() // the guard database goes away
+	got := c.Decide(context.Background(), e.req(h.Withdrawal("down", gatewaytest.AddrUser, 100, 1, "alice")))
+	if got.Allow || !got.Unavailable {
+		t.Fatalf("want unavailable and not allowed, got %+v", got)
+	}
+	// A real refusal is still a decision, never unavailable.
+	got = c.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: int32(pb.Algorithm_ALGORITHM_ED25519)})
+	if got.Allow || got.Unavailable {
+		t.Fatalf("a malformed request is a refusal, got %+v", got)
+	}
+}

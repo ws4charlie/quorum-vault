@@ -57,6 +57,7 @@ const (
 	KindCryptographic
 	KindFrozen
 	KindInternal
+	KindUnavailable // a dependency of the service is down (party B's cosigner or its database); nothing was signed
 )
 
 // Error is returned by SignDigest on failure. The gateway maps it: Refused -> job rejected (the workflow cancels the
@@ -72,6 +73,17 @@ func (e *Error) Unwrap() error { return e.Err }
 
 // SignerRefusal implements the gateway's interface: reason text if the refusal is a policy refusal.
 func (e *Error) SignerRefusal() (string, bool) { return e.Message, e.Kind == KindRefused }
+
+// SignerUnavailable implements the gateway's interface: an availability failure (link, limit, or a dependency of
+// the service is down). The gateway must not finish the job: nothing was signed or refused, so it is retried later.
+func (e *Error) SignerUnavailable() bool {
+	return e.Kind == KindTransport || e.Kind == KindLimit || e.Kind == KindUnavailable
+}
+
+// RetryOnTimeout implements the gateway's interface: when sign_timeout passes without an answer, the outcome is "try
+// again later", never "failed": the same job id is idempotent at party A and the reservation allows signing the same
+// digest again.
+func (s *Signer) RetryOnTimeout() bool { return true }
 
 // SignerAlert implements the gateway's interface: whether an operator must look at this.
 func (e *Error) SignerAlert() bool {
@@ -132,7 +144,7 @@ func (s *Signer) Key() domain.Key {
 func (s *Signer) PublicKey() *ecdsa.PublicKey { return s.pub }
 
 // SignDigest asks party A to sign digest. opts.JobID (the idempotency key) and opts.IntentPackage are required: they go
-// to party B's cosigner, which refuses anything without them. TRANSPORT and LIMIT failures are retried with the same job
+// to party B's cosigner, which refuses anything without them. TRANSPORT, LIMIT and UNAVAILABLE failures are retried with the same job
 // id (safe: a stored signature is returned, nothing is signed twice) until MaxRetries or ctx ends.
 func (s *Signer) SignDigest(ctx context.Context, digest [32]byte, opts signer.SignOptions) (signer.Result, error) {
 	if opts.JobID == "" || len(opts.IntentPackage) == 0 {
@@ -156,7 +168,7 @@ func (s *Signer) SignDigest(ctx context.Context, digest [32]byte, opts signer.Si
 		}
 		last = classify(err)
 		var e *Error
-		if !errors.As(last, &e) || (e.Kind != KindTransport && e.Kind != KindLimit) {
+		if !errors.As(last, &e) || !e.SignerUnavailable() {
 			return signer.Result{}, last
 		}
 		select {
@@ -188,6 +200,8 @@ func classify(err error) error {
 				k = KindCryptographic
 			case pb.ErrorKind_ERROR_KIND_FROZEN:
 				k = KindFrozen
+			case pb.ErrorKind_ERROR_KIND_UNAVAILABLE:
+				k = KindUnavailable
 			}
 			return &Error{Kind: k, Message: ed.Message, Err: err}
 		}

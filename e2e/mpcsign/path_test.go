@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
@@ -92,35 +94,127 @@ func TestEndToEndWithdrawalMinesOnAnvil(t *testing.T) {
 	t.Logf("party B log (cosigner decision made before B joined):\n%s", tail(s.b.out.String(), 600))
 }
 
-// B-side outage: with the cosigner down every Sign is refused (fail closed), and signing resumes when it returns.
-func TestCosignerOutageRefusesThenResumes(t *testing.T) {
+// An outage is not a refusal and not a failure: with the cosigner down nothing is signed, the job is neither rejected nor
+// failed (it would otherwise be cancelled and parked), and when the cosigner returns the job completes by itself with one
+// signature.
+func TestCosignerOutageKeepsJobsWaitingAndTheyComplete(t *testing.T) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)
-	x := ctx(t, 60*time.Second)
-	try := func(id string, nonce uint64) error {
-		_, err := s.client.Sign(x, s.signRequest(s.h.Withdrawal(id, gatewaytest.AddrUser, 100, nonce, "alice")))
-		return err
-	}
-	if err := try("out-0", 0); err != nil {
-		t.Fatalf("baseline: %v", err)
+	gw := s.startGateway("w1")
+	j0 := s.h.Withdrawal("o-0", gatewaytest.AddrUser, 100, 0, "alice")
+	s.enqueue(j0)
+	if g := s.waitJob(j0.ID, 30*time.Second); g.Status != signjob.StatusDone {
+		t.Fatalf("baseline: %s %s", g.Status, g.RejectReason)
 	}
 	s.cosigner.kill()
-	for i := uint64(1); i <= 3; i++ {
-		start := time.Now()
-		err := try(fmt.Sprintf("out-%d", i), i)
-		if grpcstatus.Code(err) != codes.PermissionDenied {
-			t.Fatalf("with the cosigner down, sign %d: %v (want PermissionDenied)", i, err)
-		}
-		if k, _ := kindOfErr(err); k != pb.ErrorKind_ERROR_KIND_REFUSED {
-			t.Fatalf("kind %v", k)
-		}
-		if time.Since(start) > 7*time.Second {
-			t.Fatalf("refusal took %v", time.Since(start))
-		}
+
+	// Directly at party A: UNAVAILABLE, never a signature, and not a refusal.
+	_, err := s.client.Sign(ctx(t, 30*time.Second), s.signRequest(s.h.Withdrawal("o-direct", gatewaytest.AddrUser, 100, 5, "alice")))
+	if k, _ := kindOfErr(err); k != pb.ErrorKind_ERROR_KIND_UNAVAILABLE || grpcstatus.Code(err) != codes.Unavailable {
+		t.Fatalf("with the cosigner down: %v (kind %v), want UNAVAILABLE", err, k)
+	}
+
+	j1 := s.h.Withdrawal("o-1", gatewaytest.AddrUser, 100, 1, "alice")
+	s.enqueue(j1)
+	time.Sleep(10 * time.Second) // longer than sign_timeout (4s) and the lease (3s): several attempts
+	row, _ := signjob.Get(context.Background(), s.biz, j1.ID)
+	if row.Status != signjob.StatusSigning || len(row.Signature) != 0 {
+		t.Fatalf("during the outage the job is %s %q: it must stay signing and unsigned\n%s", row.Status, row.RejectReason, tail(gw.out.String(), 1500))
 	}
 	s.startCosigner(t)
-	if err := try("out-4", 4); err != nil {
-		t.Fatalf("after the cosigner returned: %v", err)
+	g := s.waitJob(j1.ID, 60*time.Second)
+	if g.Status != signjob.StatusDone || len(g.Signature) != 64 {
+		t.Fatalf("after the outage the job is %s %q\n%s", g.Status, g.RejectReason, tail(gw.out.String(), 2000))
+	}
+	if n := s.countLog(s.b.out, `"job_id":"o-1"`, `"outcome":"ok"`, "OP_SIGN"); n != 1 {
+		t.Fatalf("party B signed job o-1 %d times, want exactly 1", n)
+	}
+	if n := s.countLog(gw.out, "ALERT signer unavailable"); n != 1 {
+		t.Fatalf("%d ALERT lines for one outage, want 1:\n%s", n, gw.out)
+	}
+	waitLog(t, gw.out, "signing resumed", 5*time.Second)
+	if strings.Contains(gw.out.String(), `"outcome":"rejected"`) || strings.Contains(gw.out.String(), `"outcome":"failed"`) {
+		t.Fatalf("the outage rejected or failed a job:\n%s", gw.out)
+	}
+}
+
+// Party B down for longer than sign_timeout, then restarted: the job completes on its own.
+func TestPartyBDownLongerThanSignTimeout(t *testing.T) {
+	s := newStack(t, stackOpts{})
+	s.provision(t, false)
+	gw := s.startGateway("w1")
+	s.b.kill()
+	j := s.h.Withdrawal("bdown", gatewaytest.AddrUser, 100, 0, "alice")
+	s.enqueue(j)
+	time.Sleep(9 * time.Second)
+	row, _ := signjob.Get(context.Background(), s.biz, j.ID)
+	if row.Status != signjob.StatusSigning {
+		t.Fatalf("with B down the job is %s %q", row.Status, row.RejectReason)
+	}
+	s.restartB(t)
+	g := s.waitJob(j.ID, 60*time.Second)
+	if g.Status != signjob.StatusDone || len(g.Signature) != 64 {
+		t.Fatalf("after B returned: %s %q\n%s", g.Status, g.RejectReason, tail(gw.out.String(), 2000))
+	}
+}
+
+// The cosigner's own guard database going away is an outage too: UNAVAILABLE, not REFUSED.
+func TestCosignerGuardDatabaseDownIsUnavailable(t *testing.T) {
+	s := newStack(t, stackOpts{})
+	s.provision(t, false)
+	u, _ := url.Parse(s.csGuardDSN)
+	name := strings.TrimPrefix(u.Path, "/")
+	admin, err := pgx.Connect(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close(context.Background())
+	if _, err := admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.client.Sign(ctx(t, 30*time.Second), s.signRequest(s.h.Withdrawal("db-down", gatewaytest.AddrUser, 100, 0, "alice")))
+	if k, _ := kindOfErr(err); k != pb.ErrorKind_ERROR_KIND_UNAVAILABLE || grpcstatus.Code(err) != codes.Unavailable {
+		t.Fatalf("guard database down: %v (kind %v), want UNAVAILABLE and not REFUSED", err, k)
+	}
+}
+
+// A real refusal by B's cosigner still rejects the job (the workflow then cancels the nonce), and with the cosigner up the
+// cancel is signed.
+func TestRealRefusalRejectsAndCancelIsSigned(t *testing.T) {
+	s := newStack(t, stackOpts{})
+	// B's cosigner is stricter than the gateway: per-transaction cap 400 instead of 5000.
+	s.cosignerTweak = func(f gateway.File) gateway.File {
+		cc := f.Chains[gatewaytest.Chain]
+		assets := map[string]gateway.AssetFile{}
+		for k, v := range cc.Assets {
+			assets[k] = v
+		}
+		a := assets["ETH"]
+		a.PerTxCap = "400"
+		assets["ETH"] = a
+		cc.Assets = assets
+		chains := map[string]gateway.ChainFile{}
+		for k, v := range f.Chains {
+			chains[k] = v
+		}
+		chains[gatewaytest.Chain] = cc
+		f.Chains = chains
+		return f
+	}
+	s.provision(t, false)
+	s.startGateway("w1")
+	j := s.h.Withdrawal("refuse-1", gatewaytest.AddrUser, 500, 0, "alice")
+	s.enqueue(j)
+	g := s.waitJob(j.ID, 60*time.Second)
+	if g.Status != signjob.StatusRejected || !strings.HasPrefix(g.RejectReason, gateway.ReasonSignerRefused+":") || !strings.Contains(g.RejectReason, gateway.ReasonPerTxCap) {
+		t.Fatalf("job %s %q, want rejected signer_refused ... policy_per_tx_cap", g.Status, g.RejectReason)
+	}
+	cin := signjob.Intent{Kind: "cancel", ID: "c-refuse-1", Asset: "ETH", To: s.hot.Hex(), Amount: "0"}
+	c := s.h.Job("cancel-1", cin, gatewaytest.TxSpec{Nonce: 0, To: s.hot, Gas: 21000})
+	s.enqueue(c)
+	cg := s.waitJob(c.ID, 60*time.Second)
+	if cg.Status != signjob.StatusDone || len(cg.Signature) != 64 {
+		t.Fatalf("cancel: %s %q", cg.Status, cg.RejectReason)
 	}
 }
 

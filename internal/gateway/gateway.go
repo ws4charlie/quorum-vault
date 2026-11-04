@@ -83,6 +83,9 @@ type Gateway struct {
 	opt     Options
 
 	inflight sync.WaitGroup // signer calls still running, abandoned ones included
+
+	outageMu sync.Mutex
+	outages  map[string]bool // chain -> an outage has been reported and signing has not resumed
 }
 
 // New builds a Gateway. codecs has one entry per configured chain; New builds
@@ -206,6 +209,9 @@ func (g *Gateway) decide(ctx context.Context, job signjob.Job) Decision {
 
 var errSigner = errors.New("signer failed")
 
+// errUnavailable marks an availability failure of the signer: the outcome is a retry, never a failed job.
+var errUnavailable = errors.New("signer unavailable")
+
 func (g *Gateway) evaluate(ctx context.Context, job signjob.Job) (sig []byte, replayed bool, err error) {
 	var pub *ecdsa.PublicKey
 	s := g.signers[job.PartitionID]
@@ -227,8 +233,12 @@ func (g *Gateway) evaluate(ctx context.Context, job signjob.Job) (sig []byte, re
 	}
 	raw, err := g.signWith(ctx, s, job.Digest, signer.SignOptions{JobID: job.ID, IntentPackage: pkg})
 	if err != nil {
+		if errors.Is(err, errUnavailable) {
+			g.outage(job.Chain, err)
+		}
 		return nil, false, err
 	}
+	g.resumed(job.Chain)
 
 	// Phase 3, finish. The first stored signature wins; release only the stored value.
 	stored, err := g.guard.Finish(ctx, job.Digest, raw, g.opt.Now())
@@ -278,6 +288,12 @@ func (g *Gateway) signWith(ctx context.Context, s signer.Signer, digest []byte, 
 	select {
 	case r := <-ch:
 		if r.err != nil {
+			// An availability failure (link down, limit, a dependency of the signer down) never finishes the job: nothing
+			// was signed or refused. Return a retry; the job stays "signing" and is reclaimed when its lease ends.
+			var un interface{ SignerUnavailable() bool }
+			if errors.As(r.err, &un) && un.SignerUnavailable() {
+				return nil, fmt.Errorf("%w: %v", errUnavailable, r.err)
+			}
 			// A signer may say that the other party refused (cb-mpc: party B's cosigner), or that an operator must look.
 			var ref interface{ SignerRefusal() (string, bool) }
 			if errors.As(r.err, &ref) {
@@ -299,6 +315,34 @@ func (g *Gateway) signWith(ctx context.Context, s signer.Signer, digest []byte, 
 		r.res.Sig.S.FillBytes(raw[32:])
 		return raw, nil
 	case <-sctx.Done():
+		if rt, ok := s.(interface{ RetryOnTimeout() bool }); ok && rt.RetryOnTimeout() {
+			return nil, fmt.Errorf("%w: sign timed out after %s", errUnavailable, g.cfg.SignTimeout)
+		}
 		return nil, fmt.Errorf("%w: sign timed out after %s", errSigner, g.cfg.SignTimeout)
+	}
+}
+
+// outage logs ONE alert per chain per outage (not one per job).
+func (g *Gateway) outage(chain string, err error) {
+	g.outageMu.Lock()
+	if g.outages == nil {
+		g.outages = map[string]bool{}
+	}
+	first := !g.outages[chain]
+	g.outages[chain] = true
+	g.outageMu.Unlock()
+	if first {
+		g.opt.Logger.Error("ALERT signer unavailable: jobs wait and are retried, nothing was signed or refused", "chain", chain, "error", err.Error())
+	}
+}
+
+// resumed logs once when signing works again after an outage.
+func (g *Gateway) resumed(chain string) {
+	g.outageMu.Lock()
+	was := g.outages[chain]
+	delete(g.outages, chain)
+	g.outageMu.Unlock()
+	if was {
+		g.opt.Logger.Info("signer available again: signing resumed", "chain", chain)
 	}
 }
