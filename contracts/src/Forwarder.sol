@@ -14,6 +14,10 @@ interface IDestination {
 contract Forwarder {
     address public immutable factory;
 
+    /// @notice One event per flush that moved funds. `token` is zero for ETH. Accounting
+    /// reads this (not the deposits it expected), because a flush moves the whole balance.
+    event Swept(address indexed token, uint256 amount);
+
     error SweepFrozen();
     error TransferFailed();
 
@@ -35,6 +39,7 @@ contract Forwarder {
         if (bal == 0) return;
         (bool ok,) = dest.call{value: bal}("");
         if (!ok) revert TransferFailed();
+        emit Swept(address(0), bal);
     }
 
     /// @notice Sends this contract's whole balance of `token` to the destination. Works
@@ -49,6 +54,7 @@ contract Forwarder {
         (ok, ret) = token.call(abi.encodeWithSelector(0xa9059cbb, dest, bal));
         if (!ok) revert TransferFailed();
         if (ret.length != 0 && (ret.length != 32 || abi.decode(ret, (uint256)) != 1)) revert TransferFailed();
+        emit Swept(token, bal);
     }
 
     function _destination() private view returns (address payable dest) {

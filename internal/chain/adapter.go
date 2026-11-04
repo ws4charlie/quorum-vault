@@ -41,6 +41,23 @@ type Adapter interface {
 	Broadcast(ctx context.Context, s SignedTx) (txHash string, err error)
 	Status(ctx context.Context, txHash string) (TxStatus, error)
 	EstimateSweepFee(ctx context.Context, s SweepIntent) (*big.Int, error)
+	// TxFee is the fee a mined transaction paid, in the chain's native base
+	// units (EVM: gas used x effective gas price). A reverted transaction paid
+	// it too. Errors if the transaction has no receipt yet.
+	TxFee(ctx context.Context, txHash string) (*big.Int, error)
+	// MovedAssets lists what a mined sweep transaction actually moved out of
+	// deposit addresses, as reported by the chain itself (EVM: Forwarder Swept
+	// events from known forwarders; one entry per address and asset). A sweep
+	// can move more than it expected (a deposit landed meanwhile, or ETH rides
+	// along with a token sweep), so accounting uses this, not the intent.
+	MovedAssets(ctx context.Context, txHash string) ([]MovedAsset, error)
+}
+
+// MovedAsset is an amount a sweep moved out of one deposit address.
+type MovedAsset struct {
+	Address string
+	Asset   string   // configured symbol, e.g. "ETH", "USDT"
+	Amount  *big.Int // base units, > 0
 }
 
 // DepositAddress kinds, matching deposit_addresses.kind.

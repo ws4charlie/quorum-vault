@@ -3,7 +3,7 @@ pragma solidity 0.8.26;
 
 // Run with `forge test --isolate` (each top-level call is its own transaction).
 
-import {Base} from "./Base.sol";
+import {Base, Vm} from "./Base.sol";
 import {Forwarder} from "../src/Forwarder.sol";
 import {ForwarderFactory} from "../src/ForwarderFactory.sol";
 import {UsdtLike, BoolToken, FalseToken, TransferSender, ReentrantToken} from "./mocks/Tokens.sol";
@@ -366,6 +366,57 @@ contract ForwarderTest is Base {
         fz.deployAndFlush(salt, _one(address(usdt)));
         assertEq(DEST.balance, 1 ether, "swept");
         assertEq(usdt.balanceOf(DEST), 6, "tokens swept");
+    }
+
+    // ---- Swept event ----
+
+    bytes32 constant SWEPT = keccak256("Swept(address,uint256)");
+
+    function _swept(Vm.Log[] memory logs, address emitter) private pure returns (address[] memory tok, uint256[] memory amt, uint256 n) {
+        tok = new address[](logs.length);
+        amt = new uint256[](logs.length);
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == emitter && logs[i].topics[0] == SWEPT) {
+                tok[n] = address(uint160(uint256(logs[i].topics[1])));
+                amt[n] = abi.decode(logs[i].data, (uint256));
+                n++;
+            }
+        }
+    }
+
+    function testSweptEventReportsWhatMovedAndNothingWhenEmpty() public {
+        bytes32 salt = keccak256("eve/3");
+        address predicted = factory.predict(salt);
+        usdt.mint(predicted, 777);
+        vm.deal(address(this), 10 ether);
+        _send(predicted, 3 ether);
+        vm.recordLogs();
+        factory.deployAndFlush(salt, _one(address(usdt)));
+        (address[] memory tok, uint256[] memory amt, uint256 n) = _swept(vm.getRecordedLogs(), predicted);
+        assertEq(n, 2, "two Swept events: ETH and the token");
+        assertEq(tok[0], address(0), "ETH first, token zero");
+        assertEq(amt[0], 3 ether, "ETH amount");
+        assertEq(tok[1], address(usdt), "token second");
+        assertEq(amt[1], 777, "token amount");
+
+        // A second flush with nothing left emits nothing.
+        vm.recordLogs();
+        factory.deployAndFlush(salt, _one(address(usdt)));
+        (,, n) = _swept(vm.getRecordedLogs(), predicted);
+        assertEq(n, 0, "nothing moved, no event");
+    }
+
+    function testSweptEventOnDirectFlushAndOnlyTokenWhenNoEth() public {
+        bytes32 salt = keccak256("fay/4");
+        address predicted = factory.predict(salt);
+        factory.deployAndFlush(salt, _none());
+        usdt.mint(predicted, 9);
+        vm.recordLogs();
+        Forwarder(payable(predicted)).flushTokens(address(usdt));
+        (address[] memory tok, uint256[] memory amt, uint256 n) = _swept(vm.getRecordedLogs(), predicted);
+        assertEq(n, 1, "one event");
+        assertEq(tok[0], address(usdt), "token");
+        assertEq(amt[0], 9, "amount");
     }
 
     // ---- gas ----
