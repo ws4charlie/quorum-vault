@@ -15,6 +15,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
+	"github.com/ws4charlie/quorum-vault/mpc-party/internal/cbmpc"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/server"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/testenv"
 )
@@ -154,4 +155,20 @@ func verifyECDSA(t testing.TB, pub, digest, der []byte) {
 	if !sig.Verify(digest, pk) {
 		t.Fatal("ECDSA signature does not verify (btcec)")
 	}
+}
+
+// dkgPairForTest makes a throwaway ECDSA keyset pair with the wrapper over an in-memory link.
+func dkgPairForTest(t testing.TB) (*cbmpc.Keyset, *cbmpc.Keyset) {
+	t.Helper()
+	a, b := cbmpc.NewMemPair()
+	var k1, k2 *cbmpc.Keyset
+	var e1, e2 error
+	done := make(chan struct{})
+	go func() { k2, e2 = cbmpc.DKG(context.Background(), b, cbmpc.P2, cbmpc.ECDSA); close(done) }()
+	k1, e1 = cbmpc.DKG(context.Background(), a, cbmpc.P1, cbmpc.ECDSA)
+	<-done
+	if e1 != nil || e2 != nil {
+		t.Fatal(e1, e2)
+	}
+	return k1, k2
 }

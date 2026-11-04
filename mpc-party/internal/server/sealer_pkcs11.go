@@ -109,19 +109,11 @@ func NewPKCS11Sealer(c SealerConfig) (*PKCS11Sealer, error) {
 	if _, err := os.Stat(lib); err != nil {
 		return nil, fmt.Errorf("sealer pkcs11: library %s: %w", lib, err)
 	}
-	ctx := pkcs11.New(lib)
-	if ctx == nil {
-		return nil, fmt.Errorf("sealer pkcs11: cannot load library %s", lib)
+	ctx, err := sharedCtx(lib)
+	if err != nil {
+		return nil, err
 	}
-	if err := ctx.Initialize(); err != nil {
-		ctx.Destroy()
-		return nil, fmt.Errorf("sealer pkcs11: C_Initialize: %w", err)
-	}
-	fail := func(format string, a ...any) (*PKCS11Sealer, error) {
-		ctx.Finalize()
-		ctx.Destroy()
-		return nil, fmt.Errorf(format, a...)
-	}
+	fail := func(format string, a ...any) (*PKCS11Sealer, error) { return nil, fmt.Errorf(format, a...) }
 	slots, err := ctx.GetSlotList(true)
 	if err != nil {
 		return fail("sealer pkcs11: C_GetSlotList: %w", err)
@@ -141,7 +133,7 @@ func NewPKCS11Sealer(c SealerConfig) (*PKCS11Sealer, error) {
 	if err != nil {
 		return fail("sealer pkcs11: C_OpenSession on %q: %w", c.Token, err)
 	}
-	if err := ctx.Login(login, pkcs11.CKU_USER, pin); err != nil {
+	if err := ctx.Login(login, pkcs11.CKU_USER, pin); err != nil && !isCKR(err, pkcs11.CKR_USER_ALREADY_LOGGED_IN) {
 		ctx.CloseSession(login)
 		return fail("sealer pkcs11: login to token %q failed (wrong PIN?): %w", c.Token, err)
 	}
@@ -281,3 +273,33 @@ func isDeviceError(err error) bool {
 }
 
 var _ Sealer = (*PKCS11Sealer)(nil)
+
+// A process loads a PKCS#11 module once (C_Initialize may be called once per process); sealers for several tokens share it.
+// It is finalized by the OS at exit.
+var (
+	ctxMu    sync.Mutex
+	ctxByLib = map[string]*pkcs11.Ctx{}
+)
+
+func sharedCtx(lib string) (*pkcs11.Ctx, error) {
+	ctxMu.Lock()
+	defer ctxMu.Unlock()
+	if c, ok := ctxByLib[lib]; ok {
+		return c, nil
+	}
+	ctx := pkcs11.New(lib)
+	if ctx == nil {
+		return nil, fmt.Errorf("sealer pkcs11: cannot load library %s", lib)
+	}
+	if err := ctx.Initialize(); err != nil && !isCKR(err, pkcs11.CKR_CRYPTOKI_ALREADY_INITIALIZED) {
+		ctx.Destroy()
+		return nil, fmt.Errorf("sealer pkcs11: C_Initialize: %w", err)
+	}
+	ctxByLib[lib] = ctx
+	return ctx, nil
+}
+
+func isCKR(err error, code uint) bool {
+	var pe pkcs11.Error
+	return errors.As(err, &pe) && uint(pe) == code
+}

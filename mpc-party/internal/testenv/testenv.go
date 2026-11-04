@@ -228,3 +228,37 @@ func Store(t testing.TB, cfg *server.Config) *server.FileStore {
 	}
 	return fs
 }
+
+// HSMEnv points SOFTHSM2_CONF at the repo-local SoftHSM config written by scripts/setup-softhsm.sh (<repo root>/data/softhsm)
+// and returns the PIN (QV_HSM_PIN or the documented dev-only default). The test is skipped when SoftHSM is not set up,
+// unless QV_REQUIRE_HSM=1, then it fails.
+func HSMEnv(t testing.TB) (pin string) {
+	t.Helper()
+	dir, _ := os.Getwd()
+	conf := ""
+	for d := dir; ; d = filepath.Dir(d) {
+		c := filepath.Join(d, "data", "softhsm", "softhsm2.conf")
+		if _, err := os.Stat(c); err == nil {
+			conf = c
+			break
+		}
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if os.Getenv("SOFTHSM2_CONF") != "" {
+		conf = os.Getenv("SOFTHSM2_CONF")
+	}
+	if conf == "" {
+		if os.Getenv("QV_REQUIRE_HSM") == "1" {
+			t.Fatal("QV_REQUIRE_HSM=1 but no SoftHSM config: run scripts/setup-softhsm.sh")
+		}
+		t.Skip("no SoftHSM config: run scripts/setup-softhsm.sh")
+	}
+	os.Setenv("SOFTHSM2_CONF", conf)
+	pin = os.Getenv("QV_HSM_PIN")
+	if pin == "" {
+		pin = "user-dev-1234" // dev-only value, documented in .env.example
+	}
+	return pin
+}

@@ -39,6 +39,10 @@ func pickAuthorizer(c server.AuthorizerConfig) (server.Authorizer, error) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "backup" {
+		backupMain(os.Args[2:])
+		return
+	}
 	cfgPath := flag.String("config", "", "path to the JSON config file (required)")
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))

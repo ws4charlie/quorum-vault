@@ -21,6 +21,9 @@ func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rat
 		var f *Fail
 		if err != nil && errors.As(err, &f) {
 			s.maybeFreeze(open, f)
+			if f.Peer && (f.CB == CodeUnresolved || f.CB == CodeGenMismatch) && open.KeysetId != "" && open.Op != pb.Op_OP_DKG {
+				s.unresolve(open.KeysetId) // the peer restarted or is on another generation: reconcile before more work
+			}
 		}
 	}()
 	if s.peerClient == nil {
