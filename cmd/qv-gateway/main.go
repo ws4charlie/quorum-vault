@@ -89,6 +89,12 @@ func run(log *slog.Logger) error {
 	if err := gw.Run(ctx, *interval); err != nil {
 		return err
 	}
+	if !gw.Wait(cfg.SignTimeout) {
+		// Closing the signers under a running call would crash inside the HSM
+		// library. Nothing is lost: an unstored signature was never released.
+		log.Error("a signer call is still running; exiting without closing the signers")
+		os.Exit(1)
+	}
 	log.Info("qv-gateway stopped cleanly")
 	return nil
 }

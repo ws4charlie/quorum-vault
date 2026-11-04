@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -292,4 +293,26 @@ func TestReplacementOfKnownExpiredIntentIsAccepted(t *testing.T) {
 	moved := h.job("kx3", mustIntent(first.Intent), spec)
 	moved.Approvals = first.Approvals
 	h.mustReject(moved, ReasonNonceChanged)
+}
+
+// A signer call abandoned after sign_timeout may still be inside the HSM
+// library: Wait must cover it, so nothing closes the library under it.
+func TestWaitCoversAbandonedSignerCall(t *testing.T) {
+	h := newHarness(t)
+	h.cfg.SignTimeout = 50 * time.Millisecond
+	release := make(chan struct{})
+	h.signer.setBefore(func([32]byte) error {
+		<-release
+		return nil
+	})
+	if _, err := h.gw.sign(context.Background(), h.signer, bytes.Repeat([]byte{7}, 32)); !errors.Is(err, errSigner) {
+		t.Fatalf("sign: %v, want a timeout", err)
+	}
+	if h.gw.Wait(100 * time.Millisecond) {
+		t.Fatal("Wait returned true while the abandoned call was still running")
+	}
+	close(release)
+	if !h.gw.Wait(5 * time.Second) {
+		t.Fatal("Wait returned false after the call finished")
+	}
 }

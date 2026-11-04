@@ -187,6 +187,13 @@ func (h *harness) newGateway(worker string) *Gateway {
 	if err != nil {
 		h.t.Fatal(err)
 	}
+	// Runs before the token's cleanup: finalizing the HSM library under a signer
+	// call crashes the test binary.
+	h.t.Cleanup(func() {
+		if !gw.Wait(10 * time.Second) {
+			h.t.Error("a signer call is still running at the end of the test")
+		}
+	})
 	return gw
 }
 

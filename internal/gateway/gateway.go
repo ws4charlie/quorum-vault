@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -82,6 +83,8 @@ type Gateway struct {
 	guard   *Guard
 	jobs    *pgxpool.Pool // business database, role qv_gateway
 	opt     Options
+
+	inflight sync.WaitGroup // signer calls still running, abandoned ones included
 }
 
 // New builds a Gateway. codecs has one entry per configured chain; New builds
@@ -307,6 +310,24 @@ func (g *Gateway) evaluate(ctx context.Context, job signjob.Job) (sig []byte, re
 
 var errInProgress = errors.New("another worker is signing this digest")
 
+// Wait blocks until no signer call is running, or d passes, and reports whether
+// they all finished. Call it before closing the signers: a call abandoned after
+// sign_timeout may still be inside the HSM library, and finalizing the library
+// under it crashes the process.
+func (g *Gateway) Wait(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		g.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
 // sign calls the signer with a timeout and verifies the signature locally. A
 // signer that ignores the context is abandoned; its late result is dropped.
 func (g *Gateway) sign(ctx context.Context, s signer.Signer, digest []byte) ([]byte, error) {
@@ -319,7 +340,9 @@ func (g *Gateway) sign(ctx context.Context, s signer.Signer, digest []byte) ([]b
 		err error
 	}
 	ch := make(chan result, 1)
+	g.inflight.Add(1)
 	go func() {
+		defer g.inflight.Done()
 		res, err := s.SignDigest(sctx, dg, signer.SignOptions{})
 		ch <- result{res, err}
 	}()
