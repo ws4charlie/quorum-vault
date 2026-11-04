@@ -32,6 +32,11 @@ type Adapter interface {
 	// BuildReplacement builds a fee-bumped replacement of a stuck transaction
 	// owned by (ownerKind, ownerID). Chains without replacement return ErrNotSupported.
 	BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (UnsignedTx, error)
+	// BuildCancel builds a transaction that frees the sequence number (nonce)
+	// reserved for (ownerKind, ownerID) when its job was refused, so later
+	// transactions of the same sender can proceed. Chains without strictly
+	// sequential nonces return ErrNotSupported.
+	BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (UnsignedTx, error)
 	Assemble(u UnsignedTx, sig Signature) (SignedTx, error)
 	Broadcast(ctx context.Context, s SignedTx) (txHash string, err error)
 	Status(ctx context.Context, txHash string) (TxStatus, error)

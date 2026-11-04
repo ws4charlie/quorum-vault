@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
@@ -77,11 +78,19 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 	if len(tx.AccessList()) != 0 {
 		return reject("unexpected access list")
 	}
+	if tx.GasTipCap().Cmp(tx.GasFeeCap()) > 0 {
+		return reject("max priority fee %s exceeds max fee %s", tx.GasTipCap(), tx.GasFeeCap())
+	}
+	if fee := new(big.Int).Mul(new(big.Int).SetUint64(tx.Gas()), tx.GasFeeCap()); fee.Cmp(cfg.MaxTxFeeWei) > 0 {
+		return reject("worst-case fee %s exceeds the cap %s", fee, cfg.MaxTxFeeWei)
+	}
 	switch i.Kind {
 	case "withdrawal":
 		return v.verifyWithdrawal(tx.To(), tx.Value(), tx.Data(), i, amount, tok, native)
 	case "sweep":
 		return v.verifySweep(tx.To(), tx.Value(), tx.Data(), i, tok, native)
+	case "cancel":
+		return v.verifyCancel(tx, from, i, amount)
 	default:
 		return reject("intent kind %q", i.Kind)
 	}
@@ -171,6 +180,28 @@ func (v *Verifier) verifySweep(to *common.Address, value *big.Int, data []byte, 
 	}
 	if dest != cfg.SweepDestination {
 		return reject("intent destination %s is not the configured sweep destination %s", dest, cfg.SweepDestination)
+	}
+	return nil
+}
+
+// verifyCancel accepts only a zero-value, empty-data self-send of 21,000 gas:
+// the transaction that frees a nonce whose job was refused.
+func (v *Verifier) verifyCancel(tx *types.Transaction, from common.Address, i signjob.Intent, amount *big.Int) error {
+	if i.From != "" {
+		return reject("cancel intent has a source address")
+	}
+	if amount.Sign() != 0 {
+		return reject("cancel amount %s, want 0", amount)
+	}
+	dest, err := parseIntentAddress(i.To)
+	if err != nil {
+		return reject("%v", err)
+	}
+	if dest != from {
+		return reject("cancel intent address %s is not the hot address %s", dest, from)
+	}
+	if tx.To() == nil || *tx.To() != from || tx.Value().Sign() != 0 || len(tx.Data()) != 0 || tx.Gas() != 21000 {
+		return reject("cancel transaction is not a zero-value 21000-gas self-send")
 	}
 	return nil
 }

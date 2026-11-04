@@ -82,6 +82,8 @@ func newEnv(t *testing.T) *tenv {
 		t.Fatal(err)
 	}
 	t.Cleanup(rc.Close)
+	// A previous aborted run may have left automine off.
+	_ = rc.CallContext(ctx, nil, "evm_setAutomine", true)
 	e := &tenv{t: t, ctx: ctx, url: url, ec: ethclient.NewClient(rc), rpc: rc, pool: pool}
 	e.deployer, _ = crypto.GenerateKey()
 	e.hotKey, _ = crypto.GenerateKey()
@@ -107,7 +109,7 @@ func newEnv(t *testing.T) *tenv {
 	e.usdt = e.deploy(readBin(t, "testdata/UsdtLike.bin"))
 	e.dai = e.deploy(readBin(t, "testdata/BoolToken.bin"))
 	e.cfg = Config{
-		Chain: "evm-anvil", ChainID: e.cfg.ChainID, RPCURL: url, Confirmations: 2, StuckAfterBlocks: 3,
+		Chain: "evm-anvil", ChainID: e.cfg.ChainID, MaxTxFeeWei: ether, RPCURL: url, Confirmations: 2, StuckAfterBlocks: 3,
 		Factory: factory, SweepDestination: e.dest,
 		HotAddresses: map[string]common.Address{"hot-0": e.hot},
 		Assets:       map[string]Token{"USDT": {Address: e.usdt, Decimals: 6}, "DAI": {Address: e.dai, Decimals: 18}},
@@ -800,7 +802,7 @@ func TestMeasure(t *testing.T) {
 	tx, _ := e.pool.Begin(e.ctx)
 	t0 = time.Now()
 	for i := 0; i < allocs; i++ {
-		if _, err := e.ad.allocateNonce(e.ctx, tx, e.hot, "withdrawal", "m-"+time.Now().Format("150405.000000")+string(rune('a'+i%26))+string(rune('a'+i/26)), big.NewInt(1), big.NewInt(1)); err != nil {
+		if _, _, err := e.ad.allocateNonce(e.ctx, tx, e.hot, "withdrawal", "m-"+time.Now().Format("150405.000000")+string(rune('a'+i%26))+string(rune('a'+i/26)), big.NewInt(1), big.NewInt(1)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -811,11 +813,233 @@ func TestMeasure(t *testing.T) {
 	t0 = time.Now()
 	for i := 0; i < allocs; i++ {
 		tx, _ := e.pool.Begin(e.ctx)
-		if _, err := e.ad.allocateNonce(e.ctx, tx, e.hot, "withdrawal", "s-"+string(rune('a'+i%26))+string(rune('a'+i/26)), big.NewInt(1), big.NewInt(1)); err != nil {
+		if _, _, err := e.ad.allocateNonce(e.ctx, tx, e.hot, "withdrawal", "s-"+string(rune('a'+i%26))+string(rune('a'+i/26)), big.NewInt(1), big.NewInt(1)); err != nil {
 			t.Fatal(err)
 		}
 		_ = tx.Commit(e.ctx)
 	}
 	el = time.Since(t0)
 	t.Logf("nonce allocation: %d one-per-transaction in %s = %.0f/s (excluding RPC fee/gas calls)", allocs, el.Round(time.Millisecond), float64(allocs)/el.Seconds())
+}
+
+func (e *tenv) buildCancel(ownerKind, ownerID string) chain.UnsignedTx {
+	e.t.Helper()
+	tx, err := e.pool.Begin(e.ctx)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	u, err := e.ad.BuildCancel(e.ctx, tx, ownerKind, ownerID)
+	if err != nil {
+		_ = tx.Rollback(e.ctx)
+		e.t.Fatal(err)
+	}
+	if err := tx.Commit(e.ctx); err != nil {
+		e.t.Fatal(err)
+	}
+	return u
+}
+
+func (e *tenv) allocStatus(ownerID string) string {
+	var st string
+	if err := e.pool.QueryRow(e.ctx, `SELECT status FROM evm_nonce_allocations WHERE owner_id=$1`, ownerID).Scan(&st); err != nil {
+		e.t.Fatal(err)
+	}
+	return st
+}
+
+// A transaction evicted from the mempool is the main case that needs replacing:
+// BuildReplacement must work from stored data, not from the node.
+func TestReplacementAfterNodeDroppedTheTransaction(t *testing.T) {
+	e := newEnv(t)
+	e.automine(false)
+	t.Cleanup(func() { e.automine(true) })
+
+	u := e.buildW("w-evicted", "ETH", e.dest.Hex(), 4321)
+	origHash := e.mustBroadcast(u)
+	if err := e.rpc.CallContext(e.ctx, nil, "anvil_dropTransaction", common.HexToHash(origHash)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.ec.TransactionByHash(e.ctx, common.HexToHash(origHash)); err == nil {
+		t.Fatal("node still knows the dropped transaction")
+	}
+	tx, _ := e.pool.Begin(e.ctx)
+	ur, err := e.ad.BuildReplacement(e.ctx, tx, "withdrawal", "w-evicted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tx.Commit(e.ctx)
+	if pr, po := payloadOf(t, ur), payloadOf(t, u); pr.Nonce != po.Nonce || pr.To != po.To || pr.Value != po.Value {
+		t.Fatalf("replacement changed more than fees: %+v vs %+v", pr, po)
+	}
+	before := e.balance(e.dest)
+	replHash := e.mustBroadcast(ur)
+	e.mine(1)
+	if r := e.receipt(common.HexToHash(replHash)); r.Status != 1 {
+		t.Fatal("replacement reverted")
+	}
+	if _, err := e.ec.TransactionReceipt(e.ctx, common.HexToHash(origHash)); err == nil {
+		t.Fatal("the dropped original mined")
+	}
+	if d := new(big.Int).Sub(e.balance(e.dest), before); d.Int64() != 4321 {
+		t.Fatalf("destination got %s", d)
+	}
+	var n int
+	_ = e.pool.QueryRow(e.ctx, `SELECT count(*) FROM evm_tx_attempts WHERE nonce=$1`, int64(payloadOf(t, u).Nonce)).Scan(&n)
+	if n != 2 {
+		t.Fatalf("want 2 recorded attempts, got %d", n)
+	}
+	var latest string
+	_ = e.pool.QueryRow(e.ctx, `SELECT tx_hash FROM evm_nonce_allocations WHERE owner_id='w-evicted'`).Scan(&latest)
+	if latest != replHash {
+		t.Fatalf("allocation tx_hash %q, want only the latest %q", latest, replHash)
+	}
+}
+
+func TestBroadcastWithoutAllocationIsRefused(t *testing.T) {
+	e := newEnv(t)
+	u := e.buildW("w-a", "ETH", e.dest.Hex(), 1)
+	if _, err := e.pool.Exec(e.ctx, `DELETE FROM evm_nonce_allocations`); err != nil {
+		t.Fatal(err)
+	}
+	s, err := e.ad.Assemble(u, sign(t, u, e.hotKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.ad.Broadcast(e.ctx, s); err == nil {
+		t.Fatal("transaction with an unknown nonce was broadcast")
+	}
+	var n int
+	_ = e.pool.QueryRow(e.ctx, `SELECT count(*) FROM evm_tx_attempts`).Scan(&n)
+	if n != 0 {
+		t.Fatal("an attempt was recorded for a refused broadcast")
+	}
+}
+
+// A nonce committed for a refused job blocks every later nonce; BuildCancel frees it.
+func TestCancelFreesBlockedNonce(t *testing.T) {
+	e := newEnv(t)
+	e.automine(false)
+	t.Cleanup(func() { e.automine(true) })
+
+	uN := e.buildW("w-refused", "ETH", e.dest.Hex(), 10)
+	uN1 := e.buildW("w-later", "ETH", e.dest.Hex(), 20)
+	n := payloadOf(t, uN).Nonce
+	if payloadOf(t, uN1).Nonce != n+1 {
+		t.Fatal("unexpected nonce layout")
+	}
+	// N is never signed (the gateway refused it). N+1 waits behind the gap.
+	laterHash := e.mustBroadcast(uN1)
+	e.mine(1)
+	if _, err := e.ec.TransactionReceipt(e.ctx, common.HexToHash(laterHash)); err == nil {
+		t.Fatal("N+1 mined before N: the test premise is wrong")
+	}
+
+	uc := e.buildCancel("withdrawal", "w-refused")
+	pc := payloadOf(t, uc)
+	if pc.Nonce != n || pc.To != e.hot.Hex() || pc.Value != "0" || pc.Data != "0x" || pc.Gas != 21000 {
+		t.Fatalf("not a zero-value 21000-gas self-send at nonce %d: %+v", n, pc)
+	}
+	v, _ := NewVerifier(e.cfg)
+	if err := v.Verify(uc, signjob.Intent{Kind: "cancel", ID: "w-refused", PartitionID: "hot-0", Chain: "evm-anvil", Asset: "ETH", To: e.hot.Hex(), Amount: "0"}); err != nil {
+		t.Fatalf("cancel fails offline verification: %v", err)
+	}
+	cancelHash := e.mustBroadcast(uc)
+	e.mine(1)
+
+	rc, rl := e.receipt(common.HexToHash(cancelHash)), e.receipt(common.HexToHash(laterHash))
+	if rc.Status != 1 || rl.Status != 1 || rc.BlockNumber.Uint64() > rl.BlockNumber.Uint64() {
+		t.Fatalf("cancel block %d status %d, later block %d status %d", rc.BlockNumber, rc.Status, rl.BlockNumber, rl.Status)
+	}
+	e.mine(e.cfg.Confirmations)
+	if st, _ := e.ad.Status(e.ctx, cancelHash); st != chain.TxConfirmed {
+		t.Fatalf("cancel status %s", st)
+	}
+	if st, _ := e.ad.Status(e.ctx, laterHash); st != chain.TxConfirmed {
+		t.Fatalf("later status %s", st)
+	}
+	if got := e.allocStatus("w-refused"); got != "cancelled" {
+		t.Fatalf("refused allocation is %q, want cancelled", got)
+	}
+	if got := e.allocStatus("w-later"); got != "confirmed" {
+		t.Fatalf("later allocation is %q", got)
+	}
+}
+
+func TestCancelOfBroadcastNonceBumpsFees(t *testing.T) {
+	e := newEnv(t)
+	e.automine(false)
+	t.Cleanup(func() { e.automine(true) })
+	u := e.buildW("w-c", "ETH", e.dest.Hex(), 5)
+	origHash := e.mustBroadcast(u)
+	uc := e.buildCancel("withdrawal", "w-c")
+	po, pc := payloadOf(t, u), payloadOf(t, uc)
+	for name, pair := range map[string][2]string{"tip": {po.Tip, pc.Tip}, "cap": {po.FeeCap, pc.FeeCap}} {
+		oldF, _ := new(big.Int).SetString(pair[0], 10)
+		newF, _ := new(big.Int).SetString(pair[1], 10)
+		min := new(big.Int).Mul(oldF, big.NewInt(115))
+		min.Div(min, big.NewInt(100))
+		if newF.Cmp(min) < 0 {
+			t.Fatalf("%s bumped %s -> %s, less than 15%%", name, pair[0], pair[1])
+		}
+	}
+	before := e.balance(e.dest)
+	e.mustBroadcast(uc)
+	e.mine(1)
+	if _, err := e.ec.TransactionReceipt(e.ctx, common.HexToHash(origHash)); err == nil {
+		t.Fatal("the cancelled original mined")
+	}
+	if e.balance(e.dest).Cmp(before) != 0 {
+		t.Fatal("cancelled withdrawal moved funds")
+	}
+	e.mine(e.cfg.Confirmations)
+	if st, _ := e.ad.Status(e.ctx, origHash); st != chain.TxDropped {
+		t.Fatalf("original status %s, want dropped", st)
+	}
+}
+
+func TestReplacementAndCancelRefuseFeesAboveTheCap(t *testing.T) {
+	e := newEnv(t)
+	e.automine(false)
+	t.Cleanup(func() { e.automine(true) })
+	u := e.buildW("w-cap", "ETH", e.dest.Hex(), 1)
+	e.mustBroadcast(u)
+	// Allow the original but not a 15% bump of it.
+	po := payloadOf(t, u)
+	fee := new(big.Int).Mul(new(big.Int).SetUint64(po.Gas), mustBig(po.FeeCap))
+	cfg := e.cfg
+	cfg.MaxTxFeeWei = fee
+	ad, err := New(e.ctx, cfg, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ad.Close()
+	tx, _ := e.pool.Begin(e.ctx)
+	_, err = ad.BuildReplacement(e.ctx, tx, "withdrawal", "w-cap")
+	_ = tx.Rollback(e.ctx) // release the allocation lock before the next build
+	if err == nil {
+		t.Fatal("replacement above the fee cap was built")
+	}
+	tx2, _ := e.pool.Begin(e.ctx)
+	cfg.MaxTxFeeWei = new(big.Int).SetUint64(21000) // far below any cancel
+	ad2, _ := New(e.ctx, cfg, e.pool)
+	defer ad2.Close()
+	_, err = ad2.BuildCancel(e.ctx, tx2, "withdrawal", "w-cap")
+	_ = tx2.Rollback(e.ctx)
+	if err == nil {
+		t.Fatal("cancel above the fee cap was built")
+	}
+	// A fresh withdrawal is refused too.
+	tx3, _ := e.pool.Begin(e.ctx)
+	defer tx3.Rollback(e.ctx)
+	if _, err := ad2.BuildWithdrawal(e.ctx, tx3, chain.WithdrawalIntent{ID: "x", PartitionID: "hot-0", Asset: "ETH", To: e.dest.Hex(), Amount: big.NewInt(1)}); err == nil {
+		t.Fatal("withdrawal above the fee cap was built")
+	}
+}
+
+func mustBig(s string) *big.Int {
+	n, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		panic(s)
+	}
+	return n
 }

@@ -27,6 +27,7 @@ func testCfg() Config {
 		Factory: tFactory, SweepDestination: tDest,
 		HotAddresses: map[string]common.Address{"p-hot": tHot},
 		Assets:       map[string]Token{"USDT": {Address: tToken, Decimals: 6}},
+		MaxTxFeeWei:  big.NewInt(300_000_000_000_000), // = 100000 gas x 3 gwei, the fee of mkUnsigned
 	}
 }
 
@@ -40,10 +41,14 @@ func mustVerifier(t *testing.T) *Verifier {
 }
 
 func mkUnsigned(t *testing.T, to common.Address, value *big.Int, data []byte, mut func(*Payload)) chain.UnsignedTx {
+	return mkUnsignedFee(t, to, value, data, 100000, big.NewInt(1e9), big.NewInt(3e9), mut)
+}
+
+func mkUnsignedFee(t *testing.T, to common.Address, value *big.Int, data []byte, gas uint64, tip, feeCap *big.Int, mut func(*Payload)) chain.UnsignedTx {
 	t.Helper()
 	p := eth.TxParams{
 		ChainID: big.NewInt(31337), Nonce: 7, To: to, Value: value, Data: data,
-		Gas: 100000, GasTipCap: big.NewInt(1e9), GasFeeCap: big.NewInt(3e9),
+		Gas: gas, GasTipCap: tip, GasFeeCap: feeCap,
 	}
 	_, d, err := eth.BuildTx(p)
 	if err != nil {
@@ -307,6 +312,98 @@ func TestVerifyRejects(t *testing.T) {
 				t.Fatalf("error does not wrap ErrRejected: %v", err)
 			}
 		})
+	}
+}
+
+func cancelTx(t *testing.T, gas uint64) (chain.UnsignedTx, signjob.Intent) {
+	u := mkUnsignedFee(t, tHot, new(big.Int), nil, gas, big.NewInt(1e9), big.NewInt(3e9), nil)
+	return u, signjob.Intent{Kind: "cancel", ID: "w1", PartitionID: "p-hot", Chain: "evm-test", Asset: "ETH", To: tHot.Hex(), Amount: "0"}
+}
+
+func TestVerifyCancel(t *testing.T) {
+	v := mustVerifier(t)
+	u, i := cancelTx(t, 21000)
+	if err := v.Verify(u, i); err != nil {
+		t.Fatal(err)
+	}
+	reject := map[string]func() (chain.UnsignedTx, signjob.Intent){
+		"gas not 21000": func() (chain.UnsignedTx, signjob.Intent) { return cancelTx(t, 21001) },
+		"to is not the sender": func() (chain.UnsignedTx, signjob.Intent) {
+			_, i := cancelTx(t, 21000)
+			return mkUnsignedFee(t, tUser, new(big.Int), nil, 21000, big.NewInt(1e9), big.NewInt(3e9), nil), i
+		},
+		"carries value": func() (chain.UnsignedTx, signjob.Intent) {
+			_, i := cancelTx(t, 21000)
+			return mkUnsignedFee(t, tHot, big.NewInt(1), nil, 21000, big.NewInt(1e9), big.NewInt(3e9), nil), i
+		},
+		"carries data": func() (chain.UnsignedTx, signjob.Intent) {
+			_, i := cancelTx(t, 21000)
+			return mkUnsignedFee(t, tHot, new(big.Int), []byte{1}, 21000, big.NewInt(1e9), big.NewInt(3e9), nil), i
+		},
+		"intent amount not 0": func() (chain.UnsignedTx, signjob.Intent) { u, i := cancelTx(t, 21000); i.Amount = "1"; return u, i },
+		"intent has source": func() (chain.UnsignedTx, signjob.Intent) {
+			u, i := cancelTx(t, 21000)
+			i.From = tHot.Hex()
+			return u, i
+		},
+		"intent to is not the hot address": func() (chain.UnsignedTx, signjob.Intent) {
+			u, i := cancelTx(t, 21000)
+			i.To = tUser.Hex()
+			return u, i
+		},
+		"fee cap exceeded": func() (chain.UnsignedTx, signjob.Intent) {
+			_, i := cancelTx(t, 21000)
+			return mkUnsignedFee(t, tHot, new(big.Int), nil, 21000, big.NewInt(1e9), new(big.Int).Mul(big.NewInt(3e9), big.NewInt(1000)), nil), i
+		},
+	}
+	for name, mk := range reject {
+		u, i := mk()
+		if err := v.Verify(u, i); !errors.Is(err, ErrRejected) {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
+// The hot wallet pays the fee and the intent does not mention it, so the
+// Verifier caps gas x max_fee_per_gas (Config.MaxTxFeeWei).
+func TestVerifyFeeCap(t *testing.T) {
+	v := mustVerifier(t) // cap = 100000 x 3 gwei exactly
+	_, i := nativeWithdrawal(t)
+	mk := func(gas uint64, tip, feeCap *big.Int) chain.UnsignedTx {
+		return mkUnsignedFee(t, tUser, big.NewInt(1500), nil, gas, tip, feeCap, nil)
+	}
+	if err := v.Verify(mk(100000, big.NewInt(1e9), big.NewInt(3e9)), i); err != nil {
+		t.Fatalf("fee exactly at the cap rejected: %v", err)
+	}
+	for name, u := range map[string]chain.UnsignedTx{
+		"gas one over":                           mk(100001, big.NewInt(1e9), big.NewInt(3e9)),
+		"fee cap one over":                       mk(100000, big.NewInt(1e9), big.NewInt(3e9+1)),
+		"huge priority fee (cap raised with it)": mk(100000, big.NewInt(9e12), big.NewInt(9e12)),
+	} {
+		if err := v.Verify(u, i); !errors.Is(err, ErrRejected) || !strings.Contains(err.Error(), "cap") {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+	// Tampered gas / fee fields without recomputing the digest.
+	for name, f := range map[string]func(string) string{
+		"tampered gas": func(p string) string { return strings.Replace(p, `"gas":100000`, `"gas":100000000`, 1) },
+		"tampered fee cap": func(p string) string {
+			return strings.Replace(p, `"max_fee_per_gas":"3000000000"`, `"max_fee_per_gas":"3000000000000"`, 1)
+		},
+		"tampered tip": func(p string) string {
+			return strings.Replace(p, `"max_priority_fee_per_gas":"1000000000"`, `"max_priority_fee_per_gas":"2000000000"`, 1)
+		},
+	} {
+		u, i := nativeWithdrawal(t)
+		u.Payload = []byte(f(string(u.Payload)))
+		if err := v.Verify(u, i); !errors.Is(err, ErrRejected) {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+	bad := testCfg()
+	bad.MaxTxFeeWei = nil
+	if _, err := NewVerifier(bad); err == nil {
+		t.Fatal("config without MaxTxFeeWei accepted")
 	}
 }
 

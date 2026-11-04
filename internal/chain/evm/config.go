@@ -40,6 +40,9 @@ type Config struct {
 	NativeAsset      string                    // default "ETH"
 	FeeBumpPercent   uint64                    // replacement bump, default 15
 	StuckAfterBlocks uint64                    // default 50
+	// MaxTxFeeWei caps gas x max_fee_per_gas of every transaction. Required: the
+	// hot wallet pays it and it is not part of the intent.
+	MaxTxFeeWei *big.Int
 }
 
 // ErrUnknownAsset is returned for an asset that is neither native nor configured.
@@ -64,6 +67,8 @@ func (c Config) validate() error {
 	switch {
 	case strings.TrimSpace(c.Chain) == "" || strings.Contains(c.Chain, ":"):
 		return errors.New("evm: config: chain name must be non-empty and contain no ':'")
+	case c.MaxTxFeeWei == nil || c.MaxTxFeeWei.Sign() <= 0:
+		return errors.New("evm: config: MaxTxFeeWei is required and must be > 0")
 	case c.ChainID == 0:
 		return errors.New("evm: config: chain id must be > 0")
 	case c.Factory == (common.Address{}):

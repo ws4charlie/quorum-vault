@@ -19,52 +19,51 @@ import (
 //   - The allocation is a row in evm_nonce_allocations, so the nonce and the
 //     counter move together: a rollback releases both and leaves no gap.
 //   - The same (ownerKind, ownerID) gets the same nonce back, never a second one.
-func (a *Adapter) allocateNonce(ctx context.Context, tx pgx.Tx, from common.Address, ownerKind, ownerID string, tip, feeCap *big.Int) (uint64, error) {
+func (a *Adapter) allocateNonce(ctx context.Context, tx pgx.Tx, from common.Address, ownerKind, ownerID string, tip, feeCap *big.Int) (nonce uint64, status string, err error) {
 	addr := from.Hex()
-	pending, err := a.ec.PendingNonceAt(ctx, from)
-	if err != nil {
-		return 0, fmt.Errorf("evm: pending nonce: %w", err)
+	pending, perr := a.ec.PendingNonceAt(ctx, from)
+	if perr != nil {
+		return 0, "", fmt.Errorf("evm: pending nonce: %w", perr)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO evm_nonces (chain, address, next_nonce) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
 		a.cfg.Chain, addr, int64(pending)); err != nil {
-		return 0, fmt.Errorf("evm: init nonce row: %w", err)
+		return 0, "", fmt.Errorf("evm: init nonce row: %w", err)
 	}
 	var next int64
 	if err := tx.QueryRow(ctx, `SELECT next_nonce FROM evm_nonces WHERE chain=$1 AND address=$2 FOR UPDATE`,
 		a.cfg.Chain, addr).Scan(&next); err != nil {
-		return 0, fmt.Errorf("evm: lock nonce row: %w", err)
+		return 0, "", fmt.Errorf("evm: lock nonce row: %w", err)
 	}
 	var have int64
-	var status string
 	err = tx.QueryRow(ctx, `SELECT nonce, status FROM evm_nonce_allocations
 		WHERE chain=$1 AND address=$2 AND owner_kind=$3 AND owner_id=$4 AND status IN ('allocated','broadcast','confirmed')
 		ORDER BY nonce LIMIT 1`, a.cfg.Chain, addr, ownerKind, ownerID).Scan(&have, &status)
 	switch {
 	case err == nil:
 		if status == "confirmed" {
-			return 0, fmt.Errorf("evm: %s %s already confirmed at nonce %d", ownerKind, ownerID, have)
+			return 0, "", fmt.Errorf("evm: %s %s already confirmed at nonce %d", ownerKind, ownerID, have)
 		}
 		if status == "allocated" {
 			if _, err := tx.Exec(ctx, `UPDATE evm_nonce_allocations SET max_priority_fee_per_gas=$4, max_fee_per_gas=$5, updated_at=now()
 				WHERE chain=$1 AND address=$2 AND nonce=$3`, a.cfg.Chain, addr, have, tip.String(), feeCap.String()); err != nil {
-				return 0, err
+				return 0, "", err
 			}
 		}
-		return uint64(have), nil
+		return uint64(have), status, nil
 	case !errors.Is(err, pgx.ErrNoRows):
-		return 0, fmt.Errorf("evm: look up allocation: %w", err)
+		return 0, "", fmt.Errorf("evm: look up allocation: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO evm_nonce_allocations
 		(chain, address, nonce, owner_kind, owner_id, status, max_priority_fee_per_gas, max_fee_per_gas)
 		VALUES ($1,$2,$3,$4,$5,'allocated',$6,$7)`,
 		a.cfg.Chain, addr, next, ownerKind, ownerID, tip.String(), feeCap.String()); err != nil {
-		return 0, fmt.Errorf("evm: insert allocation: %w", err)
+		return 0, "", fmt.Errorf("evm: insert allocation: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE evm_nonces SET next_nonce=$3, updated_at=now() WHERE chain=$1 AND address=$2`,
 		a.cfg.Chain, addr, next+1); err != nil {
-		return 0, fmt.Errorf("evm: advance nonce: %w", err)
+		return 0, "", fmt.Errorf("evm: advance nonce: %w", err)
 	}
-	return uint64(next), nil
+	return uint64(next), "allocated", nil
 }
 
 // Allocation is one evm_nonce_allocations row as Reconcile reports it.
@@ -74,7 +73,7 @@ type Allocation struct {
 	OwnerKind string
 	OwnerID   string
 	Status    string
-	TxHash    string // comma-separated when the transaction was replaced
+	TxHash    string // latest broadcast attempt; all attempts are in evm_tx_attempts
 	UpdatedAt time.Time
 }
 
@@ -139,8 +138,8 @@ func (a *Adapter) Reconcile(ctx context.Context) (Reconciliation, error) {
 			confirmed[al.Address] = cn
 		}
 		if al.Nonce < cn {
-			if a.mined(ctx, al.TxHash, safe) {
-				a.markConfirmed(ctx, lastHash(al.TxHash))
+			if h := a.minedAttempt(ctx, al.Address, al.Nonce, safe); h != "" {
+				a.finalize(ctx, h)
 				continue
 			}
 			out.Gaps = append(out.Gaps, al)
@@ -153,28 +152,26 @@ func (a *Adapter) Reconcile(ctx context.Context) (Reconciliation, error) {
 	return out, nil
 }
 
-func lastHash(csv string) string {
-	for i := len(csv) - 1; i >= 0; i-- {
-		if csv[i] == ',' {
-			return csv[i+1:]
+// minedAttempt returns the hash of an attempt at (address, nonce) that has a
+// receipt at or below safe, or "".
+func (a *Adapter) minedAttempt(ctx context.Context, address string, nonce, safe uint64) string {
+	rows, err := a.pool.Query(ctx, `SELECT tx_hash FROM evm_tx_attempts WHERE chain=$1 AND address=$2 AND nonce=$3 ORDER BY created_at DESC`,
+		a.cfg.Chain, address, int64(nonce))
+	if err != nil {
+		return ""
+	}
+	var hashes []string
+	for rows.Next() {
+		var h string
+		if rows.Scan(&h) == nil {
+			hashes = append(hashes, h)
 		}
 	}
-	return csv
-}
-
-// mined reports whether any recorded hash has a receipt at or below safe.
-func (a *Adapter) mined(ctx context.Context, csv string, safe uint64) bool {
-	for len(csv) > 0 {
-		h := lastHash(csv)
-		if h != "" {
-			if r, err := a.ec.TransactionReceipt(ctx, common.HexToHash(h)); err == nil && r.BlockNumber.Uint64() <= safe {
-				return true
-			}
+	rows.Close()
+	for _, h := range hashes {
+		if r, err := a.ec.TransactionReceipt(ctx, common.HexToHash(h)); err == nil && r.BlockNumber.Uint64() <= safe {
+			return h
 		}
-		if len(csv) <= len(h) {
-			break
-		}
-		csv = csv[:len(csv)-len(h)-1]
 	}
-	return false
+	return ""
 }

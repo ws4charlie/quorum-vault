@@ -20,6 +20,9 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 )
 
+// DefaultCancelGas is the gas limit of a cancel (a plain self-send).
+const DefaultCancelGas uint64 = 21000
+
 // Adapter is the EVM chain cell.
 type Adapter struct {
 	cfg  Config
@@ -206,69 +209,157 @@ func (a *Adapter) buildAndAllocate(ctx context.Context, tx pgx.Tx, kind, id, par
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	nonce, err := a.allocateNonce(ctx, tx, from, kind, id, tip, feeCap)
+	if err := a.checkFee(gas, feeCap); err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	nonce, status, err := a.allocateNonce(ctx, tx, from, kind, id, tip, feeCap)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	return a.unsigned(eth.TxParams{
+	u, err := a.unsigned(eth.TxParams{
 		ChainID: new(big.Int).SetUint64(a.cfg.ChainID), Nonce: nonce, To: to, Value: value, Data: data,
 		Gas: gas, GasTipCap: tip, GasFeeCap: feeCap,
 	}, from, partition)
-}
-
-// BuildReplacement rebuilds the transaction owned by (ownerKind, ownerID) at the
-// same nonce with both fee fields raised by at least FeeBumpPercent. The
-// transaction body is read back from the node by the hash recorded at
-// Broadcast, since evm_nonce_allocations stores no calldata.
-func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
-	var addr, hashes string
-	var nonce int64
-	var oldTip, oldCap *string
-	err := tx.QueryRow(ctx, `SELECT address, nonce, COALESCE(tx_hash,''), max_priority_fee_per_gas::text, max_fee_per_gas::text
-		FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status IN ('allocated','broadcast')
-		ORDER BY nonce DESC LIMIT 1 FOR UPDATE`, a.cfg.Chain, ownerKind, ownerID).Scan(&addr, &nonce, &hashes, &oldTip, &oldCap)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return chain.UnsignedTx{}, fmt.Errorf("evm: no replaceable allocation for %s %s", ownerKind, ownerID)
-	}
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	if hashes == "" {
-		return chain.UnsignedTx{}, fmt.Errorf("evm: %s %s was never broadcast; rebuild it instead of replacing it", ownerKind, ownerID)
-	}
-	from := common.HexToAddress(addr)
-	// Read the body from any recorded attempt the node still knows.
-	var orig *types.Transaction
-	hs := strings.Split(hashes, ",")
-	for i := len(hs) - 1; i >= 0 && orig == nil; i-- {
-		if t, _, err := a.ec.TransactionByHash(ctx, common.HexToHash(hs[i])); err == nil {
-			orig = t
+	if status == "allocated" { // once broadcast, the stored payload is what was sent
+		if err := a.storeUnsigned(ctx, tx, from.Hex(), nonce, u, tip, feeCap); err != nil {
+			return chain.UnsignedTx{}, err
 		}
 	}
-	if orig == nil || orig.To() == nil {
-		return chain.UnsignedTx{}, fmt.Errorf("evm: node no longer knows the transaction of %s %s", ownerKind, ownerID)
+	return u, nil
+}
+
+// allocRow is the open allocation of an owner, locked FOR UPDATE.
+type allocRow struct {
+	addr    string
+	nonce   int64
+	payload []byte
+	sent    bool // at least one attempt was broadcast
+	tip     *big.Int
+	feeCap  *big.Int
+}
+
+func (a *Adapter) lockOpenAllocation(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (allocRow, error) {
+	var r allocRow
+	var hash, tip, fcap string
+	err := tx.QueryRow(ctx, `SELECT address, nonce, payload, COALESCE(tx_hash,''), max_priority_fee_per_gas::text, max_fee_per_gas::text
+		FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status IN ('allocated','broadcast')
+		ORDER BY nonce DESC LIMIT 1 FOR UPDATE`, a.cfg.Chain, ownerKind, ownerID).Scan(&r.addr, &r.nonce, &r.payload, &hash, &tip, &fcap)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return r, fmt.Errorf("evm: no open allocation for %s %s", ownerKind, ownerID)
+	}
+	if err != nil {
+		return r, err
+	}
+	r.sent = hash != ""
+	r.tip, _ = new(big.Int).SetString(tip, 10)
+	r.feeCap, _ = new(big.Int).SetString(fcap, 10)
+	if r.tip == nil || r.feeCap == nil {
+		return r, fmt.Errorf("evm: allocation of %s %s has no fees", ownerKind, ownerID)
+	}
+	return r, nil
+}
+
+// bump raises old by FeeBumpPercent (rounded up), or to fresh if that is higher.
+func (a *Adapter) bump(old, fresh *big.Int) *big.Int {
+	b := new(big.Int).Mul(old, big.NewInt(int64(100+a.cfg.FeeBumpPercent)))
+	b.Add(b, big.NewInt(99)).Div(b, big.NewInt(100))
+	if fresh.Cmp(b) > 0 {
+		return fresh
+	}
+	return b
+}
+
+// checkFee refuses a transaction whose worst-case fee exceeds MaxTxFeeWei: the
+// signing gateway would reject it, so it must not be built.
+func (a *Adapter) checkFee(gas uint64, feeCap *big.Int) error {
+	if fee := new(big.Int).Mul(new(big.Int).SetUint64(gas), feeCap); fee.Cmp(a.cfg.MaxTxFeeWei) > 0 {
+		return fmt.Errorf("evm: worst-case fee %s exceeds MaxTxFeeWei %s", fee, a.cfg.MaxTxFeeWei)
+	}
+	return nil
+}
+
+// storeUnsigned records the payload and fees of the latest unsigned build, so
+// replacement and cancel never depend on the node remembering the transaction.
+func (a *Adapter) storeUnsigned(ctx context.Context, tx pgx.Tx, addr string, nonce uint64, u chain.UnsignedTx, tip, feeCap *big.Int) error {
+	_, err := tx.Exec(ctx, `UPDATE evm_nonce_allocations SET payload=$4, max_priority_fee_per_gas=$5, max_fee_per_gas=$6, updated_at=now()
+		WHERE chain=$1 AND address=$2 AND nonce=$3`, a.cfg.Chain, addr, int64(nonce), u.Payload, tip.String(), feeCap.String())
+	if err != nil {
+		return fmt.Errorf("evm: store payload: %w", err)
+	}
+	return nil
+}
+
+// BuildReplacement rebuilds the transaction owned by (ownerKind, ownerID) at the
+// same nonce from the stored payload, with both fee fields raised by at least
+// FeeBumpPercent. It reads nothing from the node.
+func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	r, err := a.lockOpenAllocation(ctx, tx, ownerKind, ownerID)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	if !r.sent {
+		return chain.UnsignedTx{}, fmt.Errorf("evm: %s %s was never broadcast; rebuild it instead of replacing it", ownerKind, ownerID)
+	}
+	pl, err := decodePayload(r.payload)
+	if err != nil {
+		return chain.UnsignedTx{}, fmt.Errorf("evm: stored payload of %s %s: %w", ownerKind, ownerID, err)
+	}
+	params, from, err := pl.params()
+	if err != nil {
+		return chain.UnsignedTx{}, err
 	}
 	tip, feeCap, _, err := a.fees(ctx)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	bump := func(old, fresh *big.Int) *big.Int {
-		b := new(big.Int).Mul(old, big.NewInt(int64(100+a.cfg.FeeBumpPercent)))
-		b.Add(b, big.NewInt(99)).Div(b, big.NewInt(100)) // round up
-		if fresh.Cmp(b) > 0 {
-			return fresh
-		}
-		return b
+	params.GasTipCap, params.GasFeeCap = a.bump(r.tip, tip), a.bump(r.feeCap, feeCap)
+	if params.GasTipCap.Cmp(params.GasFeeCap) > 0 {
+		params.GasFeeCap = new(big.Int).Set(params.GasTipCap)
 	}
-	newTip, newCap := bump(orig.GasTipCap(), tip), bump(orig.GasFeeCap(), feeCap)
-	if _, err := tx.Exec(ctx, `UPDATE evm_nonce_allocations SET max_priority_fee_per_gas=$4, max_fee_per_gas=$5, updated_at=now()
-		WHERE chain=$1 AND address=$2 AND nonce=$3`, a.cfg.Chain, addr, nonce, newTip.String(), newCap.String()); err != nil {
+	if err := a.checkFee(params.Gas, params.GasFeeCap); err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	return a.unsigned(eth.TxParams{
-		ChainID: new(big.Int).SetUint64(a.cfg.ChainID), Nonce: uint64(nonce), To: *orig.To(), Value: orig.Value(), Data: orig.Data(),
-		Gas: orig.Gas(), GasTipCap: newTip, GasFeeCap: newCap,
+	u, err := a.unsigned(params, from, a.cfg.partitionOf(from))
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	return u, a.storeUnsigned(ctx, tx, r.addr, params.Nonce, u, params.GasTipCap, params.GasFeeCap)
+}
+
+// BuildCancel builds a zero-value, 21,000-gas self-send at the owner's nonce, to
+// free a nonce whose job was refused (nonces are strictly sequential, so one
+// stuck nonce blocks every later one). If the allocation was broadcast the fees
+// are bumped as in a replacement. When it confirms the allocation is 'cancelled'.
+func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	r, err := a.lockOpenAllocation(ctx, tx, ownerKind, ownerID)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	from := common.HexToAddress(r.addr)
+	tip, feeCap, _, err := a.fees(ctx)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	if r.sent {
+		tip, feeCap = a.bump(r.tip, tip), a.bump(r.feeCap, feeCap)
+		if tip.Cmp(feeCap) > 0 {
+			feeCap = new(big.Int).Set(tip)
+		}
+	}
+	if err := a.checkFee(DefaultCancelGas, feeCap); err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	u, err := a.unsigned(eth.TxParams{
+		ChainID: new(big.Int).SetUint64(a.cfg.ChainID), Nonce: uint64(r.nonce), To: from, Value: new(big.Int),
+		Gas: DefaultCancelGas, GasTipCap: tip, GasFeeCap: feeCap,
 	}, from, a.cfg.partitionOf(from))
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	return u, a.storeUnsigned(ctx, tx, r.addr, uint64(r.nonce), u, tip, feeCap)
 }
 
 // Assemble attaches sig (64 bytes r||s, or 65 bytes r||s||v with v in
@@ -356,18 +447,37 @@ func (a *Adapter) Broadcast(ctx context.Context, s chain.SignedTx) (string, erro
 	return t.Hash().Hex(), nil
 }
 
+// recordBroadcast inserts the attempt (before sending, so a crash cannot lose
+// the hash) and points the allocation at it. A transaction whose nonce has no
+// allocation is an error: an unknown nonce is never sent.
 func (a *Adapter) recordBroadcast(ctx context.Context, from common.Address, t *types.Transaction) error {
 	h := t.Hash().Hex()
-	_, err := a.pool.Exec(ctx, `UPDATE evm_nonce_allocations SET
+	kind := "send"
+	if t.To() != nil && *t.To() == from && t.Value().Sign() == 0 && len(t.Data()) == 0 {
+		kind = "cancel"
+	}
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err := tx.Exec(ctx, `INSERT INTO evm_tx_attempts (tx_hash, chain, address, nonce, kind) VALUES ($1,$2,$3,$4,$5)
+		ON CONFLICT (tx_hash) DO NOTHING`, h, a.cfg.Chain, from.Hex(), int64(t.Nonce()), kind); err != nil {
+		return fmt.Errorf("evm: record attempt: %w", err)
+	}
+	ct, err := tx.Exec(ctx, `UPDATE evm_nonce_allocations SET
 		status = CASE WHEN status IN ('confirmed','cancelled') THEN status ELSE 'broadcast' END,
-		tx_hash = CASE WHEN tx_hash IS NULL THEN $4 WHEN $4 = ANY(string_to_array(tx_hash, ',')) THEN tx_hash ELSE tx_hash || ',' || $4 END,
+		tx_hash = CASE WHEN status IN ('confirmed','cancelled') THEN tx_hash ELSE $4 END,
 		max_priority_fee_per_gas = $5, max_fee_per_gas = $6, updated_at = now()
-		WHERE chain=$1 AND address=$2 AND nonce=$3 AND status <> 'confirmed'`,
+		WHERE chain=$1 AND address=$2 AND nonce=$3`,
 		a.cfg.Chain, from.Hex(), int64(t.Nonce()), h, t.GasTipCap().String(), t.GasFeeCap().String())
 	if err != nil {
 		return fmt.Errorf("evm: record broadcast: %w", err)
 	}
-	return nil
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("evm: refusing to broadcast: no nonce allocation for %s nonce %d", from.Hex(), t.Nonce())
+	}
+	return tx.Commit(ctx)
 }
 
 // safeHead is the highest block that has Confirmations blocks on top of it.
@@ -395,14 +505,13 @@ func (a *Adapter) Status(ctx context.Context, txHash string) (chain.TxStatus, er
 			return "", serr
 		}
 		final := ok && r.BlockNumber.Uint64() <= safe
+		if final {
+			a.finalize(ctx, h.Hex())
+		}
 		if r.Status != types.ReceiptStatusSuccessful {
-			if final {
-				a.markConfirmed(ctx, txHash)
-			}
 			return chain.TxFailed, nil
 		}
 		if final {
-			a.markConfirmed(ctx, txHash)
 			return chain.TxConfirmed, nil
 		}
 		return chain.TxPending, nil
@@ -415,8 +524,8 @@ func (a *Adapter) Status(ctx context.Context, txHash string) (chain.TxStatus, er
 	}
 	var addr string
 	var nonce int64
-	err = a.pool.QueryRow(ctx, `SELECT address, nonce FROM evm_nonce_allocations
-		WHERE chain=$1 AND $2 = ANY(string_to_array(tx_hash, ','))`, a.cfg.Chain, h.Hex()).Scan(&addr, &nonce)
+	err = a.pool.QueryRow(ctx, `SELECT address, nonce FROM evm_tx_attempts WHERE chain=$1 AND tx_hash=$2`,
+		a.cfg.Chain, h.Hex()).Scan(&addr, &nonce)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return chain.TxPending, nil
 	}
@@ -433,9 +542,15 @@ func (a *Adapter) Status(ctx context.Context, txHash string) (chain.TxStatus, er
 	return chain.TxPending, nil
 }
 
-func (a *Adapter) markConfirmed(ctx context.Context, txHash string) {
-	_, _ = a.pool.Exec(ctx, `UPDATE evm_nonce_allocations SET status='confirmed', updated_at=now()
-		WHERE chain=$1 AND status IN ('allocated','broadcast') AND $2 = ANY(string_to_array(tx_hash, ','))`, a.cfg.Chain, txHash)
+// finalize marks the allocation of a final transaction: 'cancelled' when the
+// mined attempt was a cancel, else 'confirmed' (a reverted transaction still
+// consumed its nonce).
+func (a *Adapter) finalize(ctx context.Context, txHash string) {
+	_, _ = a.pool.Exec(ctx, `UPDATE evm_nonce_allocations al
+		SET status = CASE WHEN at.kind = 'cancel' THEN 'cancelled' ELSE 'confirmed' END, tx_hash = at.tx_hash, updated_at = now()
+		FROM evm_tx_attempts at
+		WHERE at.chain=$1 AND at.tx_hash=$2 AND al.chain=at.chain AND al.address=at.address AND al.nonce=at.nonce
+		  AND al.status IN ('allocated','broadcast')`, a.cfg.Chain, txHash)
 }
 
 // EstimateSweepFee is eth_estimateGas of the sweep call times the current
