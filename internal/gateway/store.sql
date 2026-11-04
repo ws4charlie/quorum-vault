@@ -1,0 +1,37 @@
+-- Replay guard: the signing zone's own record of what it signed. Applied by the
+-- gateway at start, in a database the business zone cannot reach. Idempotent.
+
+-- One row per intent ID, written when its first signature is released.
+CREATE TABLE IF NOT EXISTS signed_intents (
+    intent_id   text PRIMARY KEY,
+    intent_hash bytea NOT NULL,
+    kind        text NOT NULL,
+    chain       text NOT NULL,
+    asset       text NOT NULL,
+    amount      numeric(78,0) NOT NULL,
+    sender      text NOT NULL,
+    nonce       numeric(20,0) NOT NULL,
+    created_at  timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS signed_intents_window ON signed_intents (chain, kind, created_at);
+
+-- One row per signature released. A replacement at the same nonce adds a row.
+CREATE TABLE IF NOT EXISTS signed_digests (
+    digest      bytea PRIMARY KEY,
+    intent_id   text NOT NULL REFERENCES signed_intents (intent_id),
+    nonce       numeric(20,0) NOT NULL,
+    tip         numeric(78,0) NOT NULL,
+    fee_cap     numeric(78,0) NOT NULL,
+    signature   bytea NOT NULL,
+    signed_at   timestamptz NOT NULL
+);
+
+-- Which intent owns a (chain, sender, nonce). A cancel consumes the nonce.
+CREATE TABLE IF NOT EXISTS nonce_claims (
+    chain     text NOT NULL,
+    sender    text NOT NULL,
+    nonce     numeric(20,0) NOT NULL,
+    intent_id text NOT NULL REFERENCES signed_intents (intent_id),
+    kind      text NOT NULL,
+    PRIMARY KEY (chain, sender, nonce)
+);
