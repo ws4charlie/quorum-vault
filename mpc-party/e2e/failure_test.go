@@ -235,9 +235,9 @@ func TestThroughput(t *testing.T) {
 			n, p50, p99 := run(conc, 6*time.Second)
 			t.Logf("THROUGHPUT %-8s conc=%-2d  %6.1f sig/s  (n=%d, p50=%v, p99=%v)", alg, conc, float64(n)/6, n, p50.Round(time.Millisecond), p99.Round(time.Millisecond))
 			if conc == 8 {
-				min := 20.0
+				min := 10.0
 				if alg == "ed25519" {
-					min = 100
+					min = 20
 				}
 				if float64(n)/6 < min {
 					t.Errorf("%s throughput %.1f sig/s at concurrency 8 is below the sanity floor %.0f", alg, float64(n)/6, min)

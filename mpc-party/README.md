@@ -114,3 +114,76 @@ not secret). Public data (public keys, chain codes, signatures, PVE ciphertexts)
    changes with the pin).
 
 `internal/cbmpc/testdata/golden.json` holds TEST-ONLY shares from throwaway keys; they protect nothing.
+
+---
+
+# The service (P5b-2)
+
+Layout: `api/` generated gRPC code (own module, pure Go; `api/generate.sh` lists the generator versions),
+`internal/server` the service, `cmd/mpc-party` the binary, `e2e/` real-process tests, `internal/testenv` throwaway
+certificates and configs for tests.
+
+| Port | Who connects | Auth | Serves |
+|---|---|---|---|
+| A `caller_listen` | gateway / admin tooling | mTLS 1.3, caller certificates pinned by SHA-256 fingerprint | `DKG`, `Node`, `Derive`, `Sign`, `Refresh`, `Health` |
+| B `caller_listen` | monitoring | same | `Health` only (everything else is `Unimplemented`) |
+| B `peer_listen` | party A only | mTLS 1.3, A's certificate pinned | `Peer.Session` (one stream per protocol session) |
+
+A has no peer listener: it dials B. Caller and peer ports are different listeners with different pin sets; a legitimate
+caller certificate is refused on the peer port (tested).
+
+## Run two parties locally
+
+Needs the cb-mpc build (`scripts/fetch-build-cbmpc.sh`) and a dev build of the binary, which is the only build that
+contains the allow-all authorizer:
+
+```bash
+cd mpc-party
+go build -tags devauth -o /tmp/mpc-party-dev ./cmd/mpc-party     # dev build: has "dev-allow-all"
+go build -o /tmp/mpc-party ./cmd/mpc-party                       # production build: only "deny-all" until P5b-3
+```
+
+Make certificates (any tool; the tests generate P-256 self-signed ones) for party A, party B and one caller, and compute
+pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Write a 32-byte hex key to `seal.key` (test sealer only).
+`b.json`:
+
+```json
+{
+  "role": "B", "caller_listen": "127.0.0.1:7002", "peer_listen": "127.0.0.1:7003",
+  "cert_file": "b.crt", "key_file": "b.key",
+  "peer_pins": ["<sha256 of a.crt>"], "caller_pins": ["<sha256 of caller.crt>"],
+  "data_dir": "data-b",
+  "sealer": {"type": "insecure-static-key-for-tests", "key_file": "seal.key"},
+  "authorizer": {"type": "dev-allow-all", "accept_risk": "I UNDERSTAND THIS PARTY SIGNS ANYTHING WITHOUT POLICY CHECKS"}
+}
+```
+
+`a.json` is the same with `"role": "A"`, `"caller_listen": "127.0.0.1:7001"`, no `peer_listen`,
+`"peer_address": "127.0.0.1:7003"`, `peer_pins` = pin of `b.crt`. Start B, then A, each with `-config`:
+
+```bash
+/tmp/mpc-party-dev -config b.json &  /tmp/mpc-party-dev -config a.json &
+```
+
+Optional `limits`: `recv_timeout_ms` (5000), `session_timeout_ms` (30000), `max_peer_sessions` (2 x cores),
+`max_frame_bytes` (1 MiB; the largest DKG message measured is about 39 KB), `sessions_per_sec_key` (200),
+`max_intent_bytes` (256 KiB), `shutdown_grace_ms` (10000), `replay_cache_size` (200000). The process refuses to start on a
+missing or invalid file, on an unknown field, or with no usable authorizer. Logs are JSON on stderr (op, job id, key id,
+duration, outcome, kind); no secrets.
+
+## Behaviour worth knowing
+
+- **Errors** are gRPC statuses with an `ErrorDetail{kind}`: `TRANSPORT` (retry, no key action), `CRYPTOGRAPHIC` (freeze the
+  keyset), `INTERNAL`, `REFUSED` (an authorizer said no, nothing ran), `LIMIT` (nothing ran). `server.KindOfStatus(err)`.
+- **Sign**: A authorizes, then opens a session; B authorizes on its side from the intent package in the OPEN frame
+  before it joins; both derive the key inside the session, A verifies the signature with btcec / `crypto/ed25519` and
+  stores it durably before returning it. `job_id` is the idempotency key: same job and digest returns the stored
+  signature (`replayed=true`), a different digest is `FailedPrecondition`.
+- **DKG and Refresh** always run `SelfTest` on both sides. New shares are stored only after A's self-test passed and A told B;
+  B stores first, then A. A crash between the two stores leaves a mismatch that P5b-4's durable two-phase commit
+  closes; until then re-run the operation (the old shares are still in the data dir only until the replacement is written).
+- **Authorizer**: `server.Authorizer` is called on B (before joining) and on A. The default build has only `deny-all`;
+  `dev-allow-all` exists only with `-tags devauth` and the risk phrase in the config. The production implementation is P5b-3.
+- Sealing uses the clearly named test sealer (`insecure-static-key-for-tests`). P5b-4 adds the HSM sealer.
+- Hardening at start: `RLIMIT_CORE=0` everywhere; on Linux also `PR_SET_DUMPABLE=0` and `mlockall` (result logged).
+- SIGTERM/SIGINT: stop accepting, wait for sessions up to `shutdown_grace_ms`, wipe keysets from memory.
