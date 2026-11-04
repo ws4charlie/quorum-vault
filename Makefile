@@ -65,3 +65,20 @@ run:
 # Demo against a server started with SEPOLIA_RPC_URL=$(LOCAL_RPC_URL).
 demo-local:
 	./scripts/demo-sepolia.sh --local
+
+# Phase 2 / P3a: signing gateway and outbox relay.
+.PHONY: build-gateway build-relay test-gateway test-relay
+
+build-gateway:
+	go build -o bin/qv-gateway ./cmd/qv-gateway
+
+build-relay:
+	go build -o bin/qv-relay ./cmd/qv-relay
+
+# Gateway attack tests and queue tests (needs Postgres and SoftHSM; `make db-up softhsm`).
+test-gateway:
+	QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 ./internal/gateway/... ./internal/signjob/...
+
+# Relay tests against Redpanda (`make infra-up`).
+test-relay:
+	QV_REQUIRE_DB=1 QV_REQUIRE_INFRA=1 go test -count=1 -p 1 ./internal/outbox/...

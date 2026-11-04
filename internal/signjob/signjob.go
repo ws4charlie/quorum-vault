@@ -5,6 +5,7 @@ package signjob
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"strconv"
 	"time"
 )
 
@@ -59,16 +60,20 @@ type Intent struct {
 	From        string // sweep source address; empty for a withdrawal
 	To          string
 	Amount      string // decimal base units
+	// NotAfter is the Unix time (seconds) after which the approvals lapse. The
+	// gateway refuses to start signing a withdrawal whose NotAfter is zero, past,
+	// or too far ahead, so an old approval cannot be replayed.
+	NotAfter int64
 }
 
 const intentDomain = "qv-intent-v1\n"
 
 // Canonical returns the domain prefix followed by every field, in struct
-// order, each prefixed by its 4-byte big-endian length so that field
+// order, each (NotAfter as a decimal string) prefixed by its 4-byte big-endian length so that field
 // boundaries are unambiguous.
 func (i Intent) Canonical() []byte {
 	b := []byte(intentDomain)
-	for _, f := range []string{i.Kind, i.ID, i.PartitionID, i.Chain, i.Asset, i.From, i.To, i.Amount} {
+	for _, f := range []string{i.Kind, i.ID, i.PartitionID, i.Chain, i.Asset, i.From, i.To, i.Amount, strconv.FormatInt(i.NotAfter, 10)} {
 		b = binary.BigEndian.AppendUint32(b, uint32(len(f)))
 		b = append(b, f...)
 	}
