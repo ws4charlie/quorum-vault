@@ -92,6 +92,10 @@ func severity(k pb.ErrorKind) int {
 		return 5
 	case pb.ErrorKind_ERROR_KIND_REFUSED:
 		return 4
+	case pb.ErrorKind_ERROR_KIND_FROZEN:
+		return 6
+	case pb.ErrorKind_ERROR_KIND_UNAVAILABLE:
+		return 1
 	case pb.ErrorKind_ERROR_KIND_LIMIT:
 		return 3
 	case pb.ErrorKind_ERROR_KIND_INTERNAL:
@@ -112,6 +116,10 @@ func peerFail(op string, fin *pb.Fin) *Fail {
 		f.Code = codes.Aborted
 	case pb.ErrorKind_ERROR_KIND_REFUSED:
 		f.Code = codes.PermissionDenied
+	case pb.ErrorKind_ERROR_KIND_FROZEN:
+		f.Code = codes.FailedPrecondition
+	case pb.ErrorKind_ERROR_KIND_UNAVAILABLE:
+		f.Code = codes.Unavailable
 	case pb.ErrorKind_ERROR_KIND_LIMIT:
 		f.Code = codes.ResourceExhausted
 		f.Err = ErrLimit
@@ -158,4 +166,8 @@ func KindOfStatus(err error) (pb.ErrorKind, bool) {
 		}
 	}
 	return 0, false
+}
+
+func frozenFail(op, keyset, reason string) *Fail {
+	return failf(pb.ErrorKind_ERROR_KIND_FROZEN, codes.FailedPrecondition, op, "keyset %q is frozen (%s); unfreezing needs an operator signature", keyset, reason)
 }

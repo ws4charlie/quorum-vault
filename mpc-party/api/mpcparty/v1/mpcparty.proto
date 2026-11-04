@@ -18,6 +18,8 @@ service MpcParty {
   // Admin: refresh the shares of a keyset. Includes a mandatory SelfTest; the old shares stay in force unless it passed.
   rpc Refresh(RefreshRequest) returns (RefreshResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
+  // Admin: lift a keyset freeze. Needs an operator signature; audited in the log on both parties.
+  rpc Unfreeze(UnfreezeRequest) returns (UnfreezeResponse);
 }
 
 enum Curve {
@@ -32,9 +34,19 @@ enum Algorithm {
   ALGORITHM_ED25519 = 2;         // digest is the full message; response is 64 bytes
 }
 
+// An operator's Ed25519 signature over ("qv-mpc-admin-v1\n" op "\n" keyset_id "\n" unix_seconds). Both parties verify it
+// with their own configured admin keys; party B refuses DKG, Refresh and Unfreeze that lack a valid one, so a
+// compromised party A cannot start them.
+message AdminAuth {
+  int64 unix_seconds = 1;
+  bytes public_key = 2; // which configured admin key signed (32 bytes)
+  bytes signature = 3;
+}
+
 message DKGRequest {
   string keyset_id = 1;
   Curve curve = 2;
+  AdminAuth admin = 3;
 }
 message DKGResponse {
   bytes root_public_key = 1;
@@ -75,10 +87,17 @@ message SignResponse {
 
 message RefreshRequest {
   string keyset_id = 1;
+  AdminAuth admin = 2;
 }
 message RefreshResponse {
   bytes root_public_key = 1;
 }
+
+message UnfreezeRequest {
+  string keyset_id = 1;
+  AdminAuth admin = 2;
+}
+message UnfreezeResponse {}
 
 message HealthRequest {}
 message HealthResponse {
@@ -98,6 +117,8 @@ enum ErrorKind {
   ERROR_KIND_INTERNAL = 3;      // bad request, local fault, unsupported: alert
   ERROR_KIND_REFUSED = 4;       // an Authorizer (local or the peer's) refused the request; nothing ran
   ERROR_KIND_LIMIT = 5;         // a configured limit was exceeded; nothing ran
+  ERROR_KIND_UNAVAILABLE = 7;   // a dependency of this party is down (B's cosigner, its guard database): NOTHING was signed, fail closed, but this is an outage, not a refusal: retry later
+  ERROR_KIND_FROZEN = 6;        // the keyset is frozen after a cryptographic failure; nothing ran; unfreezing needs an admin signature
 }
 
 message ErrorDetail {
@@ -137,6 +158,7 @@ enum Op {
   OP_DERIVE = 3;
   OP_SIGN = 4;
   OP_REFRESH = 5;
+  OP_UNFREEZE = 6;
 }
 
 message Open {
@@ -151,7 +173,8 @@ message Open {
   bytes digest = 8;
   string job_id = 9;
   bytes intent_package = 10;
-  bytes expected_public_key = 11; // sign: public key A believes key_id has; B refuses on mismatch
+  bytes expected_public_key = 11; // sign: REQUIRED. The key the authorizer judges; B refuses an empty one and aborts if the derived key differs
+  AdminAuth admin = 12;           // dkg, refresh, unfreeze
 }
 
 message Fin {

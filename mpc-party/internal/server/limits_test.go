@@ -101,7 +101,7 @@ func mustPin(s string) server.Pin { p, _ := server.ParsePin(s); return p }
 func TestLimitFrameSize(t *testing.T) {
 	p := startPair(t, pairOpts{tweak: func(role string, c *server.Config) { c.Limits.MaxFrameBytes = 2000 }})
 	start := time.Now()
-	_, err := p.Client.DKG(ctx30(t), &pb.DKGRequest{KeysetId: "ks", Curve: pb.Curve_CURVE_SECP256K1})
+	_, err := p.Client.DKG(ctx30(t), &pb.DKGRequest{KeysetId: "ks", Curve: pb.Curve_CURVE_SECP256K1, Admin: p.Env.Admin("dkg", "ks")})
 	if err == nil {
 		t.Fatal("DKG succeeded although its messages exceed the frame limit")
 	}

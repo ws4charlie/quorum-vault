@@ -21,7 +21,7 @@ type fixture struct {
 func newFixture(t *testing.T, withProxy bool) *fixture {
 	cl := newCluster(t, func(role string, c *server.Config) { c.Limits.RecvTimeoutMS = 1500; c.Limits.SessionTimeoutMS = 8000 }, withProxy)
 	x := ctx(t, 60*time.Second)
-	_, err := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: pb.Curve_CURVE_SECP256K1})
+	_, err := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: pb.Curve_CURVE_SECP256K1, Admin: cl.env.Admin("dkg", "k")})
 	must(t, err)
 	d, err := cl.client.Derive(x, &pb.DeriveRequest{KeysetId: "k", HardenedPath: []uint32{1}, Path: []uint32{0}})
 	must(t, err)
@@ -188,7 +188,7 @@ func TestThroughput(t *testing.T) {
 		if alg == "ed25519" {
 			curve, a = pb.Curve_CURVE_ED25519, pb.Algorithm_ALGORITHM_ED25519
 		}
-		_, err := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: curve})
+		_, err := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: curve, Admin: cl.env.Admin("dkg", "k")})
 		must(t, err)
 		d, err := cl.client.Derive(x, &pb.DeriveRequest{KeysetId: "k", HardenedPath: []uint32{1}, Path: []uint32{0}})
 		must(t, err)

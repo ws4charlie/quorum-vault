@@ -24,7 +24,19 @@ type Guard struct{ pool *pgxpool.Pool }
 
 // OpenGuard applies the schema to pool and returns the guard.
 func OpenGuard(ctx context.Context, pool *pgxpool.Pool) (*Guard, error) {
-	if _, err := pool.Exec(ctx, storeSQL); err != nil {
+	// Several instances may start at once on a fresh database: CREATE TYPE and friends race and fail. One at a time.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('qv-guard-schema'))`); err != nil {
+		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+	}
+	if _, err := tx.Exec(ctx, storeSQL); err != nil {
+		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
 	}
 	return &Guard{pool: pool}, nil

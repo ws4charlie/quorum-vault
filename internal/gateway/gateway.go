@@ -1,20 +1,16 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
-	"encoding/json"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
@@ -38,6 +34,7 @@ const (
 	ReasonFeeNotHigher  = "replay_fee_not_higher"  // 5 same intent, new digest, fees not higher
 	ReasonNonceTaken    = "replay_nonce_taken"     // 5 another intent already signed at this nonce
 	ReasonNonceCancel   = "replay_nonce_cancelled" // 5 a cancel consumed this nonce
+	ReasonSignerRefused = "signer_refused"         // 6 the signer's other party (cb-mpc party B) refused; nothing was signed
 )
 
 // Outcomes of processing one job.
@@ -81,10 +78,14 @@ type Gateway struct {
 	codecs  map[string]ChainCodec
 	signers map[string]signer.Signer // partition ID -> signer
 	guard   *Guard
+	dec     *Decider
 	jobs    *pgxpool.Pool // business database, role qv_gateway
 	opt     Options
 
 	inflight sync.WaitGroup // signer calls still running, abandoned ones included
+
+	outageMu sync.Mutex
+	outages  map[string]bool // chain -> an outage has been reported and signing has not resumed
 }
 
 // New builds a Gateway. codecs has one entry per configured chain; New builds
@@ -117,7 +118,8 @@ func New(cfg *Config, codecs map[string]ChainCodec, signers map[string]signer.Si
 	if opt.Now == nil {
 		opt.Now = time.Now
 	}
-	return &Gateway{cfg: cfg, codecs: codecs, signers: signers, guard: guard, jobs: jobs, opt: opt}, nil
+	dec := NewDecider(cfg, codecs, guard, ModeGateway, opt.Now)
+	return &Gateway{cfg: cfg, codecs: codecs, signers: signers, guard: guard, dec: dec, jobs: jobs, opt: opt}, nil
 }
 
 type discard struct{}
@@ -207,108 +209,41 @@ func (g *Gateway) decide(ctx context.Context, job signjob.Job) Decision {
 
 var errSigner = errors.New("signer failed")
 
+// errUnavailable marks an availability failure of the signer: the outcome is a retry, never a failed job.
+var errUnavailable = errors.New("signer unavailable")
+
 func (g *Gateway) evaluate(ctx context.Context, job signjob.Job) (sig []byte, replayed bool, err error) {
-	// 1. Intent.
-	intent, err := parseIntent(job)
+	var pub *ecdsa.PublicKey
+	s := g.signers[job.PartitionID]
+	if s != nil {
+		pub = s.PublicKey()
+	}
+	v, err := g.dec.Decide(ctx, job, pub)
 	if err != nil {
 		return nil, false, err
 	}
-	cc := g.cfg.Chains[intent.Chain]
-	codec := g.codecs[intent.Chain]
-	if cc == nil || codec == nil {
-		return nil, false, reject(ReasonIntent, "chain %q is not configured", intent.Chain)
-	}
-
-	// 2. Transaction matches intent.
-	u := chain.UnsignedTx{Chain: job.Chain, Digest: job.Digest, Payload: job.Payload,
-		KeyRef: chain.KeyRef{PartitionID: job.PartitionID, Path: job.KeyRef}}
-	if err := codec.Verify(u, intent); err != nil {
-		return nil, false, reject(ReasonTx, "%v", err)
-	}
-	info, err := codec.Decode(job.Payload)
-	if err != nil {
-		return nil, false, reject(ReasonTx, "%v", err)
-	}
-	amount, ok := new(big.Int).SetString(intent.Amount, 10)
-	if !ok {
-		return nil, false, reject(ReasonTx, "amount %q", intent.Amount)
-	}
-
-	// 3. Approvals, from configured keys only.
-	hash := intent.Hash()
-	valid := g.countApprovals(hash[:], job.Approvals)
-	if intent.Kind == "withdrawal" && valid == 0 {
-		return nil, false, reject(ReasonApprovals, "no valid approval from a configured, enabled approver")
-	}
-
-	// Phase 1, reserve. Steps 4 and 5 run under the replay guard's chain lock,
-	// so a second gateway instance sees our records before it decides. The
-	// transaction ends with the digest reserved (caps and nonce taken) and no
-	// signature yet: the lock is never held while the signer runs.
-	s := g.signers[job.PartitionID]
-	needSign := false
-	err = g.guard.Do(ctx, intent.Chain, func(gt *GuardTx) error {
-		now := g.opt.Now()
-		rec, err := gt.Intent(ctx, intent.ID)
-		if err != nil {
-			return err
-		}
-		known := rec != nil && bytes.Equal(rec.Hash, hash[:])
-
-		// 4. Policy. Caps and rates are admitted once per intent; a known
-		// intent (resubmission, replacement) is not counted again.
-		if err := g.policy(ctx, gt, cc, intent, codec, info, amount, valid, known, now); err != nil {
-			return err
-		}
-
-		// 5. Replay guard.
-		rel := Release{IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
-			Sender: info.Sender, Nonce: info.Nonce, Digest: job.Digest, Tip: info.Tip, FeeCap: info.FeeCap, At: now}
-		prior, err := g.replay(ctx, gt, intent, rec, &rel)
-		if err != nil {
-			return err
-		}
-		if prior != nil {
-			if prior.Signature != nil {
-				sig, replayed = prior.Signature, true // signed before: return it, never sign again
-				return nil
-			}
-			if now.Sub(prior.Reserved) < g.cfg.SignTimeout {
-				return errInProgress // another worker is signing this digest
-			}
-			needSign = true // a stale reservation: sign the same digest again
-			return gt.Touch(ctx, job.Digest, now)
-		}
-
-		// 6a. Reserve.
-		if s == nil {
-			return fmt.Errorf("%w: no signer for partition %q", errSigner, job.PartitionID)
-		}
-		if err := codec.CheckSigner(info, s.PublicKey()); err != nil {
-			return fmt.Errorf("%w: %v", errSigner, err)
-		}
-		needSign = true
-		return gt.Record(ctx, rel)
-	})
-	if err != nil || !needSign {
-		return sig, replayed, err
+	if !v.NeedSign {
+		return v.Signature, v.Replayed, nil
 	}
 
 	// Phase 2, sign, outside any lock or transaction, within sign_timeout.
-	if s == nil {
-		return nil, false, fmt.Errorf("%w: no signer for partition %q", errSigner, job.PartitionID)
-	}
-	raw, err := g.sign(ctx, s, job.Digest)
+	pkg, err := EncodePackage(job)
 	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", errSigner, err)
+	}
+	raw, err := g.signWith(ctx, s, job.Digest, signer.SignOptions{JobID: job.ID, IntentPackage: pkg})
+	if err != nil {
+		if errors.Is(err, errUnavailable) {
+			g.outage(job.Chain, err)
+		}
 		return nil, false, err
 	}
+	g.resumed(job.Chain)
 
 	// Phase 3, finish. The first stored signature wins; release only the stored value.
 	stored, err := g.guard.Finish(ctx, job.Digest, raw, g.opt.Now())
 	return stored, false, err
 }
-
-var errInProgress = errors.New("another worker is signing this digest")
 
 // Wait blocks until no signer call is running, or d passes, and reports whether
 // they all finished. Call it before closing the signers: a call abandoned after
@@ -331,6 +266,10 @@ func (g *Gateway) Wait(d time.Duration) bool {
 // sign calls the signer with a timeout and verifies the signature locally. A
 // signer that ignores the context is abandoned; its late result is dropped.
 func (g *Gateway) sign(ctx context.Context, s signer.Signer, digest []byte) ([]byte, error) {
+	return g.signWith(ctx, s, digest, signer.SignOptions{})
+}
+
+func (g *Gateway) signWith(ctx context.Context, s signer.Signer, digest []byte, opts signer.SignOptions) ([]byte, error) {
 	var dg [32]byte
 	copy(dg[:], digest)
 	sctx, cancel := context.WithTimeout(ctx, g.cfg.SignTimeout)
@@ -343,12 +282,29 @@ func (g *Gateway) sign(ctx context.Context, s signer.Signer, digest []byte) ([]b
 	g.inflight.Add(1)
 	go func() {
 		defer g.inflight.Done()
-		res, err := s.SignDigest(sctx, dg, signer.SignOptions{})
+		res, err := s.SignDigest(sctx, dg, opts)
 		ch <- result{res, err}
 	}()
 	select {
 	case r := <-ch:
 		if r.err != nil {
+			// An availability failure (link down, limit, a dependency of the signer down) never finishes the job: nothing
+			// was signed or refused. Return a retry; the job stays "signing" and is reclaimed when its lease ends.
+			var un interface{ SignerUnavailable() bool }
+			if errors.As(r.err, &un) && un.SignerUnavailable() {
+				return nil, fmt.Errorf("%w: %v", errUnavailable, r.err)
+			}
+			// A signer may say that the other party refused (cb-mpc: party B's cosigner), or that an operator must look.
+			var ref interface{ SignerRefusal() (string, bool) }
+			if errors.As(r.err, &ref) {
+				if why, ok := ref.SignerRefusal(); ok {
+					return nil, reject(ReasonSignerRefused, "%s", why)
+				}
+			}
+			var al interface{ SignerAlert() bool }
+			if errors.As(r.err, &al) && al.SignerAlert() {
+				g.opt.Logger.Error("ALERT signer failure: an operator must look (keyset may be frozen)", "error", r.err.Error())
+			}
 			return nil, fmt.Errorf("%w: %v", errSigner, r.err)
 		}
 		if !signer.Verify(s.PublicKey(), dg, r.res.Sig) {
@@ -359,177 +315,34 @@ func (g *Gateway) sign(ctx context.Context, s signer.Signer, digest []byte) ([]b
 		r.res.Sig.S.FillBytes(raw[32:])
 		return raw, nil
 	case <-sctx.Done():
+		if rt, ok := s.(interface{ RetryOnTimeout() bool }); ok && rt.RetryOnTimeout() {
+			return nil, fmt.Errorf("%w: sign timed out after %s", errUnavailable, g.cfg.SignTimeout)
+		}
 		return nil, fmt.Errorf("%w: sign timed out after %s", errSigner, g.cfg.SignTimeout)
 	}
 }
 
-func parseIntent(job signjob.Job) (signjob.Intent, error) {
-	var i signjob.Intent
-	dec := json.NewDecoder(bytes.NewReader(job.Intent))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&i); err != nil {
-		return i, reject(ReasonIntent, "parse intent: %v", err)
+// outage logs ONE alert per chain per outage (not one per job).
+func (g *Gateway) outage(chain string, err error) {
+	g.outageMu.Lock()
+	if g.outages == nil {
+		g.outages = map[string]bool{}
 	}
-	if dec.More() {
-		return i, reject(ReasonIntent, "trailing data after intent")
-	}
-	if i.ID == "" {
-		return i, reject(ReasonIntent, "intent has no id")
-	}
-	switch i.Kind {
-	case "withdrawal", "sweep", "cancel":
-	default:
-		return i, reject(ReasonIntent, "intent kind %q", i.Kind)
-	}
-	if i.Chain != job.Chain {
-		return i, reject(ReasonIntent, "intent chain %q, job chain %q", i.Chain, job.Chain)
-	}
-	if i.PartitionID != job.PartitionID {
-		return i, reject(ReasonIntent, "intent partition %q, job partition %q", i.PartitionID, job.PartitionID)
-	}
-	return i, nil
-}
-
-// countApprovals counts distinct enabled, configured actors whose Ed25519
-// signature over hash verifies. Unknown or disabled actors, bad signatures and
-// repeats of one actor count for nothing.
-func (g *Gateway) countApprovals(hash []byte, approvals []signjob.Approval) int {
-	seen := map[string]bool{}
-	for _, a := range approvals {
-		ap, ok := g.cfg.Approvers[a.Actor]
-		if !ok || !ap.Enabled || seen[a.Actor] {
-			continue
-		}
-		if len(a.Signature) == ed25519.SignatureSize && ed25519.Verify(ap.Key, hash, a.Signature) {
-			seen[a.Actor] = true
-		}
-	}
-	return len(seen)
-}
-
-func (g *Gateway) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i signjob.Intent, codec ChainCodec,
-	info TxInfo, amount *big.Int, valid int, known bool, now time.Time) error {
-	switch i.Kind {
-	case "withdrawal":
-		if !known { // a known intent may be replaced after it expired
-			now := now.Unix()
-			switch {
-			case i.NotAfter == 0:
-				return reject(ReasonExpired, "intent has no not_after")
-			case i.NotAfter <= now:
-				return reject(ReasonExpired, "intent expired at %d, now %d", i.NotAfter, now)
-			case i.NotAfter > now+int64(g.cfg.MaxIntentAge/time.Second):
-				return reject(ReasonExpired, "not_after %d is more than %s ahead", i.NotAfter, g.cfg.MaxIntentAge)
-			}
-		}
-		p, ok := cc.Assets[i.Asset]
-		if !ok {
-			return reject(ReasonPolicyAsset, "no policy for %s on %s", i.Asset, cc.Name)
-		}
-		if amount.Cmp(p.PerTxCap) > 0 {
-			return reject(ReasonPerTxCap, "amount %s exceeds the per-transaction cap %s", amount, p.PerTxCap)
-		}
-		if need := p.RequiredApprovals(amount); valid < need {
-			return reject(ReasonTier, "amount %s needs %d distinct approvals, have %d", amount, need, valid)
-		}
-		if !known {
-			sum, err := gt.WithdrawnSince(ctx, i.Asset, now.Add(-24*time.Hour))
-			if err != nil {
-				return err
-			}
-			if total := new(big.Int).Add(sum, amount); total.Cmp(p.DailyCap) > 0 {
-				return reject(ReasonDailyCap, "%s already withdrawn in 24h plus %s exceeds the cap %s", sum, amount, p.DailyCap)
-			}
-		}
-	case "sweep":
-		if !known {
-			n, err := gt.CountSince(ctx, "sweep", now.Add(-time.Hour))
-			if err != nil {
-				return err
-			}
-			if n >= cc.SweepsPerHour {
-				return reject(ReasonSweepRate, "%d sweeps in the last hour, limit %d", n, cc.SweepsPerHour)
-			}
-		}
-	case "cancel":
-		if !codec.OwnsSender(info.Sender) {
-			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
-		}
-		if !known {
-			n, err := gt.CountSince(ctx, "cancel", now.Add(-time.Hour))
-			if err != nil {
-				return err
-			}
-			if n >= cc.CancelsPerHour {
-				return reject(ReasonCancelRate, "%d cancels in the last hour, limit %d", n, cc.CancelsPerHour)
-			}
-		}
-	}
-	return nil
-}
-
-// replay applies the replay-guard rules. It returns the stored signature when
-// the record of a digest already reserved or signed for this intent (the
-// caller returns its signature, waits, or signs it again if the reservation is
-// stale), or nil with rel's NewIntent/TakeNonce set when a new digest may be reserved.
-func (g *Gateway) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec *IntentRecord, rel *Release) (*SigRecord, error) {
-	claim, err := gt.NonceClaim(ctx, rel.Sender, rel.Nonce)
-	if err != nil {
-		return nil, err
-	}
-	if rec != nil {
-		if !bytes.Equal(rec.Hash, rel.IntentHash) {
-			return nil, reject(ReasonIntentChanged, "intent %s was signed with a different intent hash", i.ID)
-		}
-		prior, err := gt.Digest(ctx, rel.Digest)
-		if err != nil {
-			return nil, err
-		}
-		if prior != nil && prior.IntentID != i.ID {
-			return nil, reject(ReasonIntentChanged, "digest was signed for intent %s", prior.IntentID)
-		}
-		if prior == nil && (rec.Nonce != rel.Nonce || rec.Sender != rel.Sender) {
-			// A new digest for a known intent is only a replacement at the same nonce.
-			return nil, reject(ReasonNonceChanged, "intent %s was signed at nonce %d of %s, not nonce %d", i.ID, rec.Nonce, rec.Sender, rel.Nonce)
-		}
-		if claim == nil || claim.IntentID != i.ID {
-			// The intent's nonce is gone: a cancel (or another intent) owns it.
-			return nil, reject(ReasonNonceCancel, "nonce %d of %s no longer belongs to intent %s", rel.Nonce, rel.Sender, i.ID)
-		}
-		if prior != nil {
-			return prior, nil
-		}
-		last, err := gt.LatestSig(ctx, i.ID)
-		if err != nil {
-			return nil, err
-		}
-		if last != nil && !feesHigher(rel, last) {
-			return nil, reject(ReasonFeeNotHigher, "fees tip %s cap %s do not exceed the signed tip %s cap %s", rel.Tip, rel.FeeCap, last.Tip, last.FeeCap)
-		}
-		return nil, nil
-	}
-	if prior, err := gt.Digest(ctx, rel.Digest); err != nil {
-		return nil, err
-	} else if prior != nil {
-		return nil, reject(ReasonIntentChanged, "digest was signed for intent %s", prior.IntentID)
-	}
-	rel.NewIntent = true
-	if claim == nil {
-		return nil, nil
-	}
-	switch {
-	case claim.Kind == "cancel":
-		return nil, reject(ReasonNonceCancel, "nonce %d of %s was consumed by cancel %s", rel.Nonce, rel.Sender, claim.IntentID)
-	case i.Kind == "cancel":
-		rel.TakeNonce = true // a cancel may replace what is pending at the nonce
-		return nil, nil
-	default:
-		return nil, reject(ReasonNonceTaken, "nonce %d of %s already signed for intent %s", rel.Nonce, rel.Sender, claim.IntentID)
+	first := !g.outages[chain]
+	g.outages[chain] = true
+	g.outageMu.Unlock()
+	if first {
+		g.opt.Logger.Error("ALERT signer unavailable: jobs wait and are retried, nothing was signed or refused", "chain", chain, "error", err.Error())
 	}
 }
 
-// feesHigher: neither fee drops and at least one rises.
-func feesHigher(r *Release, last *SigRecord) bool {
-	a, b := r.Tip.Cmp(last.Tip), r.FeeCap.Cmp(last.FeeCap)
-	return a >= 0 && b >= 0 && (a > 0 || b > 0)
+// resumed logs once when signing works again after an outage.
+func (g *Gateway) resumed(chain string) {
+	g.outageMu.Lock()
+	was := g.outages[chain]
+	delete(g.outages, chain)
+	g.outageMu.Unlock()
+	if was {
+		g.opt.Logger.Info("signer available again: signing resumed", "chain", chain)
+	}
 }

@@ -4,6 +4,8 @@ package server
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,11 @@ type Config struct {
 
 	DataDir string `json:"data_dir"`
 
+	// AdminKeys are the operators' Ed25519 public keys (64 hex chars). DKG, Refresh and Unfreeze need a signature by one of
+	// them, checked by BOTH parties against their own list, so a compromised party A cannot start them.
+	AdminKeys          []string `json:"admin_keys"`
+	AdminMaxAgeSeconds int      `json:"admin_max_age_seconds"` // accepted clock skew / age of an admin signature; default 300
+
 	Sealer     SealerConfig     `json:"sealer"`
 	Authorizer AuthorizerConfig `json:"authorizer"`
 	Limits     Limits           `json:"limits"`
@@ -41,8 +48,12 @@ type SealerConfig struct {
 }
 
 type AuthorizerConfig struct {
-	// Type: "deny-all" (default build) or "dev-allow-all" (only compiled with -tags devauth).
+	// Type: "cosigner" (party B: ask the qv-cosigner process on Socket; fail closed), "pinned-caller" (party A: its pinned
+	// caller, the gateway, has already decided), "deny-all", or "dev-allow-all" (only compiled with -tags devauth).
 	Type string `json:"type"`
+	// Socket is the unix socket of qv-cosigner, type "cosigner". TimeoutMS bounds one decision (default 5000).
+	Socket    string `json:"socket"`
+	TimeoutMS int    `json:"timeout_ms"`
 	// AcceptRisk must be exactly DevAllowAllRiskPhrase for "dev-allow-all".
 	AcceptRisk string `json:"accept_risk"`
 }
@@ -157,6 +168,17 @@ func (c *Config) Validate() error {
 		if _, err := ParsePin(p); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if len(c.AdminKeys) == 0 {
+		errs = append(errs, errors.New("admin_keys: at least one operator key is required"))
+	}
+	for _, k := range c.AdminKeys {
+		if b, err := hex.DecodeString(k); err != nil || len(b) != ed25519.PublicKeySize {
+			errs = append(errs, fmt.Errorf("admin_keys: %q is not a 32-byte hex Ed25519 public key", k))
+		}
+	}
+	if c.AdminMaxAgeSeconds <= 0 {
+		c.AdminMaxAgeSeconds = 300
 	}
 	req("sealer.type", c.Sealer.Type)
 	req("authorizer.type", c.Authorizer.Type)

@@ -25,7 +25,7 @@ func TestTwoProcessFlow(t *testing.T) {
 	x := ctx(t, 90*time.Second)
 
 	// ECDSA / BIP32 through Node
-	root, err := c.DKG(x, &pb.DKGRequest{KeysetId: "evm", Curve: pb.Curve_CURVE_SECP256K1})
+	root, err := c.DKG(x, &pb.DKGRequest{KeysetId: "evm", Curve: pb.Curve_CURVE_SECP256K1, Admin: cl.env.Admin("dkg", "evm")})
 	must(t, err)
 	hard := []uint32{44, 60, 0}
 	node, err := c.Node(x, &pb.NodeRequest{KeysetId: "evm", HardenedPath: hard})
@@ -46,7 +46,7 @@ func TestTwoProcessFlow(t *testing.T) {
 		verifyECDSA(t, d.PublicKey, dg, r.Signature)
 	}
 	sign("e-1", 1)
-	rr, err := c.Refresh(x, &pb.RefreshRequest{KeysetId: "evm"})
+	rr, err := c.Refresh(x, &pb.RefreshRequest{KeysetId: "evm", Admin: cl.env.Admin("refresh", "evm")})
 	must(t, err)
 	if !bytes.Equal(rr.RootPublicKey, root.RootPublicKey) {
 		t.Fatal("root key changed on refresh")
@@ -54,14 +54,14 @@ func TestTwoProcessFlow(t *testing.T) {
 	sign("e-2", 2)
 
 	// Ed25519
-	_, err = c.DKG(x, &pb.DKGRequest{KeysetId: "sol", Curve: pb.Curve_CURVE_ED25519})
+	_, err = c.DKG(x, &pb.DKGRequest{KeysetId: "sol", Curve: pb.Curve_CURVE_ED25519, Admin: cl.env.Admin("dkg", "sol")})
 	must(t, err)
 	ds, err := c.Derive(x, &pb.DeriveRequest{KeysetId: "sol", HardenedPath: []uint32{44, 501, 0}, Path: []uint32{0}})
 	must(t, err)
 	msg := []byte("solana message")
 	for i, job := range []string{"s-1", "s-2"} {
 		if i == 1 {
-			_, err = c.Refresh(x, &pb.RefreshRequest{KeysetId: "sol"})
+			_, err = c.Refresh(x, &pb.RefreshRequest{KeysetId: "sol", Admin: cl.env.Admin("refresh", "sol")})
 			must(t, err)
 		}
 		r, err := c.Sign(x, &pb.SignRequest{KeyId: ds.KeyId, Algorithm: pb.Algorithm_ALGORITHM_ED25519, Digest: msg, JobId: job})
@@ -88,7 +88,7 @@ func TestTwoProcessFlow(t *testing.T) {
 func TestIdempotentSignAcrossRestart(t *testing.T) {
 	cl := newCluster(t, nil, false)
 	x := ctx(t, 90*time.Second)
-	_, err := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: pb.Curve_CURVE_ED25519})
+	_, err := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: pb.Curve_CURVE_ED25519, Admin: cl.env.Admin("dkg", "k")})
 	must(t, err)
 	d, err := cl.client.Derive(x, &pb.DeriveRequest{KeysetId: "k", HardenedPath: []uint32{1}, Path: []uint32{0}})
 	must(t, err)
