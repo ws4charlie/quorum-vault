@@ -51,3 +51,28 @@ The native scan fetches every block with transactions (cost grows with block siz
 | 200, one transaction each | 200 | ~640-680 /s |
 
 One writer per address caps a single hot address at roughly this rate, far above what a chain accepts from one sender (nodes limit queued transactions per sender). More throughput comes from sharding hot wallets (PLAN: K child addresses), not from the nonce manager.
+
+## Fix round 1: A (forwarder) vs B (one-shot sweeper), ETH + 1 USDT-style token
+
+A = `Forwarder` + `ForwarderFactory.deployAndFlush`; B = `SweepFactory` + `OneShot` (spike, `contracts/src/SweepFactory.sol`, not wired into the adapter). Foundry `--isolate` (each call is its own transaction), gas measured around the call (the 21,000 base is not included).
+
+| Case | A | B |
+|---|---:|---:|
+| First sweep, one address | 332,040 | 90,909 |
+| Repeat sweep, one address | 48,470 | 90,909 |
+| 10 addresses, first sweep | 2,877,419 (10 calls) | 546,882 (one `sweepMany`) |
+| 10 addresses, repeat sweep | 462,691 (10 calls) | 546,884 (one `sweepMany`) |
+
+Mined on anvil (gas used by the whole transaction, including the 21,000 base): B first sweep 122,925, repeat 80,825, batch of 10 in one transaction 492,650; with two tokens 153,757 / 94,557. A on anvil (round 1 report): 324,267 first, 40,694 repeat (token only).
+
+B pays the same every time (no state to keep: no CREATE2 deployment beyond the one-shot's tiny init code, no storage). A is cheaper only after its first sweep, by about 2x.
+
+### B on real transactions
+`go test -run Spike` against anvil with `--hardfork cancun` and with the latest hardfork anvil v1.8.5 offers (reported as `Amsterdam`), all passing on both:
+- 4 rounds of deposit, sweep, deposit on one address: all funds reach the destination every time; `eth_getCode` is empty after every sweep; every deposit is a plain send with a **21,000 gas limit** and succeeds; an additional 1 wei dust deposit swept with no token list also moves.
+- ETH only, token only (USDT-style, no return value), both, and an empty sweep.
+- `setDestination` by a non-admin reverts; after an admin change the existing deposit address (unchanged) sweeps to the new destination.
+- The same salt twice in one transaction (`sweepMany([s, s])`) reverts as `DuplicateSalt` (129k gas used, nothing moves, no code). Without the check, the second CREATE2 collides with the first one-shot, which is still alive until the transaction ends, and burns all forwarded gas. A token whose `transfer` reverts reverts the whole sweep (ETH too); funds stay, and sweeping again without that token recovers the rest.
+
+### Foundry `--isolate` quirk
+In `forge test --isolate`, after "sweep, 1 wei stipend send, tokenless sweep", the second sweep zeroed the address balance without crediting the destination (1 wei vanished; with a later 2 ETH deposit, those 2 ETH vanished too). The identical sequence on anvil, on both hardforks, moves every wei. I could not explain it; treat it as a Foundry state-caching artifact, but it is a reason not to rely on Foundry alone for B. `testStipendSendAfterSweep` stops before that point and says so.

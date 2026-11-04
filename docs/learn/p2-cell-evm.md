@@ -44,6 +44,12 @@ Replacement reads the original transaction body back from the node by hash, beca
 ## Why the verifier must work offline
 The signing gateway sits in a different trust zone from the business database. If the verifier asked the database or an RPC node what a transaction means, a compromised upstream could answer anything. So `Verifier` takes only `Config` (chain ID, factory, sweep destination, hot addresses, token addresses): it re-encodes the transaction from the payload, recomputes the digest, and compares destination, asset and amount to the intent that approvers signed. A sweep checks that the salt in the calldata resolves to the intent's source address, and that the intent's destination is the configured one. It cannot check the sweep **amount**: `flush` sends the whole balance, so the intent amount is informational for sweeps.
 
+## Fix round 1 additions
+- **Fee cap.** The hot wallet pays gas and the approved intent does not contain it. `Config.MaxTxFeeWei` bounds `gas x max_fee_per_gas`; `Verify` rejects above it (a huge priority fee could otherwise be collected by a block producer the attacker controls). `BuildReplacement` and `BuildCancel` refuse to build a bump the gateway would refuse.
+- **Replacement from our own data.** Migration 0003 stores the unsigned payload on the allocation and every broadcast attempt in `evm_tx_attempts`. A transaction the node evicted is the main case needing replacement, so the node cannot be the source.
+- **Cancel.** Nonces are strictly sequential; one committed nonce whose job was refused blocks every later one. `BuildCancel` builds a zero-value 21,000-gas self-send at that nonce (fees bumped if it was broadcast); intent kind `cancel`. The allocation becomes `cancelled` when it confirms.
+- **One-shot sweeper (spike).** A contract whose logic runs in its constructor and ends in `SELFDESTRUCT`. EIP-6780 deletes an account only when it self-destructs in the transaction that created it, which is exactly this case, so no code stays on the address and plain 21,000-gas sends work. The address is the factory plus a salt (the init code has no arguments), so the destination can change without moving addresses. See `docs/measurements/evm.md` and the report for the trade-offs.
+
 ## Gotchas hit
 - Mock tokens must emit `Transfer`; without it Scan sees nothing.
 - A reverted deposit is a mined transaction with status 0; Scan must read receipts.
@@ -61,6 +67,10 @@ The signing gateway sits in a different trust zone from the business database. I
 8. What does `Reconcile` call a gap, and what a stuck allocation?
 9. Why can the verifier not check a sweep's amount?
 10. Why must the verifier not read the database or an RPC node?
+11. Why does the Verifier cap `gas x max_fee_per_gas` although the intent never mentions fees?
+12. Why is replacement built from stored data and not from the node?
+13. What does `BuildCancel` produce, and what unblocks?
+14. Why does the one-shot sweeper leave no code on its address, and which EIP does that rely on?
 
 <details><summary>Answers</summary>
 
@@ -74,4 +84,8 @@ The signing gateway sits in a different trust zone from the business database. I
 8. Gap: allocated nonce below the confirmed nonce that is not confirmed. Stuck: allocation unmoved for `StuckAfterBlocks` blocks at or above the confirmed nonce.
 9. `flushETH`/`flushTokens` send the entire balance; the amount is not in the calldata.
 10. Those are the data a compromised upstream controls; an offline check from signing-zone config cannot be lied to.
+11. The hot wallet pays it; a tampered priority fee could pay an attacker-controlled block producer while destination and amount look right.
+12. Evicted transactions are the main case needing replacement, and the node no longer knows them.
+13. A zero-value 21,000-gas self-send at the stuck nonce; every later nonce of that address can then mine.
+14. It self-destructs in its creating transaction, which EIP-6780 still deletes; it relies on EIP-6780 (and chains implementing it).
 </details>
