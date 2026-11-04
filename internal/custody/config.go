@@ -1,0 +1,371 @@
+// Package custody is the business core of the closed loop: the chart of
+// accounts, the ledger flows for deposits, sweeps and withdrawals, balance
+// reconciliation against the chain, and the HTTP API. It holds no key.
+// Temporal workflows (internal/workflow) only orchestrate calls into it.
+package custody
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"os"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
+)
+
+// File is the JSON form of Config. Amounts are canonical decimal strings,
+// durations are Go duration strings.
+type File struct {
+	Entity     string         `json:"entity"` // default "qv-us"
+	Chain      ChainFile      `json:"chain"`
+	Sweep      SweepFile      `json:"sweep"`
+	Withdrawal WithdrawalFile `json:"withdrawal"`
+	Scan       ScanFile       `json:"scan"`
+}
+
+// ChainFile configures the one EVM chain this core serves.
+type ChainFile struct {
+	Name             string               `json:"name"`
+	ChainID          uint64               `json:"chain_id"`
+	RPCURL           string               `json:"rpc_url"`
+	Confirmations    uint64               `json:"confirmations"`
+	Factory          string               `json:"factory"`
+	SweepDestination string               `json:"sweep_destination"` // must be a hot shard address (the factory pays it)
+	HotShards        []string             `json:"hot_shards"`        // shard i = HotShards[i]
+	NativeAsset      string               `json:"native_asset"`      // default "ETH"
+	MaxTxFeeWei      string               `json:"max_tx_fee_wei"`
+	StuckAfterBlocks uint64               `json:"stuck_after_blocks"`
+	Assets           map[string]AssetFile `json:"assets"`
+}
+
+// AssetFile is one asset. Address is empty for the native asset.
+type AssetFile struct {
+	Address    string `json:"address"`
+	Decimals   int    `json:"decimals"`
+	MinDeposit string `json:"min_deposit"` // base units; below it a deposit goes to suspense
+	// PriceWei is the value of one base unit in wei: the fixed price table the
+	// sweep rule compares in. The native asset is 1.
+	PriceWei string `json:"price_wei"`
+}
+
+// SweepFile configures the sweep rule.
+type SweepFile struct {
+	K            int    `json:"k"`             // fee multiple, PLAN says 20-50
+	MinSweepWei  string `json:"min_sweep_wei"` // floor of the rule, in wei value
+	PlanInterval string `json:"plan_interval"` // how often the planner runs, default 5s
+}
+
+// WithdrawalFile configures withdrawals.
+type WithdrawalFile struct {
+	ApprovalWindow  string `json:"approval_window"`  // intent validity, default 1h (NotAfter = request time + this)
+	ApprovalTimeout string `json:"approval_timeout"` // how long to wait for approvals, default = approval_window minus 5m
+	SignTimeout     string `json:"sign_timeout"`     // gateway sign_timeout; wait this long before re-enqueueing a failed job
+	StuckAfter      string `json:"stuck_after"`      // replace a broadcast tx that has not mined after this, default 2m
+	HotWait         string `json:"hot_wait"`         // give up waiting for hot liquidity after this, default 30m
+	MaxReplacements int    `json:"max_replacements"` // default 5
+	// Tiers are the business zone's advisory copy of the gateway's approval
+	// tiers (the gateway is the authority): how many approvals an amount needs
+	// and whether the worker's automated key may supply them.
+	Tiers map[string][]TierFile `json:"tiers"` // asset -> ascending tiers
+}
+
+// TierFile: amounts >= MinAmount need Approvals distinct approvals. Auto: the
+// worker's automated key approves on its own (the lowest tier only).
+type TierFile struct {
+	MinAmount string `json:"min_amount"`
+	Approvals int    `json:"approvals"`
+	Auto      bool   `json:"auto"`
+}
+
+// ScanFile configures the deposit scanner.
+type ScanFile struct {
+	Interval    string `json:"interval"`     // default 2s
+	StartHeight uint64 `json:"start_height"` // first height ever scanned
+}
+
+// Config is the validated form of File.
+type Config struct {
+	Entity string
+	EVM    evm.Config
+	Chain  string
+	Native string
+
+	HotShards []common.Address
+	SinkShard int
+	Assets    map[string]Asset
+	AssetList []string // sorted
+
+	SweepK       int
+	MinSweepWei  *big.Int
+	PlanInterval time.Duration
+
+	ApprovalWindow  time.Duration
+	ApprovalTimeout time.Duration
+	SignTimeout     time.Duration
+	StuckAfter      time.Duration
+	HotWait         time.Duration
+	MaxReplacements int
+	Tiers           map[string][]Tier
+
+	ScanInterval time.Duration
+	StartHeight  uint64
+}
+
+// Asset is a configured asset.
+type Asset struct {
+	Symbol     string
+	Address    common.Address // zero for native
+	Decimals   int
+	MinDeposit *big.Int
+	PriceWei   *big.Int
+}
+
+// Native reports whether the asset is the chain's native one.
+func (a Asset) Native() bool { return a.Address == (common.Address{}) }
+
+// Tier is a validated approval tier.
+type Tier struct {
+	Min       *big.Int
+	Approvals int
+	Auto      bool
+}
+
+// LoadConfig reads and validates a JSON config file. Unknown fields are errors.
+func LoadConfig(path string) (*Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("custody: read config: %w", err)
+	}
+	return ParseConfig(b)
+}
+
+// ParseConfig validates JSON config bytes.
+func ParseConfig(b []byte) (*Config, error) {
+	var f File
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&f); err != nil {
+		return nil, fmt.Errorf("custody: config: %w", err)
+	}
+	return f.Build()
+}
+
+func dur(what, s string, def time.Duration) (time.Duration, error) {
+	if s == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("custody: config: %s %q is not a positive duration", what, s)
+	}
+	return d, nil
+}
+
+func amount(what, s string) (*big.Int, error) {
+	n, ok := new(big.Int).SetString(s, 10)
+	if !ok || n.Sign() < 0 || s != n.String() {
+		return nil, fmt.Errorf("custody: config: %s %q is not a canonical non-negative decimal", what, s)
+	}
+	return n, nil
+}
+
+// Build validates f.
+func (f File) Build() (*Config, error) {
+	c := &Config{Entity: f.Entity, Chain: f.Chain.Name, Native: f.Chain.NativeAsset, Assets: map[string]Asset{}, Tiers: map[string][]Tier{}}
+	if c.Entity == "" {
+		c.Entity = "qv-us"
+	}
+	if c.Native == "" {
+		c.Native = evm.DefaultNativeAsset
+	}
+	cf := f.Chain
+	if cf.Name == "" || strings.ContainsAny(cf.Name, ":/") {
+		return nil, errors.New("custody: config: chain name must be non-empty and contain no ':' or '/'")
+	}
+	if len(cf.HotShards) == 0 {
+		return nil, errors.New("custody: config: at least one hot shard")
+	}
+	for i, a := range cf.HotShards {
+		if !common.IsHexAddress(a) {
+			return nil, fmt.Errorf("custody: config: hot shard %d %q is not an address", i, a)
+		}
+		c.HotShards = append(c.HotShards, common.HexToAddress(a))
+	}
+	if !common.IsHexAddress(cf.Factory) || !common.IsHexAddress(cf.SweepDestination) {
+		return nil, errors.New("custody: config: factory and sweep_destination must be addresses")
+	}
+	dest := common.HexToAddress(cf.SweepDestination)
+	c.SinkShard = -1
+	for i, a := range c.HotShards {
+		if a == dest {
+			c.SinkShard = i
+			break
+		}
+	}
+	if c.SinkShard < 0 {
+		return nil, errors.New("custody: config: sweep_destination must be one of hot_shards (swept funds land on a hot wallet)")
+	}
+	fee, err := amount("max_tx_fee_wei", cf.MaxTxFeeWei)
+	if err != nil {
+		return nil, err
+	}
+	if len(f.Chain.Assets) == 0 {
+		return nil, errors.New("custody: config: no assets")
+	}
+	evmAssets := map[string]evm.Token{}
+	for sym, af := range cf.Assets {
+		if sym == "" || strings.ContainsAny(sym, ":/") {
+			return nil, fmt.Errorf("custody: config: bad asset symbol %q", sym)
+		}
+		a := Asset{Symbol: sym, Decimals: af.Decimals}
+		if af.Address != "" {
+			if !common.IsHexAddress(af.Address) {
+				return nil, fmt.Errorf("custody: config: asset %s address %q", sym, af.Address)
+			}
+			a.Address = common.HexToAddress(af.Address)
+			evmAssets[sym] = evm.Token{Address: a.Address, Decimals: uint8(af.Decimals)}
+		} else if sym != c.Native {
+			return nil, fmt.Errorf("custody: config: asset %s has no address and is not the native asset %s", sym, c.Native)
+		}
+		if a.MinDeposit, err = amount(sym+" min_deposit", orZero(af.MinDeposit)); err != nil {
+			return nil, err
+		}
+		if a.PriceWei, err = amount(sym+" price_wei", orZero(af.PriceWei)); err != nil {
+			return nil, err
+		}
+		if a.PriceWei.Sign() == 0 {
+			return nil, fmt.Errorf("custody: config: asset %s needs price_wei > 0", sym)
+		}
+		c.Assets[sym] = a
+		c.AssetList = append(c.AssetList, sym)
+	}
+	sort.Strings(c.AssetList)
+	if _, ok := c.Assets[c.Native]; !ok {
+		return nil, fmt.Errorf("custody: config: native asset %s is not configured", c.Native)
+	}
+	// Each (asset, shard) is a partition; the hot address is the shard's.
+	hot := map[string]common.Address{}
+	for _, sym := range c.AssetList {
+		for i, a := range c.HotShards {
+			hot[c.PartitionKey(sym, i).String()] = a
+		}
+	}
+	c.EVM = evm.Config{
+		Chain: cf.Name, ChainID: cf.ChainID, RPCURL: cf.RPCURL, Confirmations: cf.Confirmations,
+		Factory: common.HexToAddress(cf.Factory), SweepDestination: dest, HotAddresses: hot,
+		Assets: evmAssets, NativeAsset: c.Native, MaxTxFeeWei: fee, StuckAfterBlocks: cf.StuckAfterBlocks,
+	}
+
+	s := f.Sweep
+	c.SweepK = s.K
+	if c.SweepK <= 0 {
+		c.SweepK = 20
+	}
+	if c.MinSweepWei, err = amount("min_sweep_wei", orZero(s.MinSweepWei)); err != nil {
+		return nil, err
+	}
+	if c.PlanInterval, err = dur("plan_interval", s.PlanInterval, 5*time.Second); err != nil {
+		return nil, err
+	}
+
+	w := f.Withdrawal
+	if c.ApprovalWindow, err = dur("approval_window", w.ApprovalWindow, time.Hour); err != nil {
+		return nil, err
+	}
+	defTimeout := c.ApprovalWindow - 5*time.Minute
+	if defTimeout <= 0 {
+		defTimeout = c.ApprovalWindow / 2
+	}
+	if c.ApprovalTimeout, err = dur("approval_timeout", w.ApprovalTimeout, defTimeout); err != nil {
+		return nil, err
+	}
+	if c.ApprovalTimeout >= c.ApprovalWindow {
+		return nil, errors.New("custody: config: approval_timeout must be shorter than approval_window")
+	}
+	if c.SignTimeout, err = dur("sign_timeout", w.SignTimeout, 30*time.Second); err != nil {
+		return nil, err
+	}
+	if c.StuckAfter, err = dur("stuck_after", w.StuckAfter, 2*time.Minute); err != nil {
+		return nil, err
+	}
+	if c.HotWait, err = dur("hot_wait", w.HotWait, 30*time.Minute); err != nil {
+		return nil, err
+	}
+	c.MaxReplacements = w.MaxReplacements
+	if c.MaxReplacements <= 0 {
+		c.MaxReplacements = 5
+	}
+	for _, sym := range c.AssetList {
+		tf := w.Tiers[sym]
+		if len(tf) == 0 {
+			tf = []TierFile{{MinAmount: "0", Approvals: 1, Auto: true}}
+		}
+		prev := big.NewInt(-1)
+		for i, t := range tf {
+			m, err := amount(fmt.Sprintf("%s tier %d min_amount", sym, i), t.MinAmount)
+			if err != nil {
+				return nil, err
+			}
+			if (i == 0 && m.Sign() != 0) || m.Cmp(prev) <= 0 || t.Approvals < 1 {
+				return nil, fmt.Errorf("custody: config: bad tiers for %s", sym)
+			}
+			if t.Auto && i != 0 {
+				return nil, fmt.Errorf("custody: config: %s: only the lowest tier may be auto-approved", sym)
+			}
+			prev = m
+			c.Tiers[sym] = append(c.Tiers[sym], Tier{Min: m, Approvals: t.Approvals, Auto: t.Auto})
+		}
+	}
+	if c.ScanInterval, err = dur("scan interval", f.Scan.Interval, 2*time.Second); err != nil {
+		return nil, err
+	}
+	c.StartHeight = f.Scan.StartHeight
+	return c, nil
+}
+
+func orZero(s string) string {
+	if s == "" {
+		return "0"
+	}
+	return s
+}
+
+// PartitionKey is the partition of (asset, shard): hot, omnibus.
+func (c *Config) PartitionKey(asset string, shard int) partition.Key {
+	return partition.Key{Entity: c.Entity, Chain: c.Chain, Asset: asset, Tier: partition.TierHot, Pool: partition.PoolOmnibus, Shard: shard}
+}
+
+// SinkPartition is where swept funds of asset land.
+func (c *Config) SinkPartition(asset string) string {
+	return c.PartitionKey(asset, c.SinkShard).String()
+}
+
+// ShardAddress returns the hot address of a partition ID.
+func (c *Config) ShardAddress(partitionID string) (common.Address, int, error) {
+	k, err := partition.Parse(partitionID)
+	if err != nil {
+		return common.Address{}, 0, err
+	}
+	if k.Chain != c.Chain || k.Shard >= len(c.HotShards) {
+		return common.Address{}, 0, fmt.Errorf("custody: unknown partition %q", partitionID)
+	}
+	return c.HotShards[k.Shard], k.Shard, nil
+}
+
+// Required returns the approvals an amount of asset needs and whether the
+// automated key may supply them.
+func (c *Config) Required(asset string, amount *big.Int) (n int, auto bool) {
+	for _, t := range c.Tiers[asset] {
+		if amount.Cmp(t.Min) >= 0 {
+			n, auto = t.Approvals, t.Auto
+		}
+	}
+	return n, auto
+}
