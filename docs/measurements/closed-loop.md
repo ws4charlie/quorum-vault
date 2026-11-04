@@ -36,6 +36,8 @@ The 20-at-once figure is bounded by serial nonces on one hot address and by the 
 
 ## The 50-customer run
 
-`TestFiftyCustomersConcurrent`: 50 customers, ETH and token deposits (one dust deposit, one below `min_deposit`), two hot shards, 49 withdrawals started 10 at a time. About 2 minutes in total on this machine, dominated by the sweeps: 74 sweeps are planned at once and each needs a nonce on the single sweep destination, one at a time, plus a gateway round trip. Afterwards `Reconcile` is clean and 592 outbox events were all published and consumed once after de-duplication.
+`TestFiftyCustomersConcurrent`: 50 customers, ETH and token deposits (one dust deposit, one below `min_deposit`), two hot shards, 49 withdrawals started 10 at a time. **About 20 s in total** on this machine. Afterwards `Reconcile` is clean and 566 outbox events were all published and consumed once after de-duplication.
 
-A finding from this run: the first version of the planner asked the node about all 50 candidates in one activity and hit the 20-second activity timeout. The planner now plans at most 25 sweeps per pass with a 2-minute timeout; the rest wait for the next pass.
+Findings from this run:
+- The first version of the planner asked the node about all candidates in one activity and hit the 20-second activity timeout; it now plans in passes of at most 25 with a 2-minute timeout.
+- The first version also let every candidate sweep run at once (about 80 workflows). Every sweep takes row locks on the same few ledger accounts (`dep`, `sweep`, `hot`, `fee`) and a nonce on the one sweep destination, so they queued behind each other and the run took 2 to 3 minutes, sometimes more than the test's 3-minute wait. The planner now keeps at most 12 sweeps open; the same run takes about 20 s. More parallelism than that only adds lock waits.
