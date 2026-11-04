@@ -87,6 +87,10 @@ A restored party rejoins through reconciliation and a SelfTest; a backup older t
   Sealers share one module context; the wrong-PIN test is a separate process.
 - A gRPC channel goes idle after the peer drops and only reconnects on the next RPC, so party A did not notice that B had restarted.
   The reconcile loop keeps the channel connecting and reconciles every keyset after a reconnect.
+- A keyset that was committed right after party B came back was marked unresolved again a moment later (flaky crash test): the
+  reconnect was noticed by a 500 ms timer, so the mark could land AFTER the work done on the new connection. A state-change watcher
+  now marks keysets the instant the connection is re-established, before any work on it; `UNAVAILABLE` while reconciling is still
+  correct and bounded (one self-test), so tests wait for it by kind instead of hiding other errors.
 - An aborted DKG leaves a candidate-only state on the party that stored it; it is dropped on abort and by reconciliation, and
   `Health` does not list it.
 - Ed25519 admin signatures are deterministic: tests move the timestamp by a second per call.

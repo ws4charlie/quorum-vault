@@ -312,7 +312,6 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 	last := map[string]time.Time{}
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
-	wasReady, everReady := false, false
 	for {
 		select {
 		case <-ctx.Done():
@@ -320,31 +319,56 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 		case <-t.C:
 		case <-s.kick:
 		}
-		// Keep the connection to B alive (a gRPC channel goes idle after a drop) and notice a new connection: B may have
-		// restarted or been restored, so every keyset is reconciled again before it serves.
+		// Keep the connection to B alive (a gRPC channel goes idle after a drop). A NEW connection is noticed by watchPeer, not
+		// here: this loop only reconciles what is unresolved.
 		s.peerConn.Connect()
-		ready := s.peerConn.GetState() == connectivity.Ready
 		ids, err := s.store.List(ctx)
 		if err != nil {
 			continue
 		}
-		if ready && !wasReady && everReady { // a RE-connection (the first one is covered by the initial unresolved state)
-			for _, id := range ids {
-				s.rt(id).setResolved(false)
-			}
-		}
-		wasReady = ready
-		everReady = everReady || ready
 		for _, id := range ids {
 			if s.rt(id).isResolved() || time.Since(last[id]) < time.Second {
 				continue
 			}
 			last[id] = time.Now()
+			t0 := time.Now()
 			if err := s.reconcileA(ctx, id); err != nil {
 				s.log.Warn("reconciliation pending", "keyset_id", id, "error", err.Error())
+			} else {
+				s.log.Info("reconciliation finished", "keyset_id", id, "duration_ms", time.Since(t0).Milliseconds())
 			}
 		}
 	}
 }
 
 var _ = codes.OK
+
+// watchPeer notices, the moment it happens, that the connection to party B was lost and came back. B may have restarted or been
+// restored in between, so every keyset is marked unresolved and reconciled again before it serves. The first connection after
+// start is not a reconnection (every keyset starts unresolved). Because this reacts to the state change itself and not to a
+// timer, a keyset that is committed AFTER the new connection was established is never marked unresolved by it: the mark
+// always comes before any work on the new connection.
+func (s *Server) watchPeer(ctx context.Context) {
+	everReady, wasReady := false, false
+	state := s.peerConn.GetState()
+	for {
+		ready := state == connectivity.Ready
+		if ready && !wasReady && everReady {
+			ids, _ := s.store.List(ctx)
+			for _, id := range ids {
+				s.rt(id).setResolved(false)
+			}
+			s.log.Info("connection to party B re-established: keysets are reconciled again before they serve", "keysets", len(ids))
+			select {
+			case s.kick <- struct{}{}:
+			default:
+			}
+		}
+		wasReady = ready
+		everReady = everReady || ready
+		if !s.peerConn.WaitForStateChange(ctx, state) {
+			return
+		}
+		state = s.peerConn.GetState()
+	}
+}

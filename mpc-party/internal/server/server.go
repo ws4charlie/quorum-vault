@@ -184,6 +184,7 @@ func (s *Server) Start() error {
 		lctx, lcancel := context.WithCancel(context.Background())
 		s.loopCancel = lcancel
 		go s.reconcileLoop(lctx)
+		go s.watchPeer(lctx)
 	} else {
 		pb.RegisterMpcPartyServer(s.callerSrv, healthOnly{s: s})
 		s.peerLn, err = net.Listen("tcp", c.PeerListen)

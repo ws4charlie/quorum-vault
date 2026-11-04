@@ -152,8 +152,11 @@ func TestCrashMatrixRefresh(t *testing.T) {
 				return nil
 			})
 			dg := dgst(7)
-			r, err := cl.client.Sign(x, &pb.SignRequest{KeyId: d.KeyId, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: dg, JobId: "after-crash"})
-			must(t, err)
+			var r *pb.SignResponse
+			retryUnavailable(t, 30*time.Second, func() (err error) {
+				r, err = cl.client.Sign(x, &pb.SignRequest{KeyId: d.KeyId, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: dg, JobId: "after-crash"})
+				return
+			})
 			verifyECDSA(t, d.PublicKey, dg, r.Signature)
 			_ = root
 			// the parties are not frozen by a crash
@@ -216,13 +219,80 @@ func TestCrashMatrixDKG(t *testing.T) {
 				must(t, err)
 				cl.waitConverged(t, "k", true)
 			}
-			d, err := cl.client.Derive(x, &pb.DeriveRequest{KeysetId: "k", HardenedPath: []uint32{1}, Path: []uint32{0}})
-			must(t, err)
+			// UNAVAILABLE while the parties reconcile is correct behaviour (bounded: one self-test); wait for it, never
+			// accept any other error.
+			var d *pb.DeriveResponse
+			retryUnavailable(t, 30*time.Second, func() (err error) {
+				d, err = cl.client.Derive(x, &pb.DeriveRequest{KeysetId: "k", HardenedPath: []uint32{1}, Path: []uint32{0}})
+				return
+			})
 			dg := dgst(8)
-			r, err := cl.client.Sign(x, &pb.SignRequest{KeyId: d.KeyId, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: dg, JobId: "after-dkg-crash"})
-			must(t, err)
+			var r *pb.SignResponse
+			retryUnavailable(t, 30*time.Second, func() (err error) {
+				r, err = cl.client.Sign(x, &pb.SignRequest{KeyId: d.KeyId, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: dg, JobId: "after-dkg-crash"})
+				return
+			})
 			verifyECDSA(t, d.PublicKey, dg, r.Signature)
 			t.Logf("RESULT %-28s DKG %s, sign OK", fmt.Sprintf("%s@%s", st.name, st.role), map[bool]string{true: "committed (keyset usable)", false: "aborted (nothing half-created, retried)"}[exists])
 		})
 	}
+}
+
+// retryUnavailable retries f while it fails with the typed UNAVAILABLE kind (a keyset being reconciled, a party coming back)
+// and fails the test at once on any other error or when the deadline passes. Unlike retry it does not hide real failures.
+func retryUnavailable(t *testing.T, d time.Duration, f func() error) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	var err error
+	start := time.Now()
+	for time.Now().Before(deadline) {
+		if err = f(); err == nil {
+			if w := time.Since(start); w > time.Second {
+				t.Logf("waited %v for reconciliation", w.Round(time.Millisecond))
+			}
+			return
+		}
+		if k, ok := kindOf(err); !ok || k != pb.ErrorKind_ERROR_KIND_UNAVAILABLE {
+			t.Fatalf("not an UNAVAILABLE: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("still UNAVAILABLE after %v: %v", d, err)
+}
+
+// Reconciliation always finishes and is quick: after restarting either party (and after a dropped link), the keyset is
+// resolved again within a bounded time, and a restart triggers it exactly once (a reconnect does not re-trigger it for ever).
+func TestReconcileLatencyAfterRestart(t *testing.T) {
+	cl := newCluster(t, nil, false)
+	x := ctx(t, 5*time.Minute)
+	_, err := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: pb.Curve_CURVE_SECP256K1, Admin: cl.env.Admin("dkg", "k")})
+	must(t, err)
+	cl.waitConverged(t, "k", true)
+	var worst time.Duration
+	for i, role := range []string{"B", "A", "B", "A", "B"} {
+		start := time.Now()
+		if role == "A" {
+			cl.a.kill()
+			cl.restartA(t)
+		} else {
+			cl.b.kill()
+			cl.restartB(t)
+		}
+		cl.waitConverged(t, "k", true)
+		d := time.Since(start)
+		if d > worst {
+			worst = d
+		}
+		// no re-trigger: the keyset stays resolved for a few seconds after it converged
+		time.Sleep(2 * time.Second)
+		ha, hb := cl.health(t)
+		if sa, sb := status(ha, "k"), status(hb, "k"); sa == nil || sb == nil || !sa.Resolved || !sb.Resolved {
+			t.Fatalf("restart %d (%s): keyset unresolved again 2 s after convergence: %v / %v", i, role, sa, sb)
+		}
+		t.Logf("restart %d of party %s: resolved on both parties after %v", i, role, d.Round(time.Millisecond))
+	}
+	if worst > 15*time.Second {
+		t.Fatalf("slowest convergence %v", worst)
+	}
+	t.Logf("slowest convergence after a restart: %v", worst.Round(time.Millisecond))
 }
