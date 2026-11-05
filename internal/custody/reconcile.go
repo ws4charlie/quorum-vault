@@ -58,7 +58,7 @@ func (s *Service) posted(ctx context.Context, acct string) (*big.Int, error) {
 //   - minus dep equals the sum of on-chain balances of all deposit addresses;
 //   - ledger.CheckInvariants passes;
 //   - for every cold address, minus the cold accounts of the partitions that use it equals its on-chain balance;
-//   - sweep, wd and tocold residuals are zero when nothing is in flight (otherwise
+//   - sweep, wd, tocold and rebal residuals are zero when nothing is in flight (otherwise
 //     they are skipped and counted in InFlight);
 //   - the scan has caught up to the pinned height (otherwise deposits the
 //     chain has but the books do not yet would show as differences).
@@ -175,12 +175,13 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 	if err := s.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM cold_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
+		+ (SELECT count(*) FROM rebalance_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM refills WHERE chain=$1 AND status IN ('signed','broadcast'))`, c.Chain).Scan(&open); err != nil {
 		return rep, err
 	}
 	rep.InFlight = open
 	for _, sym := range c.AssetList {
-		for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
+		for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), rebalAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
 			p, err := s.posted(ctx, id)
 			if err != nil {
 				return rep, err

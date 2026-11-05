@@ -108,6 +108,20 @@ func (c Config) validate() error {
 	return nil
 }
 
+// isSiblingHot reports whether addr is the configured hot address of a shard of src's pool and asset other than src's own.
+func (c Config) isSiblingHot(src partition.Key, addr common.Address) bool {
+	for id, a := range c.HotAddresses {
+		k, err := partition.Parse(id)
+		if err != nil || a != addr {
+			continue
+		}
+		if k.Entity == src.Entity && k.Chain == src.Chain && k.Asset == src.Asset && k.Tier == src.Tier && k.Pool == src.Pool && k.Shard != src.Shard {
+			return true
+		}
+	}
+	return false
+}
+
 // Asset classes of a cold address key.
 const (
 	ClassNative = "native"

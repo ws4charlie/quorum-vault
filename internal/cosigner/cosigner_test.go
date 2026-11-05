@@ -300,3 +300,27 @@ func TestCosignerToCold(t *testing.T) {
 		e.refuse(e.req(e.h.ToCold("r4", gatewaytest.AddrCold, gatewaytest.AddrCold, 100, 2)), gateway.ReasonToColdRate)
 	})
 }
+
+// Party B's own gate repeats the rebalance rules from its own config and store: a rogue party A cannot get B to take part in a move
+// to an address that is not another hot shard of the pool, or past the rate and the daily cap.
+func TestCosignerRebalance(t *testing.T) {
+	t.Run("to another shard, no approvals", func(t *testing.T) {
+		e := newEnv(t)
+		e.allow(e.h.Rebalance("b1", gatewaytest.AddrShard2, gatewaytest.AddrShard2, 2000, 0))
+	})
+	t.Run("destination outside the pinned shards", func(t *testing.T) {
+		e := newEnv(t)
+		e.refuse(e.req(e.h.Rebalance("b2", gatewaytest.AddrEvil, gatewaytest.AddrEvil, 100, 0)), gateway.ReasonTx)
+		e.refuse(e.req(e.h.Rebalance("b3", gatewaytest.AddrShard2, gatewaytest.AddrEvil, 100, 0)), gateway.ReasonTx)
+		e.refuse(e.req(e.h.Rebalance("b4", gatewaytest.AddrEvil, gatewaytest.AddrEvil, 100, 0, "alice", "bob")), gateway.ReasonTx)
+		e.refuse(e.req(e.h.Rebalance("b5", gatewaytest.AddrOtherPl, gatewaytest.AddrOtherPl, 100, 0)), gateway.ReasonTx)
+		e.refuse(e.req(e.h.Rebalance("b6", gatewaytest.AddrCold, gatewaytest.AddrCold, 100, 0)), gateway.ReasonTx)
+	})
+	t.Run("rate and daily cap from its own store", func(t *testing.T) {
+		e := newEnv(t)
+		e.allow(e.h.Rebalance("r1", gatewaytest.AddrShard2, gatewaytest.AddrShard2, 4000, 0))
+		e.refuse(e.req(e.h.Rebalance("r2", gatewaytest.AddrShard2, gatewaytest.AddrShard2, 3000, 1, "alice", "bob")), gateway.ReasonRebalanceCap)
+		e.allow(e.h.Rebalance("r3", gatewaytest.AddrShard2, gatewaytest.AddrShard2, 1000, 1))
+		e.refuse(e.req(e.h.Rebalance("r4", gatewaytest.AddrShard2, gatewaytest.AddrShard2, 100, 2)), gateway.ReasonRebalanceRate)
+	})
+}

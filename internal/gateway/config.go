@@ -75,6 +75,8 @@ type ChainFile struct {
 	CancelsPerHour int                  `json:"cancels_per_hour"`
 	// ToColdPerHour limits hot-to-cold moves; 0 refuses them all.
 	ToColdPerHour int `json:"to_cold_per_hour"`
+	// RebalancePerHour limits moves between hot shards; 0 refuses them all.
+	RebalancePerHour int `json:"rebalance_per_hour"`
 }
 
 // AssetFile is the withdrawal policy of one (chain, asset), amounts in base units.
@@ -84,6 +86,8 @@ type AssetFile struct {
 	Tiers    []TierFile `json:"tiers"`
 	// ToColdDailyCap caps what hot-to-cold moves of this asset may carry in a rolling 24 hours. Empty or 0 refuses the moves.
 	ToColdDailyCap string `json:"to_cold_daily_cap"`
+	// RebalanceDailyCap caps what moves between hot shards may carry in a rolling 24 hours, per asset. Empty or 0 refuses them.
+	RebalanceDailyCap string `json:"rebalance_daily_cap"`
 }
 
 // TierFile: withdrawals of at least MinAmount need Approvals distinct approvers.
@@ -136,6 +140,8 @@ type ChainConfig struct {
 	SweepsPerHour  int
 	CancelsPerHour int
 	ToColdPerHour  int
+	// RebalancePerHour limits moves between hot shards (zero: none allowed).
+	RebalancePerHour int
 }
 
 // AssetPolicy is the withdrawal policy of one asset.
@@ -145,6 +151,8 @@ type AssetPolicy struct {
 	Tiers    []Tier // ascending MinAmount
 	// ToColdDailyCap caps hot-to-cold moves per rolling day (zero: none allowed).
 	ToColdDailyCap *big.Int
+	// RebalanceDailyCap caps moves between hot shards per rolling day (zero: none allowed).
+	RebalanceDailyCap *big.Int
 }
 
 // Tier: amounts >= Min need Approvals distinct approvers.
@@ -268,7 +276,7 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	if cf.EVM == nil {
 		return nil, fmt.Errorf("gateway: config: chain %q has no supported chain section (only evm)", name)
 	}
-	if cf.SweepsPerHour < 0 || cf.CancelsPerHour < 0 || cf.ToColdPerHour < 0 {
+	if cf.SweepsPerHour < 0 || cf.CancelsPerHour < 0 || cf.ToColdPerHour < 0 || cf.RebalancePerHour < 0 {
 		return nil, fmt.Errorf("gateway: config: chain %q: rate limits must be >= 0", name)
 	}
 	e := cf.EVM
@@ -317,7 +325,7 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	}
 	sort.Strings(want)
 	cc := &ChainConfig{Name: name, EVM: ec, Assets: map[string]AssetPolicy{},
-		SweepsPerHour: cf.SweepsPerHour, CancelsPerHour: cf.CancelsPerHour, ToColdPerHour: cf.ToColdPerHour}
+		SweepsPerHour: cf.SweepsPerHour, CancelsPerHour: cf.CancelsPerHour, ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour}
 	for _, s := range want {
 		af, ok := cf.Assets[s]
 		if !ok {
@@ -350,6 +358,12 @@ func (af AssetFile) build(where string, enabledApprovers int) (AssetPolicy, erro
 	p.ToColdDailyCap = new(big.Int)
 	if af.ToColdDailyCap != "" {
 		if p.ToColdDailyCap, err = amount(where+" to_cold_daily_cap", af.ToColdDailyCap); err != nil {
+			return p, err
+		}
+	}
+	p.RebalanceDailyCap = new(big.Int)
+	if af.RebalanceDailyCap != "" {
+		if p.RebalanceDailyCap, err = amount(where+" rebalance_daily_cap", af.RebalanceDailyCap); err != nil {
 			return p, err
 		}
 	}

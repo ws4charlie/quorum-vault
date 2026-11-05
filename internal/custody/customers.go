@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -75,6 +76,11 @@ func (s *Service) EnsureDepositAddress(ctx context.Context, actor, customer, cha
 	d, err := s.Chain.DeriveDepositAddress(ctx, customer, 0)
 	if err != nil {
 		return DepositAddress{}, err
+	}
+	for _, c := range s.coldAddressList() {
+		if strings.EqualFold(c, d.Address) {
+			return DepositAddress{}, fmt.Errorf("%w: the deposit address %s is a configured cold address", ErrInvalid, d.Address)
+		}
 	}
 	out := DepositAddress{Customer: customer, Chain: d.Chain, Address: d.Address, Kind: d.Kind}
 	err = InTx(ctx, s.Pool, func(tx pgx.Tx) error {

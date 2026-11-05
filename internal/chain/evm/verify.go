@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -91,6 +92,8 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		return v.verifySweep(tx.To(), tx.Value(), tx.Data(), i, tok, native)
 	case "to-cold":
 		return v.verifyToCold(tx.To(), tx.Value(), tx.Data(), i, amount, tok, native)
+	case "rebalance":
+		return v.verifyRebalance(tx.To(), tx.Value(), tx.Data(), from, i, amount, tok, native)
 	case "cancel":
 		return v.verifyCancel(tx, from, i, amount)
 	default:
@@ -233,6 +236,56 @@ func (v *Verifier) verifyToCold(to *common.Address, value *big.Int, data []byte,
 	}
 	if !bytes.Equal(want, data) {
 		return reject("calldata is not transfer(%s, %s)", cold, amount)
+	}
+	return nil
+}
+
+// verifyRebalance accepts a move between hot shards only when its destination is the hot address of ANOTHER shard of the same
+// pool and asset, from this zone's own list of hot addresses (Config.HotAddresses), and the transaction is a plain transfer of
+// exactly the intent's amount to it: native value, or an ERC-20 transfer(dest, amount) on the configured token. The partition IDs
+// are parsed, so a partition of another pool, asset, tier, entity or chain is not "another shard" however its ID is spelled.
+func (v *Verifier) verifyRebalance(to *common.Address, value *big.Int, data []byte, from common.Address, i signjob.Intent, amount *big.Int, tok Token, native bool) error {
+	if i.From != "" {
+		return reject("rebalance intent has a source address")
+	}
+	if amount.Sign() == 0 {
+		return reject("zero amount")
+	}
+	src, err := partition.Parse(i.PartitionID)
+	if err != nil {
+		return reject("%v", err)
+	}
+	dest, err := parseIntentAddress(i.To)
+	if err != nil {
+		return reject("%v", err)
+	}
+	if dest == from {
+		return reject("rebalance destination %s is the source", dest)
+	}
+	if !v.cfg.isSiblingHot(src, dest) {
+		return reject("rebalance destination %s is not the hot address of another shard of %s", dest, i.PartitionID)
+	}
+	if to == nil {
+		return reject("contract creation")
+	}
+	if native {
+		if *to != dest || value.Cmp(amount) != 0 || len(data) != 0 {
+			return reject("rebalance transfer is to %s value %s data %d bytes; the destination is %s and the amount %s", to, value, len(data), dest, amount)
+		}
+		return nil
+	}
+	if *to != tok.Address {
+		return reject("call target %s is not the %s token %s", to, i.Asset, tok.Address)
+	}
+	if value.Sign() != 0 {
+		return reject("token transfer carries value %s", value)
+	}
+	want, err := packTransfer(dest, amount)
+	if err != nil {
+		return reject("%v", err)
+	}
+	if !bytes.Equal(want, data) {
+		return reject("calldata is not transfer(%s, %s)", dest, amount)
 	}
 	return nil
 }

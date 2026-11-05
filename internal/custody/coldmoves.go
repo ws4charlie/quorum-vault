@@ -124,14 +124,21 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 			if err != nil {
 				return err
 			}
+			// A rebalance on its way to this shard counts as its liquidity for the low-water mark (no refill ceremony for a shard
+			// that is being fed), but not for the high-water mark: funds that have not arrived cannot be moved on.
+			incoming, err := s.incomingRebalance(ctx, tx, p)
+			if err != nil {
+				return err
+			}
+			withIncoming := new(big.Int).Add(free, incoming)
 			var alerted bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hot_low_alerts WHERE partition_id=$1)`, p).Scan(&alerted); err != nil {
 				return err
 			}
 			switch {
-			case free.Cmp(lim.Low) < 0:
+			case withIncoming.Cmp(lim.Low) < 0:
 				// Ask for a refill (one open at a time per cold address), and say so in the ALERT, once per outage.
-				need := new(big.Int).Sub(lim.Target, free)
+				need := new(big.Int).Sub(lim.Target, withIncoming)
 				rid, opened, err := s.openRefill(ctx, tx, p, asset, need)
 				if err != nil {
 					return err

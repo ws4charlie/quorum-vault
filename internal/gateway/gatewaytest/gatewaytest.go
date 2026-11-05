@@ -33,6 +33,10 @@ const (
 	// ColdPartition is a hot partition with a well-formed ID (the to-cold verifier reads the pool from it), on the same hot
 	// address as Partition.
 	ColdPartition = "qv-us/evm-test/ETH/hot/omnibus/1"
+	// Shard2Partition is another shard of the same pool on its own address (a rebalance destination); OtherPoolPartition is a shard
+	// of a segregated pool, which a rebalance of the omnibus pool must not reach. Neither has a key: they exist in the config only.
+	Shard2Partition    = "qv-us/evm-test/ETH/hot/omnibus/2"
+	OtherPoolPartition = "qv-us/evm-test/ETH/hot/segregated:acme/0"
 )
 
 var (
@@ -42,6 +46,8 @@ var (
 	AddrUser    = common.HexToAddress("0x00000000000000000000000000000000000c0DE5")
 	AddrEvil    = common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	AddrCold    = common.HexToAddress("0x00000000000000000000000000000000000c01d0") // the configured cold address
+	AddrShard2  = common.HexToAddress("0x0000000000000000000000000000000000005a02") // hot address of Shard2Partition
+	AddrOtherPl = common.HexToAddress("0x0000000000000000000000000000000000005a03") // hot address of OtherPoolPartition
 )
 
 // Harness is one signing-zone configuration: approvers alice, bob, carol (enabled), auto, dave (disabled), policies for
@@ -70,15 +76,16 @@ func New(t testing.TB, chainID uint64, hot common.Address) *Harness {
 		Approvers: approvers,
 		Chains: map[string]gateway.ChainFile{Chain: {
 			EVM: &gateway.EVMFile{ChainID: chainID, Factory: AddrFactory.Hex(), SweepDestination: AddrDest.Hex(),
-				HotAddresses:  map[string]string{Partition: hot.Hex(), ColdPartition: hot.Hex()},
+				HotAddresses: map[string]string{Partition: hot.Hex(), ColdPartition: hot.Hex(),
+					Shard2Partition: AddrShard2.Hex(), OtherPoolPartition: AddrOtherPl.Hex()},
 				ColdAddresses: map[string]string{"omnibus/native": AddrCold.Hex(), "omnibus/token": AddrCold.Hex()},
 				Tokens:        map[string]gateway.TokenFile{"USDT": {Address: AddrToken.Hex(), Decimals: 6}},
 				MaxTxFeeWei:   "300000000000000"},
 			Assets: map[string]gateway.AssetFile{
-				"ETH":  {PerTxCap: "5000", DailyCap: "8000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000", Approvals: 2}}, ToColdDailyCap: "6000"},
-				"USDT": {PerTxCap: "5000000", DailyCap: "8000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000000", Approvals: 2}}, ToColdDailyCap: "6000000"},
+				"ETH":  {PerTxCap: "5000", DailyCap: "8000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000", Approvals: 2}}, ToColdDailyCap: "6000", RebalanceDailyCap: "6000"},
+				"USDT": {PerTxCap: "5000000", DailyCap: "8000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000000", Approvals: 2}}, ToColdDailyCap: "6000000", RebalanceDailyCap: "6000000"},
 			},
-			SweepsPerHour: 2, CancelsPerHour: 3, ToColdPerHour: 2,
+			SweepsPerHour: 2, CancelsPerHour: 3, ToColdPerHour: 2, RebalancePerHour: 2,
 		}},
 	}
 	h.Reparse()
@@ -186,6 +193,13 @@ func (h *Harness) Withdrawal(id string, to common.Address, amount int64, nonce u
 // ToCold is a hot-to-cold job of ETH: the intent names intentTo, the transaction pays txTo. No approvals are needed.
 func (h *Harness) ToCold(id string, intentTo, txTo common.Address, amount int64, nonce uint64, approvers ...string) signjob.Job {
 	in := signjob.Intent{Kind: "to-cold", ID: "m-" + id, PartitionID: ColdPartition, Asset: "ETH", To: intentTo.Hex(), Amount: fmt.Sprint(amount)}
+	return h.Job(id, in, ETH(txTo, amount, nonce), approvers...)
+}
+
+// Rebalance is a hot-shard rebalance job of ETH from ColdPartition (shard 1): the intent names intentTo, the transaction pays txTo.
+// No approvals are needed.
+func (h *Harness) Rebalance(id string, intentTo, txTo common.Address, amount int64, nonce uint64, approvers ...string) signjob.Job {
+	in := signjob.Intent{Kind: "rebalance", ID: "rb-" + id, PartitionID: ColdPartition, Asset: "ETH", To: intentTo.Hex(), Amount: fmt.Sprint(amount)}
 	return h.Job(id, in, ETH(txTo, amount, nonce), approvers...)
 }
 

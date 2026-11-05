@@ -38,6 +38,10 @@ const (
 	// testColdPartition is a hot partition with a well-formed ID (the to-cold verifier reads the pool from it), on the same hot
 	// address as testPartition.
 	testColdPartition = "qv-us/evm-test/ETH/hot/omnibus/1"
+	// testShard2 is another shard of the same pool on its own address (a rebalance destination); testOtherPool is a shard of a
+	// segregated pool, which a rebalance of the omnibus pool must not reach.
+	testShard2    = "qv-us/evm-test/ETH/hot/omnibus/2"
+	testOtherPool = "qv-us/evm-test/ETH/hot/segregated:acme/0"
 )
 
 var (
@@ -47,6 +51,8 @@ var (
 	addrUser    = common.HexToAddress("0x00000000000000000000000000000000000c0DE5")
 	addrEvil    = common.HexToAddress("0x000000000000000000000000000000000000dEaD")
 	addrCold    = common.HexToAddress("0x00000000000000000000000000000000000c01d0") // configured cold address
+	addrShard2  = common.HexToAddress("0x0000000000000000000000000000000000005a02") // hot address of shard 2 of the pool
+	addrOtherPl = common.HexToAddress("0x0000000000000000000000000000000000005a03") // hot address of a segregated pool
 )
 
 // countingSigner counts SignDigest calls so tests can assert "nothing signed".
@@ -154,16 +160,17 @@ func newHarnessChainID(t *testing.T, chainID uint64) *harness {
 		Approvers: approvers,
 		Chains: map[string]ChainFile{testChain: {
 			EVM: &EVMFile{ChainID: chainID, Factory: addrFactory.Hex(), SweepDestination: addrDest.Hex(),
-				HotAddresses:  map[string]string{testPartition: h.hot.Hex(), testColdPartition: h.hot.Hex()},
+				HotAddresses: map[string]string{testPartition: h.hot.Hex(), testColdPartition: h.hot.Hex(),
+					testShard2: addrShard2.Hex(), testOtherPool: addrOtherPl.Hex()},
 				ColdAddresses: map[string]string{"omnibus/native": addrCold.Hex(), "omnibus/token": addrCold.Hex()},
 				Tokens:        map[string]TokenFile{"USDT": {Address: addrToken.Hex(), Decimals: 6}},
 				MaxTxFeeWei:   "300000000000000"},
 			Assets: map[string]AssetFile{
-				"ETH": {PerTxCap: "5000", DailyCap: "8000", Tiers: []TierFile{{"0", 1}, {"1000", 2}}, ToColdDailyCap: "6000"},
+				"ETH": {PerTxCap: "5000", DailyCap: "8000", Tiers: []TierFile{{"0", 1}, {"1000", 2}}, ToColdDailyCap: "6000", RebalanceDailyCap: "6000"},
 				"USDT": {PerTxCap: "5000000", DailyCap: "8000000",
-					Tiers: []TierFile{{"0", 1}, {"1000000", 2}}, ToColdDailyCap: "6000000"},
+					Tiers: []TierFile{{"0", 1}, {"1000000", 2}}, ToColdDailyCap: "6000000", RebalanceDailyCap: "6000000"},
 			},
-			SweepsPerHour: 2, CancelsPerHour: 3, ToColdPerHour: 2,
+			SweepsPerHour: 2, CancelsPerHour: 3, ToColdPerHour: 2, RebalancePerHour: 2,
 		}},
 	}
 	raw, _ := json.Marshal(f)

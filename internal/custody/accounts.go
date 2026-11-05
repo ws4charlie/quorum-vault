@@ -3,6 +3,7 @@ package custody
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -28,6 +29,9 @@ func hotAcct(partitionID string) string       { return "hot:" + partitionID }
 func coldAcct(partitionID string) string    { return "cold:" + partitionID }
 func toColdAcct(chain, asset string) string { return "tocold:" + chain + ":" + asset }
 
+// rebalAcct is the clearing account of a rebalance between two hot shards while it is on its way.
+func rebalAcct(chain, asset string) string { return "rebal:" + chain + ":" + asset }
+
 // refillAcct is the clearing account of a refill on its way from cold to hot; opFundAcct is the operator's own money that was put
 // into the cold address (booked explicitly, so Reconcile stays exact).
 func refillAcct(chain, asset string) string { return "refill:" + chain + ":" + asset }
@@ -38,16 +42,17 @@ func CustomerAccount(customer, chain, asset string) string { return custAcct(cus
 
 // DepAccount, SweepAccount, WdAccount, SuspenseAccount, FeeAccount and
 // HotAccount expose the other accounts to tests and tools.
-func DepAccount(chain, asset string) string      { return depAcct(chain, asset) }
-func SweepAccount(chain, asset string) string    { return sweepAcct(chain, asset) }
-func WdAccount(chain, asset string) string       { return wdAcct(chain, asset) }
-func SuspenseAccount(chain, asset string) string { return suspenseAcct(chain, asset) }
-func FeeAccount(chain, native string) string     { return feeAcct(chain, native) }
-func HotAccount(partitionID string) string       { return hotAcct(partitionID) }
-func ColdAccount(partitionID string) string      { return coldAcct(partitionID) }
-func ToColdAccount(chain, asset string) string   { return toColdAcct(chain, asset) }
-func RefillAccount(chain, asset string) string   { return refillAcct(chain, asset) }
-func OpFundAccount(chain, asset string) string   { return opFundAcct(chain, asset) }
+func DepAccount(chain, asset string) string       { return depAcct(chain, asset) }
+func SweepAccount(chain, asset string) string     { return sweepAcct(chain, asset) }
+func WdAccount(chain, asset string) string        { return wdAcct(chain, asset) }
+func SuspenseAccount(chain, asset string) string  { return suspenseAcct(chain, asset) }
+func FeeAccount(chain, native string) string      { return feeAcct(chain, native) }
+func HotAccount(partitionID string) string        { return hotAcct(partitionID) }
+func ColdAccount(partitionID string) string       { return coldAcct(partitionID) }
+func ToColdAccount(chain, asset string) string    { return toColdAcct(chain, asset) }
+func RebalanceAccount(chain, asset string) string { return rebalAcct(chain, asset) }
+func RefillAccount(chain, asset string) string    { return refillAcct(chain, asset) }
+func OpFundAccount(chain, asset string) string    { return opFundAcct(chain, asset) }
 
 // ensureCustomerAccount creates a customer's account for asset.
 func (s *Service) ensureCustomerAccount(ctx context.Context, tx pgx.Tx, customer, asset string) error {
@@ -59,6 +64,9 @@ func (s *Service) ensureCustomerAccount(ctx context.Context, tx pgx.Tx, customer
 // It is idempotent and safe to run from every process at start.
 func (s *Service) Bootstrap(ctx context.Context) error {
 	c := s.Cfg
+	if err := s.checkColdNotForwarder(ctx); err != nil {
+		return err
+	}
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		for _, sym := range c.AssetList {
 			a := c.Assets[sym]
@@ -80,6 +88,7 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 				{sweepAcct(c.Chain, sym), ledger.KindClearing, true},
 				{wdAcct(c.Chain, sym), ledger.KindClearing, true},
 				{toColdAcct(c.Chain, sym), ledger.KindClearing, true},
+				{rebalAcct(c.Chain, sym), ledger.KindClearing, true},
 				{refillAcct(c.Chain, sym), ledger.KindClearing, true},
 				{opFundAcct(c.Chain, sym), ledger.KindClearing, true},
 				{suspenseAcct(c.Chain, sym), ledger.KindSuspense, false},
@@ -111,4 +120,32 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+// coldAddressList is every configured cold address, lower case.
+func (s *Service) coldAddressList() []string {
+	var out []string
+	for _, a := range s.Cfg.EVM.ColdAddresses {
+		out = append(out, strings.ToLower(a.Hex()))
+	}
+	return out
+}
+
+// checkColdNotForwarder refuses to start with a cold address that is already a customer's deposit forwarder: funds sent to a
+// forwarder are swept by anyone to the sweep destination, so a "cold" address that is one would not hold anything. The check is
+// one query on the deposit address table; a new deposit address is checked the same way when it is issued.
+func (s *Service) checkColdNotForwarder(ctx context.Context) error {
+	cold := s.coldAddressList()
+	if len(cold) == 0 {
+		return nil
+	}
+	var addr string
+	err := s.Pool.QueryRow(ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 AND lower(address)=ANY($2) LIMIT 1`, s.Cfg.Chain, cold).Scan(&addr)
+	if isNoRows(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: the cold address %s is a customer deposit forwarder", ErrInvalid, addr)
 }

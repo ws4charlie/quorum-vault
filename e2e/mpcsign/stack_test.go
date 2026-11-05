@@ -395,6 +395,20 @@ func (s *stack) startCosigner(t *testing.T) {
 // gatewayConfig writes the gateway's signing-zone config: the same chain and approvers, plus the mpc signer entry.
 func (s *stack) gatewayConfig() string {
 	f := s.h.File
+	// Every hot partition needs a signer; the rebalance test partitions have no key (they are destinations only, known to the
+	// cosigner), so the gateway's copy of the config leaves them out.
+	f.Chains = map[string]gateway.ChainFile{}
+	for name, cf := range s.h.File.Chains {
+		e := *cf.EVM
+		e.HotAddresses = map[string]string{}
+		for p, a := range cf.EVM.HotAddresses {
+			if p != gatewaytest.Shard2Partition && p != gatewaytest.OtherPoolPartition {
+				e.HotAddresses[p] = a
+			}
+		}
+		cf.EVM = &e
+		f.Chains[name] = cf
+	}
 	sf := gateway.SignerFile{Backend: "mpc", KeyID: s.keyID, PublicKey: hex.EncodeToString(s.pub65),
 		MPC: &gateway.MPCSignerFile{Address: s.callerA, CertFile: filepath.Join(s.dir, "gateway.crt"), KeyFile: filepath.Join(s.dir, "gateway.key"), ServerPin: s.certA.pin}}
 	// Every hot partition needs a signer; the cold-move test partition shares the one hot key.

@@ -26,6 +26,7 @@
           "per_tx_cap": "5000000000000000000",
           "daily_cap": "20000000000000000000",
           "to_cold_daily_cap": "200000000000000000000",
+          "rebalance_daily_cap": "100000000000000000000",
           "tiers": [
             { "min_amount": "0", "approvals": 1 },
             { "min_amount": "1000000000000000000", "approvals": 2 }
@@ -35,6 +36,7 @@
           "per_tx_cap": "10000000000",
           "daily_cap": "40000000000",
           "to_cold_daily_cap": "400000000000",
+          "rebalance_daily_cap": "200000000000",
           "tiers": [
             { "min_amount": "0", "approvals": 1 },
             { "min_amount": "2000000000", "approvals": 2 }
@@ -43,7 +45,8 @@
       },
       "sweeps_per_hour": 60,
       "cancels_per_hour": 5,
-      "to_cold_per_hour": 4
+      "to_cold_per_hour": 4,
+      "rebalance_per_hour": 4
     }
   }
 }
