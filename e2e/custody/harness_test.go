@@ -210,6 +210,7 @@ type system struct {
 	coldAddr                  common.Address  // the cold address both zones are configured with
 	cold                      *coldKit        // the offline signer's side, when opts.cold.coldHSM
 	mpc                       *mpcstack.Stack // mpc mode only
+	tm                        *timing
 	cosGuardDSN               string
 	chainName                 string
 	queue                     string
@@ -297,6 +298,8 @@ func eth(n int64) *big.Int { return new(big.Int).Mul(big.NewInt(n), big.NewInt(e
 func newSystem(t *testing.T, o opts) *system {
 	t.Helper()
 	requireCustody(t)
+	tm := newTiming(t)
+	t.Cleanup(func() { tm.finish(t) }) // registered first, so it runs last: after everything is torn down
 	if o.shards == 0 {
 		o.shards = 1
 	}
@@ -319,7 +322,7 @@ func newSystem(t *testing.T, o opts) *system {
 			t.Fatal(err)
 		}
 	}
-	s := &system{t: t, o: o, ctx: context.Background(), approv: map[string]ed25519.PrivateKey{}, dir: dir, tag: uuid.NewString()[:8]}
+	s := &system{t: t, o: o, ctx: context.Background(), approv: map[string]ed25519.PrivateKey{}, dir: dir, tag: uuid.NewString()[:8], tm: tm}
 	s.rpcURL = os.Getenv("QV_ANVIL_RPC")
 	if s.rpcURL == "" {
 		s.rpcURL = "http://127.0.0.1:18545"
@@ -347,6 +350,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.chainName = "evm-" + uuid.NewString()[:8]
 	s.queue = "qv-e2e-" + uuid.NewString()[:8]
 
+	s.tm.phase("databases (Postgres, guard DBs)")
 	// Chain: factory (deployed frozen), token, keys. All keys are generated now.
 	s.deployer, _ = crypto.GenerateKey()
 	s.admin, _ = crypto.GenerateKey()
@@ -363,6 +367,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.factory = s.mustSend(s.deployer, nil, new(big.Int), evm.FactoryDeployData(common.Address{}, crypto.PubkeyToAddress(s.admin.PublicKey), crypto.PubkeyToAddress(s.guardian.PublicKey))).ContractAddress
 	s.usdt = s.mustSend(s.deployer, nil, new(big.Int), readBin(t, "UsdtLike.bin")).ContractAddress
 
+	s.tm.phase("chain (factory, token, funding keys)")
 	// Hot shards: HSM keys that never leave the token, or (mpc mode) keys derived from a two-party DKG whose shares live
 	// in two parties' own HSM tokens.
 	signers := map[string]gateway.SignerFile{}
@@ -393,6 +398,7 @@ func newSystem(t *testing.T, o opts) *system {
 		}
 	}
 
+	s.tm.phase("hot keys (HSM generate, or mpc parties + DKG + derive)")
 	// Approvers.
 	apprFiles := map[string]gateway.ApproverFile{}
 	for _, name := range []string{"alice", "bob", "carol", "auto"} {
@@ -497,6 +503,7 @@ func newSystem(t *testing.T, o opts) *system {
 		s.mpc.StartCosigner(cosPath, s.cosGuardDSN, s.guardDSN)
 	}
 
+	s.tm.phase("configs")
 	// In-process service for funding and Reconcile (reads only, plus FundHot).
 	adapter, err := evm.New(s.ctx, s.cfg.EVM, s.pool)
 	if err != nil {
@@ -513,6 +520,7 @@ func newSystem(t *testing.T, o opts) *system {
 		t.Fatal(err)
 	}
 
+	s.tm.phase("in-process service + adapter")
 	// Temporal.
 	addr := os.Getenv("QV_TEMPORAL_ADDR")
 	if addr == "" {
@@ -539,6 +547,7 @@ func newSystem(t *testing.T, o opts) *system {
 	t.Cleanup(s.tc.Close)
 	t.Cleanup(s.terminateWorkflows)
 
+	s.tm.phase("Temporal connect")
 	// Fund the hot wallets: gas money on chain and in the books.
 	for i, a := range s.shardAddr {
 		s.fundETH(a, eth(100))
@@ -550,12 +559,16 @@ func newSystem(t *testing.T, o opts) *system {
 		s.setDestination(s.shardAddr[0])
 	}
 
+	s.tm.phase("fund hot wallets")
 	s.startGateway()
 	if !o.noRelay {
 		s.startRelay()
 	}
 	s.startWorker("")
 	s.startCore()
+	s.tm.phase("start gateway, relay, worker, core")
+	s.tm.markReady()
+	t.Cleanup(tm.markBodyEnd) // registered last, so it runs first: the moment the test body is over
 	return s
 }
 
@@ -752,9 +765,11 @@ func (s *system) terminateWorkflows() {
 func (s *system) waitFor(timeout time.Duration, what string, f func() bool) {
 	s.t.Helper()
 	timeout = scaled(timeout)
-	dl := time.Now().Add(timeout)
+	start := time.Now()
+	dl := start.Add(timeout)
 	for {
 		if f() {
+			s.tm.wait(what, time.Since(start))
 			return
 		}
 		if time.Now().After(dl) {
