@@ -16,11 +16,12 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // Versions of the files that cross the air gap.
 const (
-	RequestVersion  = "qv-refill-request-v1"
+	RequestVersion  = "qv-cold-request-v2"
 	SignedVersion   = "qv-refill-signed-v1"
 	approvalDomain  = "qv-refill-approval-v1\n"
 	requestHashTag  = "qv-refill-request-hash-v1\n"
@@ -29,6 +30,30 @@ const (
 	nativeTransfer  = 21000
 	addressSuffixLn = 20
 )
+
+// Action kinds. A refill moves funds from the cold address to a hot address; the others are calls on the forwarder factory, which
+// the cold key administers.
+const (
+	KindRefill         = "refill"
+	KindSetDestination = "set-destination"
+	KindFreeze         = "freeze"
+	KindSetGuardian    = "set-guardian"
+	KindTransferAdmin  = "transfer-admin"
+	KindAcceptAdmin    = "accept-admin"
+)
+
+// AdminKinds are the factory calls.
+var AdminKinds = []string{KindSetDestination, KindFreeze, KindSetGuardian, KindTransferAdmin, KindAcceptAdmin}
+
+// IsAdmin reports whether kind is a factory call.
+func IsAdmin(kind string) bool {
+	for _, k := range AdminKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
 
 // Request is a refill from the cold address to a hot address, as the online side exports it and the operators approve it. The
 // offline tool builds the transaction from these fields itself; it does not take a transaction from the online side.
@@ -49,6 +74,20 @@ type Request struct {
 	Gas                  uint64 `json:"gas"`
 	MaxFeePerGas         string `json:"max_fee_per_gas"`
 	MaxPriorityFeePerGas string `json:"max_priority_fee_per_gas"`
+
+	// Factory calls (Kind other than refill). To is then the factory too, Asset is empty and Amount is "0".
+	Kind     string `json:"kind,omitempty"`     // empty = refill
+	Contract string `json:"contract,omitempty"` // the factory
+	Param    string `json:"param,omitempty"`    // the address argument, when the call has one
+	Current  string `json:"current,omitempty"`  // what the online side says the value is now: shown to operators, not verified offline
+}
+
+// Action is the request's kind, "refill" when empty.
+func (r Request) Action() string {
+	if r.Kind == "" {
+		return KindRefill
+	}
+	return r.Kind
 }
 
 // RequestFile is what is carried to the offline machine: the request and its hash, so a file damaged on the way is noticed.
@@ -82,7 +121,7 @@ func lp(b []byte, f string) []byte {
 func (r Request) fields() []string {
 	return []string{r.Version, r.ID, strconv.Itoa(r.Revision), r.Chain, strconv.FormatUint(r.ChainID, 10), r.Pool, r.Asset, r.Token,
 		strings.ToLower(r.From), strings.ToLower(r.To), r.Amount, strconv.FormatUint(r.Nonce, 10), strconv.FormatUint(r.Gas, 10),
-		r.MaxFeePerGas, r.MaxPriorityFeePerGas}
+		r.MaxFeePerGas, r.MaxPriorityFeePerGas, r.Kind, strings.ToLower(r.Contract), strings.ToLower(r.Param), r.Current}
 }
 
 // Hash is what operators approve: every field, length-prefixed, under a domain tag.
@@ -103,7 +142,7 @@ func (r Request) HashHex() string { h := r.Hash(); return hex.EncodeToString(h[:
 func (r Request) ContentHash() string {
 	b := []byte(contentHashTag)
 	for _, f := range []string{r.Chain, strconv.FormatUint(r.ChainID, 10), r.Asset, r.Token, strings.ToLower(r.From), strings.ToLower(r.To), r.Amount,
-		strconv.FormatUint(r.Nonce, 10)} {
+		strconv.FormatUint(r.Nonce, 10), r.Kind, strings.ToLower(r.Contract), strings.ToLower(r.Param)} {
 		b = lp(b, f)
 	}
 	h := sha256.Sum256(b)
@@ -139,6 +178,9 @@ func parseAddr(what, s string) (common.Address, error) {
 func (r Request) Tx() (*types.Transaction, error) {
 	if r.Version != RequestVersion {
 		return nil, fmt.Errorf("request version %q, want %q", r.Version, RequestVersion)
+	}
+	if r.Kind != "" && r.Kind != KindRefill {
+		return r.adminTx()
 	}
 	to, err := parseAddr("destination", r.To)
 	if err != nil {
@@ -181,6 +223,61 @@ func (r Request) Tx() (*types.Transaction, error) {
 	return types.NewTx(d), nil
 }
 
+// adminTx builds the factory call.
+func (r Request) adminTx() (*types.Transaction, error) {
+	if !IsAdmin(r.Kind) {
+		return nil, fmt.Errorf("unknown action kind %q", r.Kind)
+	}
+	factory, err := parseAddr("contract", r.Contract)
+	if err != nil {
+		return nil, err
+	}
+	data, err := AdminCalldata(r.Kind, r.Param)
+	if err != nil {
+		return nil, err
+	}
+	maxFee, err := parseAmt("max_fee_per_gas", r.MaxFeePerGas)
+	if err != nil {
+		return nil, err
+	}
+	tip, err := parseAmt("max_priority_fee_per_gas", r.MaxPriorityFeePerGas)
+	if err != nil {
+		return nil, err
+	}
+	if tip.Cmp(maxFee) > 0 {
+		return nil, errors.New("priority fee exceeds the max fee")
+	}
+	if r.Gas == 0 {
+		return nil, errors.New("gas is zero")
+	}
+	if r.Amount != "0" || r.Asset != "" || r.Token != "" {
+		return nil, errors.New("a factory call carries no asset or amount")
+	}
+	return types.NewTx(&types.DynamicFeeTx{ChainID: new(big.Int).SetUint64(r.ChainID), Nonce: r.Nonce, GasTipCap: tip, GasFeeCap: maxFee, Gas: r.Gas,
+		To: &factory, Value: new(big.Int), Data: data}), nil
+}
+
+// AdminCalldata is the calldata of a factory call. The calls with an address argument need one; freeze and acceptAdmin take none.
+func AdminCalldata(kind, param string) ([]byte, error) {
+	sig := map[string]string{KindSetDestination: "setDestination(address)", KindFreeze: "freeze()", KindSetGuardian: "setGuardian(address)",
+		KindTransferAdmin: "transferAdmin(address)", KindAcceptAdmin: "acceptAdmin()"}[kind]
+	if sig == "" {
+		return nil, fmt.Errorf("unknown action kind %q", kind)
+	}
+	data := crypto.Keccak256([]byte(sig))[:4]
+	if strings.HasSuffix(sig, "()") {
+		if param != "" {
+			return nil, fmt.Errorf("%s takes no argument", kind)
+		}
+		return data, nil
+	}
+	a, err := parseAddr("argument", param)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, common.LeftPadBytes(a.Bytes(), 32)...), nil
+}
+
 // TransferData is the calldata of ERC-20 transfer(to, amount).
 func TransferData(to common.Address, amount *big.Int) []byte {
 	b, _ := hex.DecodeString(transferSigHex)
@@ -196,6 +293,9 @@ func (r Request) Summary(decimals int) string {
 	kind := "native " + r.Asset
 	if r.Token != "" {
 		kind = r.Asset + " token " + r.Token
+	}
+	if r.Kind != "" && r.Kind != KindRefill {
+		return r.adminSummary()
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "  request   %s (revision %d)\n", r.ID, r.Revision)
@@ -223,4 +323,45 @@ func Human(n *big.Int, decimals int) string {
 	}
 	i := len(s) - decimals
 	return strings.TrimSuffix(strings.TrimRight(s[:i]+"."+s[i:], "0"), ".")
+}
+
+func (r Request) adminSummary() string {
+	maxFee, _ := new(big.Int).SetString(r.MaxFeePerGas, 10)
+	worst := new(big.Int).Mul(maxFee, new(big.Int).SetUint64(r.Gas))
+	what := map[string]string{
+		KindSetDestination: "SET THE SWEEP DESTINATION of the forwarder factory (every deposit address pays to it)",
+		KindFreeze:         "FREEZE the forwarder factory: sweeping stops until the admin sets a destination again",
+		KindSetGuardian:    "SET THE GUARDIAN of the forwarder factory (the key that may freeze it)",
+		KindTransferAdmin:  "NOMINATE A NEW ADMIN of the forwarder factory (nothing changes until it accepts)",
+		KindAcceptAdmin:    "ACCEPT THE ADMIN ROLE of the forwarder factory: this signer becomes its admin",
+	}[r.Kind]
+	var b strings.Builder
+	fmt.Fprintf(&b, "  request   %s (revision %d)\n", r.ID, r.Revision)
+	fmt.Fprintf(&b, "  chain     %s (chain id %d), pool %s\n", r.Chain, r.ChainID, r.Pool)
+	fmt.Fprintf(&b, "  action    %s\n", what)
+	fmt.Fprintf(&b, "  contract  %s (the forwarder factory)\n", r.Contract)
+	fmt.Fprintf(&b, "  signer    %s\n", r.From)
+	switch r.Kind {
+	case KindSetDestination:
+		fmt.Fprintf(&b, "  change    destination: %s  ->  %s\n", orNone(r.Current), r.Param)
+	case KindSetGuardian:
+		fmt.Fprintf(&b, "  change    guardian: %s  ->  %s\n", orNone(r.Current), r.Param)
+	case KindTransferAdmin:
+		fmt.Fprintf(&b, "  change    pending admin: %s  ->  %s (admin stays %s until it accepts)\n", orNone(r.Current), r.Param, r.From)
+	case KindFreeze:
+		fmt.Fprintf(&b, "  change    destination: %s  ->  none (frozen)\n", orNone(r.Current))
+	case KindAcceptAdmin:
+		fmt.Fprintf(&b, "  change    admin: %s  ->  %s\n", orNone(r.Current), r.From)
+	}
+	fmt.Fprintf(&b, "            (the \"from\" side is what the online side reports; this tool cannot check it)\n")
+	fmt.Fprintf(&b, "  nonce     %d\n", r.Nonce)
+	fmt.Fprintf(&b, "  fee       at most %s wei (%d gas x %s wei max fee per gas, tip %s)\n", worst, r.Gas, r.MaxFeePerGas, r.MaxPriorityFeePerGas)
+	return b.String()
+}
+
+func orNone(s string) string {
+	if s == "" || strings.EqualFold(s, "0x0000000000000000000000000000000000000000") {
+		return "none"
+	}
+	return s
 }

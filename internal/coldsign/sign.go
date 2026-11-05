@@ -58,6 +58,15 @@ type Config struct {
 	PublicKey    string                 `json:"public_key"`  // the cold key, 65-byte uncompressed, hex
 	HSM          HSMConfig              `json:"hsm"`
 	RecordDir    string                 `json:"record_dir"` // durable record of what was signed at which nonce
+
+	// Factory administration. Refills are always allowed (to the pinned destinations); a factory call is allowed only if its kind is
+	// listed in Actions, it targets Factory, and any address argument is one of the pinned lists. "freeze" needs no pinned value.
+	Actions         []string `json:"actions"`
+	Factory         string   `json:"factory"`
+	NewDestinations []string `json:"new_destinations"` // set-destination: the hot addresses the destination may be set to
+	NewGuardians    []string `json:"new_guardians"`    // set-guardian
+	NewAdmins       []string `json:"new_admins"`       // transfer-admin: the other cold keys
+	MaxActionGas    uint64   `json:"max_action_gas"`   // default 100000
 }
 
 // LoadConfig reads and checks a config file. Unknown fields are errors.
@@ -112,6 +121,23 @@ func (c *Config) Validate() error {
 	if _, err := parseAmt("max_fee_wei", c.MaxFeeWei); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+	for _, k := range c.Actions {
+		if !IsAdmin(k) {
+			return fmt.Errorf("config: unknown action kind %q", k)
+		}
+	}
+	if len(c.Actions) > 0 {
+		if _, err := parseAddr("factory", c.Factory); err != nil {
+			return fmt.Errorf("config: actions need a factory: %w", err)
+		}
+	}
+	for _, list := range [][]string{c.NewDestinations, c.NewGuardians, c.NewAdmins} {
+		for _, a := range list {
+			if _, err := parseAddr("pinned address", a); err != nil {
+				return fmt.Errorf("config: %w", err)
+			}
+		}
+	}
 	if _, err := c.ColdAddress(); err != nil {
 		return err
 	}
@@ -154,6 +180,9 @@ func (c *Config) Check(rf RequestFile) (Request, *types.Transaction, error) {
 	if from, err := parseAddr("from", r.From); err != nil || from != cold {
 		return r, nil, refuse("request is from %s, this signer's cold address is %s", r.From, cold)
 	}
+	if r.Kind != "" && r.Kind != KindRefill {
+		return c.checkAdmin(r)
+	}
 	to, err := parseAddr("destination", r.To)
 	if err != nil {
 		return r, nil, refuse("%v", err)
@@ -185,6 +214,69 @@ func (c *Config) Check(rf RequestFile) (Request, *types.Transaction, error) {
 	tx, err := r.Tx()
 	if err != nil {
 		return r, nil, refuse("%v", err)
+	}
+	maxFee, _ := parseAmt("max_fee_wei", c.MaxFeeWei)
+	if worst := new(big.Int).Mul(tx.GasFeeCap(), new(big.Int).SetUint64(tx.Gas())); worst.Cmp(maxFee) > 0 {
+		return r, nil, refuse("the fee could reach %s wei, above the cap %s", worst, maxFee)
+	}
+	return r, tx, nil
+}
+
+func inList(list []string, a common.Address) bool {
+	for _, x := range list {
+		if common.HexToAddress(x) == a {
+			return true
+		}
+	}
+	return false
+}
+
+// checkAdmin applies the rules for a factory call.
+func (c *Config) checkAdmin(r Request) (Request, *types.Transaction, error) {
+	if !IsAdmin(r.Kind) {
+		return r, nil, refuse("action kind %q is not known", r.Kind)
+	}
+	allowed := false
+	for _, k := range c.Actions {
+		allowed = allowed || k == r.Kind
+	}
+	if !allowed {
+		return r, nil, refuse("action kind %q is not allowed by this signer's config (allowed: %v)", r.Kind, c.Actions)
+	}
+	factory, err := parseAddr("contract", r.Contract)
+	if err != nil || factory != common.HexToAddress(c.Factory) {
+		return r, nil, refuse("the call targets contract %s, this signer administers the factory %s", r.Contract, c.Factory)
+	}
+	switch r.Kind {
+	case KindSetDestination, KindSetGuardian, KindTransferAdmin:
+		a, err := parseAddr("argument", r.Param)
+		if err != nil {
+			return r, nil, refuse("%v", err)
+		}
+		list, name := c.NewDestinations, "destinations"
+		if r.Kind == KindSetGuardian {
+			list, name = c.NewGuardians, "guardians"
+		} else if r.Kind == KindTransferAdmin {
+			list, name = c.NewAdmins, "admins"
+		}
+		if !inList(list, a) {
+			return r, nil, refuse("%s is not one of the pinned %s for %s", a, name, r.Kind)
+		}
+	default: // freeze, accept-admin: no argument
+		if r.Param != "" {
+			return r, nil, refuse("%s takes no argument, the request has %s", r.Kind, r.Param)
+		}
+	}
+	tx, err := r.Tx()
+	if err != nil {
+		return r, nil, refuse("%v", err)
+	}
+	maxGas := c.MaxActionGas
+	if maxGas == 0 {
+		maxGas = 100000
+	}
+	if tx.Gas() > maxGas {
+		return r, nil, refuse("gas %d is above the limit %d for a factory call", tx.Gas(), maxGas)
 	}
 	maxFee, _ := parseAmt("max_fee_wei", c.MaxFeeWei)
 	if worst := new(big.Int).Mul(tx.GasFeeCap(), new(big.Int).SetUint64(tx.Gas())); worst.Cmp(maxFee) > 0 {
