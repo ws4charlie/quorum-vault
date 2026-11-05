@@ -42,7 +42,7 @@ func TestGenerateAndSign(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256([]byte("tx"))
-	res, err := s.SignDigest(ctx, digest, signer.SignOptions{Quorum: 3})
+	res, err := s.SignDigest(ctx, digest, signer.SignOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

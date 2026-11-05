@@ -368,7 +368,6 @@ func (s *Service) sign(ctx context.Context, actor string, req domain.SignRequest
 	if err != nil {
 		return fail("signer", err)
 	}
-	quorum := Quorum(w.Tier)
 	var staleNonce *uint64
 	if s.broadcast {
 		// Hold the sender's nonce from lookup until the broadcast returns, so
@@ -386,7 +385,7 @@ func (s *Service) sign(ctx context.Context, actor string, req domain.SignRequest
 	if err != nil {
 		return fail("build_tx", err)
 	}
-	started := map[string]any{"backend": key.Backend, "tier": w.Tier, "quorum": quorum, "key_version": key.Version,
+	started := map[string]any{"backend": key.Backend, "tier": w.Tier, "key_version": key.Version,
 		"address": key.Address, "nonce": r.Nonce, "digest": "0x" + hex.EncodeToString(digest[:])}
 	if staleNonce != nil {
 		started["nonce_reassigned_from"] = *staleNonce
@@ -394,7 +393,7 @@ func (s *Service) sign(ctx context.Context, actor string, req domain.SignRequest
 	s.audit(ctx, actor, domain.EventSignStarted, r, started)
 
 	t0 := time.Now()
-	out, err := sg.SignDigest(ctx, digest, signer.SignOptions{Quorum: quorum})
+	out, err := sg.SignDigest(ctx, digest, signer.SignOptions{})
 	res.timing("sign", t0)
 	if err != nil {
 		return fail("sign", err)
@@ -414,7 +413,7 @@ func (s *Service) sign(ctx context.Context, actor string, req domain.SignRequest
 	}
 	res.Request, res.From = r, st.From.Hex()
 	s.audit(ctx, actor, domain.EventSignCompleted, r, map[string]any{
-		"backend": key.Backend, "participants": out.Participants, "quorum": quorum, "meta": out.Meta,
+		"backend": key.Backend, "participants": out.Participants, "meta": out.Meta,
 		"signature": "0x" + hex.EncodeToString(st.Sig65), "tx_hash": st.Hash.Hex(), "from": st.From.Hex(),
 		"sign_ms": res.TimingsMS["sign"]})
 
@@ -458,15 +457,6 @@ func (s *Service) freshNonce(ctx context.Context, r *domain.SignRequest, from st
 	old := r.Nonce
 	r.Nonce = pending
 	return &old, nil
-}
-
-// Quorum is the MPC signing quorum for a tier: hot 0 (threshold, 2 of 3),
-// cold 3 (all parties). HSM signers ignore it.
-func Quorum(t domain.Tier) int {
-	if t == domain.TierCold {
-		return 3
-	}
-	return 0
 }
 
 // audit appends an event for req. Failures are logged loudly, never returned:

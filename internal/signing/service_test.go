@@ -22,7 +22,6 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/hsm/hsmtest"
 	"github.com/ws4charlie/quorum-vault/internal/hsmsigner"
 	"github.com/ws4charlie/quorum-vault/internal/keys"
-	"github.com/ws4charlie/quorum-vault/internal/mpc"
 	"github.com/ws4charlie/quorum-vault/internal/policy"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 )
@@ -73,13 +72,9 @@ func repoDir(t *testing.T) string {
 	}
 }
 
-// newEnv wires a Service on a fresh DB and the quorumvault HSM token, plus
-// the MPC cluster when withMPC (skipped under -short).
-func newEnv(t *testing.T, withMPC bool) *env {
+// newEnv wires a Service on a fresh DB and the quorumvault HSM token.
+func newEnv(t *testing.T) *env {
 	t.Helper()
-	if withMPC && testing.Short() {
-		t.Skip("MPC ceremony test: skipped under -short")
-	}
 	pool := dbtest.New(t)
 	tok := hsmtest.Token(t, "quorumvault")
 	e := &env{t: t, ctx: context.Background(), aud: audit.New(pool)}
@@ -90,20 +85,6 @@ func newEnv(t *testing.T, withMPC bool) *env {
 			s, err := hsmsigner.New(tok, k)
 			return countingSigner{s, &e.calls}, err
 		},
-	}
-	var cluster *mpc.Cluster
-	if withMPC {
-		var err error
-		cluster, err = mpc.NewCluster(mpc.DefaultConfig(filepath.Join(repoDir(t), "data", "mpc-signing-test"), hsmtest.PIN()), hsmtest.Lib(t))
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { cluster.Close() })
-		gens = append(gens, NewMPCGenerator(cluster, e.aud, nil))
-		signers[domain.BackendMPC] = func(k domain.Key) (signer.Signer, error) {
-			s, err := mpc.NewSigner(cluster, k)
-			return countingSigner{s, &e.calls}, err
-		}
 	}
 	e.reg = keys.New(pool, e.aud, gens...)
 	e.pol = policy.New(pool, e.aud, nil)
@@ -118,8 +99,6 @@ func newEnv(t *testing.T, withMPC bool) *env {
 				if err := tok.DestroyPrivateKey(context.Background(), k.HSMKeyID); err != nil && !errors.Is(err, hsm.ErrKeyNotFound) {
 					t.Logf("cleanup: %v", err)
 				}
-			case domain.BackendMPC:
-				os.RemoveAll(filepath.Join(repoDir(t), "data", "mpc-signing-test", "keys", k.MPCKeyRef))
 			}
 		}
 	})
@@ -245,7 +224,7 @@ var (
 )
 
 func TestHSMHotAllowSigns(t *testing.T) {
-	e := newEnv(t, false)
+	e := newEnv(t)
 	w, k := e.wallet("hot-hsm", domain.TierHot, domain.BackendHSM, 0)
 	res := e.submit(w.ID, dest, milliEth(10), 0)
 	checkSigned(t, res, k)
@@ -265,7 +244,7 @@ func TestHSMHotAllowSigns(t *testing.T) {
 }
 
 func TestOverThresholdNeedsSecondApprover(t *testing.T) {
-	e := newEnv(t, false)
+	e := newEnv(t)
 	w, k := e.wallet("hot-hsm", domain.TierHot, domain.BackendHSM, 0)
 	res := e.submit(w.ID, dest, eth1, 0)
 	if res.Request.Status != domain.StatusPendingApproval {
@@ -290,7 +269,7 @@ func TestOverThresholdNeedsSecondApprover(t *testing.T) {
 }
 
 func TestRejectPath(t *testing.T) {
-	e := newEnv(t, false)
+	e := newEnv(t)
 	w, _ := e.wallet("hot-hsm", domain.TierHot, domain.BackendHSM, 2)
 	res := e.submit(w.ID, dest, eth1, 0)
 	out := e.vote("bob", res.Request.ID, true)
@@ -313,7 +292,7 @@ func TestRejectPath(t *testing.T) {
 }
 
 func TestDeniedNeverReachesSigner(t *testing.T) {
-	e := newEnv(t, false)
+	e := newEnv(t)
 	w, _ := e.wallet("hot-hsm", domain.TierHot, domain.BackendHSM, 0)
 	res := e.submit(w.ID, other, milliEth(1), 0)
 	if res.Request.Status != domain.StatusDenied || res.Request.Decision.Reasons[0] != policy.ReasonNotAllowlisted {
@@ -339,7 +318,7 @@ func TestDeniedNeverReachesSigner(t *testing.T) {
 }
 
 func TestSubmitValidation(t *testing.T) {
-	e := newEnv(t, false)
+	e := newEnv(t)
 	w, _ := e.wallet("hot-hsm", domain.TierHot, domain.BackendHSM, 0)
 	n := uint64(0)
 	bad := []Input{
@@ -366,7 +345,7 @@ func TestSubmitValidation(t *testing.T) {
 }
 
 func TestRotatedKeyStillSignsOldRequest(t *testing.T) {
-	e := newEnv(t, false)
+	e := newEnv(t)
 	w, v1 := e.wallet("hot-hsm", domain.TierHot, domain.BackendHSM, 0)
 	pending := e.submit(w.ID, dest, eth1, 0)
 	v2, _, err := e.reg.Rotate(e.ctx, "admin", w.ID)
@@ -381,7 +360,7 @@ func TestRotatedKeyStillSignsOldRequest(t *testing.T) {
 }
 
 func TestRetiredKeyFails(t *testing.T) {
-	e := newEnv(t, false)
+	e := newEnv(t)
 	w, v1 := e.wallet("hot-hsm", domain.TierHot, domain.BackendHSM, 0)
 	pending := e.submit(w.ID, dest, eth1, 0)
 	if _, _, err := e.reg.Rotate(e.ctx, "admin", w.ID); err != nil {
@@ -406,7 +385,7 @@ func TestRetiredKeyFails(t *testing.T) {
 }
 
 func TestConcurrentApprovalsSignOnce(t *testing.T) {
-	e := newEnv(t, false)
+	e := newEnv(t)
 	w, k := e.wallet("hot-hsm", domain.TierHot, domain.BackendHSM, 1)
 	res := e.submit(w.ID, dest, eth1, 0)
 	approvers := []string{"bob", "carol", "dave", "erin", "frank", "grace"}
@@ -437,7 +416,7 @@ func TestConcurrentApprovalsSignOnce(t *testing.T) {
 }
 
 func TestConcurrentSignCallsSignOnce(t *testing.T) {
-	e := newEnv(t, false)
+	e := newEnv(t)
 	w, _ := e.wallet("hot-hsm", domain.TierHot, domain.BackendHSM, 1)
 	res := e.submit(w.ID, dest, eth1, 0)
 	approved, ok, err := e.svc.transition(e.ctx, res.Request.ID, domain.StatusApproved, domain.StatusPendingApproval)
@@ -461,9 +440,10 @@ func TestConcurrentSignCallsSignOnce(t *testing.T) {
 	}
 }
 
-func TestMPCColdWalletFullQuorum(t *testing.T) {
-	e := newEnv(t, true)
-	w, k := e.wallet("cold-mpc", domain.TierCold, domain.BackendMPC, 0)
+// A cold wallet always needs approval, here two.
+func TestColdWalletNeedsTwoApprovals(t *testing.T) {
+	e := newEnv(t)
+	w, k := e.wallet("cold-hsm", domain.TierCold, domain.BackendHSM, 0)
 	res := e.submit(w.ID, dest, big.NewInt(1), 0) // 1 wei: cold always needs approval
 	if res.Request.Status != domain.StatusPendingApproval || res.Request.Decision.RequiredApprovals != 2 {
 		t.Fatalf("status %s decision %+v", res.Request.Status, res.Request.Decision)
@@ -473,29 +453,8 @@ func TestMPCColdWalletFullQuorum(t *testing.T) {
 	}
 	out := e.vote("carol", res.Request.ID, true)
 	checkSigned(t, out, k)
-	p := e.payload(res.Request.ID, domain.EventSignCompleted)
-	if parts, _ := p["participants"].([]any); len(parts) != 3 || p["backend"] != "mpc" {
-		t.Fatalf("sign.completed payload %v", p)
-	}
 	eq(t, e.events(res.Request.ID), []string{domain.EventRequestCreated, domain.EventPolicyDecision,
 		domain.EventApprovalVoted, domain.EventApprovalVoted, domain.EventRequestApproved,
 		domain.EventSignStarted, domain.EventSignCompleted})
-	keygens, _ := e.aud.List(e.ctx, audit.Filter{WalletID: w.ID})
-	if keygens[0].Type != domain.EventMPCKeygen {
-		t.Fatalf("first wallet event %s, want mpc.keygen", keygens[0].Type)
-	}
-	e.verifyAudit()
-}
-
-func TestMPCHotWalletThreshold(t *testing.T) {
-	e := newEnv(t, true)
-	w, k := e.wallet("hot-mpc", domain.TierHot, domain.BackendMPC, 0)
-	res := e.submit(w.ID, dest, milliEth(10), 0)
-	checkSigned(t, res, k)
-	p := e.payload(res.Request.ID, domain.EventSignCompleted)
-	if parts, _ := p["participants"].([]any); len(parts) != 2 {
-		t.Fatalf("participants %v", p["participants"])
-	}
-	eq(t, e.events(res.Request.ID), seqAllow)
 	e.verifyAudit()
 }

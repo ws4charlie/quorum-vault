@@ -4,9 +4,7 @@
 // naming the caller (401 without it). Errors are {"error": "..."} with
 // 400 (malformed body), 401 (no actor), 403 (self-approval), 404 (unknown id),
 // 409 (state conflict / duplicate), 422 (well-formed but invalid), 500.
-// Wei amounts are decimal strings. POST /wallets with backend "mpc" runs a
-// distributed keygen and may take several seconds (minutes on the very first
-// run, while Paillier pre-params are generated and cached).
+// Wei amounts are decimal strings. POST /wallets with backend "mpc" is refused: the /v1 demo is HSM-only.
 package api
 
 import (
@@ -228,8 +226,12 @@ func (s *server) doCreateWallet(w http.ResponseWriter, ctx context.Context, acto
 		writeErr(w, http.StatusUnprocessableEntity, `tier must be "hot" or "cold"`)
 		return
 	}
-	if b.Backend != domain.BackendHSM && b.Backend != domain.BackendMPC {
-		writeErr(w, http.StatusUnprocessableEntity, `backend must be "hsm" or "mpc"`)
+	if b.Backend == domain.BackendMPC {
+		writeErr(w, http.StatusUnprocessableEntity, `the /v1 demo is HSM-only: the "mpc" backend was removed; two-party MPC keys belong to the custody core under /v2`)
+		return
+	}
+	if b.Backend != domain.BackendHSM {
+		writeErr(w, http.StatusUnprocessableEntity, `backend must be "hsm"`)
 		return
 	}
 	wal, k, err := s.reg.CreateWallet(ctx, actor, b.Name, b.Tier, b.Backend)

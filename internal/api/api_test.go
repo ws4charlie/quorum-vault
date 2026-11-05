@@ -288,6 +288,7 @@ func TestErrors(t *testing.T) {
 		{400, "GET", "/audit?request_id=xyz", nil},
 		{422, "POST", "/wallets", map[string]string{"name": "x", "tier": "lukewarm", "backend": "hsm"}},
 		{422, "POST", "/wallets", map[string]string{"name": "x", "tier": "hot", "backend": "paper"}},
+		{422, "POST", "/wallets", map[string]string{"name": "x", "tier": "hot", "backend": "mpc"}}, // removed: the demo is HSM-only, MPC keys are under /v2
 		{422, "POST", "/wallets", map[string]string{"name": "", "tier": "hot", "backend": "hsm"}},
 		{409, "POST", "/wallets", map[string]string{"name": "hot-1", "tier": "hot", "backend": "hsm"}},
 		{422, "POST", "/wallets/" + wid + "/allowlist", map[string]string{"address": "0x123"}},

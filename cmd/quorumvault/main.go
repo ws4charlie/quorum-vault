@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -36,7 +35,6 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/internal/hsmsigner"
 	"github.com/ws4charlie/quorum-vault/internal/keys"
-	"github.com/ws4charlie/quorum-vault/internal/mpc"
 	"github.com/ws4charlie/quorum-vault/internal/policy"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 	"github.com/ws4charlie/quorum-vault/internal/signing"
@@ -116,13 +114,6 @@ func run(log *slog.Logger) error {
 	defer tok.Close()
 	log.Info("hsm token open", "label", tok.Label(), "lib", cfg.PKCS11Lib)
 
-	cluster, err := mpc.NewCluster(mpc.DefaultConfig(filepath.Join(cfg.DataDir, "mpc"), cfg.HSMPIN), lib)
-	if err != nil {
-		return err
-	}
-	defer cluster.Close()
-	log.Info("mpc cluster ready", "parties", cluster.PartyIDs(), "threshold", cluster.Threshold()+1)
-
 	var rpc *eth.Client
 	if cfg.RPCURL != "" {
 		if rpc, err = eth.Dial(ctx, cfg.RPCURL); err != nil {
@@ -133,13 +124,12 @@ func run(log *slog.Logger) error {
 	}
 
 	aud := audit.New(pool)
-	reg := keys.New(pool, aud, hsmsigner.NewGenerator(tok), signing.NewMPCGenerator(cluster, aud, log))
+	reg := keys.New(pool, aud, hsmsigner.NewGenerator(tok))
 	pol := policy.New(pool, aud, nil)
 	svc := signing.New(signing.Config{
 		Pool: pool, Registry: reg, Policy: pol, Approvals: approval.New(pool, aud), Audit: aud,
 		Signers: map[domain.Backend]signing.SignerFunc{
 			domain.BackendHSM: func(k domain.Key) (signer.Signer, error) { return hsmsigner.New(tok, k) },
-			domain.BackendMPC: func(k domain.Key) (signer.Signer, error) { return mpc.NewSigner(cluster, k) },
 		},
 		RPC: rpc, Broadcast: cfg.Broadcast, Logger: log,
 	})

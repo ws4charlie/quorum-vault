@@ -1,5 +1,7 @@
 # T3 — 2-of-3 threshold ECDSA (GG20) with HSM-sealed shares
 
+> **History.** GG20 (tss-lib) was removed in P5b-6: it has known attacks (for example TSSHOCK, 2023) and the custody path moved to two-party cb-mpc (see [p5b-1](p5b-1-cbmpc-wrapper.md) onward). This guide describes the removed design and is kept as a record.
+
 ## What was built
 
 `internal/mpc` runs three signing parties in one process. Together they hold

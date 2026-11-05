@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"go.temporal.io/sdk/client"
 	sdklog "go.temporal.io/sdk/log"
@@ -45,6 +46,8 @@ func run(log *slog.Logger) error {
 	queue := flag.String("task-queue", workflow.DefaultTaskQueue, "Temporal task queue")
 	autoKey := flag.String("auto-approver-key-file", os.Getenv("QV_AUTO_APPROVER_KEY_FILE"),
 		"file with the automated approver's Ed25519 seed (64 hex chars); optional (env QV_AUTO_APPROVER_KEY_FILE)")
+	wdStall := flag.Duration("watchdog-stall", 2*time.Minute, "a loop workflow with no new history for this long is terminated and restarted, a withdrawal or sweep workflow is only reported (ALERT); 0 turns the watchdog off")
+	wdEvery := flag.Duration("watchdog-interval", 15*time.Second, "how often the watchdog looks")
 	flag.Parse()
 	if *cfgPath == "" || *dsn == "" {
 		return errors.New("-config and -dsn (or DATABASE_URL) are required")
@@ -100,6 +103,11 @@ func run(log *slog.Logger) error {
 	defer w.Stop()
 	if err := workflow.EnsureLoops(ctx, tc, *queue, cfg, log); err != nil {
 		return err
+	}
+	if *wdStall > 0 {
+		wd := &workflow.Watchdog{Engine: workflow.NewEngine(tc, *queue, cfg), Chain: cfg.Chain, OpenOwners: workflow.OpenOwnerIDs(svc),
+			Interval: *wdEvery, StallAfter: *wdStall, Log: log}
+		go wd.Run(ctx)
 	}
 	log.Info("qv-worker started", "chain", cfg.Chain, "failpoint", os.Getenv("QV_FAILPOINT"))
 	<-ctx.Done()

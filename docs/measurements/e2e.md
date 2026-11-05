@@ -1,5 +1,7 @@
 # End-to-end sign path measurements
 
+> **History.** This document describes the repository as it was when it was written, including the GG20 / tss-lib MPC backend that P5b-6 removed. Read GG20 mentions as history.
+
 Produced by [scripts/demo-sepolia.sh](../../scripts/demo-sepolia.sh) against a
 locally running `quorumvault` server (no `SEPOLIA_RPC_URL`: sign + verify
 locally only, no broadcast). Output below is from one run, trimmed: the

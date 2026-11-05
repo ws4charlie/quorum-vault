@@ -1,5 +1,7 @@
 # T4 — The sign path: request -> policy -> approval -> sign -> verify -> audit
 
+> **History.** This document describes the repository as it was when it was written, including the GG20 / tss-lib MPC backend that P5b-6 removed. Read GG20 mentions as history.
+
 T4 joins the pieces from T1–T3 into one path a transaction travels, and puts
 an HTTP API in front of it. At the end of the path is a signed Ethereum
 Sepolia transaction whose recovered sender is the wallet's address, produced

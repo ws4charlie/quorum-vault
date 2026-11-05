@@ -1,5 +1,7 @@
 # T0 — Foundations: PKCS#11 sessions, the schema, pinned deps
 
+> **History.** This document describes the repository as it was when it was written, including the GG20 / tss-lib MPC backend that P5b-6 removed. Read GG20 mentions as history.
+
 T0 builds nothing a user sees. It lays the ground the other tasks stand on:
 a PKCS#11 session layer, the full Postgres schema, the shared Go types, and every
 third-party dependency resolved up front.

@@ -52,23 +52,37 @@ func NewWorker(c client.Client, d Deps) worker.Worker {
 	return w
 }
 
+// loopSpec is one long-running per-chain loop.
+type loopSpec struct {
+	id string
+	wf any
+}
+
+func loopSpecs(chain string) []loopSpec {
+	return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}}
+}
+
+func startLoop(ctx context.Context, c client.Client, queue string, t Timings, l loopSpec) error {
+	_, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID: l.id, TaskQueue: queue,
+		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}, l.wf, Input{ID: l.id, T: t})
+	if err != nil {
+		return fmt.Errorf("start %s: %w", l.id, err)
+	}
+	return nil
+}
+
 // EnsureLoops starts the three per-chain loops if they are not running.
 func EnsureLoops(ctx context.Context, c client.Client, queue string, cfg *custody.Config, log *slog.Logger) error {
 	if queue == "" {
 		queue = DefaultTaskQueue
 	}
 	t := DefaultTimings(cfg)
-	for _, l := range []struct {
-		id string
-		wf any
-	}{{ScanID(cfg.Chain), ScanWorkflow}, {PlannerID(cfg.Chain), SweepPlannerWorkflow}, {ReconcilerID(cfg.Chain), WithdrawalReconcilerWorkflow}} {
-		_, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-			ID: l.id, TaskQueue: queue,
-			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-			WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		}, l.wf, Input{ID: l.id, T: t})
-		if err != nil {
-			return fmt.Errorf("start %s: %w", l.id, err)
+	for _, l := range loopSpecs(cfg.Chain) {
+		if err := startLoop(ctx, c, queue, t, l); err != nil {
+			return err
 		}
 		log.Info("loop running", "workflow", l.id)
 	}

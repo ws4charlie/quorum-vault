@@ -5,3 +5,9 @@
 *.test
 coverage.out
 .DS_Store
+/qv-worker
+/qv-core
+/qv-gateway
+/qv-relay
+/qv-cosigner
+/quorumvault

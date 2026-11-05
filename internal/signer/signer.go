@@ -16,9 +16,8 @@ import (
 type Signature struct{ R, S *big.Int } // S always low-S normalized (S <= N/2, secp256k1)
 
 type SignOptions struct {
-	Quorum int // GG20 MPC: 0 = threshold (2 parties), 3 = full quorum. HSM and cb-mpc ignore it.
 	// JobID and IntentPackage are filled by the gateway for the cb-mpc backend: the job id is the idempotency key, and the
-	// opaque intent package goes to party B's cosigner. HSM and GG20 ignore both.
+	// opaque intent package goes to party B's cosigner. The HSM ignores both.
 	JobID         string
 	IntentPackage []byte
 }

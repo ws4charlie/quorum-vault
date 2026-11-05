@@ -2,8 +2,8 @@
 # End-to-end demo against a running server (go run ./cmd/quorumvault):
 #   1. HSM hot wallet: policy + allowlist, small tx (allowed -> signed),
 #      large tx (needs approval -> second actor approves -> signed)
-#   2. MPC hot wallet: small tx signed by the 2-of-3 threshold
-#   3. MPC cold wallet: 1 wei still needs 2 approvals; signed by all 3 parties
+#   2. the "mpc" backend is gone from /v1 (the demo is HSM-only): creating one is refused with a pointer to /v2
+#   3. HSM cold wallet: 1 wei still needs 2 approvals
 #   4. offline check of every raw tx (recovered sender == wallet address),
 #      GET /audit/verify
 # Prints raw txs, tx hashes and latencies. Requires curl and jq.
@@ -104,7 +104,6 @@ wallet() { # name tier backend -> sets WID, ADDR
   call POST /wallets admin "{\"name\":\"$1-$RUN\",\"tier\":\"$2\",\"backend\":\"$3\"}"; expect 201
   WID="$(jq -r .wallet.id <<<"$BODY")"; ADDR="$(jq -r .key.address <<<"$BODY")"
   echo "wallet $1 ($2/$3) id=$WID address=$ADDR create=$(ms "$LAST_SECS")ms"
-  if [[ "$3" == mpc ]]; then record "MPC DKG keygen (POST /wallets $2)" "$(ms "$LAST_SECS")" "-"; fi
   if [[ $LOCAL == 1 ]]; then fund "$ADDR"; fi
   call PUT "/wallets/$WID/policy" admin '{"daily_limit_wei":"1000000000000000000","per_tx_limit_wei":"500000000000000000",
     "approval_threshold_wei":"10000000000000000","velocity_max_tx":10,"velocity_window_seconds":3600,"required_approvals":0}'
@@ -167,23 +166,20 @@ approve bob
 show_signed "HSM (hot, approved)"
 record "HSM approve call (vote -> signed)" "$(ms "$LAST_SECS")" "$(jq -r .timings_ms.total <<<"$REQ")"
 
-step "2. MPC hot wallet: 2-of-3 threshold signing"
-wallet demo-mpc-hot hot mpc
-submit 1000000000000000
-show_signed "MPC 2-of-3 (hot, allow)"
-record "MPC 2-of-3 e2e request (POST, allow -> signed)" "$(ms "$LAST_SECS")" "$(jq -r .timings_ms.total <<<"$REQ")"
-call GET "/audit?request_id=$RID" ""; echo "  participants: $(jq -c '.[] | select(.type=="sign.completed") | .payload.participants' <<<"$BODY")"
+step "2. the mpc backend is no longer part of /v1"
+call POST /wallets admin "{\"name\":\"demo-mpc-$RUN\",\"tier\":\"hot\",\"backend\":\"mpc\"}"; expect 422
+echo "mpc wallet -> HTTP $LAST_CODE $(jq -c . <<<"$BODY")"
+grep -q "/v2" <<<"$BODY" || { echo "the refusal does not point to /v2" >&2; exit 1; }
 
-step "3. MPC cold wallet: 1 wei still needs 2 approvals; full 3-of-3 quorum"
-wallet demo-mpc-cold cold mpc
+step "3. HSM cold wallet: 1 wei still needs 2 approvals"
+wallet demo-hsm-cold cold hsm
 COLD_RID=""
 submit 1
 COLD_RID=$RID
 approve bob
 approve carol
-show_signed "MPC 3-of-3 (cold, approved)"
-record "MPC 3-of-3 final approve (vote -> signed)" "$(ms "$LAST_SECS")" "$(jq -r .timings_ms.total <<<"$REQ")"
-call GET "/audit?request_id=$RID" ""; echo "  participants: $(jq -c '.[] | select(.type=="sign.completed") | .payload.participants' <<<"$BODY")"
+show_signed "HSM (cold, approved)"
+record "HSM cold final approve (vote -> signed)" "$(ms "$LAST_SECS")" "$(jq -r .timings_ms.total <<<"$REQ")"
 
 step "4. audit trail for the cold request, and chain verification"
 call GET "/audit?request_id=$COLD_RID" ""; jq -r '.[] | "  #\(.seq) \(.type) by \(.actor)"' <<<"$BODY"
