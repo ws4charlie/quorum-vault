@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -37,6 +38,8 @@ type Service struct {
 	Reader Reader
 	Cfg    *Config
 	Now    func() time.Time
+
+	mismatchAlerted atomic.Bool // the "destination changed on chain" ALERT was given and the mismatch has not cleared since
 }
 
 // New returns a Service. Led defaults to the Postgres ledger.

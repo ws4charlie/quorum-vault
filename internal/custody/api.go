@@ -59,6 +59,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v2/refills/{id}/export", a.exportRefill)
 	mux.HandleFunc("POST /v2/refills/{id}/import", a.importRefill)
 	mux.HandleFunc("POST /v2/cold/fundings", a.fundCold)
+	mux.HandleFunc("POST /v2/cold/spends", a.spendCold)
+	mux.HandleFunc("POST /v2/cold/actions", a.requestAction)
+	mux.HandleFunc("POST /v2/refills/{id}/close", a.closeRefill)
+	mux.HandleFunc("POST /v2/guardian/freezes", a.guardianFreeze)
 	return mux
 }
 
@@ -325,7 +329,7 @@ func (a *API) reject(w http.ResponseWriter, r *http.Request) {
 
 func refillJSON(r Refill) map[string]any {
 	return map[string]any{"id": r.ID, "asset": r.Asset, "partition": r.PartitionID, "cold_address": r.ColdAddress, "to": r.To, "amount": r.Amount.String(),
-		"status": r.Status, "revision": r.Revision, "request_hash": r.RequestHash, "tx_hash": r.TxHash, "failure_reason": r.Reason}
+		"kind": r.Kind, "param": r.Param, "status": r.Status, "revision": r.Revision, "request_hash": r.RequestHash, "tx_hash": r.TxHash, "failure_reason": r.Reason}
 }
 
 func (a *API) listRefills(w http.ResponseWriter, r *http.Request) {
@@ -406,4 +410,98 @@ func (a *API) fundCold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": body.ID, "booked": body.Amount})
+}
+
+// spendCold books an operator spend out of the cold address.
+func (a *API) spendCold(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		ID     string `json:"id"`
+		Asset  string `json:"asset"`
+		Shard  int    `json:"shard"`
+		Amount string `json:"amount"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	amt, ok := new(big.Int).SetString(body.Amount, 10)
+	if !ok || body.ID == "" {
+		a.fail(w, fmt.Errorf("%w: id and a decimal amount are required", ErrInvalid))
+		return
+	}
+	if err := a.svc.SpendCold(r.Context(), body.ID, body.Shard, body.Asset, amt); err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": body.ID, "booked": body.Amount})
+}
+
+// requestAction opens a request for a factory call (set-destination, freeze, set-guardian, transfer-admin, accept-admin).
+func (a *API) requestAction(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		Kind   string `json:"kind"`
+		Param  string `json:"param"`
+		Signer string `json:"signer"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	x, err := a.svc.RequestAction(r.Context(), body.Kind, body.Param, body.Signer)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, refillJSON(x))
+}
+
+// closeRefill ends a parked request on an operator's say-so.
+func (a *API) closeRefill(w http.ResponseWriter, r *http.Request) {
+	actor, ok := a.actor(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	if err := a.svc.CloseRefill(r.Context(), r.PathValue("id"), actor, body.Reason); err != nil {
+		a.fail(w, err)
+		return
+	}
+	x, err := a.svc.GetRefill(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, refillJSON(x))
+}
+
+// guardianFreeze books the gas of a guardian freeze transaction against the fee account.
+func (a *API) guardianFreeze(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		Tx string `json:"tx"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	fee, err := a.svc.BookGuardianFee(r.Context(), body.Tx)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"tx": body.Tx, "fee": fee.String()})
 }

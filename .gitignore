@@ -11,3 +11,5 @@ coverage.out
 /qv-relay
 /qv-cosigner
 /quorumvault
+/qv-guardian
+/qv-cold

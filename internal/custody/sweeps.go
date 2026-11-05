@@ -171,6 +171,16 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 		if errors.Is(err, evm.ErrSweepFrozen) {
 			return created, ErrSweepFrozen
 		}
+		if errors.Is(err, evm.ErrDestinationMismatch) {
+			// The factory pays somewhere else than the configured destination: the destination was changed on chain (a ceremony) and
+			// the signing-zone and business config have not been updated yet. Sweeping waits, quietly, with one ALERT; nothing is lost.
+			if s.mismatchAlerted.CompareAndSwap(false, true) {
+				log.Error("ALERT: the factory's sweep destination was changed on chain; sweeping waits until the gateway, cosigner and business "+
+					"config name the new destination", "error", err.Error())
+			}
+			return created, ErrSweepFrozen
+		}
+		s.mismatchAlerted.Store(false)
 		if err != nil {
 			log.Warn("sweep fee estimate failed; skipping", "address", addr, "asset", asset, "error", err.Error())
 			continue
@@ -221,7 +231,7 @@ func (s *Service) BuildSweepJob(ctx context.Context, id string) (string, error) 
 			return nil
 		}
 		u, err := s.Chain.BuildSweep(ctx, tx, chain.SweepIntent{ID: id, Asset: sw.Asset, From: sw.From, ToPartition: sw.PartitionID, Amount: sw.Amount})
-		if errors.Is(err, evm.ErrSweepFrozen) {
+		if errors.Is(err, evm.ErrSweepFrozen) || errors.Is(err, evm.ErrDestinationMismatch) {
 			frozen = true
 			_, uerr := tx.Exec(ctx, `UPDATE sweeps SET status='failed', failure_reason='sweeping is frozen', updated_at=now() WHERE id=$1`, id)
 			return uerr

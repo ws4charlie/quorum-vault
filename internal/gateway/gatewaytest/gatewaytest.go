@@ -47,13 +47,14 @@ var (
 // Harness is one signing-zone configuration: approvers alice, bob, carol (enabled), auto, dave (disabled), policies for
 // ETH and USDT, and a hot address for Partition.
 type Harness struct {
-	T       testing.TB
-	ChainID uint64
-	Hot     common.Address
-	Keys    map[string]ed25519.PrivateKey
-	File    gateway.File
-	Cfg     *gateway.Config
-	Now     func() time.Time
+	notAfter map[string]int64 // intent ID -> the not_after it was first given
+	T        testing.TB
+	ChainID  uint64
+	Hot      common.Address
+	Keys     map[string]ed25519.PrivateKey
+	File     gateway.File
+	Cfg      *gateway.Config
+	Now      func() time.Time
 }
 
 // New builds a harness for chainID whose hot address is hot.
@@ -159,7 +160,14 @@ func (h *Harness) Job(id string, in signjob.Intent, s TxSpec, approvers ...strin
 		in.PartitionID = Partition
 	}
 	if in.Kind == "withdrawal" && in.NotAfter == 0 {
-		in.NotAfter = h.Now().Add(time.Hour).Unix()
+		// One value per intent ID: the same intent built twice must hash the same, even across a second boundary.
+		if h.notAfter == nil {
+			h.notAfter = map[string]int64{}
+		}
+		if _, ok := h.notAfter[in.ID]; !ok {
+			h.notAfter[in.ID] = h.Now().Add(time.Hour).Unix()
+		}
+		in.NotAfter = h.notAfter[in.ID]
 	}
 	payload, digest := h.Payload(s)
 	ib, _ := json.Marshal(in)

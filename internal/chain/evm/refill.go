@@ -97,3 +97,22 @@ func (a *Adapter) RefillTxState(ctx context.Context, txHash string) (RefillState
 	}
 	return RefillConfirmed, fee, nil
 }
+
+// FactoryRead reads one address getter of the forwarder factory: "destination", "admin", "pendingAdmin" or "guardian".
+func (a *Adapter) FactoryRead(ctx context.Context, getter string) (common.Address, error) {
+	if err := loadABIs(); err != nil {
+		return common.Address{}, err
+	}
+	data, err := factoryABI.Pack(getter)
+	if err != nil {
+		return common.Address{}, err
+	}
+	out, err := a.ec.CallContract(ctx, ethereum.CallMsg{To: &a.cfg.Factory, Data: data}, nil)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("evm: read factory %s: %w", getter, err)
+	}
+	return common.BytesToAddress(out), nil
+}
+
+// FactoryAddress is the configured factory.
+func (a *Adapter) FactoryAddress() common.Address { return a.cfg.Factory }

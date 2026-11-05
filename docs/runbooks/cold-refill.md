@@ -55,7 +55,7 @@ in `record_dir` survives restarts; a re-export with only higher fees is the same
 - **Import says "re-exported, or this is another request"**: a newer export exists. Run the ceremony for the newest request file.
 - **The cold nonce moved** (someone spent from the cold address): export again. The new revision has the new nonce; the old signed file cannot be imported.
 - **A signed file was imported and broadcast, but does not confirm**: you get one `ALERT`. The system **never** retries with a new nonce. Look at the transaction on the node. If the transaction is still in the pool, wait or raise its fee with a *replacement of the same content* (the offline tool allows a higher-fee signature of the same payment at the same nonce); if the nonce was used by another transaction, the refill is parked and needs an operator.
-- **The refill is parked** (`failure_reason` starts with `parked:`): its nonce was used by another transaction. Nothing was lost, and nothing else will move through that cold address until an operator marks the refill failed in the database and a new request is made.
+- **The refill is parked** (`failure_reason` starts with `parked:`): its nonce was used by another transaction. Nothing was lost, and nothing else will move through that cold address until an operator closes it: `POST /v2/refills/{id}/close` with `X-Actor` and a reason (only a parked request that was never broadcast can be closed; the planner then opens a fresh one).
 
 ## Drill
 
