@@ -43,9 +43,9 @@ flowchart LR
 | Process | Does | Trusts |
 |---|---|---|
 | `qv-core` | HTTP API (`/v2`): customers, deposit addresses, withdrawals, approvals, balances, `Reconcile` | the business database |
-| `qv-worker` | Temporal workflows: scan, sweep planner, withdrawal reconciler (long-running loops), one workflow per withdrawal and per sweep; a watchdog restarts a loop that stops making progress | the business database, the chain |
+| `qv-worker` | Temporal workflows: scan, sweep planner, withdrawal reconciler, cold planner (long-running loops), one workflow per withdrawal, sweep and hot-to-cold move; a watchdog restarts a loop that stops making progress | the business database, the chain |
 | `qv-relay` | outbox to Redpanda, at least once | the business database |
-| `qv-gateway` | signing zone: claims `sign_jobs`, re-verifies the intent, the approver signatures and the policy, reserves the digest in its own replay-guard database, then asks a signer | **not** the business database: it only reads and updates `sign_jobs` as a restricted role |
+| `qv-gateway` | signing zone: claims `sign_jobs`, re-verifies the intent, the approver signatures and the policy (for a hot-to-cold move: the pinned cold address, a rate and a daily cap), reserves the digest in its own replay-guard database, then asks a signer | **not** the business database: it only reads and updates `sign_jobs` as a restricted role |
 | `mpc-party` A and B | two-party threshold ECDSA (cb-mpc): DKG, derive, sign, refresh; shares sealed by each party's own HSM token; durable two-phase refresh; backup and restore | each other only through pinned mTLS certificates |
 | `qv-cosigner` | party B's gate: repeats the gateway's checks from its own config and its own database before B takes part in a signature; fail closed | nothing from A or the gateway |
 
@@ -54,6 +54,29 @@ approvals, builds the transaction and allocates a nonce, enqueues a `sign_job`. 
 party A; A opens a session with B; B asks its cosigner; the two parties sign; the signature returns through the gateway to the
 job row; the workflow broadcasts, waits for the receipt, and settles the ledger. Every crash boundary in that sequence is a test
 (`e2e/custody`).
+
+## Hot to cold
+
+Most funds should not sit in a wallet that signs all day. Each hot partition has a low mark, a high mark and a target
+([config](../internal/custody/config.example.json), section `cold`). The **cold planner** loop looks at every partition: free
+liquidity above the high mark (the hot balance less what open withdrawals have reserved and less a move already planned) is moved
+down to the target, to the cold address. Below the low mark it logs one `ALERT` per outage asking for a refill (the refill is not
+built yet).
+
+```mermaid
+flowchart LR
+  pl["cold planner<br/>(qv-worker loop)"] -- "hot > high" --> mv["cold_moves row<br/>one open per partition"]
+  mv --> wf["ColdMove workflow<br/>build · sign · broadcast · settle"]
+  wf -- "sign_job, intent kind to-cold<br/>no approvals" --> gw["gateway + cosigner<br/>destination = THEIR configured cold address<br/>rate + daily cap from their own stores"]
+  wf --> chain["hot address -> cold address"]
+  chain --> led["ledger: hot -> tocold (broadcast)<br/>tocold -> cold (confirmed)"]
+```
+
+No human approves a move: the destination is pinned in the signing zone's config, which the business side cannot change, so a move
+can only make funds safer. Both the gateway and party B's cosigner check it, from their own config and their own stores, so a
+rogue party A or a rogue business database cannot send "cold" money anywhere else. `Reconcile` compares each cold address's
+on-chain balance with the sum of the `cold:<partition>` accounts that deliver to it. Design and tests:
+[learn/p6-1-hot-to-cold.md](learn/p6-1-hot-to-cold.md).
 
 ## `/v1` demo components
 
