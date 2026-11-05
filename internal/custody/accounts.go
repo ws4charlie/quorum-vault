@@ -28,6 +28,11 @@ func hotAcct(partitionID string) string       { return "hot:" + partitionID }
 func coldAcct(partitionID string) string    { return "cold:" + partitionID }
 func toColdAcct(chain, asset string) string { return "tocold:" + chain + ":" + asset }
 
+// refillAcct is the clearing account of a refill on its way from cold to hot; opFundAcct is the operator's own money that was put
+// into the cold address (booked explicitly, so Reconcile stays exact).
+func refillAcct(chain, asset string) string { return "refill:" + chain + ":" + asset }
+func opFundAcct(chain, asset string) string { return "opfund:" + chain + ":" + asset }
+
 // CustomerAccount is the ledger account owing a customer an asset.
 func CustomerAccount(customer, chain, asset string) string { return custAcct(customer, chain, asset) }
 
@@ -41,6 +46,8 @@ func FeeAccount(chain, native string) string     { return feeAcct(chain, native)
 func HotAccount(partitionID string) string       { return hotAcct(partitionID) }
 func ColdAccount(partitionID string) string      { return coldAcct(partitionID) }
 func ToColdAccount(chain, asset string) string   { return toColdAcct(chain, asset) }
+func RefillAccount(chain, asset string) string   { return refillAcct(chain, asset) }
+func OpFundAccount(chain, asset string) string   { return opFundAcct(chain, asset) }
 
 // ensureCustomerAccount creates a customer's account for asset.
 func (s *Service) ensureCustomerAccount(ctx context.Context, tx pgx.Tx, customer, asset string) error {
@@ -73,6 +80,8 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 				{sweepAcct(c.Chain, sym), ledger.KindClearing, true},
 				{wdAcct(c.Chain, sym), ledger.KindClearing, true},
 				{toColdAcct(c.Chain, sym), ledger.KindClearing, true},
+				{refillAcct(c.Chain, sym), ledger.KindClearing, true},
+				{opFundAcct(c.Chain, sym), ledger.KindClearing, true},
 				{suspenseAcct(c.Chain, sym), ledger.KindSuspense, false},
 			} {
 				if err := s.Led.EnsureAccount(ctx, tx, ledger.Account{ID: kind.id, Kind: kind.kind, Chain: c.Chain, Asset: sym, AllowNegative: kind.neg}); err != nil {

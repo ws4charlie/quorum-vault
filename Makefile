@@ -110,14 +110,14 @@ test-custody-mpc:
 
 # The heavy tests, which pull-request CI leaves to the nightly run: every crash boundary, a component killed at each custody
 # boundary, the freeze test, and the three slowest link tests (kill mid-session, partition, latency up to 1 s per frame).
-FAILURE_MPC := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCWithdrawalLatencyWithSlowLink
+FAILURE_MPC := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestRefillCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCWithdrawalLatencyWithSlowLink
 test-custody-mpc-failure:
 	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 40m -v -run '$(FAILURE_MPC)' ./e2e/custody/...
 
 # Pull-request CI: everything except the heavy tests, in three groups that run in parallel jobs (each on its own runner with its
 # own anvil, Temporal, Redpanda and Postgres). Together with test-custody-mpc-failure they cover test-custody-mpc.
-CUSTODY_GROUP_1 := TestTwoApproversAndInitiatorCannotApprove|TestApprovalTimeoutVoidsTheHold|TestHumanRejectionVoids|TestInsufficientFundsIsRefused|TestFrozenFactoryDefersSweeps|TestGatewayRejectionReleasesNonceAndHold|TestDuplicateRequestsAndSignals|TestHappyPathETHAndToken|TestWorkflowReplayOfRecordedHistories|TestColdMoveRespectsOpenWithdrawals|TestColdMoveBelowLowRaisesOneAlert
-CUSTODY_GROUP_2 := TestRevertedWithdrawalVoidsAndRecordsFee|TestDroppedTransactionIsReplacedAndPaidOnce|TestConsumedNonceParksWithOneAlert|TestRestartedWorkflowAfterMinedReplacementSettlesOnce|TestStuckTransactionIsReplacedOnce|TestGatewayAndRelayRestart|TestColdMoveExcessEthAndToken
+CUSTODY_GROUP_1 := TestTwoApproversAndInitiatorCannotApprove|TestApprovalTimeoutVoidsTheHold|TestHumanRejectionVoids|TestInsufficientFundsIsRefused|TestFrozenFactoryDefersSweeps|TestGatewayRejectionReleasesNonceAndHold|TestDuplicateRequestsAndSignals|TestHappyPathETHAndToken|TestWorkflowReplayOfRecordedHistories|TestColdMoveRespectsOpenWithdrawals|TestColdMoveBelowLowRaisesOneAlert|TestRefillCeremonyEndToEnd
+CUSTODY_GROUP_2 := TestRevertedWithdrawalVoidsAndRecordsFee|TestDroppedTransactionIsReplacedAndPaidOnce|TestConsumedNonceParksWithOneAlert|TestRestartedWorkflowAfterMinedReplacementSettlesOnce|TestStuckTransactionIsReplacedOnce|TestGatewayAndRelayRestart|TestColdMoveExcessEthAndToken|TestRefillImportAndReexportAttacks|TestRefillNotConfirming
 CUSTODY_GROUP_3 := TestMPCRefreshDuringLiveWithdrawals|TestCrashAtEveryBoundary|TestMeasureClosedLoop|TestFiftyCustomersConcurrent
 test-custody-mpc-1:
 	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(CUSTODY_GROUP_1)' ./e2e/custody/...

@@ -130,11 +130,22 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 			}
 			switch {
 			case free.Cmp(lim.Low) < 0:
+				// Ask for a refill (one open at a time per cold address), and say so in the ALERT, once per outage.
+				need := new(big.Int).Sub(lim.Target, free)
+				rid, opened, err := s.openRefill(ctx, tx, p, asset, need)
+				if err != nil {
+					return err
+				}
 				if !alerted {
 					if _, err := tx.Exec(ctx, `INSERT INTO hot_low_alerts (partition_id) VALUES ($1) ON CONFLICT DO NOTHING`, p); err != nil {
 						return err
 					}
-					log.Error("ALERT: hot wallet is below its low-water mark; it needs a refill", "partition", p, "free", free.String(), "low", lim.Low.String())
+					note := "refill request opened"
+					if !opened {
+						note = "a refill is already open for this cold address and must finish first"
+					}
+					log.Error("ALERT: hot wallet is below its low-water mark; it needs a refill from cold storage, which takes an offline ceremony",
+						"partition", p, "free", free.String(), "low", lim.Low.String(), "target", lim.Target.String(), "refill", rid, "note", note)
 				}
 			case alerted:
 				if _, err := tx.Exec(ctx, `DELETE FROM hot_low_alerts WHERE partition_id=$1`, p); err != nil {

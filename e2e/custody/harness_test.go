@@ -87,7 +87,7 @@ func TestMain(m *testing.M) {
 				buildErr = err
 			}
 		}
-		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core"} {
+		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold"} {
 			out, err := exec.Command("go", "build", "-o", filepath.Join(dir, b), "github.com/ws4charlie/quorum-vault/cmd/"+b).CombinedOutput()
 			if err != nil {
 				buildErr = fmt.Errorf("build %s: %v\n%s", b, err, out)
@@ -131,6 +131,10 @@ type opts struct {
 type coldOpts struct {
 	ethLow, ethHigh, ethTarget    string
 	usdtLow, usdtHigh, usdtTarget string
+	// coldHSM puts the cold key in the qv-cold token (as in production) and prepares the offline signer's config and three
+	// operators (2 of 3 must approve). refillStuck is the ALERT time for a broadcast refill that does not confirm (default 30m).
+	coldHSM     bool
+	refillStuck string
 }
 
 type proc struct {
@@ -199,6 +203,7 @@ type system struct {
 	factoryABI                abi.ABI
 	shardAddr                 []common.Address
 	coldAddr                  common.Address  // the cold address both zones are configured with
+	cold                      *coldKit        // the offline signer's side, when opts.cold.coldHSM
 	mpc                       *mpcstack.Stack // mpc mode only
 	cosGuardDSN               string
 	chainName                 string
@@ -426,6 +431,10 @@ func newSystem(t *testing.T, o opts) *system {
 		Scan: custody.ScanFile{Interval: "500ms", StartHeight: startHeight},
 	}
 	s.coldAddr = randAddr()
+	if o.cold != nil && o.cold.coldHSM {
+		s.cold = newColdKit(t, s)
+		s.coldAddr = s.cold.addr
+	}
 	if o.cold != nil {
 		cf.Cold = custody.ColdFile{
 			Addresses: map[string]string{"omnibus/native": s.coldAddr.Hex(), "omnibus/token": s.coldAddr.Hex()},
@@ -434,6 +443,7 @@ func newSystem(t *testing.T, o opts) *system {
 				"USDT": {Low: o.cold.usdtLow, High: o.cold.usdtHigh, Target: o.cold.usdtTarget},
 			},
 			PlanInterval: "1s",
+			Refill:       custody.RefillFile{Poll: "1s", StuckAfter: o.cold.refillStuck},
 		}
 	}
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
@@ -714,7 +724,7 @@ func (s *system) terminateWorkflows() {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	ids := []string{workflow.ScanID(s.chainName), workflow.PlannerID(s.chainName), workflow.ReconcilerID(s.chainName), workflow.ColdPlannerID(s.chainName)}
-	for _, q := range []string{`SELECT id FROM withdrawals`, `SELECT id FROM sweeps`, `SELECT id FROM cold_moves`} {
+	for _, q := range []string{`SELECT id FROM withdrawals`, `SELECT id FROM sweeps`, `SELECT id FROM cold_moves`, `SELECT id FROM refills`} {
 		rows, err := s.pool.Query(ctx, q)
 		if err != nil {
 			continue

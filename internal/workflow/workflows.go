@@ -20,22 +20,24 @@ const (
 
 // Timings the workflows use that are not business configuration.
 type Timings struct {
-	ApprovalTimeout time.Duration
-	ApprovalPoll    time.Duration // re-read approvals this often even without a signal
-	SignTimeout     time.Duration // the gateway's sign_timeout: wait this long before retrying a failed job
-	StuckAfter      time.Duration
-	HotWait         time.Duration
-	HotPoll         time.Duration
-	MaxReplacements int
-	ScanInterval    time.Duration
-	PlanInterval    time.Duration
-	ColdInterval    time.Duration // how often the cold planner looks at the hot wallets
+	ApprovalTimeout  time.Duration
+	ApprovalPoll     time.Duration // re-read approvals this often even without a signal
+	SignTimeout      time.Duration // the gateway's sign_timeout: wait this long before retrying a failed job
+	StuckAfter       time.Duration
+	HotWait          time.Duration
+	HotPoll          time.Duration
+	MaxReplacements  int
+	ScanInterval     time.Duration
+	PlanInterval     time.Duration
+	ColdInterval     time.Duration // how often the cold planner looks at the hot wallets
+	RefillPoll       time.Duration // how often a refill workflow looks for the imported signed file
+	RefillStuckAfter time.Duration // a broadcast refill that has not confirmed after this raises an ALERT
 }
 
 // DefaultTimings derives timings from the business config.
 func DefaultTimings(c *custody.Config) Timings {
 	return Timings{ApprovalTimeout: c.ApprovalTimeout, ApprovalPoll: 15 * time.Second, SignTimeout: c.SignTimeout, StuckAfter: c.StuckAfter,
-		HotWait: c.HotWait, HotPoll: 10 * time.Second, MaxReplacements: c.MaxReplacements, ScanInterval: c.ScanInterval, PlanInterval: c.PlanInterval, ColdInterval: c.ColdPlanInterval}
+		HotWait: c.HotWait, HotPoll: 10 * time.Second, MaxReplacements: c.MaxReplacements, ScanInterval: c.ScanInterval, PlanInterval: c.PlanInterval, ColdInterval: c.ColdPlanInterval, RefillPoll: c.RefillPoll, RefillStuckAfter: c.RefillStuckAfter}
 }
 
 // Input of the workflows that need timings. The worker passes them at start;
@@ -590,4 +592,49 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "cancelled")
 	}
 	return fmt.Errorf("unexpected outcome %q", r.Kind)
+}
+
+// ---- refill ----
+
+// RefillWorkflow is one refill from cold to hot. Its workflow ID is the refill ID. It waits for people: the request sits until an
+// operator has run the offline ceremony and imported the signed file, which can take days, so it polls cheaply and continues as new
+// now and then to keep its history short. Then it broadcasts, follows the transaction to confirmation and books it. A transaction
+// that does not confirm raises one ALERT and keeps waiting: a new nonce is a new ceremony, never automatic.
+func RefillWorkflow(ctx workflow.Context, in Input) error {
+	id, t := in.ID, in.T
+	for i := 0; i < 300; i++ {
+		var st RefillView
+		if err := call(ctx, opts(ctx), &st, a.LoadRefill, id); err != nil {
+			return err
+		}
+		if st.Status == "confirmed" || st.Status == "failed" || st.Parked {
+			return nil
+		}
+		switch st.Status {
+		case "requested":
+			if err := workflow.Sleep(ctx, t.RefillPoll); err != nil {
+				return err
+			}
+		case "signed":
+			var h string
+			if err := call(ctx, opts(ctx), &h, a.BroadcastRefill, id); err != nil {
+				return err
+			}
+		case "broadcast":
+			var state string
+			if err := call(ctx, longOpts(ctx, 10*time.Second), &state, a.WaitRefillTx, id, 10*time.Second); err != nil {
+				return err
+			}
+			switch state {
+			case "confirmed", "reverted":
+				return call(ctx, opts(ctx), nil, a.SettleRefill, id, state == "reverted")
+			}
+			if !st.Stuck && time.Duration(st.AgeSeconds)*time.Second > t.RefillStuckAfter {
+				if err := call(ctx, opts(ctx), nil, a.AlertRefillStuck, id); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return workflow.NewContinueAsNewError(ctx, RefillWorkflow, in)
 }

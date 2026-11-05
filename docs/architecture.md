@@ -78,6 +78,16 @@ rogue party A or a rogue business database cannot send "cold" money anywhere els
 on-chain balance with the sum of the `cold:<partition>` accounts that deliver to it. Design and tests:
 [learn/p6-1-hot-to-cold.md](learn/p6-1-hot-to-cold.md).
 
+### Cold to hot: the refill
+
+The way back needs people. A hot partition below its low mark gets a **refill request** (one open per cold address); an operator exports it
+(`POST /v2/refills/{id}/export`: nonce and fees read online), carries the file across an air gap to the **offline signer** `qv-cold`
+(the `qv-cold` SoftHSM token, no network client at all), where M of N operators approve and the HSM signs; the signed file comes back
+(`POST /v2/refills/{id}/import`), is checked against the request, and the refill workflow broadcasts it and follows it to confirmation.
+The offline config alone decides what may be signed (pinned hot destinations, per-ceremony caps, chain id); the online side is untrusted.
+M-of-N is enforced in software with SoftHSM. Details and runbook: [learn/p6-2-cold-refill.md](learn/p6-2-cold-refill.md),
+[runbooks/cold-refill.md](runbooks/cold-refill.md).
+
 ## `/v1` demo components
 
 ```mermaid

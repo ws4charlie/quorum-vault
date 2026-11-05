@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 )
 
@@ -53,6 +54,11 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v2/withdrawals/{id}/rejections", a.reject)
 	mux.HandleFunc("GET /v2/withdrawals/{id}/intent", a.intent)
 	mux.HandleFunc("GET /v2/reconcile", a.reconcile)
+	mux.HandleFunc("GET /v2/refills", a.listRefills)
+	mux.HandleFunc("GET /v2/refills/{id}", a.getRefill)
+	mux.HandleFunc("POST /v2/refills/{id}/export", a.exportRefill)
+	mux.HandleFunc("POST /v2/refills/{id}/import", a.importRefill)
+	mux.HandleFunc("POST /v2/cold/fundings", a.fundCold)
 	return mux
 }
 
@@ -313,4 +319,91 @@ func (a *API) reject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"withdrawal": id, "rejected_by": actor})
+}
+
+// ---- refills (cold to hot) ----
+
+func refillJSON(r Refill) map[string]any {
+	return map[string]any{"id": r.ID, "asset": r.Asset, "partition": r.PartitionID, "cold_address": r.ColdAddress, "to": r.To, "amount": r.Amount.String(),
+		"status": r.Status, "revision": r.Revision, "request_hash": r.RequestHash, "tx_hash": r.TxHash, "failure_reason": r.Reason}
+}
+
+func (a *API) listRefills(w http.ResponseWriter, r *http.Request) {
+	rs, err := a.svc.ListRefills(r.Context())
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(rs))
+	for _, x := range rs {
+		out = append(out, refillJSON(x))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"refills": out})
+}
+
+func (a *API) getRefill(w http.ResponseWriter, r *http.Request) {
+	x, err := a.svc.GetRefill(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, refillJSON(x))
+}
+
+// exportRefill returns the request file for the offline ceremony (nonce and fees read from the node now).
+func (a *API) exportRefill(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	f, err := a.svc.ExportRefill(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, f)
+}
+
+// importRefill takes the signed file that came back from the ceremony.
+func (a *API) importRefill(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var signed coldsign.Signed
+	if err := decode(r, &signed); err != nil {
+		a.fail(w, err)
+		return
+	}
+	x, err := a.svc.ImportRefill(r.Context(), r.PathValue("id"), signed)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, refillJSON(x))
+}
+
+// fundCold books operator funding of the cold address.
+func (a *API) fundCold(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		ID     string `json:"id"`
+		Asset  string `json:"asset"`
+		Shard  int    `json:"shard"`
+		Amount string `json:"amount"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	amt, ok := new(big.Int).SetString(body.Amount, 10)
+	if !ok || body.ID == "" {
+		a.fail(w, fmt.Errorf("%w: id and a decimal amount are required", ErrInvalid))
+		return
+	}
+	if err := a.svc.FundCold(r.Context(), body.ID, body.Shard, body.Asset, amt); err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": body.ID, "booked": body.Amount})
 }
