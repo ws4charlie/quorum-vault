@@ -34,6 +34,12 @@ import (
 //	confirmed  hot -> refill    the hot wallet received it; the fee comes out of cold (fee -> cold, native)
 //	reverted   cold -> refill   the broadcast booking is undone; only the fee stays
 
+// RefillKind is the Kind of an ordinary refill; ActionGas is the gas limit written into a factory call (the calls are tiny).
+const (
+	RefillKind = "refill"
+	ActionGas  = 60000
+)
+
 // Refill statuses.
 const (
 	RefillRequested = "requested"
@@ -45,6 +51,8 @@ const (
 
 // Refill is a row of refills.
 type Refill struct {
+	Kind        string // refill | set-destination | freeze | set-guardian | transfer-admin | accept-admin
+	Param       string
 	ID          string
 	Asset       string
 	PartitionID string
@@ -64,14 +72,14 @@ type Refill struct {
 // Parked reports whether the refill needs an operator for something the workflow cannot do.
 func (r Refill) Parked() bool { return strings.HasPrefix(r.Reason, ParkedPrefix) }
 
-const refillCols = `id, asset, partition_id, cold_address, to_address, amount::text, status, revision, COALESCE(request_hash,''), request,
+const refillCols = `kind, COALESCE(param,''), id, asset, partition_id, cold_address, to_address, amount::text, status, revision, COALESCE(request_hash,''), request,
 	COALESCE(raw_tx,''), COALESCE(tx_hash,''), COALESCE(failure_reason,''), stuck_alerted`
 
 func scanRefill(row pgx.Row) (Refill, error) {
 	var r Refill
 	var amt string
 	var req []byte
-	if err := row.Scan(&r.ID, &r.Asset, &r.PartitionID, &r.ColdAddress, &r.To, &amt, &r.Status, &r.Revision, &r.RequestHash, &req, &r.RawTx, &r.TxHash, &r.Reason, &r.Stuck); err != nil {
+	if err := row.Scan(&r.Kind, &r.Param, &r.ID, &r.Asset, &r.PartitionID, &r.ColdAddress, &r.To, &amt, &r.Status, &r.Revision, &r.RequestHash, &req, &r.RawTx, &r.TxHash, &r.Reason, &r.Stuck); err != nil {
 		return r, err
 	}
 	r.Amount = parseBig(amt)
@@ -90,6 +98,8 @@ type RefillChain interface {
 	ColdTxParams(ctx context.Context, from common.Address) (nonce uint64, tip, maxFee *big.Int, err error)
 	SendRaw(ctx context.Context, raw []byte) (string, error)
 	RefillTxState(ctx context.Context, txHash string) (evm.RefillState, *big.Int, error)
+	FactoryRead(ctx context.Context, getter string) (common.Address, error)
+	FactoryAddress() common.Address
 }
 
 func (s *Service) refillChain() (RefillChain, error) {
@@ -201,16 +211,28 @@ func (s *Service) ExportRefill(ctx context.Context, id string) (coldsign.Request
 	if err != nil {
 		return coldsign.RequestFile{}, err
 	}
-	a := s.Cfg.Assets[r.Asset]
-	req := coldsign.Request{Version: coldsign.RequestVersion, ID: r.ID, Chain: s.Cfg.Chain, ChainID: s.Cfg.EVM.ChainID, Asset: r.Asset,
-		From: r.ColdAddress, To: r.To, Amount: r.Amount.String(), Nonce: nonce, Gas: 21000, MaxFeePerGas: maxFee.String(), MaxPriorityFeePerGas: tip.String()}
-	if k, perr := partitionPool(r.PartitionID); perr == nil {
-		req.Pool = k
-	} else {
+	pool, perr := partitionPool(r.PartitionID)
+	if perr != nil {
 		return coldsign.RequestFile{}, perr
 	}
-	if !a.Native() {
-		req.Token, req.Gas = a.Address.Hex(), s.Cfg.RefillTokenGas
+	var req coldsign.Request
+	if r.Kind != RefillKind {
+		// A factory call: the offline tool builds the calldata from Kind and Param; Current is what the node says the value is now.
+		cur, err := s.factoryCurrent(ctx, rc, r.Kind)
+		if err != nil {
+			return coldsign.RequestFile{}, err
+		}
+		fa := rc.FactoryAddress().Hex()
+		req = coldsign.Request{Version: coldsign.RequestVersion, ID: r.ID, Chain: s.Cfg.Chain, ChainID: s.Cfg.EVM.ChainID, Pool: pool, Kind: r.Kind,
+			Contract: fa, Param: r.Param, Current: cur, From: r.ColdAddress, To: fa, Amount: "0", Nonce: nonce, Gas: ActionGas,
+			MaxFeePerGas: maxFee.String(), MaxPriorityFeePerGas: tip.String()}
+	} else {
+		a := s.Cfg.Assets[r.Asset]
+		req = coldsign.Request{Version: coldsign.RequestVersion, ID: r.ID, Chain: s.Cfg.Chain, ChainID: s.Cfg.EVM.ChainID, Pool: pool, Asset: r.Asset,
+			From: r.ColdAddress, To: r.To, Amount: r.Amount.String(), Nonce: nonce, Gas: 21000, MaxFeePerGas: maxFee.String(), MaxPriorityFeePerGas: tip.String()}
+		if !a.Native() {
+			req.Token, req.Gas = a.Address.Hex(), s.Cfg.RefillTokenGas
+		}
 	}
 	var out coldsign.RequestFile
 	err = InTx(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -382,11 +404,7 @@ func (s *Service) SettleRefill(ctx context.Context, id string, reverted bool) er
 		}
 		fs := ""
 		if fee != nil && fee.Sign() > 0 {
-			nativePart, err := s.nativePartitionOf(r.PartitionID)
-			if err != nil {
-				return err
-			}
-			if err := s.transfer(ctx, tx, "rf-fee:"+r.TxHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), coldAcct(nativePart), fee, map[string]any{"refill": id, "kind": "cold_network_fee"}); err != nil {
+			if err := s.bookColdSignerFee(ctx, tx, r, fee); err != nil {
 				return err
 			}
 			fs = fee.String()
@@ -428,4 +446,151 @@ func partitionPool(partitionID string) (string, error) {
 		return "", err
 	}
 	return k.Pool, nil
+}
+
+// bookColdSignerFee books the network fee of a cold transaction. When the signer is the configured cold address the fee comes
+// out of cold (fee -> cold), which keeps Reconcile's cold check exact. When it is some other key (the new admin accepting the role
+// from its own address) that address is not tracked by the books, so the fee is booked as an operator expense (fee -> opfund).
+func (s *Service) bookColdSignerFee(ctx context.Context, tx pgx.Tx, r Refill, fee *big.Int) error {
+	nativePart, err := s.nativePartitionOf(r.PartitionID)
+	if err != nil {
+		return err
+	}
+	meta := map[string]any{"refill": r.ID, "kind": "cold_network_fee", "signer": r.ColdAddress}
+	if cold, cerr := s.Cfg.EVM.ColdAddress(nativePart, s.Cfg.Native); cerr == nil && strings.EqualFold(cold.Hex(), r.ColdAddress) {
+		return s.transfer(ctx, tx, "rf-fee:"+r.TxHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), coldAcct(nativePart), fee, meta)
+	}
+	return s.transfer(ctx, tx, "rf-fee:"+r.TxHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), opFundAcct(s.Cfg.Chain, s.Cfg.Native), fee, meta)
+}
+
+// factoryCurrent is the value a factory call is about to change, read from the node: shown to the operators, not trusted.
+func (s *Service) factoryCurrent(ctx context.Context, rc RefillChain, kind string) (string, error) {
+	getter := map[string]string{coldsign.KindSetDestination: "destination", coldsign.KindFreeze: "destination", coldsign.KindSetGuardian: "guardian",
+		coldsign.KindTransferAdmin: "pendingAdmin", coldsign.KindAcceptAdmin: "admin"}[kind]
+	if getter == "" {
+		return "", fmt.Errorf("%w: unknown action kind %q", ErrInvalid, kind)
+	}
+	a, err := rc.FactoryRead(ctx, getter)
+	if err != nil {
+		return "", err
+	}
+	return a.Hex(), nil
+}
+
+// RequestAction opens a request for a factory call: set-destination, freeze, set-guardian, transfer-admin or accept-admin. signer is
+// the key that will sign it: the cold address (default), or for accept-admin the new admin. It then goes through the same ceremony,
+// export, import, broadcast and tracking as a refill. A set-destination target must be one of the hot shards (swept funds land on a
+// hot wallet); the offline tool pins its own list as well.
+func (s *Service) RequestAction(ctx context.Context, kind, param, signer string) (Refill, error) {
+	if !coldsign.IsAdmin(kind) {
+		return Refill{}, fmt.Errorf("%w: unknown action kind %q", ErrInvalid, kind)
+	}
+	switch kind {
+	case coldsign.KindFreeze, coldsign.KindAcceptAdmin:
+		if param != "" {
+			return Refill{}, fmt.Errorf("%w: %s takes no argument", ErrInvalid, kind)
+		}
+	default:
+		if !common.IsHexAddress(param) {
+			return Refill{}, fmt.Errorf("%w: %s needs an address argument", ErrInvalid, kind)
+		}
+		param = common.HexToAddress(param).Hex()
+	}
+	if kind == coldsign.KindSetDestination {
+		ok := false
+		for _, h := range s.Cfg.HotShards {
+			ok = ok || strings.EqualFold(h.Hex(), param)
+		}
+		if !ok {
+			return Refill{}, fmt.Errorf("%w: the sweep destination must be one of the hot shards", ErrInvalid)
+		}
+	}
+	part := s.Cfg.PartitionKey(s.Cfg.Native, 0).String()
+	cold, err := s.Cfg.EVM.ColdAddress(part, s.Cfg.Native)
+	if err != nil {
+		return Refill{}, err
+	}
+	from := cold.Hex()
+	if signer != "" {
+		if !common.IsHexAddress(signer) {
+			return Refill{}, fmt.Errorf("%w: signer is not an address", ErrInvalid)
+		}
+		from = common.HexToAddress(signer).Hex()
+	} else if kind == coldsign.KindAcceptAdmin {
+		return Refill{}, fmt.Errorf("%w: accept-admin is signed by the new admin: give its address as signer", ErrInvalid)
+	}
+	rc, err := s.refillChain()
+	if err != nil {
+		return Refill{}, err
+	}
+	id := "act-" + uuid.NewString()
+	err = InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		if other, open, err := s.openRefillFor(ctx, tx, from); err != nil {
+			return err
+		} else if open {
+			return fmt.Errorf("%w: %s is already open for the signer %s", ErrInvalid, other, from)
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO refills (id, chain, kind, param, asset, partition_id, cold_address, to_address, amount, status)
+			VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8,0,'requested')`, id, s.Cfg.Chain, kind, param, s.Cfg.Native, part, from, rc.FactoryAddress().Hex())
+		if err != nil {
+			return fmt.Errorf("custody: insert action: %w", err)
+		}
+		return emit(ctx, tx, outbox.TopicColdMoves, id, "cold_action.requested", map[string]any{"chain": s.Cfg.Chain, "kind": kind, "param": param, "signer": from})
+	})
+	if err != nil {
+		return Refill{}, err
+	}
+	return s.GetRefill(ctx, id)
+}
+
+// SpendCold books that the operator took amount of asset out of the cold address by some other means (a transfer the books did not
+// make), so the cold balance in the books keeps matching the chain: opfund -> cold. id makes it idempotent.
+func (s *Service) SpendCold(ctx context.Context, id string, shard int, asset string, amount *big.Int) error {
+	if shard < 0 || shard >= len(s.Cfg.HotShards) || amount == nil || amount.Sign() <= 0 {
+		return fmt.Errorf("%w: spend cold", ErrInvalid)
+	}
+	if _, ok := s.Cfg.Assets[asset]; !ok {
+		return fmt.Errorf("%w: unknown asset %q", ErrInvalid, asset)
+	}
+	p := s.Cfg.PartitionKey(asset, shard).String()
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		return s.transfer(ctx, tx, "spend-cold:"+id, opFundAcct(s.Cfg.Chain, asset), coldAcct(p), amount, map[string]any{"kind": "cold_spend"})
+	})
+}
+
+// BookGuardianFee books the gas of a guardian transaction (freeze) against the fee account: the guardian key is an operations key
+// funded by the operator, so its gas is an operator expense (fee -> opfund), and the books stay balanced. Idempotent by transaction.
+func (s *Service) BookGuardianFee(ctx context.Context, txHash string) (*big.Int, error) {
+	fee, err := s.Chain.TxFee(ctx, txHash)
+	if err != nil {
+		return nil, err
+	}
+	return fee, InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		return s.transfer(ctx, tx, "guardian-fee:"+txHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), opFundAcct(s.Cfg.Chain, s.Cfg.Native), fee,
+			map[string]any{"kind": "guardian_network_fee", "tx": txHash})
+	})
+}
+
+// CloseRefill ends a parked request, instead of editing the database by hand: an operator says why. Only a request that is parked
+// and was never broadcast can be closed (nothing is booked for it); one that was broadcast has to be resolved on the chain first.
+func (s *Service) CloseRefill(ctx context.Context, id, actor, reason string) error {
+	if !ValidID(actor) || strings.TrimSpace(reason) == "" {
+		return fmt.Errorf("%w: an actor and a reason are required", ErrInvalid)
+	}
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		r, err := scanRefill(tx.QueryRow(ctx, `SELECT `+refillCols+` FROM refills WHERE id=$1 FOR UPDATE`, id))
+		if isNoRows(err) {
+			return fmt.Errorf("%w: refill %s", ErrNotFound, id)
+		}
+		if err != nil {
+			return err
+		}
+		if !r.Parked() || (r.Status != RefillRequested && r.Status != RefillSigned) {
+			return fmt.Errorf("%w: %s is %s%s: only a parked request that was never broadcast can be closed", ErrInvalid, id, r.Status, map[bool]string{true: ", parked", false: ", not parked"}[r.Parked()])
+		}
+		if _, err := tx.Exec(ctx, `UPDATE refills SET status='failed', failure_reason=$2, updated_at=now() WHERE id=$1`, id, "closed by "+actor+": "+reason); err != nil {
+			return err
+		}
+		return emit(ctx, tx, outbox.TopicColdMoves, id, "refill.closed", map[string]any{"by": actor, "reason": reason, "was_parked": r.Reason})
+	})
 }
