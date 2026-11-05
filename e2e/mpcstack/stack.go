@@ -296,6 +296,11 @@ func (p *Proc) RSSAndThreads() (rssKB, threads int, err error) {
 	if pid == 0 || !p.Running() {
 		return 0, 0, fmt.Errorf("%s is not running", p.Name)
 	}
+	return RSSAndThreads(pid)
+}
+
+// RSSAndThreads reads the resident set size (KiB) and the thread count of a process.
+func RSSAndThreads(pid int) (rssKB, threads int, err error) {
 	if runtime.GOOS == "linux" {
 		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
 		if err != nil {
