@@ -149,3 +149,41 @@ func TestDepositDedupKeyUnique(t *testing.T) {
 		t.Errorf("duplicate dedup_key: err = %v, want unique violation", err)
 	}
 }
+
+// At most one open rebalance leaves a shard, and at most one open rebalance feeds a shard (per asset); a finished one frees both.
+func TestRebalanceOneOpenPerSourceAndPerDestination(t *testing.T) {
+	ctx := context.Background()
+	pool := dbtest.New(t)
+	for _, q := range []string{
+		`INSERT INTO assets (chain, symbol, decimals) VALUES ('eth', 'ETH', 18)`,
+		`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES
+			('p0','qv-us','eth','ETH','hot','omnibus',0), ('p1','qv-us','eth','ETH','hot','omnibus',1), ('p2','qv-us','eth','ETH','hot','omnibus',2)`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	ins := func(id, from, to, status string) error {
+		_, err := pool.Exec(ctx, `INSERT INTO rebalance_moves (id, chain, asset, partition_id, to_partition_id, to_address, amount, status)
+			VALUES ($1,'eth','ETH',$2,$3,'0xaa',5,$4)`, id, from, to, status)
+		return err
+	}
+	if err := ins("r1", "p0", "p1", "planned"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ins("r2", "p0", "p2", "planned"); err == nil {
+		t.Error("two open rebalances from one shard were accepted")
+	}
+	if err := ins("r3", "p2", "p1", "planned"); err == nil {
+		t.Error("two open rebalances to one shard were accepted")
+	}
+	if err := ins("r4", "p1", "p1", "planned"); err == nil {
+		t.Error("a rebalance from a shard to itself was accepted")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE rebalance_moves SET status='confirmed' WHERE id='r1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ins("r5", "p0", "p2", "planned"); err != nil {
+		t.Errorf("a finished rebalance still blocks the shard: %v", err)
+	}
+}

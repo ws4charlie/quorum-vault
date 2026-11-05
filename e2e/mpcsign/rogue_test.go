@@ -191,6 +191,40 @@ func TestRogueParty_ToCold(t *testing.T) {
 	})
 }
 
+// A rogue party A asks party B to take part in rebalances it should refuse: B's cosigner holds its own list of hot shards, rate and
+// daily cap, so owning A (or the gateway) does not let anyone move hot funds anywhere but to another shard of the pool.
+func TestRogueParty_Rebalance(t *testing.T) {
+	s := newStack(t, stackOpts{})
+	s.provision(t, false)
+	r := s.rogue(t)
+	shard2, evil := gatewaytest.AddrShard2, gatewaytest.AddrEvil
+
+	t.Run("destination outside the pinned shards", func(t *testing.T) {
+		r.refused(t, r.signOpen(s.h.Rebalance("rb-1", evil, evil, 100, 40), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonTx)
+	})
+	t.Run("intent says a shard, transaction pays the attacker", func(t *testing.T) {
+		r.refused(t, r.signOpen(s.h.Rebalance("rb-2", shard2, evil, 100, 41), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonTx)
+	})
+	t.Run("approvals do not rescue a wrong destination", func(t *testing.T) {
+		r.refused(t, r.signOpen(s.h.Rebalance("rb-3", evil, evil, 100, 42, "alice", "bob"), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonTx)
+	})
+	t.Run("a shard of another pool", func(t *testing.T) {
+		r.refused(t, r.signOpen(s.h.Rebalance("rb-4", gatewaytest.AddrOtherPl, gatewaytest.AddrOtherPl, 100, 43), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonTx)
+	})
+	t.Run("over the daily cap with approvals attached", func(t *testing.T) {
+		r.refused(t, r.signOpen(s.h.Rebalance("rb-5", shard2, shard2, 7000, 44, "alice", "bob"), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonRebalanceCap)
+	})
+	t.Run("a legitimate rebalance is accepted, then the rate limit holds", func(t *testing.T) {
+		for i, n := range []int{2000, 2000} {
+			ack, fin := r.open(t, r.signOpen(s.h.Rebalance(fmt.Sprintf("rb-ok-%d", i), shard2, shard2, int64(n), uint64(50+i)), s.pub33))
+			if !ack {
+				t.Fatalf("legitimate rebalance %d refused: %+v", i, fin)
+			}
+		}
+		r.refused(t, r.signOpen(s.h.Rebalance("rb-rate", shard2, shard2, 100, 52), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonRebalanceRate)
+	})
+}
+
 func TestRogueParty_DailyCapSplitting(t *testing.T) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)

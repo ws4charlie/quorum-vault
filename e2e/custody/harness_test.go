@@ -132,7 +132,15 @@ type opts struct {
 	signTimeout string
 	mpcProxy    bool // mpc mode: A reaches B through the session proxy (partition, latency, tamper)
 	cold        *coldOpts
+	// seed is how many ETH each hot shard starts with, on chain and in the books (default 100 each). A shard that starts with 0 is dry.
+	seed []int64
+	// rebalance puts rebalance targets into the business config, so the worker's planner moves funds between shards by itself.
+	// Without it the worker plans no rebalance and a test calls PlanRebalances on the in-process service.
+	rebalance *rebalOpts
 }
+
+// rebalOpts are the rebalance targets of the business config: "ETH" or "USDT" for every shard, "ETH/1" for one (base units).
+type rebalOpts struct{ targets map[string]string }
 
 // coldOpts turns hot-to-cold on: the business config gets the cold address and these limits (base units; target defaults to
 // halfway). The gateway and the cosigner always know the cold address.
@@ -474,6 +482,12 @@ func newSystem(t *testing.T, o opts) *system {
 			Refill:       custody.RefillFile{Poll: "1s", StuckAfter: o.cold.refillStuck},
 		}
 	}
+	if o.rebalance != nil {
+		cf.Cold.Rebalance = custody.RebalanceFile{Targets: o.rebalance.targets}
+		if o.cold == nil {
+			cf.Cold.PlanInterval = "1s"
+		}
+	}
 	s.cf = cf
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
 	writeJSON(t, s.cfgPath, cf)
@@ -502,11 +516,11 @@ func newSystem(t *testing.T, o opts) *system {
 				Tokens:        map[string]gateway.TokenFile{"USDT": {Address: s.usdt.Hex(), Decimals: 6}}, MaxTxFeeWei: "100000000000000000"},
 			Assets: map[string]gateway.AssetFile{
 				"ETH": {PerTxCap: o.gwETHPerTx, DailyCap: "1000000000000000000000000000",
-					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: fmt.Sprint(int64(ether)), Approvals: 2}}, ToColdDailyCap: "1000000000000000000000000000"},
-				"USDT": {PerTxCap: "1000000000000000", DailyCap: "1000000000000000000", ToColdDailyCap: "1000000000000000000",
+					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: fmt.Sprint(int64(ether)), Approvals: 2}}, ToColdDailyCap: "1000000000000000000000000000", RebalanceDailyCap: "1000000000000000000000000000"},
+				"USDT": {PerTxCap: "1000000000000000", DailyCap: "1000000000000000000", ToColdDailyCap: "1000000000000000000", RebalanceDailyCap: "1000000000000000000",
 					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "2000000000", Approvals: 2}}},
 			},
-			SweepsPerHour: 100000, CancelsPerHour: 1000, ToColdPerHour: 1000}},
+			SweepsPerHour: 100000, CancelsPerHour: 1000, ToColdPerHour: 1000, RebalancePerHour: 1000}},
 	}
 	s.gf = gf
 	s.gwPath = filepath.Join(s.dir, "gateway.json")
@@ -570,8 +584,15 @@ func newSystem(t *testing.T, o opts) *system {
 	s.tm.phase("Temporal connect")
 	// Fund the hot wallets: gas money on chain and in the books.
 	for i, a := range s.shardAddr {
-		s.fundETH(a, eth(100))
-		if err := s.svc.FundHot(s.ctx, fmt.Sprintf("seed-%d", i), i, eth(100)); err != nil {
+		n := int64(100)
+		if i < len(o.seed) {
+			n = o.seed[i]
+		}
+		if n == 0 {
+			continue
+		}
+		s.fundETH(a, eth(n))
+		if err := s.svc.FundHot(s.ctx, fmt.Sprintf("seed-%d", i), i, eth(n)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -783,7 +804,7 @@ func (s *system) terminateWorkflows() {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	ids := []string{workflow.ScanID(s.chainName), workflow.PlannerID(s.chainName), workflow.ReconcilerID(s.chainName), workflow.ColdPlannerID(s.chainName)}
-	for _, q := range []string{`SELECT id FROM withdrawals`, `SELECT id FROM sweeps`, `SELECT id FROM cold_moves`, `SELECT id FROM refills`} {
+	for _, q := range []string{`SELECT id FROM withdrawals`, `SELECT id FROM sweeps`, `SELECT id FROM cold_moves`, `SELECT id FROM rebalance_moves`, `SELECT id FROM refills`} {
 		rows, err := s.pool.Query(ctx, q)
 		if err != nil {
 			continue
@@ -1064,7 +1085,7 @@ func (s *system) sweepsConfirmed() int {
 }
 
 func (s *system) openWork() int {
-	return s.count(`SELECT (SELECT count(*) FROM sweeps WHERE status NOT IN ('confirmed','failed')) + (SELECT count(*) FROM withdrawals WHERE status NOT IN ('confirmed','failed')) + (SELECT count(*) FROM cold_moves WHERE status NOT IN ('confirmed','failed'))`)
+	return s.count(`SELECT (SELECT count(*) FROM sweeps WHERE status NOT IN ('confirmed','failed')) + (SELECT count(*) FROM withdrawals WHERE status NOT IN ('confirmed','failed')) + (SELECT count(*) FROM cold_moves WHERE status NOT IN ('confirmed','failed')) + (SELECT count(*) FROM rebalance_moves WHERE status NOT IN ('confirmed','failed'))`)
 }
 
 // waitIdle waits until no sweep or withdrawal is open.
@@ -1113,6 +1134,7 @@ func (s *system) dump(label string) {
 	q("sign jobs not done (id, status, reject)", `SELECT id, status, COALESCE(reject_reason,'') FROM sign_jobs WHERE status<>'done' ORDER BY created_at`)
 	q("open nonce allocations (address, nonce, owner, status)", `SELECT address, nonce, owner_kind||' '||owner_id, status FROM evm_nonce_allocations WHERE status NOT IN ('confirmed','cancelled') ORDER BY address, nonce`)
 	q("cold moves (id, status, amount, reason)", `SELECT id, status, amount::text, COALESCE(failure_reason,'') FROM cold_moves ORDER BY created_at`)
+	q("rebalances (id, status, from, to, amount, reason)", `SELECT id, status, partition_id, to_partition_id, amount::text, COALESCE(failure_reason,'') FROM rebalance_moves ORDER BY created_at`)
 	q("scan cursor", `SELECT chain, next_height FROM chain_cursors`)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1145,7 +1167,7 @@ func (s *system) dump(label string) {
 
 func (s *system) openIDs() []string {
 	var ids []string
-	for _, q := range []string{`SELECT id FROM withdrawals WHERE status NOT IN ('confirmed','failed')`, `SELECT id FROM sweeps WHERE status NOT IN ('confirmed','failed')`, `SELECT id FROM cold_moves WHERE status NOT IN ('confirmed','failed')`} {
+	for _, q := range []string{`SELECT id FROM withdrawals WHERE status NOT IN ('confirmed','failed')`, `SELECT id FROM sweeps WHERE status NOT IN ('confirmed','failed')`, `SELECT id FROM cold_moves WHERE status NOT IN ('confirmed','failed')`, `SELECT id FROM rebalance_moves WHERE status NOT IN ('confirmed','failed')`} {
 		rows, err := s.pool.Query(context.Background(), q)
 		if err != nil {
 			continue

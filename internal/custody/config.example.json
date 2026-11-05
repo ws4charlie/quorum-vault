@@ -1,5 +1,5 @@
 {
-  "_comment": "PLACEHOLDER business-zone config. Every address below is a dummy. Never commit real values. The signing zone has its own config (internal/gateway/config.example.json) with its own copy of the trust-relevant parts. The cold section: above a limit's high mark the excess moves down to target (default: halfway between low and high); below low the planner logs an ALERT asking for a refill; the signing zone has its own copy of the cold addresses and refuses any other destination.",
+  "_comment": "PLACEHOLDER business-zone config. Every address below is a dummy. Never commit real values. The signing zone has its own config (internal/gateway/config.example.json) with its own copy of the trust-relevant parts. The cold section: above a limit's high mark the excess moves down to target (default: halfway between low and high); below low the planner logs an ALERT asking for a refill; the signing zone has its own copy of the cold addresses and refuses any other destination. The rebalance targets (per asset, or \"ASSET/shard\" for one shard; every shard needs one) make a shard below its target receive from the fullest shard when that holds more than its own target; each target must lie between the shard's low mark and its cold target.",
   "entity": "qv-us",
   "chain": {
     "name": "evm-example",
@@ -8,7 +8,7 @@
     "confirmations": 2,
     "factory": "0x0000000000000000000000000000000000000001",
     "sweep_destination": "0x0000000000000000000000000000000000000003",
-    "hot_shards": ["0x0000000000000000000000000000000000000003"],
+    "hot_shards": ["0x0000000000000000000000000000000000000003", "0x0000000000000000000000000000000000000006"],
     "max_tx_fee_wei": "10000000000000000",
     "assets": {
       "ETH":  { "decimals": 18, "min_deposit": "0", "price_wei": "1" },
@@ -38,6 +38,9 @@
       "ETH":  { "low": "2000000000000000000",  "high": "20000000000000000000", "target": "10000000000000000000" },
       "USDT": { "low": "5000000000",           "high": "50000000000" }
     },
-    "plan_interval": "5s"
+    "plan_interval": "5s",
+    "rebalance": {
+      "targets": { "ETH": "5000000000000000000", "USDT": "10000000000", "ETH/1": "8000000000000000000" }
+    }
   }
 }

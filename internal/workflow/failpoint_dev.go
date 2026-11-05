@@ -12,7 +12,7 @@ import (
 // calls, no flushed buffers) the first time that point is reached; the test then restarts the worker without the variable.
 // A production build has the no-op Hit of failpoint.go and never reads the variable.
 //
-// Boundaries, for kind "withdrawal" (sweeps and hot-to-cold moves, kind "to-cold", have the same):
+// Boundaries, for kind "withdrawal" (sweeps, hot-to-cold moves, kind "to-cold", and hot-shard rebalances, kind "rebalance", have the same):
 //
 //	after_build   the sign job and nonce are committed, the activity has not returned
 //	after_job     the gateway signed the job, the worker has not acted on it

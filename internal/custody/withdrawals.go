@@ -266,8 +266,15 @@ func (s *Service) freeHot(ctx context.Context, q interface {
 		partitionID).Scan(&moving); err != nil {
 		return nil, err
 	}
+	// The same for a rebalance leaving this shard.
+	var leaving string
+	if err := q.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::text FROM rebalance_moves WHERE partition_id=$1 AND status IN ('planned','signing')`,
+		partitionID).Scan(&leaving); err != nil {
+		return nil, err
+	}
 	free := new(big.Int).Neg(parseBig(posted))
 	free.Sub(free, parseBig(reserved))
+	free.Sub(free, parseBig(leaving))
 	return free.Sub(free, parseBig(moving)), nil
 }
 

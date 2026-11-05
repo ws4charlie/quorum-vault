@@ -45,7 +45,7 @@ flowchart LR
 | `qv-core` | HTTP API (`/v2`): customers, deposit addresses, withdrawals, approvals, balances, `Reconcile` | the business database |
 | `qv-worker` | Temporal workflows: scan, sweep planner, withdrawal reconciler, cold planner (long-running loops), one workflow per withdrawal, sweep and hot-to-cold move; a watchdog restarts a loop that stops making progress | the business database, the chain |
 | `qv-relay` | outbox to Redpanda, at least once | the business database |
-| `qv-gateway` | signing zone: claims `sign_jobs`, re-verifies the intent, the approver signatures and the policy (for a hot-to-cold move: the pinned cold address, a rate and a daily cap), reserves the digest in its own replay-guard database, then asks a signer | **not** the business database: it only reads and updates `sign_jobs` as a restricted role |
+| `qv-gateway` | signing zone: claims `sign_jobs`, re-verifies the intent, the approver signatures and the policy (for a hot-to-cold move: the pinned cold address, a rate and a daily cap; for a hot-shard rebalance: another hot shard of the pool, a rate and a daily cap), reserves the digest in its own replay-guard database, then asks a signer | **not** the business database: it only reads and updates `sign_jobs` as a restricted role |
 | `mpc-party` A and B | two-party threshold ECDSA (cb-mpc): DKG, derive, sign, refresh; shares sealed by each party's own HSM token; durable two-phase refresh; backup and restore | each other only through pinned mTLS certificates |
 | `qv-cosigner` | party B's gate: repeats the gateway's checks from its own config and its own database before B takes part in a signature; fail closed | nothing from A or the gateway |
 
@@ -77,6 +77,15 @@ can only make funds safer. Both the gateway and party B's cosigner check it, fro
 rogue party A or a rogue business database cannot send "cold" money anywhere else. `Reconcile` compares each cold address's
 on-chain balance with the sum of the `cold:<partition>` accounts that deliver to it. Design and tests:
 [learn/p6-1-hot-to-cold.md](learn/p6-1-hot-to-cold.md).
+
+### Between hot shards: the rebalance
+
+Every sweep pays one hot shard, so the others run dry. Per asset, a shard below its **target** (config `cold.rebalance.targets`) receives from
+the fullest shard when that holds more than its own target: intent kind `rebalance`, no approval, its own workflow and ledger clearing
+account (`rebal`), planned by the same loop *before* the move to cold. The signing zone pins the destination to another hot shard of the same
+pool and asset from its own `hot_addresses`, and rate-limits and caps it from its own store (gateway and cosigner both). Targets must lie
+between a shard's low mark and its cold target, so a rebalance and a move to cold cannot undo each other.
+Design and tests: [learn/p6-4-shard-rebalance.md](learn/p6-4-shard-rebalance.md).
 
 ### Cold to hot: the refill
 

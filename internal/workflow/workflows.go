@@ -180,7 +180,15 @@ func ColdPlannerWorkflow(ctx workflow.Context, in Input) error {
 	ctx = withTimings(ctx, in.T)
 	for i := 0; i < 300; i++ {
 		var n int
+		// Rebalance first, then the move to cold: the cold planner then sees a rebalance that is on its way to a shard (see
+		// custody/rebalance.go for the rules that keep the two from undoing each other).
+		if err := call(ctx, planOpts(ctx), &n, a.PlanRebalances); err != nil {
+			return err
+		}
 		if err := call(ctx, planOpts(ctx), &n, a.PlanColdMoves); err != nil {
+			return err
+		}
+		if err := call(ctx, opts(ctx), &n, a.StartOpenRebalances); err != nil {
 			return err
 		}
 		if err := call(ctx, opts(ctx), &n, a.StartOpenColdMoves); err != nil {
@@ -628,6 +636,50 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 		return call(ctx, opts(ctx), nil, a.SettleColdMove, id, r.Hash, r.Kind == txReverted)
 	case txCancelled:
 		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "cancelled")
+	}
+	return fmt.Errorf("unexpected outcome %q", r.Kind)
+}
+
+// RebalanceWorkflow is one move between hot shards. Its workflow ID is the rebalance ID: build and enqueue, wait for the gateway
+// (which pins the destination to its own list of hot shards and caps the amount itself), broadcast, wait, settle. One that fails
+// ends cleanly and the planner plans another if the shard is still below its target.
+func RebalanceWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
+	id, t := in.ID, in.T
+	var st ColdState
+	if err := call(ctx, opts(ctx), &st, a.LoadRebalance, id); err != nil {
+		return err
+	}
+	if st.Status == "confirmed" || st.Status == "failed" || st.Parked {
+		return nil
+	}
+	o := OwnerArg{Kind: custody.OwnerKindRebalance, ID: id, Part: st.Part}
+	ow := custody.Owner{Kind: custody.OwnerKindRebalance, ID: id, PartitionID: st.Part}
+
+	var job string
+	if err := call(ctx, buildOpts(ctx), &job, a.BuildRebalanceJob, id); err != nil {
+		workflow.GetLogger(ctx).Warn("could not build the rebalance; it will be planned again", "rebalance", id, "error", err.Error())
+		return call(ctx, opts(ctx), nil, a.FailRebalance, id, "could not build: "+err.Error())
+	}
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
+	if err != nil {
+		return err
+	}
+	if r.Kind == txRefused {
+		cr, err := cancelNonce(ctx, t, o)
+		if err != nil {
+			return err
+		}
+		if cr.Kind == txCancelled {
+			return call(ctx, opts(ctx), nil, a.FailRebalance, id, "gateway refused: "+r.Reason)
+		}
+		r = cr
+	}
+	switch r.Kind {
+	case txMined, txReverted:
+		return call(ctx, opts(ctx), nil, a.SettleRebalance, id, r.Hash, r.Kind == txReverted)
+	case txCancelled:
+		return call(ctx, opts(ctx), nil, a.FailRebalance, id, "cancelled")
 	}
 	return fmt.Errorf("unexpected outcome %q", r.Kind)
 }

@@ -17,7 +17,7 @@ import (
 // Owner is the business object a transaction belongs to: a withdrawal or a
 // sweep. The EVM nonce manager keys its allocations by (Kind, ID).
 type Owner struct {
-	Kind        string // "withdrawal" | "sweep" | "to-cold"
+	Kind        string // "withdrawal" | "sweep" | "to-cold" | "rebalance"
 	ID          string
 	PartitionID string // partition whose key signs
 }
@@ -34,6 +34,8 @@ func OwnerTrack(o Owner) Track {
 		return Track("wd:" + o.ID)
 	case OwnerKindToCold:
 		return Track("tocold:" + o.ID)
+	case OwnerKindRebalance:
+		return Track("rebal:" + o.ID)
 	}
 	return Track("sweep:" + o.ID)
 }

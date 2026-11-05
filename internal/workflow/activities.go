@@ -465,6 +465,64 @@ func (a *Activities) FailColdMove(ctx context.Context, id, reason string) error 
 	return nonRetry(a.D.Svc.FailColdMoveBeforeBroadcast(ctx, id, reason))
 }
 
+// ---- hot-shard rebalance steps ----
+
+// PlanRebalances creates a rebalance for every hot shard below its target that a fuller shard can feed. It returns how many it created.
+func (a *Activities) PlanRebalances(ctx context.Context) (int, error) {
+	stop := heartbeating(ctx)
+	defer stop()
+	mv, err := a.D.Svc.PlanRebalances(ctx, a.log())
+	return len(mv), err
+}
+
+// StartOpenRebalances starts a Rebalance workflow for every unfinished rebalance that has none running.
+func (a *Activities) StartOpenRebalances(ctx context.Context) (int, error) {
+	open, err := a.D.Svc.OpenRebalances(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, m := range open {
+		if err := a.start(ctx, m.ID, RebalanceWorkflow, Input{ID: m.ID, T: a.D.T}); err != nil {
+			return 0, fmt.Errorf("start rebalance %s: %w", m.ID, err)
+		}
+	}
+	return len(open), nil
+}
+
+// LoadRebalance reads the rebalance (the same view as a cold move).
+func (a *Activities) LoadRebalance(ctx context.Context, id string) (ColdState, error) {
+	m, err := a.D.Svc.GetRebalance(ctx, id)
+	return ColdState{Status: m.Status, Part: m.PartitionID, Parked: m.Parked()}, err
+}
+
+// BuildRebalanceJob builds the rebalance and enqueues its sign job in one transaction.
+func (a *Activities) BuildRebalanceJob(ctx context.Context, id string) (string, error) {
+	job, err := a.D.Svc.BuildRebalanceJob(ctx, id)
+	if err != nil {
+		return "", nonRetry(err)
+	}
+	Hit(custody.OwnerKindRebalance, "after_build")
+	return job, nil
+}
+
+// SettleRebalance books a mined rebalance.
+func (a *Activities) SettleRebalance(ctx context.Context, id, txHash string, reverted bool) error {
+	st := chain.TxConfirmed
+	if reverted {
+		st = chain.TxFailed
+	}
+	if err := a.D.Svc.SettleRebalance(ctx, id, txHash, st); err != nil {
+		return nonRetry(err)
+	}
+	Hit(custody.OwnerKindRebalance, "after_settle")
+	return nil
+}
+
+// FailRebalance ends a rebalance that never broadcast, once its nonce is freed.
+func (a *Activities) FailRebalance(ctx context.Context, id, reason string) error {
+	return nonRetry(a.D.Svc.FailRebalanceBeforeBroadcast(ctx, id, reason))
+}
+
 // ---- shared transaction steps (withdrawals and sweeps) ----
 
 // OwnerArg identifies a transaction owner and its tracks in activity arguments.
@@ -506,6 +564,8 @@ func killKind(jobID string) (string, string) {
 		return "sweep", jobID
 	case len(jobID) > 7 && jobID[:7] == "tocold:":
 		return custody.OwnerKindToCold, jobID
+	case len(jobID) > 6 && jobID[:6] == "rebal:":
+		return custody.OwnerKindRebalance, jobID
 	}
 	return "cancel", jobID
 }
@@ -537,6 +597,8 @@ func (a *Activities) RecordBroadcast(ctx context.Context, o OwnerArg, txHash str
 		return a.D.Svc.RecordSweepBroadcast(ctx, o.ID, txHash)
 	case custody.OwnerKindToCold:
 		return a.D.Svc.RecordColdMoveBroadcast(ctx, o.ID, txHash)
+	case custody.OwnerKindRebalance:
+		return a.D.Svc.RecordRebalanceBroadcast(ctx, o.ID, txHash)
 	}
 	return fmt.Errorf("unknown owner kind %q", o.Kind)
 }
@@ -585,6 +647,8 @@ func (a *Activities) Park(ctx context.Context, o OwnerArg, reason string) error 
 		return a.D.Svc.ParkWithdrawal(ctx, o.ID, reason)
 	case custody.OwnerKindToCold:
 		return a.D.Svc.ParkColdMove(ctx, o.ID, reason)
+	case custody.OwnerKindRebalance:
+		return a.D.Svc.ParkRebalance(ctx, o.ID, reason)
 	}
 	return a.D.Svc.ParkSweep(ctx, o.ID, reason)
 }

@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +46,16 @@ type ColdFile struct {
 	ShardLimits  map[string]LimitFile `json:"shard_limits"`
 	PlanInterval string               `json:"plan_interval"` // default 5s
 	Refill       RefillFile           `json:"refill"`
+	// Rebalance configures moves between the hot shards of a pool.
+	Rebalance RebalanceFile `json:"rebalance"`
+}
+
+// RebalanceFile configures the rebalance of hot shards. Without targets nothing is moved.
+type RebalanceFile struct {
+	// Targets: what a shard should hold, per asset ("ETH": applies to every shard) or per shard ("ETH/1": overrides). Base units.
+	// A shard below its target receives from the fullest shard, if that holds more than its own target. With cold limits the target
+	// must lie between the shard's low-water mark and its cold target (see docs/learn/p6-4-shard-rebalance.md).
+	Targets map[string]string `json:"targets"`
 }
 
 // RefillFile configures refills (cold to hot, through an offline ceremony).
@@ -158,6 +169,8 @@ type Config struct {
 	ActivityTimeout  time.Duration // 0 = the workflows' production activity timeouts
 	ColdLimits       map[string]HotLimits
 	ColdPlanInterval time.Duration
+	// RebalanceTargets: the target per hot partition ID; empty when rebalance is not configured.
+	RebalanceTargets map[string]*big.Int
 	RefillTokenGas   uint64
 	RefillStuckAfter time.Duration
 	RefillPoll       time.Duration
@@ -380,6 +393,9 @@ func (f File) Build() (*Config, error) {
 	if err := c.buildCold(f.Cold, hot); err != nil {
 		return nil, err
 	}
+	if err := c.buildRebalance(f.Cold.Rebalance); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -494,5 +510,64 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 		}
 	}
 	_ = hot
+	return nil
+}
+
+func (c *Config) shardCount() int { return len(c.HotShards) }
+
+// buildRebalance validates the targets. Every shard of an asset needs one (a partial list would starve the shards left out), there
+// must be a second shard to move to, and with cold limits the target must lie in low <= target <= cold target, which is what keeps
+// a rebalance and a move to cold from undoing each other.
+func (c *Config) buildRebalance(rf RebalanceFile) error {
+	if len(rf.Targets) == 0 {
+		return nil
+	}
+	if len(c.HotShards) < 2 {
+		return errors.New("custody: config: rebalance targets need at least two hot shards")
+	}
+	c.RebalanceTargets = map[string]*big.Int{}
+	for k, v := range rf.Targets {
+		sym, shard, hasShard := strings.Cut(k, "/")
+		if _, ok := c.Assets[sym]; !ok {
+			return fmt.Errorf("custody: config: rebalance target for unknown asset %q", k)
+		}
+		if hasShard {
+			i, err := strconv.Atoi(shard)
+			if err != nil || i < 0 || i >= len(c.HotShards) {
+				return fmt.Errorf("custody: config: rebalance target %q: shard must be 0..%d", k, len(c.HotShards)-1)
+			}
+		}
+		if _, err := amount("rebalance target "+k, v); err != nil {
+			return err
+		}
+	}
+	for _, sym := range c.AssetList {
+		_, all := rf.Targets[sym]
+		anyShard := false
+		for i := range c.HotShards {
+			if _, ok := rf.Targets[fmt.Sprintf("%s/%d", sym, i)]; ok {
+				anyShard = true
+			}
+		}
+		for i := range c.HotShards {
+			v, ok := rf.Targets[fmt.Sprintf("%s/%d", sym, i)]
+			if !ok {
+				v, ok = rf.Targets[sym]
+			}
+			if !ok {
+				if all || anyShard {
+					return fmt.Errorf("custody: config: rebalance: %s has no target for shard %d", sym, i)
+				}
+				continue
+			}
+			t, _ := amount("rebalance target", v)
+			p := c.PartitionKey(sym, i).String()
+			if lim, ok := c.ColdLimits[p]; ok && (t.Cmp(lim.Low) < 0 || t.Cmp(lim.Target) > 0) {
+				return fmt.Errorf("custody: config: rebalance target %s of %s must lie between its cold low-water mark %s and its cold target %s",
+					t, p, lim.Low, lim.Target)
+			}
+			c.RebalanceTargets[p] = t
+		}
+	}
 	return nil
 }

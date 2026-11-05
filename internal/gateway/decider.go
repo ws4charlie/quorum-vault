@@ -187,7 +187,7 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 		return i, reject(ReasonIntent, "intent has no id")
 	}
 	switch i.Kind {
-	case "withdrawal", "sweep", "cancel", "to-cold":
+	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance":
 	default:
 		return i, reject(ReasonIntent, "intent kind %q", i.Kind)
 	}
@@ -287,6 +287,33 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 			}
 			if total := new(big.Int).Add(sum, amount); total.Cmp(p.ToColdDailyCap) > 0 {
 				return reject(ReasonToColdCap, "%s already moved to cold in 24h plus %s exceeds the cap %s", sum, amount, p.ToColdDailyCap)
+			}
+		}
+	case "rebalance":
+		// Needs no approval, like a move to cold: the destination is another hot shard of this zone's own config (the chain
+		// verifier refused anything else), so the funds stay in wallets the operator already runs. Approvals are ignored. The rate
+		// and the daily cap come from this zone's own guard store and apply to whatever the intent carries.
+		p, ok := cc.Assets[i.Asset]
+		if !ok {
+			return reject(ReasonPolicyAsset, "no policy for %s on %s", i.Asset, cc.Name)
+		}
+		if !codec.OwnsSender(info.Sender) {
+			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
+		}
+		if !known {
+			n, err := gt.CountSince(ctx, "rebalance", now.Add(-time.Hour))
+			if err != nil {
+				return err
+			}
+			if n >= cc.RebalancePerHour {
+				return reject(ReasonRebalanceRate, "%d hot-shard rebalances in the last hour, limit %d", n, cc.RebalancePerHour)
+			}
+			sum, err := gt.AmountSince(ctx, "rebalance", i.Asset, now.Add(-24*time.Hour))
+			if err != nil {
+				return err
+			}
+			if total := new(big.Int).Add(sum, amount); total.Cmp(p.RebalanceDailyCap) > 0 {
+				return reject(ReasonRebalanceCap, "%s already rebalanced in 24h plus %s exceeds the cap %s", sum, amount, p.RebalanceDailyCap)
 			}
 		}
 	case "cancel":
