@@ -17,6 +17,7 @@
         "factory": "0x0000000000000000000000000000000000000001",
         "sweep_destination": "0x0000000000000000000000000000000000000002",
         "hot_addresses": { "PLACEHOLDER-partition-id": "0x0000000000000000000000000000000000000003" },
+        "cold_addresses": { "omnibus/native": "0x0000000000000000000000000000000000000005", "omnibus/token": "0x0000000000000000000000000000000000000005" },
         "tokens": { "USDT": { "address": "0x0000000000000000000000000000000000000004", "decimals": 6 } },
         "max_tx_fee_wei": "10000000000000000"
       },
@@ -24,6 +25,7 @@
         "ETH": {
           "per_tx_cap": "5000000000000000000",
           "daily_cap": "20000000000000000000",
+          "to_cold_daily_cap": "200000000000000000000",
           "tiers": [
             { "min_amount": "0", "approvals": 1 },
             { "min_amount": "1000000000000000000", "approvals": 2 }
@@ -32,6 +34,7 @@
         "USDT": {
           "per_tx_cap": "10000000000",
           "daily_cap": "40000000000",
+          "to_cold_daily_cap": "400000000000",
           "tiers": [
             { "min_amount": "0", "approvals": 1 },
             { "min_amount": "2000000000", "approvals": 2 }
@@ -39,7 +42,8 @@
         }
       },
       "sweeps_per_hour": 60,
-      "cancels_per_hour": 5
+      "cancels_per_hour": 5,
+      "to_cold_per_hour": 4
     }
   }
 }

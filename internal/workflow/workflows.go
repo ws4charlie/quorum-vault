@@ -29,12 +29,13 @@ type Timings struct {
 	MaxReplacements int
 	ScanInterval    time.Duration
 	PlanInterval    time.Duration
+	ColdInterval    time.Duration // how often the cold planner looks at the hot wallets
 }
 
 // DefaultTimings derives timings from the business config.
 func DefaultTimings(c *custody.Config) Timings {
 	return Timings{ApprovalTimeout: c.ApprovalTimeout, ApprovalPoll: 15 * time.Second, SignTimeout: c.SignTimeout, StuckAfter: c.StuckAfter,
-		HotWait: c.HotWait, HotPoll: 10 * time.Second, MaxReplacements: c.MaxReplacements, ScanInterval: c.ScanInterval, PlanInterval: c.PlanInterval}
+		HotWait: c.HotWait, HotPoll: 10 * time.Second, MaxReplacements: c.MaxReplacements, ScanInterval: c.ScanInterval, PlanInterval: c.PlanInterval, ColdInterval: c.ColdPlanInterval}
 }
 
 // Input of the workflows that need timings. The worker passes them at start;
@@ -72,9 +73,14 @@ func opts(ctx workflow.Context) workflow.Context {
 }
 
 // planOpts gives the planner room: one pass asks the node about each candidate.
+//
+// A planning pass can take a while, so StartToClose is long; but if the worker running it dies, the server would wait the whole
+// StartToClose before trying again, and the planner would stand still for two minutes (the "no sweep within 90 s" failure in the
+// crash tests). The pass heartbeats (see heartbeating), so a dead worker is noticed after HeartbeatTimeout.
 func planOpts(ctx workflow.Context) workflow.Context {
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout:    2 * time.Minute,
+		HeartbeatTimeout:       15 * time.Second,
 		ScheduleToStartTimeout: queueTimeout,
 		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
 	})
@@ -134,6 +140,24 @@ func SweepPlannerWorkflow(ctx workflow.Context, in Input) error {
 		}
 	}
 	return workflow.NewContinueAsNewError(ctx, SweepPlannerWorkflow, in)
+}
+
+// ColdPlannerWorkflow decides which hot partitions hold more than their high-water mark and makes sure each open cold move
+// has a workflow.
+func ColdPlannerWorkflow(ctx workflow.Context, in Input) error {
+	for i := 0; i < 300; i++ {
+		var n int
+		if err := call(ctx, planOpts(ctx), &n, a.PlanColdMoves); err != nil {
+			return err
+		}
+		if err := call(ctx, opts(ctx), &n, a.StartOpenColdMoves); err != nil {
+			return err
+		}
+		if err := workflow.Sleep(ctx, in.T.ColdInterval); err != nil {
+			return err
+		}
+	}
+	return workflow.NewContinueAsNewError(ctx, ColdPlannerWorkflow, in)
 }
 
 // WithdrawalReconcilerWorkflow starts a workflow for every open withdrawal that
@@ -521,4 +545,49 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 		}
 	}
 	return errors.New("true-up did not finish: the deposit scan is not advancing")
+}
+
+// ---- hot to cold ----
+
+// ColdMoveWorkflow is one hot-to-cold move. Its workflow ID is the move ID: build and enqueue, wait for the gateway (which
+// pins the destination and caps the amount itself), broadcast, wait, settle. A move that fails ends cleanly and the planner
+// plans another if the partition is still above its mark.
+func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
+	id, t := in.ID, in.T
+	var st ColdState
+	if err := call(ctx, opts(ctx), &st, a.LoadColdMove, id); err != nil {
+		return err
+	}
+	if st.Status == "confirmed" || st.Status == "failed" || st.Parked {
+		return nil
+	}
+	o := OwnerArg{Kind: custody.OwnerKindToCold, ID: id, Part: st.Part}
+	ow := custody.Owner{Kind: custody.OwnerKindToCold, ID: id, PartitionID: st.Part}
+
+	var job string
+	if err := call(ctx, buildOpts(ctx), &job, a.BuildColdMoveJob, id); err != nil {
+		workflow.GetLogger(ctx).Warn("could not build the cold move; it will be planned again", "cold_move", id, "error", err.Error())
+		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "could not build: "+err.Error())
+	}
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
+	if err != nil {
+		return err
+	}
+	if r.Kind == txRefused {
+		cr, err := cancelNonce(ctx, t, o)
+		if err != nil {
+			return err
+		}
+		if cr.Kind == txCancelled {
+			return call(ctx, opts(ctx), nil, a.FailColdMove, id, "gateway refused: "+r.Reason)
+		}
+		r = cr
+	}
+	switch r.Kind {
+	case txMined, txReverted:
+		return call(ctx, opts(ctx), nil, a.SettleColdMove, id, r.Hash, r.Kind == txReverted)
+	case txCancelled:
+		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "cancelled")
+	}
+	return fmt.Errorf("unexpected outcome %q", r.Kind)
 }

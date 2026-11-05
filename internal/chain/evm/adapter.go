@@ -150,7 +150,11 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 			return chain.UnsignedTx{}, err
 		}
 	}
-	return a.buildAndAllocate(ctx, tx, "withdrawal", w.ID, w.PartitionID, from, to, value, data)
+	kind := w.OwnerKind
+	if kind == "" {
+		kind = "withdrawal"
+	}
+	return a.buildAndAllocate(ctx, tx, kind, w.ID, w.PartitionID, from, to, value, data)
 }
 
 // BuildSweep builds a call from the hot address of s.ToPartition to the

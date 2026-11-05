@@ -123,6 +123,14 @@ type opts struct {
 	noRelay         bool
 	minSweepWei     string
 	mpcProxy        bool // mpc mode: A reaches B through the session proxy (partition, latency, tamper)
+	cold            *coldOpts
+}
+
+// coldOpts turns hot-to-cold on: the business config gets the cold address and these limits (base units; target defaults to
+// halfway). The gateway and the cosigner always know the cold address.
+type coldOpts struct {
+	ethLow, ethHigh, ethTarget    string
+	usdtLow, usdtHigh, usdtTarget string
 }
 
 type proc struct {
@@ -190,6 +198,7 @@ type system struct {
 	tokABI                    abi.ABI
 	factoryABI                abi.ABI
 	shardAddr                 []common.Address
+	coldAddr                  common.Address  // the cold address both zones are configured with
 	mpc                       *mpcstack.Stack // mpc mode only
 	cosGuardDSN               string
 	chainName                 string
@@ -416,6 +425,17 @@ func newSystem(t *testing.T, o opts) *system {
 			HotWait: "1m", MaxReplacements: 3, Tiers: tiers},
 		Scan: custody.ScanFile{Interval: "500ms", StartHeight: startHeight},
 	}
+	s.coldAddr = randAddr()
+	if o.cold != nil {
+		cf.Cold = custody.ColdFile{
+			Addresses: map[string]string{"omnibus/native": s.coldAddr.Hex(), "omnibus/token": s.coldAddr.Hex()},
+			Limits: map[string]custody.LimitFile{
+				"ETH":  {Low: o.cold.ethLow, High: o.cold.ethHigh, Target: o.cold.ethTarget},
+				"USDT": {Low: o.cold.usdtLow, High: o.cold.usdtHigh, Target: o.cold.usdtTarget},
+			},
+			PlanInterval: "1s",
+		}
+	}
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
 	writeJSON(t, s.cfgPath, cf)
 	if s.cfg, err = custody.LoadConfig(s.cfgPath); err != nil {
@@ -439,14 +459,15 @@ func newSystem(t *testing.T, o opts) *system {
 		Approvers: apprFiles, Signers: signers, SignTimeout: signTimeout(), MaxIntentAge: "24h",
 		Chains: map[string]gateway.ChainFile{s.chainName: {
 			EVM: &gateway.EVMFile{ChainID: 11155111, Factory: s.factory.Hex(), SweepDestination: s.shardAddr[0].Hex(), HotAddresses: hot,
-				Tokens: map[string]gateway.TokenFile{"USDT": {Address: s.usdt.Hex(), Decimals: 6}}, MaxTxFeeWei: "100000000000000000"},
+				ColdAddresses: map[string]string{"omnibus/native": s.coldAddr.Hex(), "omnibus/token": s.coldAddr.Hex()},
+				Tokens:        map[string]gateway.TokenFile{"USDT": {Address: s.usdt.Hex(), Decimals: 6}}, MaxTxFeeWei: "100000000000000000"},
 			Assets: map[string]gateway.AssetFile{
 				"ETH": {PerTxCap: o.gwETHPerTx, DailyCap: "1000000000000000000000000000",
-					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: fmt.Sprint(int64(ether)), Approvals: 2}}},
-				"USDT": {PerTxCap: "1000000000000000", DailyCap: "1000000000000000000",
+					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: fmt.Sprint(int64(ether)), Approvals: 2}}, ToColdDailyCap: "1000000000000000000000000000"},
+				"USDT": {PerTxCap: "1000000000000000", DailyCap: "1000000000000000000", ToColdDailyCap: "1000000000000000000",
 					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "2000000000", Approvals: 2}}},
 			},
-			SweepsPerHour: 100000, CancelsPerHour: 1000}},
+			SweepsPerHour: 100000, CancelsPerHour: 1000, ToColdPerHour: 1000}},
 	}
 	s.gwPath = filepath.Join(s.dir, "gateway.json")
 	writeJSON(t, s.gwPath, gf)
@@ -692,8 +713,8 @@ func (s *system) startCore() {
 func (s *system) terminateWorkflows() {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	ids := []string{workflow.ScanID(s.chainName), workflow.PlannerID(s.chainName), workflow.ReconcilerID(s.chainName)}
-	for _, q := range []string{`SELECT id FROM withdrawals`, `SELECT id FROM sweeps`} {
+	ids := []string{workflow.ScanID(s.chainName), workflow.PlannerID(s.chainName), workflow.ReconcilerID(s.chainName), workflow.ColdPlannerID(s.chainName)}
+	for _, q := range []string{`SELECT id FROM withdrawals`, `SELECT id FROM sweeps`, `SELECT id FROM cold_moves`} {
 		rows, err := s.pool.Query(ctx, q)
 		if err != nil {
 			continue
@@ -936,7 +957,7 @@ func (s *system) sweepsConfirmed() int {
 }
 
 func (s *system) openWork() int {
-	return s.count(`SELECT (SELECT count(*) FROM sweeps WHERE status NOT IN ('confirmed','failed')) + (SELECT count(*) FROM withdrawals WHERE status NOT IN ('confirmed','failed'))`)
+	return s.count(`SELECT (SELECT count(*) FROM sweeps WHERE status NOT IN ('confirmed','failed')) + (SELECT count(*) FROM withdrawals WHERE status NOT IN ('confirmed','failed')) + (SELECT count(*) FROM cold_moves WHERE status NOT IN ('confirmed','failed'))`)
 }
 
 // waitIdle waits until no sweep or withdrawal is open.
@@ -984,6 +1005,7 @@ func (s *system) dump(label string) {
 	q("open or parked sweeps (id, status, from, reason)", `SELECT id, status, from_address, COALESCE(failure_reason,'') FROM sweeps WHERE status NOT IN ('confirmed','failed') OR failure_reason IS NOT NULL ORDER BY created_at`)
 	q("sign jobs not done (id, status, reject)", `SELECT id, status, COALESCE(reject_reason,'') FROM sign_jobs WHERE status<>'done' ORDER BY created_at`)
 	q("open nonce allocations (address, nonce, owner, status)", `SELECT address, nonce, owner_kind||' '||owner_id, status FROM evm_nonce_allocations WHERE status NOT IN ('confirmed','cancelled') ORDER BY address, nonce`)
+	q("cold moves (id, status, amount, reason)", `SELECT id, status, amount::text, COALESCE(failure_reason,'') FROM cold_moves ORDER BY created_at`)
 	q("scan cursor", `SELECT chain, next_height FROM chain_cursors`)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1016,7 +1038,7 @@ func (s *system) dump(label string) {
 
 func (s *system) openIDs() []string {
 	var ids []string
-	for _, q := range []string{`SELECT id FROM withdrawals WHERE status NOT IN ('confirmed','failed')`, `SELECT id FROM sweeps WHERE status NOT IN ('confirmed','failed')`} {
+	for _, q := range []string{`SELECT id FROM withdrawals WHERE status NOT IN ('confirmed','failed')`, `SELECT id FROM sweeps WHERE status NOT IN ('confirmed','failed')`, `SELECT id FROM cold_moves WHERE status NOT IN ('confirmed','failed')`} {
 		rows, err := s.pool.Query(context.Background(), q)
 		if err != nil {
 			continue

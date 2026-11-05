@@ -278,3 +278,25 @@ func TestGuardDatabaseDownIsUnavailableNotRefused(t *testing.T) {
 		t.Fatalf("a malformed request is a refusal, got %+v", got)
 	}
 }
+
+// Party B's own gate repeats the hot-to-cold rules from its own config and store: a rogue party A (or a gateway that was
+// talked into it) cannot get B to take part in a move to any other address, or past the rate and the daily cap.
+func TestCosignerToCold(t *testing.T) {
+	t.Run("to the configured cold address, no approvals", func(t *testing.T) {
+		e := newEnv(t)
+		e.allow(e.h.ToCold("c1", gatewaytest.AddrCold, gatewaytest.AddrCold, 2000, 0))
+	})
+	t.Run("another destination", func(t *testing.T) {
+		e := newEnv(t)
+		e.refuse(e.req(e.h.ToCold("c2", gatewaytest.AddrEvil, gatewaytest.AddrEvil, 100, 0)), gateway.ReasonTx)
+		e.refuse(e.req(e.h.ToCold("c3", gatewaytest.AddrCold, gatewaytest.AddrEvil, 100, 0)), gateway.ReasonTx)
+		e.refuse(e.req(e.h.ToCold("c4", gatewaytest.AddrEvil, gatewaytest.AddrEvil, 100, 0, "alice", "bob")), gateway.ReasonTx)
+	})
+	t.Run("rate and daily cap from its own store", func(t *testing.T) {
+		e := newEnv(t)
+		e.allow(e.h.ToCold("r1", gatewaytest.AddrCold, gatewaytest.AddrCold, 4000, 0))
+		e.refuse(e.req(e.h.ToCold("r2", gatewaytest.AddrCold, gatewaytest.AddrCold, 3000, 1, "alice", "bob")), gateway.ReasonToColdCap)
+		e.allow(e.h.ToCold("r3", gatewaytest.AddrCold, gatewaytest.AddrCold, 1000, 1))
+		e.refuse(e.req(e.h.ToCold("r4", gatewaytest.AddrCold, gatewaytest.AddrCold, 100, 2)), gateway.ReasonToColdRate)
+	})
+}

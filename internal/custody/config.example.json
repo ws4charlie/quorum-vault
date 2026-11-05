@@ -1,5 +1,5 @@
 {
-  "_comment": "PLACEHOLDER business-zone config. Every address below is a dummy. Never commit real values. The signing zone has its own config (internal/gateway/config.example.json) with its own copy of the trust-relevant parts.",
+  "_comment": "PLACEHOLDER business-zone config. Every address below is a dummy. Never commit real values. The signing zone has its own config (internal/gateway/config.example.json) with its own copy of the trust-relevant parts. The cold section: above a limit's high mark the excess moves down to target (default: halfway between low and high); below low the planner logs an ALERT asking for a refill; the signing zone has its own copy of the cold addresses and refuses any other destination.",
   "entity": "qv-us",
   "chain": {
     "name": "evm-example",
@@ -28,5 +28,16 @@
       "USDT": [ { "min_amount": "0", "approvals": 1, "auto": true }, { "min_amount": "2000000000", "approvals": 2 } ]
     }
   },
-  "scan": { "interval": "2s", "start_height": 0 }
+  "scan": { "interval": "2s", "start_height": 0 },
+  "cold": {
+    "addresses": {
+      "omnibus/native": "0x0000000000000000000000000000000000000005",
+      "omnibus/token":  "0x0000000000000000000000000000000000000005"
+    },
+    "limits": {
+      "ETH":  { "low": "2000000000000000000",  "high": "20000000000000000000", "target": "10000000000000000000" },
+      "USDT": { "low": "5000000000",           "high": "50000000000" }
+    },
+    "plan_interval": "5s"
+  }
 }

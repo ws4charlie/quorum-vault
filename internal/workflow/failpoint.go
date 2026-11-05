@@ -11,7 +11,7 @@ import (
 // reached; the test then restarts the worker without the variable. In
 // production the variable is unset and Hit is a map-free string compare.
 //
-// Boundaries, for kind "withdrawal" (sweeps have the same):
+// Boundaries, for kind "withdrawal" (sweeps and hot-to-cold moves, kind "to-cold", have the same):
 //
 //	after_build   the sign job and nonce are committed, the activity has not returned
 //	after_job     the gateway signed the job, the worker has not acted on it

@@ -167,9 +167,14 @@ func (t *GuardTx) NonceClaim(ctx context.Context, sender string, nonce uint64) (
 // WithdrawnSince sums the amount of withdrawal intents of (this chain, asset)
 // first signed at or after since.
 func (t *GuardTx) WithdrawnSince(ctx context.Context, asset string, since time.Time) (*big.Int, error) {
+	return t.AmountSince(ctx, "withdrawal", asset, since)
+}
+
+// AmountSince sums the amount of intents of kind on (this chain, asset) first signed at or after since.
+func (t *GuardTx) AmountSince(ctx context.Context, kind, asset string, since time.Time) (*big.Int, error) {
 	var sum string
 	err := t.tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0)::text FROM signed_intents
-		WHERE chain=$1 AND asset=$2 AND kind='withdrawal' AND created_at >= $3`, t.chain, asset, since).Scan(&sum)
+		WHERE chain=$1 AND asset=$2 AND kind=$3 AND created_at >= $4`, t.chain, asset, kind, since).Scan(&sum)
 	if err != nil {
 		return nil, err
 	}

@@ -35,6 +35,9 @@ import (
 const (
 	testChain     = "evm-test"
 	testPartition = "p-hot"
+	// testColdPartition is a hot partition with a well-formed ID (the to-cold verifier reads the pool from it), on the same hot
+	// address as testPartition.
+	testColdPartition = "qv-us/evm-test/ETH/hot/omnibus/1"
 )
 
 var (
@@ -43,6 +46,7 @@ var (
 	addrToken   = common.HexToAddress("0x00000000000000000000000000000000000070C3")
 	addrUser    = common.HexToAddress("0x00000000000000000000000000000000000c0DE5")
 	addrEvil    = common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	addrCold    = common.HexToAddress("0x00000000000000000000000000000000000c01d0") // configured cold address
 )
 
 // countingSigner counts SignDigest calls so tests can assert "nothing signed".
@@ -150,15 +154,16 @@ func newHarnessChainID(t *testing.T, chainID uint64) *harness {
 		Approvers: approvers,
 		Chains: map[string]ChainFile{testChain: {
 			EVM: &EVMFile{ChainID: chainID, Factory: addrFactory.Hex(), SweepDestination: addrDest.Hex(),
-				HotAddresses: map[string]string{testPartition: h.hot.Hex()},
-				Tokens:       map[string]TokenFile{"USDT": {Address: addrToken.Hex(), Decimals: 6}},
-				MaxTxFeeWei:  "300000000000000"},
+				HotAddresses:  map[string]string{testPartition: h.hot.Hex(), testColdPartition: h.hot.Hex()},
+				ColdAddresses: map[string]string{"omnibus/native": addrCold.Hex(), "omnibus/token": addrCold.Hex()},
+				Tokens:        map[string]TokenFile{"USDT": {Address: addrToken.Hex(), Decimals: 6}},
+				MaxTxFeeWei:   "300000000000000"},
 			Assets: map[string]AssetFile{
-				"ETH": {PerTxCap: "5000", DailyCap: "8000", Tiers: []TierFile{{"0", 1}, {"1000", 2}}},
+				"ETH": {PerTxCap: "5000", DailyCap: "8000", Tiers: []TierFile{{"0", 1}, {"1000", 2}}, ToColdDailyCap: "6000"},
 				"USDT": {PerTxCap: "5000000", DailyCap: "8000000",
-					Tiers: []TierFile{{"0", 1}, {"1000000", 2}}},
+					Tiers: []TierFile{{"0", 1}, {"1000000", 2}}, ToColdDailyCap: "6000000"},
 			},
-			SweepsPerHour: 2, CancelsPerHour: 3,
+			SweepsPerHour: 2, CancelsPerHour: 3, ToColdPerHour: 2,
 		}},
 	}
 	raw, _ := json.Marshal(f)
@@ -173,6 +178,7 @@ func newHarnessChainID(t *testing.T, chainID uint64) *harness {
 	for _, q := range []string{
 		fmt.Sprintf(`INSERT INTO assets (chain, symbol, decimals) VALUES ('%s','ETH',18),('%s','USDT',6)`, testChain, testChain),
 		fmt.Sprintf(`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('%s','qv-us','%s','ETH','hot','omnibus',0)`, testPartition, testChain),
+		fmt.Sprintf(`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('%s','qv-us','%s','ETH','hot','omnibus',1)`, testColdPartition, testChain),
 	} {
 		if _, err := h.biz.Exec(ctx, q); err != nil {
 			t.Fatal(err)
@@ -182,7 +188,7 @@ func newHarnessChainID(t *testing.T, chainID uint64) *harness {
 }
 
 func (h *harness) newGateway(worker string) *Gateway {
-	gw, err := New(h.cfg, nil, map[string]signer.Signer{testPartition: h.signer}, h.guard, h.biz,
+	gw, err := New(h.cfg, nil, map[string]signer.Signer{testPartition: h.signer, testColdPartition: h.signer}, h.guard, h.biz,
 		Options{WorkerID: worker, Lease: time.Minute, Now: h.clock})
 	if err != nil {
 		h.t.Fatal(err)

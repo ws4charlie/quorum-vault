@@ -105,6 +105,27 @@ func (a *Activities) ScanOnce(ctx context.Context) (ScanResult, error) {
 	return ScanResult{Credited: n, Cursor: cur}, err
 }
 
+// heartbeating reports the activity alive every few seconds until the returned function is called, so the server notices a dead
+// worker after the activity's HeartbeatTimeout instead of after its whole StartToCloseTimeout.
+func heartbeating(ctx context.Context) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(3 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				activity.RecordHeartbeat(ctx)
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 // ---- starting workflows (reconcilers) ----
 
 func (a *Activities) start(ctx context.Context, id string, wf any, arg any) error {
@@ -119,6 +140,8 @@ func (a *Activities) start(ctx context.Context, id string, wf any, arg any) erro
 // PlanSweeps creates sweep rows for addresses worth sweeping. Returns whether
 // sweeping is frozen (nothing is planned then, and that is not an error).
 func (a *Activities) PlanSweeps(ctx context.Context) (frozen bool, err error) {
+	stop := heartbeating(ctx)
+	defer stop()
 	_, err = a.D.Svc.PlanSweeps(ctx, a.log())
 	if errors.Is(err, custody.ErrSweepFrozen) {
 		a.log().Info("sweeping is frozen; planning again later")
@@ -284,6 +307,72 @@ func (a *Activities) FailSweep(ctx context.Context, id, reason string) error {
 	return nonRetry(a.D.Svc.FailSweepBeforeBroadcast(ctx, id, reason))
 }
 
+// ---- hot-to-cold move steps ----
+
+// PlanColdMoves creates a move for every hot partition above its high-water mark and logs the low-water ALERT (once per
+// outage). It returns how many it created.
+func (a *Activities) PlanColdMoves(ctx context.Context) (int, error) {
+	stop := heartbeating(ctx)
+	defer stop()
+	mv, err := a.D.Svc.PlanColdMoves(ctx, a.log())
+	return len(mv), err
+}
+
+// StartOpenColdMoves starts a ColdMove workflow for every unfinished move that has none running.
+func (a *Activities) StartOpenColdMoves(ctx context.Context) (int, error) {
+	open, err := a.D.Svc.OpenColdMoves(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, m := range open {
+		if err := a.start(ctx, m.ID, ColdMoveWorkflow, Input{ID: m.ID, T: a.D.T}); err != nil {
+			return 0, fmt.Errorf("start cold move %s: %w", m.ID, err)
+		}
+	}
+	return len(open), nil
+}
+
+// ColdState is a cold move as the workflow needs it.
+type ColdState struct {
+	Status string
+	Part   string
+	Parked bool
+}
+
+// LoadColdMove reads the move.
+func (a *Activities) LoadColdMove(ctx context.Context, id string) (ColdState, error) {
+	m, err := a.D.Svc.GetColdMove(ctx, id)
+	return ColdState{Status: m.Status, Part: m.PartitionID, Parked: m.Parked()}, err
+}
+
+// BuildColdMoveJob builds the move and enqueues its sign job in one transaction.
+func (a *Activities) BuildColdMoveJob(ctx context.Context, id string) (string, error) {
+	job, err := a.D.Svc.BuildColdMoveJob(ctx, id)
+	if err != nil {
+		return "", nonRetry(err)
+	}
+	Hit(custody.OwnerKindToCold, "after_build")
+	return job, nil
+}
+
+// SettleColdMove books a mined move.
+func (a *Activities) SettleColdMove(ctx context.Context, id, txHash string, reverted bool) error {
+	st := chain.TxConfirmed
+	if reverted {
+		st = chain.TxFailed
+	}
+	if err := a.D.Svc.SettleColdMove(ctx, id, txHash, st); err != nil {
+		return nonRetry(err)
+	}
+	Hit(custody.OwnerKindToCold, "after_settle")
+	return nil
+}
+
+// FailColdMove ends a move that never broadcast, once its nonce is freed.
+func (a *Activities) FailColdMove(ctx context.Context, id, reason string) error {
+	return nonRetry(a.D.Svc.FailColdMoveBeforeBroadcast(ctx, id, reason))
+}
+
 // ---- shared transaction steps (withdrawals and sweeps) ----
 
 // OwnerArg identifies a transaction owner and its tracks in activity arguments.
@@ -323,6 +412,8 @@ func killKind(jobID string) (string, string) {
 		return "withdrawal", jobID
 	case len(jobID) > 6 && jobID[:6] == "sweep:":
 		return "sweep", jobID
+	case len(jobID) > 7 && jobID[:7] == "tocold:":
+		return custody.OwnerKindToCold, jobID
 	}
 	return "cancel", jobID
 }
@@ -352,6 +443,8 @@ func (a *Activities) RecordBroadcast(ctx context.Context, o OwnerArg, txHash str
 		return a.D.Svc.RecordWithdrawalBroadcast(ctx, o.ID, txHash)
 	case "sweep":
 		return a.D.Svc.RecordSweepBroadcast(ctx, o.ID, txHash)
+	case custody.OwnerKindToCold:
+		return a.D.Svc.RecordColdMoveBroadcast(ctx, o.ID, txHash)
 	}
 	return fmt.Errorf("unknown owner kind %q", o.Kind)
 }
@@ -395,8 +488,11 @@ func (a *Activities) WaitNonce(ctx context.Context, o OwnerArg, wait time.Durati
 // Park records that a withdrawal or sweep needs an operator and logs the ALERT.
 func (a *Activities) Park(ctx context.Context, o OwnerArg, reason string) error {
 	a.log().Error("ALERT: parked for an operator", "owner", o.Kind+" "+o.ID, "reason", reason)
-	if o.Kind == "withdrawal" {
+	switch o.Kind {
+	case "withdrawal":
 		return a.D.Svc.ParkWithdrawal(ctx, o.ID, reason)
+	case custody.OwnerKindToCold:
+		return a.D.Svc.ParkColdMove(ctx, o.ID, reason)
 	}
 	return a.D.Svc.ParkSweep(ctx, o.ID, reason)
 }

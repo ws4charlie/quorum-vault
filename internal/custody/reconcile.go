@@ -57,7 +57,8 @@ func (s *Service) posted(ctx context.Context, acct string) (*big.Int, error) {
 //     balance of the shard's address (fees make ETH exact);
 //   - minus dep equals the sum of on-chain balances of all deposit addresses;
 //   - ledger.CheckInvariants passes;
-//   - sweep and wd residuals are zero when nothing is in flight (otherwise
+//   - for every cold address, minus the cold accounts of the partitions that use it equals its on-chain balance;
+//   - sweep, wd and tocold residuals are zero when nothing is in flight (otherwise
 //     they are skipped and counted in InFlight);
 //   - the scan has caught up to the pinned height (otherwise deposits the
 //     chain has but the books do not yet would show as differences).
@@ -93,6 +94,40 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 			}
 			want := new(big.Int).Neg(posted)
 			rep.add(Check{Name: "hot", Asset: sym, Subject: addr.Hex(), Ledger: want.String(), Chain: bal.String(), OK: want.Cmp(bal) == 0})
+		}
+	}
+
+	// Cold addresses: what hot-to-cold moves delivered, per cold address and asset, against the chain. Several hot partitions
+	// (shards) may share one cold address, so their cold accounts are summed.
+	if len(c.EVM.ColdAddresses) > 0 {
+		type coldKey struct{ addr, asset string }
+		sums := map[coldKey]*big.Int{}
+		var keys []coldKey
+		for _, sym := range c.AssetList {
+			for i := range c.HotShards {
+				p := c.PartitionKey(sym, i).String()
+				ca, err := c.EVM.ColdAddress(p, sym)
+				if err != nil {
+					continue // no cold address configured for this pool and asset class
+				}
+				posted, err := s.posted(ctx, coldAcct(p))
+				if err != nil {
+					return rep, err
+				}
+				k := coldKey{ca.Hex(), sym}
+				if sums[k] == nil {
+					sums[k] = new(big.Int)
+					keys = append(keys, k)
+				}
+				sums[k].Sub(sums[k], posted)
+			}
+		}
+		for _, k := range keys {
+			bal, err := s.Reader.Balance(ctx, k.addr, k.asset, h)
+			if err != nil {
+				return rep, err
+			}
+			rep.add(Check{Name: "cold", Asset: k.asset, Subject: k.addr, Ledger: sums[k].String(), Chain: bal.String(), OK: sums[k].Cmp(bal) == 0})
 		}
 	}
 
@@ -138,12 +173,13 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 	// Clearing residuals.
 	var open int
 	if err := s.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
-		+ (SELECT count(*) FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed'))`, c.Chain).Scan(&open); err != nil {
+		+ (SELECT count(*) FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
+		+ (SELECT count(*) FROM cold_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))`, c.Chain).Scan(&open); err != nil {
 		return rep, err
 	}
 	rep.InFlight = open
 	for _, sym := range c.AssetList {
-		for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym)} {
+		for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym)} {
 			p, err := s.posted(ctx, id)
 			if err != nil {
 				return rep, err

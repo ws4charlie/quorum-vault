@@ -17,6 +17,7 @@ const (
 	TopicDeposits    = "qv.deposits"
 	TopicWithdrawals = "qv.withdrawals"
 	TopicSweeps      = "qv.sweeps"
+	TopicColdMoves   = "qv.cold-moves"
 	TopicAudit       = "qv.audit"
 )
 

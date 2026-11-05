@@ -30,6 +30,9 @@ import (
 const (
 	Chain     = "evm-test"
 	Partition = "p-hot"
+	// ColdPartition is a hot partition with a well-formed ID (the to-cold verifier reads the pool from it), on the same hot
+	// address as Partition.
+	ColdPartition = "qv-us/evm-test/ETH/hot/omnibus/1"
 )
 
 var (
@@ -38,6 +41,7 @@ var (
 	AddrToken   = common.HexToAddress("0x00000000000000000000000000000000000070C3")
 	AddrUser    = common.HexToAddress("0x00000000000000000000000000000000000c0DE5")
 	AddrEvil    = common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+	AddrCold    = common.HexToAddress("0x00000000000000000000000000000000000c01d0") // the configured cold address
 )
 
 // Harness is one signing-zone configuration: approvers alice, bob, carol (enabled), auto, dave (disabled), policies for
@@ -66,14 +70,15 @@ func New(t testing.TB, chainID uint64, hot common.Address) *Harness {
 		Approvers: approvers,
 		Chains: map[string]gateway.ChainFile{Chain: {
 			EVM: &gateway.EVMFile{ChainID: chainID, Factory: AddrFactory.Hex(), SweepDestination: AddrDest.Hex(),
-				HotAddresses: map[string]string{Partition: hot.Hex()},
-				Tokens:       map[string]gateway.TokenFile{"USDT": {Address: AddrToken.Hex(), Decimals: 6}},
-				MaxTxFeeWei:  "300000000000000"},
+				HotAddresses:  map[string]string{Partition: hot.Hex(), ColdPartition: hot.Hex()},
+				ColdAddresses: map[string]string{"omnibus/native": AddrCold.Hex(), "omnibus/token": AddrCold.Hex()},
+				Tokens:        map[string]gateway.TokenFile{"USDT": {Address: AddrToken.Hex(), Decimals: 6}},
+				MaxTxFeeWei:   "300000000000000"},
 			Assets: map[string]gateway.AssetFile{
-				"ETH":  {PerTxCap: "5000", DailyCap: "8000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000", Approvals: 2}}},
-				"USDT": {PerTxCap: "5000000", DailyCap: "8000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000000", Approvals: 2}}},
+				"ETH":  {PerTxCap: "5000", DailyCap: "8000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000", Approvals: 2}}, ToColdDailyCap: "6000"},
+				"USDT": {PerTxCap: "5000000", DailyCap: "8000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000000", Approvals: 2}}, ToColdDailyCap: "6000000"},
 			},
-			SweepsPerHour: 2, CancelsPerHour: 3,
+			SweepsPerHour: 2, CancelsPerHour: 3, ToColdPerHour: 2,
 		}},
 	}
 	h.Reparse()
@@ -176,6 +181,12 @@ func (h *Harness) Approvals(in signjob.Intent, actors ...string) []signjob.Appro
 func (h *Harness) Withdrawal(id string, to common.Address, amount int64, nonce uint64, approvers ...string) signjob.Job {
 	in := signjob.Intent{Kind: "withdrawal", ID: "w-" + id, Asset: "ETH", To: to.Hex(), Amount: fmt.Sprint(amount)}
 	return h.Job(id, in, ETH(to, amount, nonce), approvers...)
+}
+
+// ToCold is a hot-to-cold job of ETH: the intent names intentTo, the transaction pays txTo. No approvals are needed.
+func (h *Harness) ToCold(id string, intentTo, txTo common.Address, amount int64, nonce uint64, approvers ...string) signjob.Job {
+	in := signjob.Intent{Kind: "to-cold", ID: "m-" + id, PartitionID: ColdPartition, Asset: "ETH", To: intentTo.Hex(), Amount: fmt.Sprint(amount)}
+	return h.Job(id, in, ETH(txTo, amount, nonce), approvers...)
 }
 
 // NewGuardDB creates an empty database on the DATABASE_URL server (dropped at cleanup) and returns a pool. Each call is a

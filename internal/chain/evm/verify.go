@@ -89,6 +89,8 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		return v.verifyWithdrawal(tx.To(), tx.Value(), tx.Data(), i, amount, tok, native)
 	case "sweep":
 		return v.verifySweep(tx.To(), tx.Value(), tx.Data(), i, tok, native)
+	case "to-cold":
+		return v.verifyToCold(tx.To(), tx.Value(), tx.Data(), i, amount, tok, native)
 	case "cancel":
 		return v.verifyCancel(tx, from, i, amount)
 	default:
@@ -184,6 +186,53 @@ func (v *Verifier) verifySweep(to *common.Address, value *big.Int, data []byte, 
 	}
 	if dest != cfg.SweepDestination {
 		return reject("intent destination %s is not the configured sweep destination %s", dest, cfg.SweepDestination)
+	}
+	return nil
+}
+
+// verifyToCold accepts a hot-to-cold move only when its destination is the cold address that signing-zone config names for
+// the partition's pool and the asset class, and the transaction is a plain transfer of exactly the intent's amount to it:
+// native value, or an ERC-20 transfer(cold, amount) on the configured token. The intent's own To is checked too, so an intent
+// that names another destination is refused even if the transaction happens to match it.
+func (v *Verifier) verifyToCold(to *common.Address, value *big.Int, data []byte, i signjob.Intent, amount *big.Int, tok Token, native bool) error {
+	if i.From != "" {
+		return reject("to-cold intent has a source address")
+	}
+	if amount.Sign() == 0 {
+		return reject("zero amount")
+	}
+	cold, err := v.cfg.ColdAddress(i.PartitionID, i.Asset)
+	if err != nil {
+		return reject("%v", err)
+	}
+	dest, err := parseIntentAddress(i.To)
+	if err != nil {
+		return reject("%v", err)
+	}
+	if dest != cold {
+		return reject("to-cold destination %s is not the configured cold address %s", dest, cold)
+	}
+	if to == nil {
+		return reject("contract creation")
+	}
+	if native {
+		if *to != cold || value.Cmp(amount) != 0 || len(data) != 0 {
+			return reject("to-cold transfer is to %s value %s data %d bytes; the cold address is %s and the amount %s", to, value, len(data), cold, amount)
+		}
+		return nil
+	}
+	if *to != tok.Address {
+		return reject("call target %s is not the %s token %s", to, i.Asset, tok.Address)
+	}
+	if value.Sign() != 0 {
+		return reject("token transfer carries value %s", value)
+	}
+	want, err := packTransfer(cold, amount)
+	if err != nil {
+		return reject("%v", err)
+	}
+	if !bytes.Equal(want, data) {
+		return reject("calldata is not transfer(%s, %s)", cold, amount)
 	}
 	return nil
 }

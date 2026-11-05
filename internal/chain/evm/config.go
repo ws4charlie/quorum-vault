@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
 // Defaults.
@@ -36,10 +38,14 @@ type Config struct {
 	Factory          common.Address
 	SweepDestination common.Address
 	HotAddresses     map[string]common.Address // partition ID -> hot address
-	Assets           map[string]Token          // symbol -> token (the native asset is implicit)
-	NativeAsset      string                    // default "ETH"
-	FeeBumpPercent   uint64                    // replacement bump, default 15
-	StuckAfterBlocks uint64                    // default 50
+	// ColdAddresses is where hot-to-cold moves go, per pool and asset class: key "<pool>/native" or "<pool>/token". The
+	// verifier accepts a "to-cold" intent only when its destination is exactly this address. It lives in signing-zone
+	// config, so the business side cannot change it.
+	ColdAddresses    map[string]common.Address
+	Assets           map[string]Token // symbol -> token (the native asset is implicit)
+	NativeAsset      string           // default "ETH"
+	FeeBumpPercent   uint64           // replacement bump, default 15
+	StuckAfterBlocks uint64           // default 50
 	// MaxTxFeeWei caps gas x max_fee_per_gas of every transaction. Required: the
 	// hot wallet pays it and it is not part of the intent.
 	MaxTxFeeWei *big.Int
@@ -86,7 +92,56 @@ func (c Config) validate() error {
 			return fmt.Errorf("evm: config: bad asset entry %q", s)
 		}
 	}
+	hot := map[common.Address]bool{}
+	for _, a := range c.HotAddresses {
+		hot[a] = true
+	}
+	for k, a := range c.ColdAddresses {
+		i := strings.LastIndex(k, "/")
+		if i <= 0 || (k[i+1:] != ClassNative && k[i+1:] != ClassToken) {
+			return fmt.Errorf("evm: config: cold address key %q: want <pool>/native or <pool>/token", k)
+		}
+		if a == (common.Address{}) || hot[a] || a == c.Factory {
+			return fmt.Errorf("evm: config: cold address %s for %q is zero, a hot address or the factory", a, k)
+		}
+	}
 	return nil
+}
+
+// Asset classes of a cold address key.
+const (
+	ClassNative = "native"
+	ClassToken  = "token"
+)
+
+// ColdKey is the ColdAddresses key for a partition's pool and an asset.
+func (c Config) ColdKey(partitionID, asset string) (string, error) {
+	k, err := partition.Parse(partitionID)
+	if err != nil {
+		return "", err
+	}
+	_, native, err := c.asset(asset)
+	if err != nil {
+		return "", err
+	}
+	class := ClassToken
+	if native {
+		class = ClassNative
+	}
+	return k.Pool + "/" + class, nil
+}
+
+// ColdAddress is the configured cold address for the partition's pool and the asset.
+func (c Config) ColdAddress(partitionID, asset string) (common.Address, error) {
+	key, err := c.ColdKey(partitionID, asset)
+	if err != nil {
+		return common.Address{}, err
+	}
+	a, ok := c.ColdAddresses[key]
+	if !ok {
+		return common.Address{}, fmt.Errorf("evm: no cold address configured for %q", key)
+	}
+	return a, nil
 }
 
 // asset resolves a symbol: (zero Token, true) for native, else the token.

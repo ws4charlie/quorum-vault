@@ -155,6 +155,37 @@ func TestRogueParty_Decisions(t *testing.T) {
 	})
 }
 
+// A rogue party A asks party B to take part in hot-to-cold moves it should refuse: B's cosigner holds its own copy of the cold
+// address, rate and daily cap, so owning A (or the gateway) does not let anyone move funds anywhere but the cold address.
+func TestRogueParty_ToCold(t *testing.T) {
+	s := newStack(t, stackOpts{})
+	s.provision(t, false)
+	r := s.rogue(t)
+	cold, evil := gatewaytest.AddrCold, gatewaytest.AddrEvil
+
+	t.Run("another destination, no approvals needed to ask", func(t *testing.T) {
+		r.refused(t, r.signOpen(s.h.ToCold("tc-1", evil, evil, 100, 20), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonTx)
+	})
+	t.Run("intent says cold, transaction pays the attacker", func(t *testing.T) {
+		r.refused(t, r.signOpen(s.h.ToCold("tc-2", cold, evil, 100, 21), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonTx)
+	})
+	t.Run("approvals do not rescue a wrong destination", func(t *testing.T) {
+		r.refused(t, r.signOpen(s.h.ToCold("tc-3", evil, evil, 100, 22, "alice", "bob"), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonTx)
+	})
+	t.Run("over the daily cap with approvals attached", func(t *testing.T) {
+		r.refused(t, r.signOpen(s.h.ToCold("tc-4", cold, cold, 7000, 23, "alice", "bob"), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonToColdCap)
+	})
+	t.Run("a legitimate move is accepted, then the rate limit holds", func(t *testing.T) {
+		for i, n := range []int{2000, 2000} {
+			ack, fin := r.open(t, r.signOpen(s.h.ToCold(fmt.Sprintf("tc-ok-%d", i), cold, cold, int64(n), uint64(30+i)), s.pub33))
+			if !ack {
+				t.Fatalf("legitimate move %d refused: %+v", i, fin)
+			}
+		}
+		r.refused(t, r.signOpen(s.h.ToCold("tc-rate", cold, cold, 100, 32), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonToColdRate)
+	})
+}
+
 func TestRogueParty_DailyCapSplitting(t *testing.T) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)
