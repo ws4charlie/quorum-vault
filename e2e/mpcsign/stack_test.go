@@ -38,6 +38,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	grpcstatus "google.golang.org/grpc/status"
 
+	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/gateway/gatewaytest"
@@ -255,10 +256,6 @@ func newStack(t *testing.T, o stackOpts) *stack {
 	s := &stack{t: t, dir: t.TempDir(), chainID: o.chainID, keysetID: "hot"}
 	s.certA, s.certB, s.certGW, s.certProx = newCert(t, "party-a"), newCert(t, "party-b"), newCert(t, "gateway"), newCert(t, "proxy")
 	s.adminPub, s.admin, _ = ed25519.GenerateKey(rand.Reader)
-	seal := filepath.Join(s.dir, "seal.key")
-	k := make([]byte, 32)
-	rand.Read(k)
-	os.WriteFile(seal, []byte(hex.EncodeToString(k)), 0o600)
 	s.callerA, s.callerB, s.peerB = freeAddr(t), freeAddr(t), freeAddr(t)
 	s.peerForA = s.peerB
 	s.sock = filepath.Join(os.TempDir(), fmt.Sprintf("qvcs-%d.sock", time.Now().UnixNano()%1e9))
@@ -269,7 +266,7 @@ func newStack(t *testing.T, o stackOpts) *stack {
 		s.proxy, s.peerForA = startProxy(t, s)
 		pin = s.certProx.pin
 	}
-	s.cfgA, s.cfgB = s.writeParty(t, "A", seal, pin), s.writeParty(t, "B", seal, pin)
+	s.cfgA, s.cfgB = s.writeParty(t, "A", "", pin), s.writeParty(t, "B", "", pin)
 	s.startParties(t)
 	return s
 }
@@ -287,7 +284,7 @@ func (s *stack) writeParty(t *testing.T, role, seal, peerPin string) string {
 	cfg := map[string]any{
 		"role": role, "cert_file": crt, "key_file": key, "peer_pins": []string{peerPin}, "caller_pins": []string{s.certGW.pin},
 		"data_dir": filepath.Join(s.dir, "data-"+role), "admin_keys": []string{hex.EncodeToString(s.adminPub)},
-		"sealer": map[string]any{"type": "insecure-static-key-for-tests", "key_file": seal},
+		"sealer": mpcstack.SealerConfig(role),
 		"limits": map[string]any{"recv_timeout_ms": 3000, "session_timeout_ms": 20000, "sessions_per_sec_key": 100000, "max_peer_sessions": 32},
 	}
 	if role == "A" {
@@ -304,8 +301,8 @@ func (s *stack) writeParty(t *testing.T, role, seal, peerPin string) string {
 }
 
 func (s *stack) startParties(t *testing.T) {
-	s.b = startProc(t, "B", binMPC, nil, "-config", s.cfgB)
-	s.a = startProc(t, "A", binMPC, nil, "-config", s.cfgA)
+	s.b = startProc(t, "B", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgB)
+	s.a = startProc(t, "A", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgA)
 	conn, err := grpc.NewClient(s.callerA, grpc.WithTransportCredentials(credentials.NewTLS(pinnedTLS(s.certGW, s.certA.pin))))
 	if err != nil {
 		t.Fatal(err)
@@ -557,7 +554,7 @@ func startProxy(t *testing.T, s *stack) (*tamperProxy, string) {
 }
 
 func (s *stack) restartB(t *testing.T) {
-	s.b = startProc(t, "B", binMPC, nil, "-config", s.cfgB)
+	s.b = startProc(t, "B", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgB)
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
