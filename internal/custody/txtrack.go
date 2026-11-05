@@ -119,7 +119,15 @@ func (s *Service) RequeueJob(ctx context.Context, failedID, newID string) error 
 			return err
 		}
 		j.ID = newID
-		return signjob.Enqueue(ctx, tx, j)
+		if err := signjob.Enqueue(ctx, tx, j); err != nil {
+			return err
+		}
+		// A restarted workflow (an operator cleared a parked row after fixing the cause, e.g. unfreezing a keyset) meets a
+		// retry job that already exists and already failed. Failed means the signer had an operational problem, not that
+		// the request was refused, and the gateway keeps its reservation for the digest, so signing it again can only give
+		// the same signature. Without this the second failure would be final and the row would park again at once.
+		_, err = tx.Exec(ctx, `UPDATE sign_jobs SET status='pending', locked_by=NULL, locked_at=NULL, updated_at=now() WHERE id=$1 AND status='failed'`, newID)
+		return err
 	})
 }
 

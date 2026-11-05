@@ -99,13 +99,26 @@ func TestMPCKillSigningComponentAtCustodyBoundary(t *testing.T) {
 			current = v.name + " down, worker killed at " + fp
 			s.worker.stop()
 			s.startWorker(fp)
-			v.kill()
 			before := s.gwLogCount("ALERT signer unavailable")
+			afterSig := fp == "withdrawal.after_job" // this boundary is reached only once the signature exists
+			if !afterSig {
+				v.kill()
+			}
 			id, dest := s.startPayment("c-mk", fmt.Sprintf("k-mk-%d", n))
 			if code, ok := s.worker.exitCode(90 * time.Second); !ok || code != 137 {
 				t.Fatalf("%s: worker did not die at %s (exited=%v code=%d)", v.name, fp, ok, code)
 			}
+			if afterSig {
+				v.kill() // signed already: the restarted workflow must finish without the signer
+			}
 			s.startWorker("")
+			if afterSig {
+				s.mustPayOnce(id, dest, 150*time.Second)
+				v.start()
+				s.finish()
+				t.Logf("kill %-9s at %-24s ok: signature existed, payout completed with the component down, one payout, Reconcile clean", v.name, fp)
+				continue
+			}
 			s.waitOutageSeen(before, current)
 			if got := s.getWd(id); got.Status == "confirmed" || got.Status == "failed" {
 				t.Fatalf("%s: withdrawal is %s while %s is down", current, got.Status, v.name)
@@ -253,10 +266,15 @@ func TestMPCRefreshDuringLiveWithdrawals(t *testing.T) {
 	// Let some be in flight, then refresh.
 	s.waitFor(60*time.Second, "withdrawals in flight", func() bool { mu.Lock(); defer mu.Unlock(); return len(pays) >= 2 })
 	start := time.Now()
-	if err := s.mpc.Refresh(); err != nil {
-		close(stop)
-		wg.Wait()
-		t.Fatalf("Refresh during live withdrawals: %v", err)
+	const refreshes = 4
+	for i := 0; i < refreshes; i++ {
+		if err := s.mpc.Refresh(); err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("Refresh #%d during live withdrawals: %v", i+1, err)
+		}
+		n := len(pays)
+		s.waitFor(60*time.Second, "more withdrawals between refreshes", func() bool { mu.Lock(); defer mu.Unlock(); return len(pays) >= n+2 })
 	}
 	took := time.Since(start)
 	close(stop)
@@ -275,7 +293,7 @@ func TestMPCRefreshDuringLiveWithdrawals(t *testing.T) {
 	id, dest := s.startPayment("c-ref", "k-ref-after")
 	s.mustPayOnce(id, dest, 150*time.Second)
 	s.finish()
-	t.Logf("REFRESH took %v with %d withdrawals made around it; generation %d -> %d; none failed, none refused, each paid once", took.Round(10*time.Millisecond), len(pays), gen0, h1.Keysets[0].Generation)
+	t.Logf("REFRESH x%d took %v in all, with %d withdrawals made around them; generation %d -> %d; none failed, none refused, each paid once", refreshes, took.Round(10*time.Millisecond), len(pays), gen0, h1.Keysets[0].Generation)
 }
 
 // A keyset frozen while withdrawals are live: the sign jobs fail with an ALERT, no hold is voided while a nonce is open, and
