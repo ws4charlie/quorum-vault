@@ -145,7 +145,7 @@ func TestMPCKillPartyMidSession(t *testing.T) {
 		name        string
 		kill, start func()
 	}{{"party-A", s.mpc.A.Kill, s.mpc.RestartA}, {"party-B", s.mpc.B.Kill, s.mpc.RestartB}} {
-		s.mpc.Proxy.SetLatency(500 * time.Millisecond)
+		s.mpc.Proxy.SetLatency(200 * time.Millisecond)
 		sessions := s.mpc.Proxy.Sessions.Load()
 		before := s.gwLogCount("ALERT signer unavailable")
 		id, dest := s.startPayment("c-mid", fmt.Sprintf("k-mid-%d", i))
@@ -182,7 +182,7 @@ func TestMPCPartitionBetweenPartiesDuringWithdrawal(t *testing.T) {
 	s.finish()
 
 	// 2. Cut in the middle of a session.
-	s.mpc.Proxy.SetLatency(500 * time.Millisecond)
+	s.mpc.Proxy.SetLatency(200 * time.Millisecond)
 	sessions := s.mpc.Proxy.Sessions.Load()
 	before = s.gwLogCount("ALERT signer unavailable")
 	id2, dest2 := s.startPayment("c-part", "k-part-2")
@@ -202,7 +202,7 @@ func TestMPCPartitionBetweenPartiesDuringWithdrawal(t *testing.T) {
 // large enough to matter (one second), which also has to complete inside the gateway's sign timeout.
 func TestMPCWithdrawalLatencyWithSlowLink(t *testing.T) {
 	requireMPC(t)
-	s, _ := funded(t, opts{mpcProxy: true}, "c-lat", 30)
+	s, _ := funded(t, opts{mpcProxy: true, signTimeout: sd(40 * time.Second)}, "c-lat", 30) // slow on purpose: a 1 s-per-frame signature takes 13 s
 	cases := []struct {
 		name  string
 		delay time.Duration

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/custody"
+	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
 
 // Hot to cold: the excess above a hot wallet's high-water mark goes to the cold address by itself. These run in both signer
@@ -198,7 +199,7 @@ func TestColdMoveBelowLowRaisesOneAlert(t *testing.T) {
 		if _, err := s.svc.PlanColdMoves(s.ctx, log); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(1200 * time.Millisecond) // several planner passes in the worker too
+		s.waitPasses(workflow.ColdPlannerID(s.chainName), 3) // several planner passes in the worker too
 	}
 	if n := alerts(); n != 1 {
 		t.Fatalf("%d ALERTs for one outage, want 1\nworker: %s", n, readFile(s.worker.log))

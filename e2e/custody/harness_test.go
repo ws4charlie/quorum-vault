@@ -124,11 +124,14 @@ type opts struct {
 	gwETHPerTx      string // gateway per-tx cap for ETH (wei), default huge
 	businessOneTier bool   // business config knows only the lowest tier (the gateway still has two)
 	approvalTimeout string // default 20s
-	stuckAfter      string // default 8s
+	stuckAfter      string // default 4s (scaled)
 	noRelay         bool
 	minSweepWei     string
-	mpcProxy        bool // mpc mode: A reaches B through the session proxy (partition, latency, tamper)
-	cold            *coldOpts
+	// signTimeout overrides the gateway sign timeout (and with it the retry window and the lease) for a test whose signatures are
+	// made slow on purpose.
+	signTimeout string
+	mpcProxy    bool // mpc mode: A reaches B through the session proxy (partition, latency, tamper)
+	cold        *coldOpts
 }
 
 // coldOpts turns hot-to-cold on: the business config gets the cold address and these limits (base units; target defaults to
@@ -307,7 +310,7 @@ func newSystem(t *testing.T, o opts) *system {
 		o.approvalTimeout = "20s"
 	}
 	if o.stuckAfter == "" {
-		o.stuckAfter = "8s"
+		o.stuckAfter = sd(4 * time.Second)
 	}
 	if o.gwETHPerTx == "" {
 		o.gwETHPerTx = "1000000000000000000000000"
@@ -436,8 +439,8 @@ func newSystem(t *testing.T, o opts) *system {
 				"ETH":  {Decimals: 18, MinDeposit: "0", PriceWei: "1"},
 				"USDT": {Address: s.usdt.Hex(), Decimals: 6, MinDeposit: "1000", PriceWei: "300000000"},
 			}},
-		Sweep: custody.SweepFile{K: 20, MinSweepWei: o.minSweepWei, PlanInterval: "1s"},
-		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: o.approvalTimeout, SignTimeout: "3s", StuckAfter: o.stuckAfter,
+		Sweep: custody.SweepFile{K: 20, MinSweepWei: o.minSweepWei, PlanInterval: "300ms"},
+		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: o.approvalTimeout, SignTimeout: signTimeout(o), StuckAfter: o.stuckAfter,
 			HotWait: "1m", MaxReplacements: 3, Tiers: tiers},
 		Scan: custody.ScanFile{Interval: "500ms", StartHeight: startHeight},
 	}
@@ -477,7 +480,7 @@ func newSystem(t *testing.T, o opts) *system {
 		}
 	}
 	gf := gateway.File{
-		Approvers: apprFiles, Signers: signers, SignTimeout: signTimeout(), MaxIntentAge: "24h",
+		Approvers: apprFiles, Signers: signers, SignTimeout: signTimeout(o), MaxIntentAge: "24h",
 		Chains: map[string]gateway.ChainFile{s.chainName: {
 			EVM: &gateway.EVMFile{ChainID: 11155111, Factory: s.factory.Hex(), SweepDestination: s.shardAddr[0].Hex(), HotAddresses: hot,
 				ColdAddresses: map[string]string{"omnibus/native": s.coldAddr.Hex(), "omnibus/token": s.coldAddr.Hex()},
@@ -572,17 +575,38 @@ func newSystem(t *testing.T, o opts) *system {
 	return s
 }
 
-// signTimeout bounds one signer call at the gateway. An HSM answers in milliseconds; two parties running a protocol over the
-// network need seconds on a slow runner, so mpc mode allows 30 s (QV_CUSTODY_SIGN_TIMEOUT overrides it).
-func signTimeout() string {
+// signTimeout bounds one signer call at the gateway, and is also how long a reserved digest counts as "being signed" (a retry
+// after an outage waits that long) and, with the lease, how long a failed attempt keeps its job. An HSM answers in milliseconds
+// and two parties in about 50 ms, so the test values are short (they are stretched by QV_E2E_TIMEOUT_SCALE on a slow runner):
+// 3 s for the HSM, 5 s for two parties. A test that makes signatures slow on purpose sets opts.signTimeout. The business config's
+// sign_timeout (how long the workflow waits before it re-enqueues a failed job) is the same value.
+// QV_CUSTODY_SIGN_TIMEOUT overrides everything.
+func signTimeout(o opts) string {
 	if v := os.Getenv("QV_CUSTODY_SIGN_TIMEOUT"); v != "" {
 		return v
 	}
+	if o.signTimeout != "" {
+		return o.signTimeout
+	}
 	if mpcMode() {
-		return "30s"
+		return sd(5 * time.Second)
 	}
 	return "3s"
 }
+
+// gatewayLease is how long a claimed job stays with its worker before another may take it: longer than one signer call.
+func gatewayLease(o opts) string {
+	d, err := time.ParseDuration(signTimeout(o))
+	if err != nil {
+		return "30s"
+	}
+	return (d + sdur(3*time.Second)).String()
+}
+
+// sd is a test duration written as a config string, stretched by QV_E2E_TIMEOUT_SCALE.
+func sd(d time.Duration) string { return sdur(d).String() }
+
+func sdur(d time.Duration) time.Duration { return scaled(d) }
 
 // scaled stretches a wait by QV_E2E_TIMEOUT_SCALE (default 1; CI sets a larger value). Every wait in these tests is on a
 // condition, so the scale only changes how long a slow machine is given before the test calls it stuck.
@@ -705,7 +729,7 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 
 func (s *system) startGateway() {
 	s.gateway = s.spawn("qv-gateway", []string{"QV_HSM_PIN=" + hsmtest.PIN()},
-		"-config", s.gwPath, "-jobs-dsn", s.gatewayJobsDSN(), "-guard-dsn", s.guardDSN, "-interval", "200ms", "-lease", "30s",
+		"-config", s.gwPath, "-jobs-dsn", s.gatewayJobsDSN(), "-guard-dsn", s.guardDSN, "-interval", "200ms", "-lease", gatewayLease(s.o),
 		"-worker-id", "gw-"+uuid.NewString()[:6])
 }
 
@@ -774,6 +798,42 @@ func (s *system) waitFor(timeout time.Duration, what string, f func() bool) {
 		}
 		if time.Now().After(dl) {
 			s.t.Fatalf("timed out after %s waiting for %s", timeout, what)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+// historyLen is the number of history events of a workflow's latest run.
+func (s *system) historyLen(id string) int {
+	d, err := s.tc.DescribeWorkflowExecution(s.ctx, id, "")
+	if err != nil {
+		return 0
+	}
+	return int(d.WorkflowExecutionInfo.HistoryLength)
+}
+
+// waitHistory waits until the workflow has written n more history events: it has run again. (A run that continued as new counts as
+// progress.)
+func (s *system) waitHistory(id string, n int) {
+	s.t.Helper()
+	base := s.historyLen(id)
+	s.waitFor(30*time.Second, fmt.Sprintf("%s to write %d more history events", id, n), func() bool {
+		cur := s.historyLen(id)
+		return cur >= base+n || cur < base
+	})
+}
+
+// waitPasses waits for a long-running loop workflow to go round a few more times (each pass writes at least six events).
+func (s *system) waitPasses(id string, passes int) { s.t.Helper(); s.waitHistory(id, passes*6) }
+
+// holds asserts that cond stays true for d (a negative check cannot be a condition wait: something that must NOT happen is only
+// shown by waiting). d is stretched by QV_E2E_TIMEOUT_SCALE.
+func (s *system) holds(d time.Duration, what string, cond func() bool) {
+	s.t.Helper()
+	end := time.Now().Add(scaled(d))
+	for time.Now().Before(end) {
+		if !cond() {
+			s.t.Fatalf("%s: stopped being true", what)
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
