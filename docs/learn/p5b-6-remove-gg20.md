@@ -12,9 +12,7 @@ the docs were brought up to date. One new safety net was added: a watchdog for t
 | `tss-lib` and the `agl/ed25519` `replace` in `go.mod`; `qv-party-3` token | nothing else needed them; `go.sum` has no tss-lib line any more |
 
 What stays: the `mpc` value of `domain.Backend`, the `mpc_key_ref` column and the audit event name. Migrations are not touched, and
-old rows may exist. The `/v1` demo is HSM-only: creating an `mpc` wallet returns 422 and names `/v2`
-([api.go:230](../../internal/api/api.go)). The cold-wallet tests now use an HSM wallet with two approvals, so that
-policy still has a test.
+old rows may exist. (The `/v1` demo this page talks about was retired later, in P6b-1.)
 
 ## The watchdog
 
@@ -50,7 +48,7 @@ required check. One test by name: `make test-e2e-evm TEST=TestName`.
 
 1. Why was GG20 removed instead of kept "for the demo"?
 2. Which parts of the old MPC code were deliberately left in place, and why?
-3. What does asking the `/v1` API for an `mpc` wallet return now?
+3. Why did removing GG20 leave the `mpc_key_ref` column and the `mpc` backend value in place?
 4. What does the watchdog use as the sign of progress?
 5. Why may it restart a loop but only alert for a withdrawal?
 6. How does the test make a workflow stall for real?
@@ -61,7 +59,7 @@ required check. One test by name: `make test-e2e-evm TEST=TestName`.
 
 1. It has known attacks, and a second MPC implementation in the repo is a second thing to review and to get wrong. Nothing in the custody path used it.
 2. The `mpc` backend value, the `mpc_key_ref` column and the event name: old rows and audit entries may still carry them, and migrations are not changed.
-3. HTTP 422 with a message that says the demo is HSM-only and that MPC keys are under `/v2`.
+3. Migrations are not edited and old rows may exist, so the schema and the value stay.
 4. A growing history length or a new run id for the workflow.
 5. A loop pass is idempotent, so a second run does no harm. Money movement is not something to restart without a person looking.
 6. It starts the loop on a queue with no worker, so the first workflow task is never picked up and the history never grows.

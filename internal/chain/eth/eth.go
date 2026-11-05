@@ -24,7 +24,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 
-	"github.com/ws4charlie/quorum-vault/internal/domain"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 )
 
@@ -52,23 +51,6 @@ type TxParams struct {
 	Gas       uint64
 	GasTipCap *big.Int // max priority fee per gas
 	GasFeeCap *big.Int // max fee per gas
-}
-
-// FromRequest maps a stored sign request to TxParams.
-func FromRequest(req domain.SignRequest) (TxParams, error) {
-	if !common.IsHexAddress(req.To) {
-		return TxParams{}, fmt.Errorf("%w: to %q", ErrInvalidTx, req.To)
-	}
-	return TxParams{
-		ChainID:   big.NewInt(req.ChainID),
-		Nonce:     req.Nonce,
-		To:        common.HexToAddress(req.To),
-		Value:     req.ValueWei,
-		Data:      req.Data,
-		Gas:       req.GasLimit,
-		GasTipCap: req.MaxPriorityFeePerGas,
-		GasFeeCap: req.MaxFeePerGas,
-	}, nil
 }
 
 func (p TxParams) validate() error {
@@ -188,7 +170,7 @@ func DecodeRaw(raw []byte) (*types.Transaction, error) {
 	return tx, nil
 }
 
-// Client is an optional JSON-RPC connection (SEPOLIA_RPC_URL) used to fill
+// Client is an optional JSON-RPC connection used to fill
 // nonce/fees and to broadcast.
 type Client struct {
 	ec      *ethclient.Client
@@ -235,17 +217,6 @@ func (c *Client) Suggest(ctx context.Context, from common.Address) (nonce uint64
 	return nonce, tip, feeCap, nil
 }
 
-// PendingNonce returns the next nonce of from, counting txs in the node's pool.
-func (c *Client) PendingNonce(ctx context.Context, from common.Address) (uint64, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	n, err := c.ec.PendingNonceAt(ctx, from)
-	if err != nil {
-		return 0, fmt.Errorf("eth: nonce: %w", err)
-	}
-	return n, nil
-}
-
 // Broadcast sends a raw signed transaction and returns its hash.
 func (c *Client) Broadcast(ctx context.Context, raw []byte) (common.Hash, error) {
 	tx, err := DecodeRaw(raw)
@@ -283,14 +254,4 @@ func (c *Client) WaitReceipt(ctx context.Context, hash common.Hash, poll time.Du
 		case <-t.C:
 		}
 	}
-}
-
-// Broadcast dials rpcURL once and sends raw (convenience for one-off use).
-func Broadcast(ctx context.Context, rpcURL string, raw []byte) (common.Hash, error) {
-	c, err := Dial(ctx, rpcURL)
-	if err != nil {
-		return common.Hash{}, err
-	}
-	defer c.Close()
-	return c.Broadcast(ctx, raw)
 }

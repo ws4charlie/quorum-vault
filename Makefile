@@ -8,10 +8,7 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-# Local anvil node impersonating Sepolia (docker-compose.yml service "anvil").
-LOCAL_RPC_URL := http://127.0.0.1:8545
-
-.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery test-demo-v1 mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short build vet run demo-local
+.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
 
 setup: softhsm db-up chain-up
 
@@ -47,24 +44,8 @@ test:
 test-short:
 	go test -short -p 1 ./...
 
-# The /v1 demo (HSM-only): broadcast + receipt checks on the local anvil node (make chain-up first).
-# Not -short: the full broadcast and receipt checks.
-test-demo-v1:
-	SEPOLIA_RPC_URL=$(LOCAL_RPC_URL) QV_REQUIRE_CHAIN=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 \
-		go test -count=1 -p 1 -timeout 20m -v ./e2e
-
-build:
-	go build -o bin/quorumvault ./cmd/quorumvault
-
 vet:
 	go vet ./...
-
-run:
-	go run ./cmd/quorumvault
-
-# Demo against a server started with SEPOLIA_RPC_URL=$(LOCAL_RPC_URL).
-demo-local:
-	./scripts/demo-sepolia.sh --local
 
 # Phase 2 / P3a: signing gateway and outbox relay.
 .PHONY: build-gateway build-relay test-gateway test-relay

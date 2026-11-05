@@ -26,7 +26,7 @@ func TestGenerateAndSign(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { tok.DestroyPrivateKey(ctx, k.HSMKeyID) })
-	if k.HSMLabel != "qv-wallet-x-v3" || len(k.HSMKeyID) != 16 || k.Curve != domain.CurveSecp256k1 || k.State != "" {
+	if k.HSMLabel != "qv-wallet-x-v3" || len(k.HSMKeyID) != 16 || k.Curve != domain.CurveSecp256k1 {
 		t.Fatalf("key = %+v", k)
 	}
 	pub, err := signer.ParseUncompressed(k.PublicKey)

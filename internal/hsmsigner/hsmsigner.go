@@ -21,9 +21,7 @@ import (
 // Purpose is the domain.Key.Purpose of every key this package generates.
 const Purpose = "signing"
 
-// Generator creates HSM keys. It also implements keys.KeyDestroyer so the
-// registry can destroy the private key when a key is retired (or when a
-// rotation's DB transaction fails).
+// Generator creates HSM keys, and can destroy the private key of one it made.
 type Generator struct{ tok *hsm.Token }
 
 // NewGenerator returns a KeyGenerator for the HSM backend on tok.
@@ -37,7 +35,7 @@ func Label(walletID string, version int) string {
 }
 
 // Generate creates a secp256k1 key pair in the token with a random 16-byte
-// CKA_ID and returns its metadata (State empty; the registry sets it).
+// CKA_ID and returns its metadata.
 func (g *Generator) Generate(ctx context.Context, walletID string, version int) (domain.Key, error) {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
@@ -81,7 +79,7 @@ func (g *Generator) DestroyKey(ctx context.Context, key domain.Key) error {
 }
 
 // Signer signs with one HSM key. It does not check the key's lifecycle state:
-// callers ask keys.Registry.AuthorizeSign first.
+// callers decide whether the key may sign.
 type Signer struct {
 	tok *hsm.Token
 	key domain.Key
