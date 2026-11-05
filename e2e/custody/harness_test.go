@@ -88,7 +88,12 @@ func TestMain(m *testing.M) {
 			}
 		}
 		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold"} {
-			out, err := exec.Command("go", "build", "-o", filepath.Join(dir, b), "github.com/ws4charlie/quorum-vault/cmd/"+b).CombinedOutput()
+			// The worker is built with -tags devauth: only then does it have the crash-test failpoints (QV_FAILPOINT).
+			args := []string{"build", "-o", filepath.Join(dir, b)}
+			if b == "qv-worker" {
+				args = append(args, "-tags", "devauth")
+			}
+			out, err := exec.Command("go", append(args, "github.com/ws4charlie/quorum-vault/cmd/"+b)...).CombinedOutput()
 			if err != nil {
 				buildErr = fmt.Errorf("build %s: %v\n%s", b, err, out)
 				break
