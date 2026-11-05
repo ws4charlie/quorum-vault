@@ -105,7 +105,7 @@ func TestMPCKillSigningComponentAtCustodyBoundary(t *testing.T) {
 				v.kill()
 			}
 			id, dest := s.startPayment("c-mk", fmt.Sprintf("k-mk-%d", n))
-			if code, ok := s.worker.exitCode(90 * time.Second); !ok || code != 137 {
+			if code, ok := s.worker.exitCode(scaled(90 * time.Second)); !ok || code != 137 {
 				t.Fatalf("%s: worker did not die at %s (exited=%v code=%d)", v.name, fp, ok, code)
 			}
 			if afterSig {

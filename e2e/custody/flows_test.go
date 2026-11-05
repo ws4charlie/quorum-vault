@@ -308,7 +308,7 @@ func TestCrashAtEveryBoundary(t *testing.T) {
 			addr = a.Hex()
 			s.sendETH(a, eth(2))
 		}
-		code, ok := s.worker.exitCode(90 * time.Second)
+		code, ok := s.worker.exitCode(scaled(90 * time.Second))
 		if !ok || code != 137 {
 			t.Fatalf("%s: worker did not die at the failpoint (exited=%v code=%d)", fp, ok, code)
 		}

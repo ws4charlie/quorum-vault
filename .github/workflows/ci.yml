@@ -180,6 +180,8 @@ jobs:
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
       QV_ANVIL_RPC: http://127.0.0.1:18545
+      # A shared runner is slower than a laptop: every condition wait in the custody tests gets three times as long.
+      QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

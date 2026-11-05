@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -534,6 +535,15 @@ func signTimeout() string {
 	return "3s"
 }
 
+// scaled stretches a wait by QV_E2E_TIMEOUT_SCALE (default 1; CI sets a larger value). Every wait in these tests is on a
+// condition, so the scale only changes how long a slow machine is given before the test calls it stuck.
+func scaled(d time.Duration) time.Duration {
+	if v, err := strconv.ParseFloat(os.Getenv("QV_E2E_TIMEOUT_SCALE"), 64); err == nil && v > 0 {
+		return time.Duration(float64(d) * v)
+	}
+	return d
+}
+
 func writeJSON(t *testing.T, path string, v any) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -705,6 +715,7 @@ func (s *system) terminateWorkflows() {
 
 func (s *system) waitFor(timeout time.Duration, what string, f func() bool) {
 	s.t.Helper()
+	timeout = scaled(timeout)
 	dl := time.Now().Add(timeout)
 	for {
 		if f() {
@@ -902,7 +913,7 @@ func (s *system) posted(acct string) *big.Int {
 func (s *system) reconcileClean() custody.Report {
 	s.t.Helper()
 	var rep custody.Report
-	dl := time.Now().Add(45 * time.Second)
+	dl := time.Now().Add(scaled(45 * time.Second))
 	for {
 		var err error
 		rep, err = s.svc.Reconcile(s.ctx)
