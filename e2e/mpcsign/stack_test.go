@@ -395,8 +395,10 @@ func (s *stack) startCosigner(t *testing.T) {
 // gatewayConfig writes the gateway's signing-zone config: the same chain and approvers, plus the mpc signer entry.
 func (s *stack) gatewayConfig() string {
 	f := s.h.File
-	f.Signers = map[string]gateway.SignerFile{gatewaytest.Partition: {Backend: "mpc", KeyID: s.keyID, PublicKey: hex.EncodeToString(s.pub65),
-		MPC: &gateway.MPCSignerFile{Address: s.callerA, CertFile: filepath.Join(s.dir, "gateway.crt"), KeyFile: filepath.Join(s.dir, "gateway.key"), ServerPin: s.certA.pin}}}
+	sf := gateway.SignerFile{Backend: "mpc", KeyID: s.keyID, PublicKey: hex.EncodeToString(s.pub65),
+		MPC: &gateway.MPCSignerFile{Address: s.callerA, CertFile: filepath.Join(s.dir, "gateway.crt"), KeyFile: filepath.Join(s.dir, "gateway.key"), ServerPin: s.certA.pin}}
+	// Every hot partition needs a signer; the cold-move test partition shares the one hot key.
+	f.Signers = map[string]gateway.SignerFile{gatewaytest.Partition: sf, gatewaytest.ColdPartition: sf}
 	f.SignTimeout = "4s" // short on purpose: outage tests wait past it
 	s.certGW.write(s.t, s.dir)
 	raw, _ := json.MarshalIndent(f, "", " ")

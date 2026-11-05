@@ -73,9 +73,14 @@ func opts(ctx workflow.Context) workflow.Context {
 }
 
 // planOpts gives the planner room: one pass asks the node about each candidate.
+//
+// A planning pass can take a while, so StartToClose is long; but if the worker running it dies, the server would wait the whole
+// StartToClose before trying again, and the planner would stand still for two minutes (the "no sweep within 90 s" failure in the
+// crash tests). The pass heartbeats (see heartbeating), so a dead worker is noticed after HeartbeatTimeout.
 func planOpts(ctx workflow.Context) workflow.Context {
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout:    2 * time.Minute,
+		HeartbeatTimeout:       15 * time.Second,
 		ScheduleToStartTimeout: queueTimeout,
 		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
 	})

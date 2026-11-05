@@ -105,6 +105,27 @@ func (a *Activities) ScanOnce(ctx context.Context) (ScanResult, error) {
 	return ScanResult{Credited: n, Cursor: cur}, err
 }
 
+// heartbeating reports the activity alive every few seconds until the returned function is called, so the server notices a dead
+// worker after the activity's HeartbeatTimeout instead of after its whole StartToCloseTimeout.
+func heartbeating(ctx context.Context) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(3 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				activity.RecordHeartbeat(ctx)
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 // ---- starting workflows (reconcilers) ----
 
 func (a *Activities) start(ctx context.Context, id string, wf any, arg any) error {
@@ -119,6 +140,8 @@ func (a *Activities) start(ctx context.Context, id string, wf any, arg any) erro
 // PlanSweeps creates sweep rows for addresses worth sweeping. Returns whether
 // sweeping is frozen (nothing is planned then, and that is not an error).
 func (a *Activities) PlanSweeps(ctx context.Context) (frozen bool, err error) {
+	stop := heartbeating(ctx)
+	defer stop()
 	_, err = a.D.Svc.PlanSweeps(ctx, a.log())
 	if errors.Is(err, custody.ErrSweepFrozen) {
 		a.log().Info("sweeping is frozen; planning again later")
@@ -289,6 +312,8 @@ func (a *Activities) FailSweep(ctx context.Context, id, reason string) error {
 // PlanColdMoves creates a move for every hot partition above its high-water mark and logs the low-water ALERT (once per
 // outage). It returns how many it created.
 func (a *Activities) PlanColdMoves(ctx context.Context) (int, error) {
+	stop := heartbeating(ctx)
+	defer stop()
 	mv, err := a.D.Svc.PlanColdMoves(ctx, a.log())
 	return len(mv), err
 }
