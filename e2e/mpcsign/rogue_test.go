@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -145,8 +146,12 @@ func TestRogueParty_Decisions(t *testing.T) {
 			t.Fatalf("legitimate signing failed: %v", err)
 		}
 		// Same approved intent (same id, same hash), next nonce: B's OWN guard remembers nonce 0.
-		again := s.h.Withdrawal("replay", user, 500, 1, "alice")
-		again.ID = "replay-n1"
+		// The same intent bytes, not a rebuilt one: a rebuilt intent gets a new not_after if a second boundary passes.
+		var in signjob.Intent
+		if err := json.Unmarshal(j.Intent, &in); err != nil {
+			t.Fatal(err)
+		}
+		again := s.h.Job("replay-n1", in, gatewaytest.ETH(user, 500, 1), "alice")
 		r.refused(t, r.signOpen(again, s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonNonceChanged)
 		// And the original digest again is a retry: B accepts it (it would sign the same digest again, never a new one).
 		if ack, fin := r.open(t, r.signOpen(j, s.pub33)); !ack {
