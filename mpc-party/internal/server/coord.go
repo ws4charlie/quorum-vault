@@ -230,6 +230,13 @@ func (s *Server) commitA(ctx context.Context, name string, open *pb.Open, tr *se
 	failpoint("a_after_delete_old")
 	s.rt(c.id).setResolved(true)
 	s.log.Warn("keyset moved to a new generation: existing backups are STALE, export new backups", "role", "A", "keyset_id", c.id, "generation", c.gen)
+	// Keep the gate until B has taken the confirmation (its handler returning ends the stream). B serves the keyset again only
+	// then, so a session released earlier is refused by B as unresolved, and that refusal costs A a whole reconciliation.
+	select {
+	case <-tr.done:
+	case <-ctx.Done():
+	case <-time.After(s.cfg.Limits.RecvTimeout()):
+	}
 	return nil
 }
 
