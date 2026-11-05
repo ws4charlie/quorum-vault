@@ -11,14 +11,10 @@ mined and checked by receipt — in a Go test suite and in CI on every push.
 | Piece | Where | Job |
 |---|---|---|
 | anvil service | [docker-compose.yml](../../docker-compose.yml) | `anvil --host 0.0.0.0 --chain-id 11155111` on 127.0.0.1:8545, pinned image `ghcr.io/foundry-rs/foundry:v1.8.5` |
-| Make targets | [Makefile](../../Makefile) | `chain-up`, `chain-down`, `test-e2e`; `setup` now also starts anvil |
+| Make targets | [Makefile](../../Makefile) | `chain-up`, `chain-down`; `setup` now also starts anvil |
 | Safety check + funding | [e2e/localchain.go](../../e2e/localchain.go) | `CheckLocalChain` (host, client name, chain ID), `SetBalance` (`anvil_setBalance`) |
-| e2e tests | [e2e/e2e_test.go](../../e2e/e2e_test.go) | the real service over HTTP, broadcast on, receipts and balances checked |
 | Refusal tests | [e2e/localchain_test.go](../../e2e/localchain_test.go) | fake JSON-RPC nodes that must be refused |
 | Receipt wait | [internal/chain/eth/eth.go](../../internal/chain/eth/eth.go) `WaitReceipt` | poll `eth_getTransactionReceipt` until mined or the context ends |
-| Nonce fix | [internal/signing/service.go](../../internal/signing/service.go) `freshNonce` | re-check the nonce against the node at sign time |
-| CI job `demo-v1` | [.github/workflows/ci.yml](../../.github/workflows/ci.yml) | Postgres service + `docker run` anvil + `go test ./e2e/...` |
-| Demo local mode | [scripts/demo-sepolia.sh](../../scripts/demo-sepolia.sh) `--local` | funds wallets, prints receipts; output in [docs/measurements/e2e.md](../measurements/e2e.md) |
 
 ## anvil vs geth --dev vs a real testnet
 
@@ -63,7 +59,7 @@ changes for the test.
 writes 10 ETH straight into the account state. No transfer, no funded
 account, no private key — which is why the repo does not need (and must not
 contain) anvil's well-known dev keys. `SetBalance` in
-[localchain.go](../../e2e/localchain.go) and `fund` in the demo do this right
+[localchain.go](../../e2e/localchain.go) does this right
 after a wallet is created.
 
 ## Receipts and effective gas price
@@ -98,27 +94,15 @@ test wallets, and `anvil_setBalance` would fail in confusing ways. So
 
 Any of these is `t.Fatal`, not a skip. The four refusal tests in
 [localchain_test.go](../../e2e/localchain_test.go) run without a node (fake
-JSON-RPC servers on 127.0.0.1) and even under `-short`. The demo's
-`check_local_chain` applies the same rules in bash.
+JSON-RPC servers on 127.0.0.1) and even under `-short`.
 
 ## The bug the chain found
 
-T4 filled the nonce at **Submit** time from the node (`PendingNonceAt`). A
-request that waits for approval keeps that nonce. If a later small transfer
-of the same wallet is allowed and broadcast first, it takes the same nonce;
-when the first request is finally approved its tx is refused with
-`nonce too low` — the request ends `signed` but never lands.
-
-The fix (`sign` → `freshNonce` in [service.go](../../internal/signing/service.go)):
-with broadcast on, the service takes a per-sender lock, asks the node for the
-pending nonce, and moves the request's nonce **up** to it when it is lower.
-A nonce at or above the pending one is kept (the caller chose it). The lock
-is held until the broadcast returns so two requests of one wallet never take
-the same nonce. The signed nonce is stored on the request, and `sign.started`
-records `nonce` and `nonce_reassigned_from`. Regression test:
-`TestLocalChain/ApprovedAfterLaterTransferGetsFreshNonce` (it fails with
-`nonce too low` without the fix). Limits: the lock is in-process (one server
-instance); a multi-instance service needs a shared nonce manager.
+The /v1 demo took a request's nonce when it was submitted. A request waiting
+for approval kept that nonce, so a later transfer of the same wallet could
+take it first, and the approved one was refused with `nonce too low`. Only a
+real node showed this. The demo is gone; /v2 keeps nonces in the nonce
+manager, one writer per address.
 
 ## Gotchas
 

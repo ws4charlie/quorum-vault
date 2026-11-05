@@ -257,9 +257,8 @@ new address, and funds must move. For all 1M wallets: 1M × 21,000 gas × 20
 gwei = 420 ETH ≈ **$1.26M** (A10), plus ERC-20 balances at roughly 3× the
 gas each. MPC `Refresh` rotates key material with **no on-chain cost** and
 no new address. This is the strongest operational argument for MPC in the
-hot tier. Address rotation (this repo's rotation drill,
-[docs/rotation-ceremony.md](docs/rotation-ceremony.md)) is kept for
-suspected compromise.
+hot tier. Address rotation (moving funds to a new key) remains the answer to a
+suspected compromise; this repo has no key-replacement flow yet.
 
 **HSM vendor failure or migration.** Non-exportable keys cannot move to
 another vendor. That is the point of them, and also lock-in. Options:
@@ -321,15 +320,15 @@ flowchart LR
   cer --> post["post-sign: tx monitoring,<br/>travel-rule message to counterparty"]
 ```
 
-Where it fits in this repo's orchestrator
-([internal/signing/service.go](internal/signing/service.go)):
+Where it fits in a request-and-approve orchestrator (the removed /v1 demo had
+one; in `/v2` the same slots are the withdrawal request and the signing step):
 
 | Hook | Slot | Behaviour |
 |---|---|---|
-| Sanctions / KYT screening | `Submit`, after `prepare` ([service.go:143](internal/signing/service.go#L143)) and **before** `lockWallet` ([:151](internal/signing/service.go#L151)) | it is a network call: keep it outside the per-wallet lock. Pass the result into `Evaluate` as an input. A sanctions hit → `deny` with a reason; a high risk score → `needs_approval` with a compliance approver role. |
-| Calldata decoding | same slot | an ERC-20 `transfer(to, amount)` has `to` = the token contract. Screen and allowlist the **beneficiary** in calldata. This repo's allowlist checks only the transaction `to`. |
+| Sanctions / KYT screening | request submit, after validation and **before** any per-wallet lock | it is a network call: keep it outside the per-wallet lock. Pass the result into the policy decision as an input. A sanctions hit → `deny` with a reason; a high risk score → `needs_approval` with a compliance approver role. |
+| Calldata decoding | same slot | an ERC-20 `transfer(to, amount)` has `to` = the token contract. Screen and allowlist the **beneficiary** in calldata. An allowlist that checks only the transaction `to` misses this. |
 | Travel rule | same slot | above the jurisdiction's threshold (FATF Recommendation 16 suggests USD/EUR 1,000; the US rule applies from $3,000; the EU transfer-of-funds rule has no minimum for transfers between service providers), require originator and beneficiary data. Store a reference on the request and its hash in the `request.created` payload. Hold the request in `pending_approval` until the counterparty service provider acknowledges, or route unhosted-wallet transfers to manual review. |
-| Re-screening | `sign`, after `AuthorizeSign` ([:353](internal/signing/service.go#L353)), before `sign.started` ([:377](internal/signing/service.go#L377)) | approvals can take hours and sanctions lists change. A hit sends the request to `failed` with stage `screening`, like the existing lifecycle check. |
+| Re-screening | just before the signing step | approvals can take hours and sanctions lists change. A hit sends the request to `failed` with stage `screening`, like any other signing-time refusal. |
 | Evidence | `policy.decision` / `sign.failed` payloads | provider, list version, score, decision. The audit chain already makes these tamper-evident. |
 
 ## 7. What this repo does not do, and how production would

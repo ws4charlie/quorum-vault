@@ -1,12 +1,7 @@
 # Architecture
 
-quorum-vault has two layers that share one repository:
-
-1. **The custody core** (`/v2`): deposits, sweeps and withdrawals on EVM chains, a Temporal-driven workflow engine, a signing
-   gateway that is a separate trust zone, and **two-party MPC hot signing** (`mpc-party` A and B plus a cosigner).
-2. **The `/v1` demo** (`cmd/quorumvault`): one binary with an HTTP API, policy, approvals, key lifecycle, a hash-chained audit
-   log and an **HSM-only** signer. It is where the policy and audit ideas were first worked out; the "mpc" wallet backend
-   was removed from it.
+quorum-vault is one custody system (`/v2`): deposits, sweeps and withdrawals on EVM chains, a Temporal-driven workflow engine, a
+signing gateway that is a separate trust zone, and **two-party MPC hot signing** (`mpc-party` A and B plus a cosigner).
 
 ## The custody system: processes and trust zones
 
@@ -97,121 +92,11 @@ The offline config alone decides what may be signed (pinned hot destinations, pe
 M-of-N is enforced in software with SoftHSM. Details and runbook: [learn/p6-2-cold-refill.md](learn/p6-2-cold-refill.md),
 [runbooks/cold-refill.md](runbooks/cold-refill.md).
 
-## `/v1` demo components
+## Audit log
 
-```mermaid
-flowchart LR
-  client["Client<br/>(X-Actor header)"] --> api["HTTP API<br/>internal/api"]
-  api --> svc["Signing orchestrator<br/>internal/signing"]
-  api --> reg
-  api --> pol
-  api --> aud
-  svc --> pol["Policy engine<br/>internal/policy"]
-  svc --> apq["Approval queue<br/>internal/approval"]
-  svc --> reg["Key registry + lifecycle<br/>internal/keys"]
-  svc --> eth["Chain adapter<br/>internal/chain/eth"]
-  svc --> aud["Audit log<br/>internal/audit"]
-  svc --> sig{{"signer.Signer"}}
-  sig --> hsms["HSM signer<br/>internal/hsmsigner"]
-  hsms --> tok0[("token quorumvault<br/>EC keys, non-exportable")]
-  pol & apq & reg & aud & svc --> pg[("Postgres 16")]
-  eth -. optional .-> rpc["Sepolia RPC"]
-```
-
-| Component | Package | Owns | Key facts |
-|---|---|---|---|
-| HTTP API | [internal/api](../internal/api/api.go) | routes, JSON errors | `X-Actor` required on every mutating call (demo auth, 401 without it); wei as decimal strings; bytes as 0x-hex; creating an `mpc` wallet is refused with a pointer to `/v2` |
-| Signing orchestrator | [internal/signing](../internal/signing/service.go) | `sign_requests` (only writer) | `Submit`, `Vote`, `sign`; status moves are compare-and-set `UPDATE ... WHERE status = ANY($from)`; per-wallet mutex around evaluate+insert |
-| Policy engine | [internal/policy](../internal/policy) | `policies`, `allowlist` | `Evaluate` is read-only; order: allowlist, per-tx limit, velocity, then approval triggers (cold tier, threshold, 24h spend) |
-| Approval queue | [internal/approval](../internal/approval/approval.go) | `approvals` | approver != requester; one vote per approver (DB unique constraint); any reject ends it |
-| Key registry | [internal/keys](../internal/keys/keys.go) | `wallets`, `keys` | lifecycle `active -> sign_only -> retired`; `AuthorizeSign` drain rule; destroys HSM private key on retire |
-| Audit log | [internal/audit](../internal/audit/audit.go) | `audit_log` | hash chain `SHA-256(prev_hash ‖ canonical JSON)`; appends serialized by `pg_advisory_xact_lock`; DB triggers reject UPDATE/DELETE/TRUNCATE |
-| HSM signer | [internal/hsmsigner](../internal/hsmsigner/hsmsigner.go), [internal/hsm](../internal/hsm) | EC key objects in token `quorumvault` | raw PKCS#11 via `miekg/pkcs11`; token found by label; `CKM_ECDSA` over a 32-byte digest |
-| Chain adapter | [internal/chain/eth](../internal/chain/eth/eth.go) | — | EIP-1559 tx + digest, low-S, recovery-id search, sender check, optional RPC fill/broadcast |
-
-## Data model
-
-Schema: [migrations/0001_init.sql](../migrations/0001_init.sql).
-
-```mermaid
-erDiagram
-  wallets ||--o{ keys : "has versions"
-  wallets ||--o| policies : "has"
-  wallets ||--o{ allowlist : "allows"
-  wallets ||--o{ sign_requests : "receives"
-  keys ||--o{ sign_requests : "bound at creation"
-  sign_requests ||--o{ approvals : "collects"
-```
-
-`audit_log` has no foreign keys on purpose: it must outlive the rows it
-describes.
-
-| Table | Columns that matter | Constraints |
-|---|---|---|
-| `wallets` | `id`, `name`, `tier` (hot/cold), `backend` (hsm; old rows may say mpc) | `name` unique |
-| `keys` | `wallet_id`, `version`, `state`, `hsm_label`, `hsm_key_id` (CKA_ID), `mpc_key_ref`, `public_key` (65-byte SEC1), `address`, `activated_at`, `sign_only_at`, `retired_at` | `unique(wallet_id, version)`; partial unique index: one `active` key per wallet |
-| `policies` | `daily_limit_wei`, `per_tx_limit_wei`, `approval_threshold_wei` (`numeric(78,0)`), `velocity_max_tx`, `velocity_window_seconds`, `required_approvals` | one row per wallet; no row = deny |
-| `allowlist` | `wallet_id`, `address` (lowercase), `label` | PK `(wallet_id, address)` |
-| `sign_requests` | `key_id`, `chain_id`, `to_address`, `value_wei`, `data`, `nonce`, gas fields, `requester`, `status`, `decision` (jsonb), `signature`, `raw_tx`, `tx_hash` | `status` CHECK; index `(wallet_id, created_at)` for velocity/spend windows |
-| `approvals` | `request_id`, `approver`, `approve`, `comment` | `unique(request_id, approver)` |
-| `audit_log` | `seq`, `at`, `actor`, `type`, `request_id`, `wallet_id`, `key_id`, `payload`, `prev_hash`, `hash` | append-only triggers; genesis `prev_hash` = 32 zero bytes |
-
-No private key material is in the database. HSM keys are referenced by
-`CKA_ID`. (Old rows from the removed `mpc` backend keep their `mpc_key_ref` column; nothing reads it.)
-
-## Request state machine
-
-```mermaid
-stateDiagram-v2
-  [*] --> denied: policy deny
-  [*] --> pending_approval: policy needs_approval
-  [*] --> approved: policy allow (cleared to sign)
-  pending_approval --> rejected: any reject vote
-  pending_approval --> approved: required distinct approvals
-  approved --> signing: compare-and-set (one winner)
-  signing --> signed: signature verified, sender == key address
-  signing --> failed: lifecycle check, ceremony or verify error
-  denied --> [*]
-  rejected --> [*]
-  signed --> [*]
-  failed --> [*]
-```
-
-- The status is decided before the insert and stored with the row, so no
-  concurrent reader sees a half-decided request.
-- An allowed request is stored as `approved`; both paths then share the one
-  `approved -> signing` compare-and-set. Of N concurrent callers exactly one
-  gets the row and calls a signer (`TestConcurrentApprovalsSignOnce`,
-  `TestConcurrentSignCallsSignOnce`).
-- `sign` runs detached from the HTTP request's cancellation with its own
-  2-minute timeout, so a client hanging up cannot leave a row in `signing`.
-- Audit events per path: allow `request.created, policy.decision,
-  sign.started, sign.completed`; approval adds `approval.voted` (×N) and
-  `request.approved` before `sign.started`; reject ends with
-  `request.rejected`; a lifecycle refusal ends with `sign.failed` (stage
-  `authorize`) and no `sign.started`.
-
-## Key lifecycle state machine
-
-```mermaid
-stateDiagram-v2
-  [*] --> active: CreateWallet (v1) or Rotate (vN+1)
-  active --> sign_only: Rotate (same DB tx as vN+1 insert)
-  sign_only --> retired: Retire (HSM - C_DestroyObject before commit)
-  retired --> [*]
-```
-
-| State | May sign |
-|---|---|
-| `active` | requests bound to it |
-| `sign_only` | requests bound to it **and** created before its `sign_only_at` (drain) |
-| `retired` | nothing |
-
-The new key is generated before the rotation transaction (an HSM keygen is fast, but the
-rotation transaction may still fail); if the transaction fails, the new HSM key is destroyed.
-Concurrent rotations serialize via `SELECT ... FOR UPDATE` and a version
-re-check. The full drill with API calls is in
-[rotation-ceremony.md](rotation-ceremony.md).
+`internal/audit` keeps a hash-chained, append-only `audit_log` table: each row stores the hash of the one before it, database
+triggers refuse UPDATE, DELETE and TRUNCATE, and `Verify` walks the chain to find the first bad row. The table has no foreign
+keys on purpose, so it outlives the rows it describes. Nothing in the `/v2` path writes to it yet.
 
 ## A withdrawal signed by two parties
 

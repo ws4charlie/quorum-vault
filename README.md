@@ -4,16 +4,13 @@
 > (chain id 11155111). All PINs and passwords in this repo are dev-only defaults. Never point this code at
 > real funds or real keys.
 
-quorum-vault is a working model of how an institution holds customer crypto. It has two layers:
+quorum-vault is a working model of how an institution holds customer crypto.
 
-- **The custody core (`/v2`)**: customers, deposit addresses, **deposits, sweeps and withdrawals on EVM chains** with a
+**The custody core (`/v2`)**: customers, deposit addresses, **deposits, sweeps and withdrawals on EVM chains** with a
   double-entry ledger, holds, nonce management, stuck-transaction replacement, crash-safe Temporal workflows, an outbox to
   Redpanda, and a `Reconcile` check that compares the books with the chain. Hot wallets sign with **two-party MPC**
   (`mpc-party` A and B, Coinbase's cb-mpc), behind a **signing gateway** and a **cosigner** that are separate trust zones
   and each re-check every request.
-- **The `/v1` demo**: one binary with an HTTP API, policy (limits, allowlist, velocity), dual-control approvals, key lifecycle,
-  a hash-chained audit log, and an **HSM-only** signer. It is where those ideas were first built; the older GG20 MPC backend was
-  removed (see [History](#history)).
 
 [DESIGN_SCALE.md](DESIGN_SCALE.md) works out how the design scales to 1M wallets, with measured figures.
 
@@ -52,8 +49,8 @@ Components, data model, state machines and a sequence diagram of a withdrawal si
 | Signing gateway (zone 1) and cosigner (zone 2): approver signatures, policy, replay guard, each with its own database | [internal/gateway](internal/gateway), [internal/cosigner](internal/cosigner) | attack tests, rogue-party tests |
 | Two-party MPC signer: DKG, derive, sign, refresh, freeze, sealing in HSM tokens, backup and restore | [mpc-party](mpc-party), [internal/mpcsigner](internal/mpcsigner) | `make test-mpc`, the custody tests with `QV_CUSTODY_SIGNER=mpc` |
 | Failure tests on MPC: kill a party or the cosigner, partition, latency, refresh and freeze under live withdrawals | [e2e/custody/mpc_test.go](e2e/custody/mpc_test.go) | see [measurements](docs/measurements/mpc-service.md) |
-| `/v1` demo: HSM keys non-exportable, policy, approvals, key lifecycle, hash-chained audit log | [internal/hsm](internal/hsm), [internal/policy](internal/policy), [internal/approval](internal/approval), [internal/keys](internal/keys), [internal/audit](internal/audit) | unit tests, `make test-demo-v1`, [demo script](scripts/demo-sepolia.sh) |
-| Runbooks: MPC backup and restore, keyset freeze, key rotation | [docs/runbooks](docs/runbooks), [docs/rotation-ceremony.md](docs/rotation-ceremony.md) | `mpc-party/scripts/restore-drill.sh` |
+| Tamper-evident audit log (hash chain, append-only table) | [internal/audit](internal/audit) | unit tests |
+| Runbooks: MPC backup and restore, keyset freeze | [docs/runbooks](docs/runbooks) | `mpc-party/scripts/restore-drill.sh` |
 
 ## Limits, honestly
 
@@ -73,12 +70,11 @@ Components, data model, state machines and a sequence diagram of a withdrawal si
 
 ## Quickstart
 
-Prerequisites: Go ≥ 1.25 with CGO, SoftHSM2, Docker (Postgres, anvil, and for the custody tests Temporal and Redpanda), `jq` and
-`curl` for the demo. For the MPC parts also a C++ toolchain (clang, cmake, ninja); `make mpc-build` fetches and builds cb-mpc
+Prerequisites: Go ≥ 1.25 with CGO, SoftHSM2, Docker (Postgres, anvil, and for the custody tests Temporal and Redpanda). For the MPC parts also a C++ toolchain (clang, cmake, ninja); `make mpc-build` fetches and builds cb-mpc
 at the pinned commit into `mpc-party/.deps` (a few minutes once).
 
 ```bash
-brew install softhsm jq        # Ubuntu: apt-get install softhsm2 jq
+brew install softhsm           # Ubuntu: apt-get install softhsm2
 ```
 
 ```bash
@@ -92,21 +88,6 @@ make test-short   # unit and integration tests, fast
 ```bash
 make test         # every package; fails instead of skipping if Postgres or SoftHSM is missing (the e2e packages skip without their env)
 ```
-
-### The `/v1` demo (HSM)
-
-```bash
-make run          # go run ./cmd/quorumvault, listens on :8080
-```
-
-```bash
-./scripts/demo-sepolia.sh --local   # in a second terminal; funds the wallets on anvil and prints each receipt
-```
-
-The demo creates an HSM hot wallet and an HSM cold wallet, sets policies and allowlists, and signs three transactions: allowed,
-over-threshold (self-approval refused, a second person approves), and a cold one that needs two approvals. It also shows that
-asking for an `mpc` wallet is refused with a pointer to `/v2`. It ends with the audit trail and `{"ok":true}`. Run the server
-with `SEPOLIA_RPC_URL=http://127.0.0.1:8545 make run` to broadcast to the local node.
 
 ### The custody system
 
@@ -155,30 +136,10 @@ All optional; see [.env.example](.env.example).
 | `SOFTHSM2_CONF` | `./data/softhsm/softhsm2.conf` | repo-local token store |
 | `QV_HSM_PIN` | `user-dev-1234` (dev only) | user PIN of all tokens |
 | `QV_PKCS11_LIB` | the SoftHSM2 library of the OS | PKCS#11 module |
-| `SEPOLIA_RPC_URL` | empty | `/v1` demo: nonce and fees from this node, and broadcast |
 | `QV_CUSTODY_SIGNER` | `hsm` | `e2e/custody`: `hsm` or `mpc` |
 | `QV_E2E_TIMEOUT_SCALE` | `1` | stretches every condition wait in the custody tests (CI sets 3) |
 
-## The `/v1` API
-
-Every mutating call needs an `X-Actor: <name>` header (401 without it). Wei amounts are decimal strings; bytes are 0x-hex.
-Errors are `{"error": "..."}` with 400, 401, 403 (self-approval), 404, 409 (conflict), 422 (invalid).
-
-| Method | Path | Does |
-|---|---|---|
-| GET | `/healthz` | DB and HSM token check |
-| POST | `/wallets` | `{name, tier: hot\|cold, backend: hsm}` → wallet + key v1 (`mpc` is refused: use `/v2`) |
-| GET | `/wallets`, `/wallets/{id}` | list; one wallet with keys, policy, allowlist |
-| POST | `/wallets/{id}/rotate` | new key version `active`, old one `sign_only` |
-| PUT | `/wallets/{id}/policy` | limits, velocity, `required_approvals` (0 = tier default: hot 1, cold 2) |
-| POST / DELETE | `/wallets/{id}/allowlist`, `/wallets/{id}/allowlist/{address}` | add / remove a destination |
-| POST | `/keys` | `{}` → new HSM wallet + key; `{wallet_id}` → next key version |
-| GET | `/keys?wallet_id=` | key metadata |
-| POST | `/keys/{id}/retire` | `sign_only` → `retired`; the HSM private key is destroyed |
-| POST | `/sign-requests` | `{wallet_id, to, value_wei, nonce, …}` → `signed`, `pending_approval`, `denied` or `failed` |
-| GET | `/sign-requests?wallet_id=`, `/sign-requests/{id}` | list / one |
-| POST | `/sign-requests/{id}/approve`, `/reject` | vote; the deciding approval signs in the same call |
-| GET | `/audit`, `/audit/verify` | events with hashes; walks the chain |
+## The API
 
 The `/v2` API (customers, deposit addresses, balances, withdrawals, approvals, `reconcile`) is served by `qv-core`; routes are in
 [internal/custody/api.go](internal/custody/api.go) and used throughout [e2e/custody](e2e/custody).
@@ -215,13 +176,13 @@ Apple M3 Pro, Go 1.27.3, SoftHSM 2.7.0, all processes on one machine. Sources:
 - [DESIGN_SCALE.md](DESIGN_SCALE.md): scaling to 1M wallets, with measured numbers and what is still to be measured
 - [docs/architecture.md](docs/architecture.md): processes, trust zones, data model, state machines
 - [docs/runbooks](docs/runbooks): MPC backup and restore, keyset freeze
-- [docs/rotation-ceremony.md](docs/rotation-ceremony.md): key rotation drill
 - [docs/measurements](docs/measurements): raw benchmark and test output
 - [docs/learn](docs/learn): study guides per task, each with a quiz
 
 ## History
 
-The first version used a 2-of-3 GG20 threshold-ECDSA cluster (tss-lib) with all three parties in one process. GG20 has known
+The first version was a single `/v1` binary (HTTP API, policy, approvals, HSM key registry); it was retired in P6b-1 and the
+custody core replaced it. Before that it used a 2-of-3 GG20 threshold-ECDSA cluster (tss-lib) with all three parties in one process. GG20 has known
 attacks and nothing in the custody path used it, so it was removed in P5b-6. Its study guide
 ([docs/learn/t3-mpc-gg20.md](docs/learn/t3-mpc-gg20.md)) and measurements ([docs/measurements/mpc.md](docs/measurements/mpc.md))
 are kept as a record.

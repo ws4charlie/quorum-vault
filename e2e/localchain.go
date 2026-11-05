@@ -1,11 +1,9 @@
-// Package e2e runs the whole service (HTTP API, policy, approvals, audit,
-// SoftHSM and 2-of-3 MPC signers) against a local anvil node that
-// impersonates Sepolia (chain ID 11155111), so the transactions the sign path
-// produces are broadcast unchanged, mined, and checked by receipt.
+// Package e2e holds the helpers the end-to-end tests share for a local anvil
+// node that impersonates Sepolia (chain ID 11155111), so the transactions the
+// custody path produces are broadcast unchanged, mined, and checked by receipt.
 //
-// The tests skip unless SEPOLIA_RPC_URL is set (QV_REQUIRE_CHAIN=1 turns the
-// skip into a failure) and refuse any endpoint that CheckLocalChain rejects:
-// they must never send anything to a real network.
+// CheckLocalChain refuses any endpoint that is not a local anvil node on the
+// right chain: tests must never send anything to a real network.
 package e2e
 
 import (

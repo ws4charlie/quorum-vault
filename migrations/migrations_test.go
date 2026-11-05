@@ -2,13 +2,20 @@ package migrations_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"io/fs"
+	"os"
 	"strings"
 	"testing"
+	"testing/fstest"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
+	"github.com/ws4charlie/quorum-vault/migrations"
 )
 
 func seed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
@@ -185,5 +192,82 @@ func TestRebalanceOneOpenPerSourceAndPerDestination(t *testing.T) {
 	}
 	if err := ins("r5", "p0", "p2", "planned"); err != nil {
 		t.Errorf("a finished rebalance still blocks the shard: %v", err)
+	}
+}
+
+func TestDropV1Tables(t *testing.T) {
+	ctx := context.Background()
+	pool := dbtest.New(t)
+	for _, tbl := range []string{"wallets", "keys", "policies", "allowlist", "sign_requests", "approvals"} {
+		var ok bool
+		if err := pool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, tbl).Scan(&ok); err != nil || ok {
+			t.Errorf("table %s still exists (err %v)", tbl, err)
+		}
+	}
+	var ok bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('audit_log') IS NOT NULL`).Scan(&ok); err != nil || !ok {
+		t.Errorf("audit_log missing (err %v)", err)
+	}
+}
+
+// A database at 0009 that still holds /v1 rows upgrades to 0010 and loses only the /v1 tables.
+func TestUpgradeFromNineKeepsAuditLog(t *testing.T) {
+	ctx := context.Background()
+	dbtest.New(t) // skips (or fails under QV_REQUIRE_DB) when no database is reachable
+	url := os.Getenv("DATABASE_URL")
+	admin, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close(ctx)
+	var b [6]byte
+	rand.Read(b[:])
+	name := "qv_test_up9_" + hex.EncodeToString(b[:])
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Exec(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Database = name
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+
+	upTo9 := fstest.MapFS{}
+	entries, _ := fs.ReadDir(migrations.FS, ".")
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sql") && e.Name() < "0010" {
+			data, _ := fs.ReadFile(migrations.FS, e.Name())
+			upTo9[e.Name()] = &fstest.MapFile{Data: data}
+		}
+	}
+	if err := db.MigrateFS(ctx, pool, upTo9); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO wallets (id, name, tier, backend) VALUES ('00000000-0000-0000-0000-000000000001', 'w', 'hot', 'hsm')`,
+		`INSERT INTO keys (id, wallet_id, version, curve, backend, state, public_key, address)
+			VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 1, 'secp256k1', 'hsm', 'active', '\x04', '0x0')`,
+		`INSERT INTO audit_log (at, actor, type, payload, prev_hash, hash) VALUES (now(), 'a', 'x', '{}', '\x00', '\x01')`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("seed v1 rows: %v", err)
+		}
+	}
+	if err := db.Migrate(ctx, pool); err != nil {
+		t.Fatalf("migrate 0009 -> 0010: %v", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_log`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("audit_log rows = %d, err %v; want 1", n, err)
+	}
+	var ok bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('wallets') IS NOT NULL`).Scan(&ok); err != nil || ok {
+		t.Errorf("wallets still exists (err %v)", err)
 	}
 }
