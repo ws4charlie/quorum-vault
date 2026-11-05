@@ -187,7 +187,7 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 		return i, reject(ReasonIntent, "intent has no id")
 	}
 	switch i.Kind {
-	case "withdrawal", "sweep", "cancel":
+	case "withdrawal", "sweep", "cancel", "to-cold":
 	default:
 		return i, reject(ReasonIntent, "intent kind %q", i.Kind)
 	}
@@ -259,6 +259,34 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 			}
 			if n >= cc.SweepsPerHour {
 				return reject(ReasonSweepRate, "%d sweeps in the last hour, limit %d", n, cc.SweepsPerHour)
+			}
+		}
+	case "to-cold":
+		// Needs no approval: the destination is pinned in this zone's config (the chain verifier refused anything else), so a
+		// move can only make funds safer. Any approvals attached are ignored, not counted towards or against anything: the
+		// rate and the daily cap below apply no matter what the intent carries, so an approved intent cannot be used to
+		// push more than the cap through this path.
+		p, ok := cc.Assets[i.Asset]
+		if !ok {
+			return reject(ReasonPolicyAsset, "no policy for %s on %s", i.Asset, cc.Name)
+		}
+		if !codec.OwnsSender(info.Sender) {
+			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
+		}
+		if !known {
+			n, err := gt.CountSince(ctx, "to-cold", now.Add(-time.Hour))
+			if err != nil {
+				return err
+			}
+			if n >= cc.ToColdPerHour {
+				return reject(ReasonToColdRate, "%d hot-to-cold moves in the last hour, limit %d", n, cc.ToColdPerHour)
+			}
+			sum, err := gt.AmountSince(ctx, "to-cold", i.Asset, now.Add(-24*time.Hour))
+			if err != nil {
+				return err
+			}
+			if total := new(big.Int).Add(sum, amount); total.Cmp(p.ToColdDailyCap) > 0 {
+				return reject(ReasonToColdCap, "%s already moved to cold in 24h plus %s exceeds the cap %s", sum, amount, p.ToColdDailyCap)
 			}
 		}
 	case "cancel":

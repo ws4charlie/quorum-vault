@@ -29,7 +29,32 @@ type File struct {
 	Sweep      SweepFile      `json:"sweep"`
 	Withdrawal WithdrawalFile `json:"withdrawal"`
 	Scan       ScanFile       `json:"scan"`
+	Cold       ColdFile       `json:"cold"`
 }
+
+// ColdFile configures hot-to-cold moves. Without addresses and limits nothing is moved. The business config's copy of the
+// cold addresses only decides where the move transaction is built to; the signing zone has its own copy and refuses a
+// move to any other address.
+type ColdFile struct {
+	// Addresses: "<pool>/native" or "<pool>/token" -> the cold address (the same keys as the signing zone's cold_addresses).
+	Addresses map[string]string `json:"addresses"`
+	// Limits per asset, applied to every hot shard: Low raises an ALERT (the refill is a later task), High triggers a move, and
+	// the move brings the shard down to Target (default: halfway between Low and High). Base units.
+	Limits map[string]LimitFile `json:"limits"`
+	// ShardLimits overrides Limits for one shard: key "<asset>/<shard index>".
+	ShardLimits  map[string]LimitFile `json:"shard_limits"`
+	PlanInterval string               `json:"plan_interval"` // default 5s
+}
+
+// LimitFile is the low-water mark, high-water mark and target of one hot partition.
+type LimitFile struct {
+	Low    string `json:"low"`
+	High   string `json:"high"`
+	Target string `json:"target"`
+}
+
+// HotLimits is a validated LimitFile.
+type HotLimits struct{ Low, High, Target *big.Int }
 
 // ChainFile configures the one EVM chain this core serves.
 type ChainFile struct {
@@ -117,6 +142,10 @@ type Config struct {
 
 	ScanInterval time.Duration
 	StartHeight  uint64
+
+	// Cold: limits per hot partition ID; empty when hot-to-cold is not configured.
+	ColdLimits       map[string]HotLimits
+	ColdPlanInterval time.Duration
 }
 
 // Asset is a configured asset.
@@ -328,6 +357,9 @@ func (f File) Build() (*Config, error) {
 		return nil, err
 	}
 	c.StartHeight = f.Scan.StartHeight
+	if err := c.buildCold(f.Cold, hot); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -369,4 +401,68 @@ func (c *Config) Required(asset string, amount *big.Int) (n int, auto bool) {
 		}
 	}
 	return n, auto
+}
+
+func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
+	var err error
+	if c.ColdPlanInterval, err = dur("cold plan_interval", cf.PlanInterval, 5*time.Second); err != nil {
+		return err
+	}
+	if len(cf.Addresses) == 0 && len(cf.Limits) == 0 && len(cf.ShardLimits) == 0 {
+		return nil
+	}
+	c.EVM.ColdAddresses = map[string]common.Address{}
+	for k, a := range cf.Addresses {
+		if !common.IsHexAddress(a) {
+			return fmt.Errorf("custody: config: cold address %q is not an address", k)
+		}
+		c.EVM.ColdAddresses[k] = common.HexToAddress(a)
+	}
+	parse := func(where string, lf LimitFile) (HotLimits, error) {
+		var l HotLimits
+		var err error
+		if l.Low, err = amount(where+" low", orZero(lf.Low)); err != nil {
+			return l, err
+		}
+		if l.High, err = amount(where+" high", lf.High); err != nil {
+			return l, err
+		}
+		if l.High.Sign() == 0 || l.High.Cmp(l.Low) <= 0 {
+			return l, fmt.Errorf("custody: config: %s: need 0 <= low < high", where)
+		}
+		if lf.Target == "" {
+			l.Target = new(big.Int).Rsh(new(big.Int).Add(l.Low, l.High), 1)
+		} else if l.Target, err = amount(where+" target", lf.Target); err != nil {
+			return l, err
+		}
+		if l.Target.Cmp(l.Low) < 0 || l.Target.Cmp(l.High) >= 0 {
+			return l, fmt.Errorf("custody: config: %s: need low <= target < high", where)
+		}
+		return l, nil
+	}
+	c.ColdLimits = map[string]HotLimits{}
+	for _, sym := range c.AssetList {
+		for i := range c.HotShards {
+			lf, ok := cf.ShardLimits[fmt.Sprintf("%s/%d", sym, i)]
+			if !ok {
+				if lf, ok = cf.Limits[sym]; !ok {
+					continue
+				}
+			}
+			p := c.PartitionKey(sym, i).String()
+			if c.ColdLimits[p], err = parse("cold limits of "+p, lf); err != nil {
+				return err
+			}
+			if _, err := c.EVM.ColdAddress(p, sym); err != nil {
+				return fmt.Errorf("custody: config: %s has limits but no cold address: %w", p, err)
+			}
+		}
+	}
+	for k := range cf.Limits {
+		if _, ok := c.Assets[k]; !ok {
+			return fmt.Errorf("custody: config: cold limits for unknown asset %q", k)
+		}
+	}
+	_ = hot
+	return nil
 }

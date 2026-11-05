@@ -73,6 +73,8 @@ type ChainFile struct {
 	Assets         map[string]AssetFile `json:"assets"`
 	SweepsPerHour  int                  `json:"sweeps_per_hour"`
 	CancelsPerHour int                  `json:"cancels_per_hour"`
+	// ToColdPerHour limits hot-to-cold moves; 0 refuses them all.
+	ToColdPerHour int `json:"to_cold_per_hour"`
 }
 
 // AssetFile is the withdrawal policy of one (chain, asset), amounts in base units.
@@ -80,6 +82,8 @@ type AssetFile struct {
 	PerTxCap string     `json:"per_tx_cap"`
 	DailyCap string     `json:"daily_cap"` // rolling 24 hours
 	Tiers    []TierFile `json:"tiers"`
+	// ToColdDailyCap caps what hot-to-cold moves of this asset may carry in a rolling 24 hours. Empty or 0 refuses the moves.
+	ToColdDailyCap string `json:"to_cold_daily_cap"`
 }
 
 // TierFile: withdrawals of at least MinAmount need Approvals distinct approvers.
@@ -90,13 +94,16 @@ type TierFile struct {
 
 // EVMFile is the JSON form of evm.Config (no RPC: the gateway has no chain access).
 type EVMFile struct {
-	ChainID          uint64               `json:"chain_id"`
-	Factory          string               `json:"factory"`
-	SweepDestination string               `json:"sweep_destination"`
-	HotAddresses     map[string]string    `json:"hot_addresses"` // partition ID -> address
-	Tokens           map[string]TokenFile `json:"tokens"`
-	NativeAsset      string               `json:"native_asset"`
-	MaxTxFeeWei      string               `json:"max_tx_fee_wei"`
+	ChainID          uint64            `json:"chain_id"`
+	Factory          string            `json:"factory"`
+	SweepDestination string            `json:"sweep_destination"`
+	HotAddresses     map[string]string `json:"hot_addresses"` // partition ID -> address
+	// ColdAddresses: where hot-to-cold moves may go, "<pool>/native" or "<pool>/token" -> address. Only this zone's config can
+	// change it; a move to any other address is refused.
+	ColdAddresses map[string]string    `json:"cold_addresses"`
+	Tokens        map[string]TokenFile `json:"tokens"`
+	NativeAsset   string               `json:"native_asset"`
+	MaxTxFeeWei   string               `json:"max_tx_fee_wei"`
 }
 
 // TokenFile is a configured ERC-20.
@@ -128,6 +135,7 @@ type ChainConfig struct {
 	Assets         map[string]AssetPolicy
 	SweepsPerHour  int
 	CancelsPerHour int
+	ToColdPerHour  int
 }
 
 // AssetPolicy is the withdrawal policy of one asset.
@@ -135,6 +143,8 @@ type AssetPolicy struct {
 	PerTxCap *big.Int
 	DailyCap *big.Int
 	Tiers    []Tier // ascending MinAmount
+	// ToColdDailyCap caps hot-to-cold moves per rolling day (zero: none allowed).
+	ToColdDailyCap *big.Int
 }
 
 // Tier: amounts >= Min need Approvals distinct approvers.
@@ -258,12 +268,12 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	if cf.EVM == nil {
 		return nil, fmt.Errorf("gateway: config: chain %q has no supported chain section (only evm)", name)
 	}
-	if cf.SweepsPerHour < 0 || cf.CancelsPerHour < 0 {
+	if cf.SweepsPerHour < 0 || cf.CancelsPerHour < 0 || cf.ToColdPerHour < 0 {
 		return nil, fmt.Errorf("gateway: config: chain %q: rate limits must be >= 0", name)
 	}
 	e := cf.EVM
 	ec := evm.Config{Chain: name, ChainID: e.ChainID, NativeAsset: e.NativeAsset,
-		HotAddresses: map[string]common.Address{}, Assets: map[string]evm.Token{}}
+		HotAddresses: map[string]common.Address{}, Assets: map[string]evm.Token{}, ColdAddresses: map[string]common.Address{}}
 	var err error
 	if ec.Factory, err = addr("factory", e.Factory); err != nil {
 		return nil, err
@@ -273,6 +283,11 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	}
 	for p, a := range e.HotAddresses {
 		if ec.HotAddresses[p], err = addr("hot address of "+p, a); err != nil {
+			return nil, err
+		}
+	}
+	for k, a := range e.ColdAddresses {
+		if ec.ColdAddresses[k], err = addr("cold address "+k, a); err != nil {
 			return nil, err
 		}
 	}
@@ -302,7 +317,7 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	}
 	sort.Strings(want)
 	cc := &ChainConfig{Name: name, EVM: ec, Assets: map[string]AssetPolicy{},
-		SweepsPerHour: cf.SweepsPerHour, CancelsPerHour: cf.CancelsPerHour}
+		SweepsPerHour: cf.SweepsPerHour, CancelsPerHour: cf.CancelsPerHour, ToColdPerHour: cf.ToColdPerHour}
 	for _, s := range want {
 		af, ok := cf.Assets[s]
 		if !ok {
@@ -331,6 +346,12 @@ func (af AssetFile) build(where string, enabledApprovers int) (AssetPolicy, erro
 	}
 	if p.PerTxCap.Sign() == 0 || p.DailyCap.Cmp(p.PerTxCap) < 0 {
 		return p, fmt.Errorf("gateway: config: %s: need 0 < per_tx_cap <= daily_cap", where)
+	}
+	p.ToColdDailyCap = new(big.Int)
+	if af.ToColdDailyCap != "" {
+		if p.ToColdDailyCap, err = amount(where+" to_cold_daily_cap", af.ToColdDailyCap); err != nil {
+			return p, err
+		}
 	}
 	if len(af.Tiers) == 0 {
 		return p, fmt.Errorf("gateway: config: %s: no approval tiers", where)

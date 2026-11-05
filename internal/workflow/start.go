@@ -17,9 +17,10 @@ import (
 )
 
 // Names of the long-running workflows (their workflow IDs).
-func ScanID(chain string) string       { return "scan:" + chain }
-func PlannerID(chain string) string    { return "sweep-planner:" + chain }
-func ReconcilerID(chain string) string { return "withdrawal-reconciler:" + chain }
+func ScanID(chain string) string        { return "scan:" + chain }
+func PlannerID(chain string) string     { return "sweep-planner:" + chain }
+func ReconcilerID(chain string) string  { return "withdrawal-reconciler:" + chain }
+func ColdPlannerID(chain string) string { return "cold-planner:" + chain }
 
 // RegisterNamespace creates the Temporal namespace if it does not exist (the
 // dev server starts without one). Idempotent.
@@ -46,6 +47,8 @@ func NewWorker(c client.Client, d Deps) worker.Worker {
 	w.RegisterWorkflow(ScanWorkflow)
 	w.RegisterWorkflow(SweepPlannerWorkflow)
 	w.RegisterWorkflow(WithdrawalReconcilerWorkflow)
+	w.RegisterWorkflow(ColdPlannerWorkflow)
+	w.RegisterWorkflow(ColdMoveWorkflow)
 	w.RegisterWorkflow(SweepWorkflow)
 	w.RegisterWorkflow(WithdrawalWorkflow)
 	w.RegisterActivity(&Activities{D: d})
@@ -59,7 +62,7 @@ type loopSpec struct {
 }
 
 func loopSpecs(chain string) []loopSpec {
-	return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}}
+	return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}, {ColdPlannerID(chain), ColdPlannerWorkflow}}
 }
 
 func startLoop(ctx context.Context, c client.Client, queue string, t Timings, l loopSpec) error {
@@ -74,7 +77,7 @@ func startLoop(ctx context.Context, c client.Client, queue string, t Timings, l 
 	return nil
 }
 
-// EnsureLoops starts the three per-chain loops if they are not running.
+// EnsureLoops starts the per-chain loops if they are not running.
 func EnsureLoops(ctx context.Context, c client.Client, queue string, cfg *custody.Config, log *slog.Logger) error {
 	if queue == "" {
 		queue = DefaultTaskQueue

@@ -29,6 +29,8 @@ const (
 	ReasonSweepRate     = "policy_sweep_rate"      // 4
 	ReasonCancelRate    = "policy_cancel_rate"     // 4
 	ReasonCancelTarget  = "policy_cancel_target"   // 4 sender is not a hot address the gateway owns
+	ReasonToColdRate    = "policy_to_cold_rate"    // 4 too many hot-to-cold moves in the last hour
+	ReasonToColdCap     = "policy_to_cold_cap"     // 4 hot-to-cold moves of this asset would exceed the daily cap
 	ReasonIntentChanged = "replay_intent_conflict" // 5 same intent ID, different intent hash
 	ReasonNonceChanged  = "replay_nonce_changed"   // 5 same intent, new digest, different nonce
 	ReasonFeeNotHigher  = "replay_fee_not_higher"  // 5 same intent, new digest, fees not higher

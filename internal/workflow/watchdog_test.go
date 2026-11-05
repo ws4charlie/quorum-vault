@@ -18,7 +18,9 @@ type fakeEngine struct {
 	started    []string
 }
 
-func (f *fakeEngine) Describe(_ context.Context, id string) (Progress, error) { return f.progress[id], nil }
+func (f *fakeEngine) Describe(_ context.Context, id string) (Progress, error) {
+	return f.progress[id], nil
+}
 func (f *fakeEngine) Terminate(_ context.Context, id, _, _ string) error {
 	f.terminated = append(f.terminated, id)
 	return nil

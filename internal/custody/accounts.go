@@ -23,6 +23,11 @@ func suspenseAcct(chain, asset string) string { return "suspense:" + chain + ":"
 func feeAcct(chain, native string) string     { return "fee:" + chain + ":" + native }
 func hotAcct(partitionID string) string       { return "hot:" + partitionID }
 
+// coldAcct is minus the on-chain cold balance that hot-to-cold moves have delivered for a hot partition. toColdAcct is the
+// clearing account the funds are in while a move is on its way.
+func coldAcct(partitionID string) string    { return "cold:" + partitionID }
+func toColdAcct(chain, asset string) string { return "tocold:" + chain + ":" + asset }
+
 // CustomerAccount is the ledger account owing a customer an asset.
 func CustomerAccount(customer, chain, asset string) string { return custAcct(customer, chain, asset) }
 
@@ -34,6 +39,8 @@ func WdAccount(chain, asset string) string       { return wdAcct(chain, asset) }
 func SuspenseAccount(chain, asset string) string { return suspenseAcct(chain, asset) }
 func FeeAccount(chain, native string) string     { return feeAcct(chain, native) }
 func HotAccount(partitionID string) string       { return hotAcct(partitionID) }
+func ColdAccount(partitionID string) string      { return coldAcct(partitionID) }
+func ToColdAccount(chain, asset string) string   { return toColdAcct(chain, asset) }
 
 // ensureCustomerAccount creates a customer's account for asset.
 func (s *Service) ensureCustomerAccount(ctx context.Context, tx pgx.Tx, customer, asset string) error {
@@ -65,6 +72,7 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 				{depAcct(c.Chain, sym), ledger.KindClearing, true},
 				{sweepAcct(c.Chain, sym), ledger.KindClearing, true},
 				{wdAcct(c.Chain, sym), ledger.KindClearing, true},
+				{toColdAcct(c.Chain, sym), ledger.KindClearing, true},
 				{suspenseAcct(c.Chain, sym), ledger.KindSuspense, false},
 			} {
 				if err := s.Led.EnsureAccount(ctx, tx, ledger.Account{ID: kind.id, Kind: kind.kind, Chain: c.Chain, Asset: sym, AllowNegative: kind.neg}); err != nil {
@@ -83,6 +91,10 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 					return fmt.Errorf("custody: bootstrap partition %s: %w", k, err)
 				}
 				if err := s.Led.EnsureAccount(ctx, tx, ledger.Account{ID: hotAcct(k.String()), Kind: ledger.KindHot, Chain: c.Chain, Asset: sym,
+					PartitionID: k.String(), AllowNegative: true}); err != nil {
+					return err
+				}
+				if err := s.Led.EnsureAccount(ctx, tx, ledger.Account{ID: coldAcct(k.String()), Kind: ledger.KindCold, Chain: c.Chain, Asset: sym,
 					PartitionID: k.String(), AllowNegative: true}); err != nil {
 					return err
 				}

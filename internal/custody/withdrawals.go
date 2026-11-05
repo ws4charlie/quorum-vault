@@ -259,8 +259,16 @@ func (s *Service) freeHot(ctx context.Context, q interface {
 		partitionID).Scan(&reserved); err != nil {
 		return nil, err
 	}
+	// A cold move that is planned or signing has not been booked yet (that happens at broadcast), so its amount is
+	// set aside here; after the broadcast the hot balance already shows it.
+	var moving string
+	if err := q.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::text FROM cold_moves WHERE partition_id=$1 AND status IN ('planned','signing')`,
+		partitionID).Scan(&moving); err != nil {
+		return nil, err
+	}
 	free := new(big.Int).Neg(parseBig(posted))
-	return free.Sub(free, parseBig(reserved)), nil
+	free.Sub(free, parseBig(reserved))
+	return free.Sub(free, parseBig(moving)), nil
 }
 
 // pickShard returns the partition of the shard with the most free hot
