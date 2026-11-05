@@ -44,10 +44,12 @@ type Server struct {
 		KeyStore
 		JobStore
 	}
-	fi    *FaultInjection
-	cert  tls.Certificate
-	cache *keyCache
-	stats frameStats
+	fi     *FaultInjection
+	admin  *adminVerifier
+	freeze FreezeStore
+	cert   tls.Certificate
+	cache  *keyCache
+	stats  frameStats
 
 	rl      *rateLimiter
 	slots   *slots // concurrent sessions: outgoing on A, incoming on B
@@ -107,7 +109,15 @@ func New(o Options) (*Server, error) {
 			lg.Warn("using the insecure test sealer: key shares are only as safe as the key file next to them")
 		}
 	}
-	return &Server{cfg: c, log: lg, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
+	adm, err := newAdminVerifier(c)
+	if err != nil {
+		return nil, err
+	}
+	fz, err := newFileFreeze(c.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	return &Server{cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
 		cache: newKeyCache(), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
 		replay: newReplayCache(c.Limits.ReplayCacheSize), inflight: map[string]*flight{}}, nil
 }

@@ -121,7 +121,7 @@ func wantKind(t testing.TB, err error, code codes.Code, kind pb.ErrorKind) {
 
 func (p *pair) dkg(t testing.TB, id string, c pb.Curve) []byte {
 	t.Helper()
-	r, err := p.Client.DKG(ctx30(t), &pb.DKGRequest{KeysetId: id, Curve: c})
+	r, err := p.Client.DKG(ctx30(t), &pb.DKGRequest{KeysetId: id, Curve: c, Admin: p.Env.Admin("dkg", id)})
 	mustOK(t, err)
 	return r.RootPublicKey
 }

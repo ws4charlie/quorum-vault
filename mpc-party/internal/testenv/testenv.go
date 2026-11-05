@@ -4,6 +4,7 @@ package testenv
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
@@ -16,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,12 +97,17 @@ type Env struct {
 	CertA, CertB, CertCaller Cert
 	Stranger                 Cert // pinned nowhere
 	SealKeyFile              string
+	mu                       sync.Mutex
+	n                        int
+	AdminPriv                ed25519.PrivateKey
+	AdminPub                 ed25519.PublicKey
 }
 
 func NewEnv(t testing.TB) *Env {
 	t.Helper()
 	dir := t.TempDir()
-	e := &Env{Dir: dir, CertA: NewCert(t, "party-a"), CertB: NewCert(t, "party-b"), CertCaller: NewCert(t, "caller"), Stranger: NewCert(t, "stranger")}
+	apub, apriv, _ := ed25519.GenerateKey(rand.Reader)
+	e := &Env{AdminPriv: apriv, AdminPub: apub, Dir: dir, CertA: NewCert(t, "party-a"), CertB: NewCert(t, "party-b"), CertCaller: NewCert(t, "caller"), Stranger: NewCert(t, "stranger")}
 	e.SealKeyFile = filepath.Join(dir, "seal.key")
 	key := make([]byte, 32)
 	rand.Read(key)
@@ -119,7 +126,7 @@ func (e *Env) Config(t testing.TB, role string, peerAddr string, callerAddr, pee
 	}
 	crt, key := own.Write(t, e.Dir)
 	c := &server.Config{Role: role, CallerListen: callerAddr, CertFile: crt, KeyFile: key,
-		PeerPins: []string{other.Pin}, CallerPins: []string{e.CertCaller.Pin},
+		PeerPins: []string{other.Pin}, CallerPins: []string{e.CertCaller.Pin}, AdminKeys: []string{hex.EncodeToString(e.AdminPub)},
 		DataDir:    filepath.Join(e.Dir, "data-"+role),
 		Sealer:     server.SealerConfig{Type: server.InsecureSealerType, KeyFile: e.SealKeyFile},
 		Authorizer: server.AuthorizerConfig{Type: "dev-allow-all", AcceptRisk: server.DevAllowAllRiskPhrase}}
@@ -163,4 +170,21 @@ func parse(pin string) (map[server.Pin]bool, error) {
 		return nil, err
 	}
 	return map[server.Pin]bool{p: true}, nil
+}
+
+// Admin signs an operator authorization for (op, keyset) with the environment's admin key.
+// Each call uses a timestamp one second later than the previous: Ed25519 signatures are deterministic and an admin
+// signature is accepted only once.
+func (e *Env) Admin(op, keysetID string) *pb.AdminAuth {
+	e.mu.Lock()
+	e.n++
+	n := e.n
+	e.mu.Unlock()
+	return server.SignAdmin(e.AdminPriv, op, keysetID, time.Now().Add(time.Duration(n)*time.Second))
+}
+
+// CertCallerKey returns an Ed25519 key that is NOT a configured admin key (for refusal tests).
+func (e *Env) CertCallerKey() ed25519.PrivateKey {
+	_, k, _ := ed25519.GenerateKey(rand.Reader)
+	return k
 }

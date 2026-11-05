@@ -194,7 +194,9 @@ func (s *Server) execOp(ctx context.Context, open *pb.Open, tr cbmpc.Transport) 
 		if err != nil {
 			return nil, fromWrapper("sign", err)
 		}
-		if len(open.ExpectedPublicKey) > 0 && !bytes.Equal(pub, open.ExpectedPublicKey) {
+		// The key an authorizer judged must be the key that signs: an OPEN without an expected key never gets this far
+		// (peer.go refuses it), and a derived key that differs aborts before any signing message.
+		if len(open.ExpectedPublicKey) == 0 || !bytes.Equal(pub, open.ExpectedPublicKey) {
 			return nil, failf(pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, codes.Aborted, "sign", "derived key differs from the expected public key")
 		}
 		if fi := s.fi; fi != nil && fi.BeforeSign != nil {

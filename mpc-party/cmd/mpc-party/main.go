@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/server"
 )
@@ -20,6 +21,14 @@ func pickAuthorizer(c server.AuthorizerConfig) (server.Authorizer, error) {
 	switch c.Type {
 	case "deny-all":
 		return server.DenyAll{}, nil
+	case "pinned-caller":
+		// Party A: its pinned caller (the gateway) already decided; party B's cosigner is the independent check.
+		return server.PinnedCaller{}, nil
+	case "cosigner":
+		if c.Socket == "" {
+			return nil, fmt.Errorf("authorizer cosigner needs authorizer.socket")
+		}
+		return server.NewCosignerAuthorizer(c.Socket, time.Duration(c.TimeoutMS)*time.Millisecond), nil
 	case "":
 		return nil, server.ErrNoAuthorizer
 	}

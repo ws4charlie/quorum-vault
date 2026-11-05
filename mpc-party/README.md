@@ -153,6 +153,7 @@ pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Write a 32-byte hex key
   "cert_file": "b.crt", "key_file": "b.key",
   "peer_pins": ["<sha256 of a.crt>"], "caller_pins": ["<sha256 of caller.crt>"],
   "data_dir": "data-b",
+  "admin_keys": ["<64 hex chars: an operator's Ed25519 public key>"],
   "sealer": {"type": "insecure-static-key-for-tests", "key_file": "seal.key"},
   "authorizer": {"type": "dev-allow-all", "accept_risk": "I UNDERSTAND THIS PARTY SIGNS ANYTHING WITHOUT POLICY CHECKS"}
 }
@@ -164,6 +165,8 @@ pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Write a 32-byte hex key
 ```bash
 /tmp/mpc-party-dev -config b.json &  /tmp/mpc-party-dev -config a.json &
 ```
+
+`admin_keys` (required): operators' Ed25519 public keys. `DKG`, `Refresh` and `Unfreeze` carry an `AdminAuth` (a signature over `op, keyset, timestamp`, see `api/admin`) that BOTH parties verify against their own list; the timestamp must be within `admin_max_age_seconds` (300) and a signature works once.
 
 Optional `limits`: `recv_timeout_ms` (5000), `session_timeout_ms` (30000), `max_peer_sessions` (2 x cores),
 `max_frame_bytes` (1 MiB; the largest DKG message measured is about 39 KB), `sessions_per_sec_key` (200),
@@ -187,3 +190,16 @@ duration, outcome, kind); no secrets.
 - Sealing uses the clearly named test sealer (`insecure-static-key-for-tests`). P5b-4 adds the HSM sealer.
 - Hardening at start: `RLIMIT_CORE=0` everywhere; on Linux also `PR_SET_DUMPABLE=0` and `mlockall` (result logged).
 - SIGTERM/SIGINT: stop accepting, wait for sessions up to `shutdown_grace_ms`, wipe keysets from memory.
+
+## P5b-3: production authorizers, freeze, cosigner
+
+- `authorizer.type`: `pinned-caller` on party A (its pinned caller, the gateway, already decided), `cosigner` on party B
+  (`socket`, `timeout_ms`: asks `qv-cosigner` over a unix socket and refuses when it is down or slow), `deny-all`, and in
+  `-tags devauth` builds only `dev-allow-all`.
+- B refuses a `Sign` whose OPEN has no `expected_public_key`, and aborts before any signing message if its derived key
+  differs from it: the key the cosigner judged is the key that signs.
+- **Freeze**: a `CRYPTOGRAPHIC` failure on either side freezes the keyset on both (the other is told in the FIN), durably
+  (`data_dir/freeze`). A frozen keyset refuses `Sign`, `Derive` and `Refresh` with kind `FROZEN`; `Unfreeze` needs an operator
+  signature checked by both parties and is logged as `AUDIT keyset unfrozen`. A malicious A can freeze a keyset by sending
+  garbage (denial of service, not theft); that is the price of failing closed.
+- Log lines to alert on: `ALERT keyset frozen after a cryptographic failure`, `ALERT cannot persist keyset freeze`.

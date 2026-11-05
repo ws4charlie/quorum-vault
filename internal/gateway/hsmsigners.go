@@ -29,6 +29,9 @@ func HSMSigners(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer
 	sort.Strings(parts)
 	for _, p := range parts {
 		sf := cfg.Signers[p]
+		if sf.Backend == "mpc" {
+			continue // built by MPCSigners
+		}
 		tok := tokens[sf.Token]
 		if tok == nil {
 			t, err := lib.OpenToken(sf.Token, pin)
@@ -53,9 +56,12 @@ func HSMSigners(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer
 	}
 	for name, cc := range cfg.Chains {
 		for p := range cc.EVM.HotAddresses {
-			if out[p] == nil {
+			if out[p] == nil && cfg.Signers[p].Backend != "mpc" {
 				closeAll()
 				return nil, nil, fmt.Errorf("gateway: chain %q: hot partition %q has no signer", name, p)
+			}
+			if out[p] == nil {
+				continue
 			}
 			if err := (&EVMCodec{}).CheckSigner(TxInfo{Sender: cc.EVM.HotAddresses[p].Hex()}, out[p].PublicKey()); err != nil {
 				closeAll()
@@ -64,4 +70,14 @@ func HSMSigners(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer
 		}
 	}
 	return out, closeAll, nil
+}
+
+// HasHSMSigners reports whether any partition uses the HSM backend (the PKCS#11 library is only loaded then).
+func HasHSMSigners(cfg *Config) bool {
+	for _, sf := range cfg.Signers {
+		if sf.Backend != "mpc" {
+			return true
+		}
+	}
+	return false
 }

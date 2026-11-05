@@ -19,12 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MpcParty_DKG_FullMethodName     = "/qv.mpcparty.v1.MpcParty/DKG"
-	MpcParty_Node_FullMethodName    = "/qv.mpcparty.v1.MpcParty/Node"
-	MpcParty_Derive_FullMethodName  = "/qv.mpcparty.v1.MpcParty/Derive"
-	MpcParty_Sign_FullMethodName    = "/qv.mpcparty.v1.MpcParty/Sign"
-	MpcParty_Refresh_FullMethodName = "/qv.mpcparty.v1.MpcParty/Refresh"
-	MpcParty_Health_FullMethodName  = "/qv.mpcparty.v1.MpcParty/Health"
+	MpcParty_DKG_FullMethodName      = "/qv.mpcparty.v1.MpcParty/DKG"
+	MpcParty_Node_FullMethodName     = "/qv.mpcparty.v1.MpcParty/Node"
+	MpcParty_Derive_FullMethodName   = "/qv.mpcparty.v1.MpcParty/Derive"
+	MpcParty_Sign_FullMethodName     = "/qv.mpcparty.v1.MpcParty/Sign"
+	MpcParty_Refresh_FullMethodName  = "/qv.mpcparty.v1.MpcParty/Refresh"
+	MpcParty_Health_FullMethodName   = "/qv.mpcparty.v1.MpcParty/Health"
+	MpcParty_Unfreeze_FullMethodName = "/qv.mpcparty.v1.MpcParty/Unfreeze"
 )
 
 // MpcPartyClient is the client API for MpcParty service.
@@ -42,6 +43,8 @@ type MpcPartyClient interface {
 	// Admin: refresh the shares of a keyset. Includes a mandatory SelfTest; the old shares stay in force unless it passed.
 	Refresh(ctx context.Context, in *RefreshRequest, opts ...grpc.CallOption) (*RefreshResponse, error)
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
+	// Admin: lift a keyset freeze. Needs an operator signature; audited in the log on both parties.
+	Unfreeze(ctx context.Context, in *UnfreezeRequest, opts ...grpc.CallOption) (*UnfreezeResponse, error)
 }
 
 type mpcPartyClient struct {
@@ -112,6 +115,16 @@ func (c *mpcPartyClient) Health(ctx context.Context, in *HealthRequest, opts ...
 	return out, nil
 }
 
+func (c *mpcPartyClient) Unfreeze(ctx context.Context, in *UnfreezeRequest, opts ...grpc.CallOption) (*UnfreezeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnfreezeResponse)
+	err := c.cc.Invoke(ctx, MpcParty_Unfreeze_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MpcPartyServer is the server API for MpcParty service.
 // All implementations must embed UnimplementedMpcPartyServer
 // for forward compatibility.
@@ -127,6 +140,8 @@ type MpcPartyServer interface {
 	// Admin: refresh the shares of a keyset. Includes a mandatory SelfTest; the old shares stay in force unless it passed.
 	Refresh(context.Context, *RefreshRequest) (*RefreshResponse, error)
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
+	// Admin: lift a keyset freeze. Needs an operator signature; audited in the log on both parties.
+	Unfreeze(context.Context, *UnfreezeRequest) (*UnfreezeResponse, error)
 	mustEmbedUnimplementedMpcPartyServer()
 }
 
@@ -154,6 +169,9 @@ func (UnimplementedMpcPartyServer) Refresh(context.Context, *RefreshRequest) (*R
 }
 func (UnimplementedMpcPartyServer) Health(context.Context, *HealthRequest) (*HealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
+}
+func (UnimplementedMpcPartyServer) Unfreeze(context.Context, *UnfreezeRequest) (*UnfreezeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Unfreeze not implemented")
 }
 func (UnimplementedMpcPartyServer) mustEmbedUnimplementedMpcPartyServer() {}
 func (UnimplementedMpcPartyServer) testEmbeddedByValue()                  {}
@@ -284,6 +302,24 @@ func _MpcParty_Health_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MpcParty_Unfreeze_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnfreezeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MpcPartyServer).Unfreeze(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MpcParty_Unfreeze_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MpcPartyServer).Unfreeze(ctx, req.(*UnfreezeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MpcParty_ServiceDesc is the grpc.ServiceDesc for MpcParty service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -314,6 +350,10 @@ var MpcParty_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Health",
 			Handler:    _MpcParty_Health_Handler,
+		},
+		{
+			MethodName: "Unfreeze",
+			Handler:    _MpcParty_Unfreeze_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
