@@ -11,7 +11,7 @@ export DATABASE_URL
 # Local anvil node impersonating Sepolia (docker-compose.yml service "anvil").
 LOCAL_RPC_URL := http://127.0.0.1:8545
 
-.PHONY: test-mpc test-mpc-soak test-custody-mpc test-custody-mpc-failure test-custody-mpc-1 test-custody-mpc-2 test-custody-mpc-3 mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short test-e2e build vet run demo-local
+.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery test-demo-v1 mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short build vet run demo-local
 
 setup: softhsm db-up chain-up
 
@@ -47,11 +47,11 @@ test:
 test-short:
 	go test -short -p 1 ./...
 
-# Broadcast + receipt checks on the local anvil node (make chain-up first).
+# The /v1 demo (HSM-only): broadcast + receipt checks on the local anvil node (make chain-up first).
 # Not -short: the full broadcast and receipt checks.
-test-e2e:
+test-demo-v1:
 	SEPOLIA_RPC_URL=$(LOCAL_RPC_URL) QV_REQUIRE_CHAIN=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 \
-		go test -count=1 -p 1 -timeout 20m -v ./e2e/...
+		go test -count=1 -p 1 -timeout 20m -v ./e2e
 
 build:
 	go build -o bin/quorumvault ./cmd/quorumvault
@@ -98,34 +98,38 @@ build-worker:
 test-custody:
 	QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 30m -v ./e2e/custody/...
 
-# The closed loop with the hot keys on two-party MPC (mpc-party A and B, qv-cosigner, real SoftHSM sealing), plus the
-# failure tests that only exist in this mode. Needs `make mpc-build`, `make softhsm`, `make infra-up`, Postgres and anvil.
-# test-custody-mpc runs ALL tests (about 15 minutes). To run one test, or a few, by name (a Go -run regexp):
-#   make test-custody-mpc TEST=TestMPCRefreshDuringLiveWithdrawals
-#   make test-custody-mpc TEST='TestMPCRefresh|TestHappyPath'
+# The end-to-end suite for the EVM chain: the closed loop (deposits, sweeps, withdrawals, hot to cold, refills) with the hot keys on
+# two-party MPC (mpc-party A and B, qv-cosigner, real SoftHSM sealing), plus the failure tests. Needs `make mpc-build`, `make softhsm`,
+# `make infra-up`, Postgres and anvil. Jobs are named e2e-<chain>-<group>: the chain decides how nonces, UTXOs or blockhashes fail.
+# test-e2e-evm runs ALL tests (about 15 minutes). To run one test, or a few, by name (a Go -run regexp):
+#   make test-e2e-evm TEST=TestMPCRefreshDuringLiveWithdrawals
+#   make test-e2e-evm TEST='TestMPCRefresh|TestHappyPath'
 # and, to run only some crash boundaries of TestCrashAtEveryBoundary: QV_CRASH_BOUNDARIES=withdrawal.after_broadcast.
-CUSTODY_MPC_ENV := QV_CUSTODY_SIGNER=mpc QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1
-test-custody-mpc:
-	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 40m -v $(if $(TEST),-run '$(TEST)') ./e2e/custody/...
+E2E_EVM_ENV := QV_CUSTODY_SIGNER=mpc QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1
+test-e2e-evm:
+	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 40m -v $(if $(TEST),-run '$(TEST)') ./e2e/custody/...
 
 # The heavy tests, which pull-request CI leaves to the nightly run: every crash boundary, a component killed at each custody
 # boundary, the freeze test, and the three slowest link tests (kill mid-session, partition, latency up to 1 s per frame).
-FAILURE_MPC := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestRefillCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCWithdrawalLatencyWithSlowLink
-test-custody-mpc-failure:
-	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 40m -v -run '$(FAILURE_MPC)' ./e2e/custody/...
+E2E_EVM_FAILURE := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestRefillCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCWithdrawalLatencyWithSlowLink
+test-e2e-evm-failure:
+	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 40m -v -run '$(E2E_EVM_FAILURE)' ./e2e/custody/...
 
-# Pull-request CI: everything except the heavy tests, in three groups that run in parallel jobs (each on its own runner with its
-# own anvil, Temporal, Redpanda and Postgres). Together with test-custody-mpc-failure they cover test-custody-mpc.
-CUSTODY_GROUP_1 := TestTwoApproversAndInitiatorCannotApprove|TestApprovalTimeoutVoidsTheHold|TestHumanRejectionVoids|TestInsufficientFundsIsRefused|TestFrozenFactoryDefersSweeps|TestGatewayRejectionReleasesNonceAndHold|TestDuplicateRequestsAndSignals|TestHappyPathETHAndToken|TestWorkflowReplayOfRecordedHistories|TestColdMoveRespectsOpenWithdrawals|TestColdMoveBelowLowRaisesOneAlert|TestRefillCeremonyEndToEnd
-CUSTODY_GROUP_2 := TestRevertedWithdrawalVoidsAndRecordsFee|TestDroppedTransactionIsReplacedAndPaidOnce|TestConsumedNonceParksWithOneAlert|TestRestartedWorkflowAfterMinedReplacementSettlesOnce|TestStuckTransactionIsReplacedOnce|TestGatewayAndRelayRestart|TestColdMoveExcessEthAndToken|TestRefillImportAndReexportAttacks|TestRefillNotConfirming
-CUSTODY_GROUP_3 := TestMPCRefreshDuringLiveWithdrawals|TestCrashAtEveryBoundary|TestMeasureClosedLoop|TestFiftyCustomersConcurrent
-test-custody-mpc-1:
-	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(CUSTODY_GROUP_1)' ./e2e/custody/...
-test-custody-mpc-2:
-	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(CUSTODY_GROUP_2)' ./e2e/custody/...
-# Group 3 keeps one crash boundary on pull requests: the worker dies right after the broadcast.
-test-custody-mpc-3:
-	$(CUSTODY_MPC_ENV) QV_CRASH_BOUNDARIES=withdrawal.after_broadcast go test -count=1 -p 1 -timeout 25m -v -run '$(CUSTODY_GROUP_3)' ./e2e/custody/...
+# Pull-request CI: everything except the failure tests, in three groups that run in parallel jobs (each on its own runner with its
+# own anvil, Temporal, Redpanda and Postgres). Together with test-e2e-evm-failure they cover test-e2e-evm.
+#   flows        deposits, sweeps, withdrawals, approvals, hot to cold, refills: the business flows working
+#   tx-failures  what the chain does to a transaction: reverted, dropped, stuck, replaced, nonce taken from under us
+#   recovery     processes and links dying: gateway and relay restarts, a refresh under load, a worker crash at a boundary
+E2E_EVM_FLOWS := TestTwoApproversAndInitiatorCannotApprove|TestApprovalTimeoutVoidsTheHold|TestHumanRejectionVoids|TestInsufficientFundsIsRefused|TestFrozenFactoryDefersSweeps|TestGatewayRejectionReleasesNonceAndHold|TestDuplicateRequestsAndSignals|TestHappyPathETHAndToken|TestWorkflowReplayOfRecordedHistories|TestColdMoveRespectsOpenWithdrawals|TestColdMoveBelowLowRaisesOneAlert|TestRefillCeremonyEndToEnd|TestColdMoveExcessEthAndToken|TestMeasureClosedLoop|TestFiftyCustomersConcurrent|TestRefillImportAndReexportAttacks|TestRefillNotConfirming
+E2E_EVM_TX_FAILURES := TestRevertedWithdrawalVoidsAndRecordsFee|TestDroppedTransactionIsReplacedAndPaidOnce|TestConsumedNonceParksWithOneAlert|TestRestartedWorkflowAfterMinedReplacementSettlesOnce|TestStuckTransactionIsReplacedOnce
+E2E_EVM_RECOVERY := TestGatewayAndRelayRestart|TestMPCRefreshDuringLiveWithdrawals|TestCrashAtEveryBoundary
+test-e2e-evm-flows:
+	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' ./e2e/custody/...
+test-e2e-evm-tx-failures:
+	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_TX_FAILURES)' ./e2e/custody/...
+# recovery keeps one crash boundary on pull requests: the worker dies right after the broadcast.
+test-e2e-evm-recovery:
+	$(E2E_EVM_ENV) QV_CRASH_BOUNDARIES=withdrawal.after_broadcast go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_RECOVERY)' ./e2e/custody/...
 
 # cb-mpc signing path end to end (needs the C++ build once: `make mpc-build`; Postgres; anvil on 127.0.0.1:18545 with chain
 # id 11155111 for the mining test: docker run -d --name qv-anvil-p5b3 -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111").

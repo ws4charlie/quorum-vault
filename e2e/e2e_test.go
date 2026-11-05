@@ -50,7 +50,7 @@ func requireChain(t *testing.T) string {
 		if os.Getenv("QV_REQUIRE_CHAIN") == "1" {
 			t.Fatal("e2e (QV_REQUIRE_CHAIN=1): SEPOLIA_RPC_URL is not set (make chain-up; see .env.example)")
 		}
-		t.Skip("e2e: SEPOLIA_RPC_URL is not set (make chain-up && make test-e2e)")
+		t.Skip("e2e: SEPOLIA_RPC_URL is not set (make chain-up && make test-demo-v1)")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
