@@ -304,7 +304,10 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 				"owner", o.Kind+" "+o.ID, "why", why)
 		}
 	}
-	const slice = 10 * time.Second
+	slice := 10 * time.Second
+	if _, _, _, _, short := act(ctx); short {
+		slice = 2 * time.Second // tests: look at the transaction (and at "stuck") more often
+	}
 	for {
 		var n NonceResult
 		if err := call(ctx, longOpts(ctx, slice), &n, a.WaitNonce, o, slice); err != nil {
