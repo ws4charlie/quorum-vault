@@ -297,7 +297,8 @@ func TestMPCRefreshDuringLiveWithdrawals(t *testing.T) {
 }
 
 // A keyset frozen while withdrawals are live: the sign jobs fail with an ALERT, no hold is voided while a nonce is open, and
-// after the operator unfreezes (and resumes the parked rows, the documented procedure) later withdrawals proceed.
+// after the operator unfreezes and resumes the parked rows (the documented procedure) the cancels complete, the holds are
+// voided only then, and later withdrawals proceed.
 func TestMPCFreezeDuringLiveWithdrawals(t *testing.T) {
 	requireMPC(t)
 	s, _ := funded(t, opts{mpcProxy: true}, "c-frz", 20)
@@ -373,15 +374,32 @@ func TestMPCFreezeDuringLiveWithdrawals(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The gateway reserved the CANCEL of each nonce while the keyset was frozen (the cancel job failed, but its reservation
+	// stands), so the original transaction can never be signed any more: it would race its own cancel. The restarted workflow
+	// therefore finishes the cancel (a failed retry job is reopened, same digest, same signature), the cancel mines, and
+	// only then the hold is voided. The money comes back only after the nonce is provably spent.
 	for _, c := range []struct {
 		id   string
 		dest common.Address
-	}{{id1, dest1}, {id2, dest2}, {id3, dest3}} {
-		s.mustPayOnce(c.id, c.dest, 180*time.Second)
+	}{{id1, dest1}, {id2, dest2}} {
+		got := s.waitWd(c.id, "failed", 180*time.Second)
+		if !strings.Contains(got.Reason, "gateway refused") {
+			t.Fatalf("withdrawal %s voided with %q", c.id, got.Reason)
+		}
+		if st := s.nonceStatus(c.id); st != "cancelled" && st != "confirmed" {
+			t.Fatalf("withdrawal %s: nonce is %s after the void", c.id, st)
+		}
+		if s.ethBalance(c.dest).Sign() != 0 {
+			t.Fatalf("withdrawal %s paid out although its cancel was signed", c.id)
+		}
+	}
+	s.mustPayOnce(id3, dest3, 180*time.Second)
+	if _, h, _ := s.balance("c-frz", "ETH"); h.Sign() != 0 {
+		t.Fatalf("held %s after everything finished", h)
 	}
 	s.waitIdle(120 * time.Second)
 	s.reconcileClean()
-	t.Logf("FREEZE: tampered session froze the keyset; ALERT logged; two withdrawals parked with holds and nonces kept; after Unfreeze and resume all three paid exactly once; Reconcile clean")
+	t.Logf("FREEZE: tampered session froze the keyset; ALERT logged; two withdrawals parked with holds and nonces kept; after Unfreeze and resume the cancels were signed and mined, both holds were voided, the later withdrawal paid once; Reconcile clean")
 }
 
 func (s *system) nonceStatus(withdrawalID string) string {
