@@ -42,8 +42,8 @@ jobs:
 
   # Broadcast + receipt checks: the e2e package against a local anvil node
   # impersonating Sepolia (chain ID 11155111). Same commands as `make chain-up`
-  # + `make test-e2e`. Not -short.
-  e2e:
+  # + `make test-demo-v1`. Not -short.
+  demo-v1:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -89,7 +89,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y softhsm2
       - name: Set up tokens
         run: ./scripts/setup-softhsm.sh
-      - run: go test -count=1 -p 1 -timeout 20m -v ./e2e/...
+      - run: make test-demo-v1
       - name: anvil logs
         if: failure()
         run: docker logs anvil
@@ -189,7 +189,7 @@ jobs:
       - name: make test-mpc
         run: make test-mpc
 
-  custody-mpc-1:
+  e2e-evm-flows:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
@@ -219,10 +219,10 @@ jobs:
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: make test-custody-mpc-1
-        run: make test-custody-mpc-1
+      - name: make test-e2e-evm-flows
+        run: make test-e2e-evm-flows
 
-  custody-mpc-2:
+  e2e-evm-tx-failures:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
@@ -252,10 +252,10 @@ jobs:
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: make test-custody-mpc-2
-        run: make test-custody-mpc-2
+      - name: make test-e2e-evm-tx-failures
+        run: make test-e2e-evm-tx-failures
 
-  custody-mpc-3:
+  e2e-evm-recovery:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
@@ -285,5 +285,5 @@ jobs:
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: make test-custody-mpc-3
-        run: make test-custody-mpc-3
+      - name: make test-e2e-evm-recovery
+        run: make test-e2e-evm-recovery

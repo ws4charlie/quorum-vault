@@ -17,7 +17,7 @@ mined and checked by receipt — in a Go test suite and in CI on every push.
 | Refusal tests | [e2e/localchain_test.go](../../e2e/localchain_test.go) | fake JSON-RPC nodes that must be refused |
 | Receipt wait | [internal/chain/eth/eth.go](../../internal/chain/eth/eth.go) `WaitReceipt` | poll `eth_getTransactionReceipt` until mined or the context ends |
 | Nonce fix | [internal/signing/service.go](../../internal/signing/service.go) `freshNonce` | re-check the nonce against the node at sign time |
-| CI job `e2e` | [.github/workflows/ci.yml](../../.github/workflows/ci.yml) | Postgres service + `docker run` anvil + `go test ./e2e/...` |
+| CI job `demo-v1` | [.github/workflows/ci.yml](../../.github/workflows/ci.yml) | Postgres service + `docker run` anvil + `go test ./e2e/...` |
 | Demo local mode | [scripts/demo-sepolia.sh](../../scripts/demo-sepolia.sh) `--local` | funds wallets, prints receipts; output in [docs/measurements/e2e.md](../measurements/e2e.md) |
 
 ## anvil vs geth --dev vs a real testnet

@@ -4,7 +4,7 @@
 // sign_jobs table, from the signing gateway. The one key it holds is the
 // automated approver for the lowest approval tier.
 //
-// QV_FAILPOINT="<kind>.<name>" (tests only) makes it exit at that boundary.
+// QV_FAILPOINT="<kind>.<name>" makes a worker built with -tags devauth (tests only) exit at that boundary; a production build ignores it.
 package main
 
 import (
@@ -109,7 +109,7 @@ func run(log *slog.Logger) error {
 			Interval: *wdEvery, StallAfter: *wdStall, Log: log}
 		go wd.Run(ctx)
 	}
-	log.Info("qv-worker started", "chain", cfg.Chain, "failpoint", os.Getenv("QV_FAILPOINT"))
+	log.Info("qv-worker started", "chain", cfg.Chain, "failpoint", workflow.Armed())
 	<-ctx.Done()
 	return nil
 }

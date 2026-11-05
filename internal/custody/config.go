@@ -104,6 +104,9 @@ type WithdrawalFile struct {
 	StuckAfter      string `json:"stuck_after"`      // replace a broadcast tx that has not mined after this, default 2m
 	HotWait         string `json:"hot_wait"`         // give up waiting for hot liquidity after this, default 30m
 	MaxReplacements int    `json:"max_replacements"` // default 5
+	// ActivityTimeout, when set, shortens how long the workflow engine waits before it notices an activity died with its worker
+	// (production: 20 s to run, 30 s for a build). For tests that kill the worker; leave it empty in production.
+	ActivityTimeout string `json:"activity_timeout"`
 	// Tiers are the business zone's advisory copy of the gateway's approval
 	// tiers (the gateway is the authority): how many approvals an amount needs
 	// and whether the worker's automated key may supply them.
@@ -152,6 +155,7 @@ type Config struct {
 	StartHeight  uint64
 
 	// Cold: limits per hot partition ID; empty when hot-to-cold is not configured.
+	ActivityTimeout  time.Duration // 0 = the workflows' production activity timeouts
 	ColdLimits       map[string]HotLimits
 	ColdPlanInterval time.Duration
 	RefillTokenGas   uint64
@@ -338,6 +342,11 @@ func (f File) Build() (*Config, error) {
 	}
 	if c.HotWait, err = dur("hot_wait", w.HotWait, 30*time.Minute); err != nil {
 		return nil, err
+	}
+	if w.ActivityTimeout != "" {
+		if c.ActivityTimeout, err = dur("activity_timeout", w.ActivityTimeout, 0); err != nil {
+			return nil, err
+		}
 	}
 	c.MaxReplacements = w.MaxReplacements
 	if c.MaxReplacements <= 0 {

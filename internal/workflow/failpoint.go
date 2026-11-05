@@ -1,38 +1,14 @@
+//go:build !devauth
+
 package workflow
 
-import (
-	"log/slog"
-	"os"
-)
-
-// Failpoints let crash tests kill the worker at a named boundary. With
-// QV_FAILPOINT="<kind>.<name>" in the environment, the process exits (like
-// SIGKILL: no deferred calls, no flushed buffers) the first time that point is
-// reached; the test then restarts the worker without the variable. In
-// production the variable is unset and Hit is a map-free string compare.
-//
-// Boundaries, for kind "withdrawal" (sweeps and hot-to-cold moves, kind "to-cold", have the same):
-//
-//	after_build   the sign job and nonce are committed, the activity has not returned
-//	after_job     the gateway signed the job, the worker has not acted on it
-//	after_broadcast  the transaction was sent, the worker has not recorded it
-//	after_confirm the transaction is final, the worker has not settled the ledger
-//	after_settle  the ledger is settled and committed, the activity has not returned
-const failpointEnv = "QV_FAILPOINT"
-
-// FailHook, when set (in-process tests), is called instead of exiting.
+// FailHook, when set (in-process tests built with -tags devauth), is called instead of exiting. It is declared in every build so
+// code that sets it compiles; a production build never calls it.
 var FailHook func(point string)
 
-// Hit exits the process if the failpoint "<kind>.<name>" is armed.
-func Hit(kind, name string) {
-	want := os.Getenv(failpointEnv)
-	if want == "" || want != kind+"."+name {
-		return
-	}
-	if FailHook != nil {
-		FailHook(want)
-		return
-	}
-	slog.Error("failpoint reached: killing the process", "failpoint", want)
-	os.Exit(137)
-}
+// Hit is a no-op in production builds: crash-testing failpoints exist only in binaries built with -tags devauth. It reads no
+// environment variable, so QV_FAILPOINT in a production worker's environment does nothing.
+func Hit(kind, name string) {}
+
+// Armed is always empty in a production build.
+func Armed() string { return "" }

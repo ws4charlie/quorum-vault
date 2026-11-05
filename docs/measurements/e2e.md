@@ -179,7 +179,7 @@ Reading the numbers:
 - The HSM wallet's second tx (1c) got nonce 1 from the node: the first had
   already been mined. The e2e test `ApprovedAfterLaterTransferGetsFreshNonce`
   covers the harder order (approved request overtaken by a later one).
-- The same flows run as Go tests on every push: `make test-e2e`, CI job `e2e`.
+- The same flows run as Go tests on every push: `make test-demo-v1`, CI job `demo-v1`.
 
 Run output (trimmed: raw txs and most of the offline `verify-tx` JSON cut):
 

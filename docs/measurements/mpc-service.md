@@ -5,7 +5,7 @@ SoftHSM tokens `qv-party-1` / `qv-party-2`), `qv-cosigner`, `qv-gateway`, `qv-wo
 Temporal, Redpanda, anvil (chain ID 11155111, instant blocks). Machine: Apple Silicon laptop, everything on one host over
 loopback. These figures say nothing about a real network or capacity planning; they show how the signer behaves.
 
-Reproduce: `make test-custody-mpc` (all tests), `make test-mpc-soak` (soak), `QV_REQUIRE_CUSTODY=1 QV_CUSTODY_SIGNER=mpc go test -run TestMeasureClosedLoop ./e2e/custody`.
+Reproduce: `make test-e2e-evm` (all tests), `make test-mpc-soak` (soak), `QV_REQUIRE_CUSTODY=1 QV_CUSTODY_SIGNER=mpc go test -run TestMeasureClosedLoop ./e2e/custody`.
 
 ## One withdrawal: HSM signer vs MPC signer
 

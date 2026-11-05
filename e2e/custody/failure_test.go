@@ -8,6 +8,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+
+	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
 
 func (s *system) automine(on bool) {
@@ -84,7 +86,7 @@ func TestRevertedWithdrawalVoidsAndRecordsFee(t *testing.T) {
 // A transaction the node forgot is handled like any stuck one: replaced from
 // stored data, one payout.
 func TestDroppedTransactionIsReplacedAndPaidOnce(t *testing.T) {
-	s, _ := funded(t, opts{stuckAfter: "5s"}, "c-drop", 5)
+	s, _ := funded(t, opts{stuckAfter: sd(2 * time.Second)}, "c-drop", 5)
 	dest := randAddr()
 	s.automine(false)
 	t.Cleanup(func() { s.automine(true) })
@@ -143,7 +145,7 @@ func TestConsumedNonceParksWithOneAlert(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := desc.WorkflowExecutionInfo.Execution.RunId
-	time.Sleep(8 * time.Second) // several reconciler passes
+	s.waitPasses(workflow.ReconcilerID(s.chainName), 5) // several reconciler passes
 	desc, _ = s.tc.DescribeWorkflowExecution(s.ctx, w.ID, "")
 	if desc.WorkflowExecutionInfo.Execution.RunId != run || desc.WorkflowExecutionInfo.Status.String() != "Failed" {
 		t.Fatalf("the parked workflow was restarted or is %s", desc.WorkflowExecutionInfo.Status)
@@ -166,7 +168,7 @@ func TestConsumedNonceParksWithOneAlert(t *testing.T) {
 // A workflow that starts over (a new execution) after the replacement mined
 // settles once and does not loop on "nonce too low".
 func TestRestartedWorkflowAfterMinedReplacementSettlesOnce(t *testing.T) {
-	s, _ := funded(t, opts{stuckAfter: "5s"}, "c-restart2", 5)
+	s, _ := funded(t, opts{stuckAfter: sd(2 * time.Second)}, "c-restart2", 5)
 	dest := randAddr()
 	s.automine(false)
 	t.Cleanup(func() { s.automine(true) })

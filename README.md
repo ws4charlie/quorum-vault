@@ -52,7 +52,7 @@ Components, data model, state machines and a sequence diagram of a withdrawal si
 | Signing gateway (zone 1) and cosigner (zone 2): approver signatures, policy, replay guard, each with its own database | [internal/gateway](internal/gateway), [internal/cosigner](internal/cosigner) | attack tests, rogue-party tests |
 | Two-party MPC signer: DKG, derive, sign, refresh, freeze, sealing in HSM tokens, backup and restore | [mpc-party](mpc-party), [internal/mpcsigner](internal/mpcsigner) | `make test-mpc`, the custody tests with `QV_CUSTODY_SIGNER=mpc` |
 | Failure tests on MPC: kill a party or the cosigner, partition, latency, refresh and freeze under live withdrawals | [e2e/custody/mpc_test.go](e2e/custody/mpc_test.go) | see [measurements](docs/measurements/mpc-service.md) |
-| `/v1` demo: HSM keys non-exportable, policy, approvals, key lifecycle, hash-chained audit log | [internal/hsm](internal/hsm), [internal/policy](internal/policy), [internal/approval](internal/approval), [internal/keys](internal/keys), [internal/audit](internal/audit) | unit tests, `make test-e2e`, [demo script](scripts/demo-sepolia.sh) |
+| `/v1` demo: HSM keys non-exportable, policy, approvals, key lifecycle, hash-chained audit log | [internal/hsm](internal/hsm), [internal/policy](internal/policy), [internal/approval](internal/approval), [internal/keys](internal/keys), [internal/audit](internal/audit) | unit tests, `make test-demo-v1`, [demo script](scripts/demo-sepolia.sh) |
 | Runbooks: MPC backup and restore, keyset freeze, key rotation | [docs/runbooks](docs/runbooks), [docs/rotation-ceremony.md](docs/rotation-ceremony.md) | `mpc-party/scripts/restore-drill.sh` |
 
 ## Limits, honestly
@@ -127,18 +127,18 @@ make test-custody                 # the closed loop with HSM hot keys (about 5 m
 ```bash
 make mpc-build                    # once: cb-mpc at the pinned commit
 make test-mpc                     # gateway -> party A -> party B -> cosigner, about 1 minute
-make test-custody-mpc             # the closed loop with two-party MPC hot keys plus all failure tests (about 15 minutes)
+make test-e2e-evm             # the closed loop with two-party MPC hot keys plus all failure tests (about 15 minutes)
 ```
 
 `QV_CUSTODY_SIGNER=hsm|mpc` chooses the signer for `e2e/custody`. To run one test, or a few, by name (a Go `-run` regexp):
 
 ```bash
-make test-custody-mpc TEST=TestMPCRefreshDuringLiveWithdrawals
+make test-e2e-evm TEST=TestMPCRefreshDuringLiveWithdrawals
 ```
 
-Pull requests run the light tests in three parallel CI jobs (`make test-custody-mpc-1`, `-2`, `-3`) next to `make test-mpc`; the
+Pull requests run the light tests in three parallel CI jobs (`make test-e2e-evm-flows`, `-tx-failures`, `-recovery`) next to `make test-mpc`; the
 heavy ones (every crash boundary, a component killed at each custody boundary, freeze, partition, latency) run nightly or on
-demand from the Actions tab (`nightly` > Run workflow), and locally with `make test-custody-mpc-failure`. Crash boundaries can be
+demand from the Actions tab (`nightly` > Run workflow), and locally with `make test-e2e-evm-failure`. Crash boundaries can be
 picked with `QV_CRASH_BOUNDARIES=withdrawal.after_broadcast,sweep.after_settle`.
 
 Soak: `make test-mpc-soak` (50 signatures per second for 10 minutes; `QV_MPC_SOAK_MINUTES` and `QV_MPC_SOAK_RATE` change it). The

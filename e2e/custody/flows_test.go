@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/custody"
+	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
 
 // funded returns a system with a customer holding ethWei of ETH credited and swept to the hot wallet.
@@ -54,7 +55,7 @@ func TestTwoApproversAndInitiatorCannotApprove(t *testing.T) {
 	if code, out := s.approve("alice", w.ID); code != 200 {
 		t.Fatalf("alice: %d %v", code, out)
 	}
-	time.Sleep(3 * time.Second)
+	s.waitHistory(w.ID, 6) // the workflow has taken the approval signal and looked at the approvals again
 	if got := s.getWd(w.ID); got.Status != "requested" {
 		t.Fatalf("one of two approvals moved the withdrawal to %s", got.Status)
 	}
@@ -73,7 +74,7 @@ func TestTwoApproversAndInitiatorCannotApprove(t *testing.T) {
 }
 
 func TestApprovalTimeoutVoidsTheHold(t *testing.T) {
-	s, _ := funded(t, opts{approvalTimeout: "5s"}, "c-timeout", 4)
+	s, _ := funded(t, opts{approvalTimeout: sd(2 * time.Second)}, "c-timeout", 4)
 	dest := randAddr()
 	w := s.withdraw("initiator", "k-timeout", "c-timeout", "ETH", dest, eth(2))
 	if w.Code != 201 {
@@ -155,7 +156,7 @@ func TestFrozenFactoryDefersSweeps(t *testing.T) {
 	s.waitAvailable("c-frozen", "ETH", eth(3), 30*time.Second)
 	s.waitAvailable("c-frozen", "USDT", big.NewInt(800_000_000), 30*time.Second)
 
-	time.Sleep(6 * time.Second) // several planner passes
+	s.waitPasses(workflow.PlannerID(s.chainName), 5) // several planner passes
 	if n := s.count(`SELECT count(*) FROM sweeps`); n != 0 {
 		t.Fatalf("%d sweeps while frozen", n)
 	}
@@ -219,7 +220,7 @@ func TestGatewayRejectionReleasesNonceAndHold(t *testing.T) {
 // A transaction that does not mine is replaced with a higher fee; the replacement
 // mines; exactly one payout.
 func TestStuckTransactionIsReplacedOnce(t *testing.T) {
-	s, _ := funded(t, opts{stuckAfter: "5s"}, "c-stuck", 5)
+	s, _ := funded(t, opts{stuckAfter: sd(2 * time.Second)}, "c-stuck", 5)
 	dest := randAddr()
 	if err := s.rc.CallContext(s.ctx, nil, "evm_setAutomine", false); err != nil {
 		t.Fatal(err)
@@ -356,7 +357,7 @@ func TestGatewayAndRelayRestart(t *testing.T) {
 	s.waitFor(30*time.Second, "job enqueued", func() bool {
 		return s.count(`SELECT count(*) FROM sign_jobs WHERE id LIKE 'wd:%' AND status='pending'`) == 1
 	})
-	time.Sleep(3 * time.Second)
+	s.holds(1500*time.Millisecond, "the withdrawal stays signing while the gateway is down", func() bool { return s.getWd(w.ID).Status == "signing" })
 	if got := s.getWd(w.ID); got.Status != "signing" {
 		t.Fatalf("with the gateway down the withdrawal is %s", got.Status)
 	}

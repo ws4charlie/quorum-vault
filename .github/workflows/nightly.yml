@@ -2,7 +2,7 @@ name: nightly
 
 # The full MPC end-to-end set once a night and on demand (Actions tab > nightly > Run workflow): the signing path, then every
 # custody test on two-party MPC, including the heavy ones that pull requests skip. Pull requests run the light groups in
-# .github/workflows/ci.yml. To run a single test by name, use the Makefile locally: make test-custody-mpc TEST=TestName
+# .github/workflows/ci.yml. To run a single test by name, use the Makefile locally: make test-e2e-evm TEST=TestName
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -42,5 +42,7 @@ jobs:
           infra: "true"
       - name: make test-mpc
         run: make test-mpc
-      - name: make test-custody-mpc (all tests)
-        run: make test-custody-mpc
+      - name: make test-e2e-evm (all tests)
+        run: make test-e2e-evm
+      - name: make test-e2e-evm-latency (the slow-link measurement)
+        run: make test-e2e-evm-latency
