@@ -87,7 +87,7 @@ func TestMain(m *testing.M) {
 				buildErr = err
 			}
 		}
-		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold"} {
+		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold", "qv-guardian"} {
 			// The worker is built with -tags devauth: only then does it have the crash-test failpoints (QV_FAILPOINT).
 			args := []string{"build", "-o", filepath.Join(dir, b)}
 			if b == "qv-worker" {
@@ -143,6 +143,9 @@ type coldOpts struct {
 	// operators (2 of 3 must approve). refillStuck is the ALERT time for a broadcast refill that does not confirm (default 30m).
 	coldHSM     bool
 	refillStuck string
+	// factoryAdmin makes the cold key the forwarder factory's admin (the production arrangement); the factory's destination is
+	// then only changed by a ceremony. Needs coldHSM.
+	factoryAdmin bool
 }
 
 type proc struct {
@@ -214,6 +217,9 @@ type system struct {
 	cold                      *coldKit        // the offline signer's side, when opts.cold.coldHSM
 	mpc                       *mpcstack.Stack // mpc mode only
 	tm                        *timing
+	cf                        custody.File // the files as written, so a test can change one and restart
+	gf                        gateway.File
+	cosPath                   string
 	cosGuardDSN               string
 	chainName                 string
 	queue                     string
@@ -367,7 +373,12 @@ func newSystem(t *testing.T, o opts) *system {
 		t.Fatal(err)
 	}
 	s.factoryABI, _ = abi.JSON(strings.NewReader(`[{"type":"function","name":"setDestination","inputs":[{"name":"d","type":"address"}]},{"type":"function","name":"freeze","inputs":[]}]`))
-	s.factory = s.mustSend(s.deployer, nil, new(big.Int), evm.FactoryDeployData(common.Address{}, crypto.PubkeyToAddress(s.admin.PublicKey), crypto.PubkeyToAddress(s.guardian.PublicKey))).ContractAddress
+	adminAddr := crypto.PubkeyToAddress(s.admin.PublicKey)
+	if o.cold != nil && o.cold.coldHSM && o.cold.factoryAdmin {
+		s.cold = newColdKey(t, s, "cold")
+		adminAddr = s.cold.addr
+	}
+	s.factory = s.mustSend(s.deployer, nil, new(big.Int), evm.FactoryDeployData(common.Address{}, adminAddr, crypto.PubkeyToAddress(s.guardian.PublicKey))).ContractAddress
 	s.usdt = s.mustSend(s.deployer, nil, new(big.Int), readBin(t, "UsdtLike.bin")).ContractAddress
 
 	s.tm.phase("chain (factory, token, funding keys)")
@@ -446,7 +457,10 @@ func newSystem(t *testing.T, o opts) *system {
 	}
 	s.coldAddr = randAddr()
 	if o.cold != nil && o.cold.coldHSM {
-		s.cold = newColdKit(t, s)
+		if s.cold == nil {
+			s.cold = newColdKey(t, s, "cold")
+		}
+		s.cold.configure(s)
 		s.coldAddr = s.cold.addr
 	}
 	if o.cold != nil {
@@ -460,6 +474,7 @@ func newSystem(t *testing.T, o opts) *system {
 			Refill:       custody.RefillFile{Poll: "1s", StuckAfter: o.cold.refillStuck},
 		}
 	}
+	s.cf = cf
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
 	writeJSON(t, s.cfgPath, cf)
 	if s.cfg, err = custody.LoadConfig(s.cfgPath); err != nil {
@@ -493,6 +508,7 @@ func newSystem(t *testing.T, o opts) *system {
 			},
 			SweepsPerHour: 100000, CancelsPerHour: 1000, ToColdPerHour: 1000}},
 	}
+	s.gf = gf
 	s.gwPath = filepath.Join(s.dir, "gateway.json")
 	writeJSON(t, s.gwPath, gf)
 	if mpcMode() {
@@ -501,6 +517,7 @@ func newSystem(t *testing.T, o opts) *system {
 		cf2 := gf
 		cf2.Signers = nil
 		cosPath := filepath.Join(s.dir, "cosigner.json")
+		s.cosPath = cosPath
 		writeJSON(t, cosPath, cf2)
 		s.cosGuardDSN = s.newGuardDB()
 		s.mpc.StartCosigner(cosPath, s.cosGuardDSN, s.guardDSN)

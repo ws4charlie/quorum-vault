@@ -27,12 +27,16 @@ type coldKit struct {
 	cfgPath string
 	cfg     coldsign.Config
 	opKeys  map[string]string // operator -> key file
+	ops     map[string]string // operator -> public key
 	keyID   []byte
+	pub     []byte
 }
 
-func newColdKit(t *testing.T, s *system) *coldKit {
+// newColdKey makes the cold key in the qv-cold token and three operators, in directory name under the system's dir. configure writes
+// the offline config once the system's addresses exist.
+func newColdKey(t *testing.T, s *system, name string) *coldKit {
 	t.Helper()
-	k := &coldKit{t: t, dir: filepath.Join(s.dir, "cold"), opKeys: map[string]string{}}
+	k := &coldKit{t: t, dir: filepath.Join(s.dir, name), opKeys: map[string]string{}}
 	if err := os.MkdirAll(k.dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -48,33 +52,50 @@ func newColdKit(t *testing.T, s *system) *coldKit {
 	if err != nil {
 		t.Fatal(err)
 	}
-	k.addr = crypto.PubkeyToAddress(*pk)
-	ops := map[string]string{}
-	for _, name := range []string{"alice", "bob", "carol"} {
-		kp := filepath.Join(k.dir, name+".key")
+	k.addr, k.pub = crypto.PubkeyToAddress(*pk), pub
+	k.ops = map[string]string{}
+	for _, n := range []string{"alice", "bob", "carol"} {
+		kp := filepath.Join(k.dir, n+".key")
 		out, err := exec.Command(filepath.Join(binDir, "qv-cold"), "operator-key", "-key", kp).Output()
 		if err != nil {
 			t.Fatalf("operator-key: %v", err)
 		}
-		ops[name] = string(out[:len(out)-1])
-		k.opKeys[name] = kp
+		k.ops[n] = string(out[:len(out)-1])
+		k.opKeys[n] = kp
 	}
+	return k
+}
+
+// configure writes the offline config: refills to the hot shards, and every factory call, with the hot shards as the pinned new
+// destinations. Tests add pinned guardians and admins before writing it again with write().
+func (k *coldKit) configure(s *system) {
+	t := k.t
 	var dests []string
 	for _, a := range s.shardAddr {
 		dests = append(dests, a.Hex())
 	}
 	k.cfg = coldsign.Config{
-		Chain: s.chainName, ChainID: 11155111, Pool: "omnibus", Operators: ops, Threshold: 2, Destinations: dests,
+		Chain: s.chainName, ChainID: 11155111, Pool: "omnibus", Operators: k.ops, Threshold: 2, Destinations: dests,
 		Assets: map[string]coldsign.AssetPolicy{
 			"ETH":  {Decimals: 18, MaxAmount: eth(100).String()},
 			"USDT": {Token: s.usdt.Hex(), Decimals: 6, MaxAmount: "100000000000"},
 		},
-		MaxFeeWei: "10000000000000000", PublicKey: hex.EncodeToString(pub),
+		MaxFeeWei: "10000000000000000", PublicKey: hex.EncodeToString(k.pub),
 		HSM:       coldsign.HSMConfig{Token: "qv-cold", PinEnv: "QV_HSM_PIN", KeyID: hex.EncodeToString(k.keyID)},
 		RecordDir: filepath.Join(k.dir, "record"),
+		Actions:   append([]string(nil), coldsign.AdminKinds...), Factory: s.factory.Hex(), NewDestinations: dests,
 	}
 	k.cfgPath = filepath.Join(k.dir, "qv-cold.json")
-	writeJSON(t, k.cfgPath, k.cfg)
+	k.write()
+	_ = t
+}
+
+// write saves the (possibly edited) offline config.
+func (k *coldKit) write() { writeJSON(k.t, k.cfgPath, k.cfg) }
+
+func newColdKit(t *testing.T, s *system) *coldKit {
+	k := newColdKey(t, s, "cold")
+	k.configure(s)
 	return k
 }
 
