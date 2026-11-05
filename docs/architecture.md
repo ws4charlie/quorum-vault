@@ -40,7 +40,7 @@ flowchart LR
 | `qv-core` | HTTP API (`/v2`): customers, deposit addresses, withdrawals, approvals, balances, `Reconcile` | the business database |
 | `qv-worker` | Temporal workflows: scan, sweep planner, withdrawal reconciler, cold planner (long-running loops), one workflow per withdrawal, sweep and hot-to-cold move; a watchdog restarts a loop that stops making progress | the business database, the chain |
 | `qv-relay` | outbox to Redpanda, at least once | the business database |
-| `qv-gateway` | signing zone: claims `sign_jobs`, re-verifies the intent, the approver signatures and the policy (for a hot-to-cold move: the pinned cold address, a rate and a daily cap; for a hot-shard rebalance: another hot shard of the pool, a rate and a daily cap), reserves the digest in its own replay-guard database, then asks a signer | **not** the business database: it only reads and updates `sign_jobs` as a restricted role |
+| `qv-gateway` | signing zone: claims `sign_jobs`, re-verifies the intent, the approver signatures and the policy (for a withdrawal: the destination must be on the asset's list in its config, and only so many may start per hour; for a hot-to-cold move: the pinned cold address, a rate and a daily cap; for a hot-shard rebalance: another hot shard of the pool, a rate and a daily cap), reserves the digest in its own replay-guard database, then asks a signer | **not** the business database: it only reads and updates `sign_jobs` as a restricted role |
 | `mpc-party` A and B | two-party threshold ECDSA (cb-mpc): DKG, derive, sign, refresh; shares sealed by each party's own HSM token; durable two-phase refresh; backup and restore | each other only through pinned mTLS certificates |
 | `qv-cosigner` | party B's gate: repeats the gateway's checks from its own config and its own database before B takes part in a signature; fail closed | nothing from A or the gateway |
 
@@ -91,6 +91,17 @@ The way back needs people. A hot partition below its low mark gets a **refill re
 The offline config alone decides what may be signed (pinned hot destinations, per-ceremony caps, chain id); the online side is untrusted.
 M-of-N is enforced in software with SoftHSM. Details and runbook: [learn/p6-2-cold-refill.md](learn/p6-2-cold-refill.md),
 [runbooks/cold-refill.md](runbooks/cold-refill.md).
+
+## Where withdrawals may go
+
+A compromised `qv-core` with enough approvals could pay any address, and many small amounts up to the daily cap. The signing zone
+bounds both. Per chain and asset, the gateway's and the cosigner's config either lists the addresses a withdrawal may pay
+(`withdrawal_destinations`) or says on purpose that any address will do (`any_destination: true`); neither, or both, stops the
+start. Per chain, `withdrawals_per_hour` caps how many withdrawals may be first signed in a rolling hour, counted from the zone's
+own store; it is required. Both checks run in the shared decision code, so the gateway and the cosigner each apply them from
+their own config. The destination is read from the signed transaction itself: for an ERC-20 transfer the recipient in the calldata,
+never the token contract, and addresses are compared as addresses, so checksum case never matters. A refusal carries
+`policy_destination` or `policy_withdrawal_rate` and is recorded in the zone's audit chain.
 
 ## Audit log
 

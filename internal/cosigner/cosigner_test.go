@@ -381,3 +381,17 @@ func TestCosignerAuditsEveryDecision(t *testing.T) {
 		t.Fatalf("audit = %q", got)
 	}
 }
+
+// A rogue gateway: it signs a withdrawal to an address the cosigner's own config does not list, and past the cosigner's own
+// hourly limit. Party B refuses both, from its config and its store.
+func TestCosignerRefusesUnlistedDestinationAndHourLimit(t *testing.T) {
+	e := newEnv(t)
+	cc := e.h.Cfg.Chains[gatewaytest.Chain]
+	p := cc.Assets["ETH"]
+	p.AnyDestination, p.Destinations = false, map[common.Address]bool{gatewaytest.AddrUser: true}
+	cc.Assets["ETH"] = p
+	cc.WithdrawalsPerHour = 1
+	e.refuse(e.req(e.h.Withdrawal("rg1", gatewaytest.AddrEvil, 100, 0, "alice")), gateway.ReasonDestination)
+	e.allow(e.h.Withdrawal("rg2", gatewaytest.AddrUser, 100, 0, "alice"))
+	e.refuse(e.req(e.h.Withdrawal("rg3", gatewaytest.AddrUser, 100, 1, "alice")), gateway.ReasonWithdrawRate)
+}

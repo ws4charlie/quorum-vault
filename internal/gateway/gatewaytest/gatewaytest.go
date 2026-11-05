@@ -83,10 +83,10 @@ func New(t testing.TB, chainID uint64, hot common.Address) *Harness {
 				Tokens:        map[string]gateway.TokenFile{"USDT": {Address: AddrToken.Hex(), Decimals: 6}},
 				MaxTxFeeWei:   "300000000000000"},
 			Assets: map[string]gateway.AssetFile{
-				"ETH":  {PerTxCap: "5000", DailyCap: "8000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000", Approvals: 2}}, ToColdDailyCap: "6000", RebalanceDailyCap: "6000"},
-				"USDT": {PerTxCap: "5000000", DailyCap: "8000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000000", Approvals: 2}}, ToColdDailyCap: "6000000", RebalanceDailyCap: "6000000"},
+				"ETH":  {AnyDestination: true, PerTxCap: "5000", DailyCap: "8000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000", Approvals: 2}}, ToColdDailyCap: "6000", RebalanceDailyCap: "6000"},
+				"USDT": {AnyDestination: true, PerTxCap: "5000000", DailyCap: "8000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "1000000", Approvals: 2}}, ToColdDailyCap: "6000000", RebalanceDailyCap: "6000000"},
 			},
-			SweepsPerHour: 2, CancelsPerHour: 3, ToColdPerHour: 2, RebalancePerHour: 2,
+			SweepsPerHour: 2, WithdrawalsPerHour: 1000, CancelsPerHour: 3, ToColdPerHour: 2, RebalancePerHour: 2,
 		}},
 	}
 	h.Reparse()
