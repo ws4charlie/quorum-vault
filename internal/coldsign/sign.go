@@ -256,11 +256,11 @@ func (c *Config) Sign(ctx context.Context, rf RequestFile, approvals []Approval,
 	if err != nil {
 		return Signed{}, names, fmt.Errorf("the HSM did not sign: %w", err)
 	}
-	signed, err := assemble(tx, signer, digest, sr, ss)
+	cold, _ := c.ColdAddress()
+	signed, err := assemble(tx, signer, digest, sr, ss, cold)
 	if err != nil {
 		return Signed{}, names, err
 	}
-	cold, _ := c.ColdAddress()
 	if from, err := types.Sender(signer, signed); err != nil || from != cold {
 		return Signed{}, names, fmt.Errorf("the signature does not recover to the cold address %s (got %v, %v)", cold, from, err)
 	}
@@ -284,8 +284,8 @@ func ignoredNote(ignored []string) string {
 
 var halfN = new(big.Int).Rsh(crypto.S256().Params().N, 1)
 
-// assemble turns (r, s) into a signed transaction: low-S, and the recovery id found by trying both.
-func assemble(tx *types.Transaction, signer types.Signer, digest [32]byte, r, s *big.Int) (*types.Transaction, error) {
+// assemble turns (r, s) into a signed transaction: low-S, and the recovery id for which the signature recovers to want.
+func assemble(tx *types.Transaction, signer types.Signer, digest [32]byte, r, s *big.Int, want common.Address) (*types.Transaction, error) {
 	if s.Cmp(halfN) > 0 {
 		s = new(big.Int).Sub(crypto.S256().Params().N, s)
 	}
@@ -294,8 +294,7 @@ func assemble(tx *types.Transaction, signer types.Signer, digest [32]byte, r, s 
 	s.FillBytes(sig[32:64])
 	for v := byte(0); v < 2; v++ {
 		sig[64] = v
-		if pub, err := crypto.SigToPub(digest[:], sig); err == nil {
-			_ = pub
+		if pub, err := crypto.SigToPub(digest[:], sig); err == nil && crypto.PubkeyToAddress(*pub) == want {
 			t, err := tx.WithSignature(signer, sig)
 			if err != nil {
 				return nil, err
@@ -303,7 +302,7 @@ func assemble(tx *types.Transaction, signer types.Signer, digest [32]byte, r, s 
 			return t, nil
 		}
 	}
-	return nil, errors.New("no recovery id fits the signature")
+	return nil, fmt.Errorf("the HSM signature does not recover to %s with either recovery id", want)
 }
 
 // VerifySignedMatches is what the online side runs on an imported file: the transaction inside is exactly the one the request
