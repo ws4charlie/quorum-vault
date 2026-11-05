@@ -440,7 +440,7 @@ func newSystem(t *testing.T, o opts) *system {
 				"USDT": {Address: s.usdt.Hex(), Decimals: 6, MinDeposit: "1000", PriceWei: "300000000"},
 			}},
 		Sweep: custody.SweepFile{K: 20, MinSweepWei: o.minSweepWei, PlanInterval: "300ms"},
-		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: o.approvalTimeout, SignTimeout: signTimeout(o), StuckAfter: o.stuckAfter,
+		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: o.approvalTimeout, SignTimeout: signTimeout(o), StuckAfter: o.stuckAfter, ActivityTimeout: sd(5 * time.Second),
 			HotWait: "1m", MaxReplacements: 3, Tiers: tiers},
 		Scan: custody.ScanFile{Interval: "500ms", StartHeight: startHeight},
 	}

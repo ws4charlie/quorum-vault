@@ -32,12 +32,16 @@ type Timings struct {
 	ColdInterval     time.Duration // how often the cold planner looks at the hot wallets
 	RefillPoll       time.Duration // how often a refill workflow looks for the imported signed file
 	RefillStuckAfter time.Duration // a broadcast refill that has not confirmed after this raises an ALERT
+	// ActivityTimeout, when set, replaces the fixed activity timeouts below (20 s to run, 30 s for a build, 20 s in the queue, 8 s
+	// without a heartbeat): that is how long the engine waits before it notices an activity died with its worker. Zero keeps the
+	// production values. It exists so tests that kill the worker do not wait 20 to 30 seconds per crash.
+	ActivityTimeout time.Duration
 }
 
 // DefaultTimings derives timings from the business config.
 func DefaultTimings(c *custody.Config) Timings {
 	return Timings{ApprovalTimeout: c.ApprovalTimeout, ApprovalPoll: 15 * time.Second, SignTimeout: c.SignTimeout, StuckAfter: c.StuckAfter,
-		HotWait: c.HotWait, HotPoll: 10 * time.Second, MaxReplacements: c.MaxReplacements, ScanInterval: c.ScanInterval, PlanInterval: c.PlanInterval, ColdInterval: c.ColdPlanInterval, RefillPoll: c.RefillPoll, RefillStuckAfter: c.RefillStuckAfter}
+		HotWait: c.HotWait, HotPoll: 10 * time.Second, MaxReplacements: c.MaxReplacements, ScanInterval: c.ScanInterval, PlanInterval: c.PlanInterval, ColdInterval: c.ColdPlanInterval, RefillPoll: c.RefillPoll, RefillStuckAfter: c.RefillStuckAfter, ActivityTimeout: c.ActivityTimeout}
 }
 
 // Input of the workflows that need timings. The worker passes them at start;
@@ -66,10 +70,27 @@ func call(ctx, optx workflow.Context, res any, act any, args ...any) error {
 
 const queueTimeout = 20 * time.Second
 
+type timingsKey struct{}
+
+// withTimings makes the workflow's Timings available to the option helpers below. Every workflow calls it first.
+func withTimings(ctx workflow.Context, t Timings) workflow.Context {
+	return workflow.WithValue(ctx, timingsKey{}, t)
+}
+
+// act returns the timeouts to use: the production ones, or the shorter ones Timings.ActivityTimeout asks for.
+func act(ctx workflow.Context) (run, build, queue, beat time.Duration, short bool) {
+	if t, ok := ctx.Value(timingsKey{}).(Timings); ok && t.ActivityTimeout > 0 {
+		d := t.ActivityTimeout
+		return d, d, d, max(d/2, 2*time.Second), true
+	}
+	return 20 * time.Second, 30 * time.Second, queueTimeout, 8 * time.Second, false
+}
+
 func opts(ctx workflow.Context) workflow.Context {
+	run, _, queue, _, _ := act(ctx)
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout:    20 * time.Second,
-		ScheduleToStartTimeout: queueTimeout,
+		StartToCloseTimeout:    run,
+		ScheduleToStartTimeout: queue,
 		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
 	})
 }
@@ -80,10 +101,15 @@ func opts(ctx workflow.Context) workflow.Context {
 // StartToClose before trying again, and the planner would stand still for two minutes (the "no sweep within 90 s" failure in the
 // crash tests). The pass heartbeats (see heartbeating), so a dead worker is noticed after HeartbeatTimeout.
 func planOpts(ctx workflow.Context) workflow.Context {
+	_, _, queue, _, short := act(ctx)
+	beat := 15 * time.Second
+	if short {
+		beat = 5 * time.Second
+	}
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout:    2 * time.Minute,
-		HeartbeatTimeout:       15 * time.Second,
-		ScheduleToStartTimeout: queueTimeout,
+		HeartbeatTimeout:       beat,
+		ScheduleToStartTimeout: queue,
 		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
 	})
 }
@@ -92,19 +118,21 @@ func planOpts(ctx workflow.Context) workflow.Context {
 // chain refuses the call) is not going to start working, and nothing was
 // allocated, because the build and the nonce share one transaction.
 func buildOpts(ctx workflow.Context) workflow.Context {
+	_, build, queue, _, _ := act(ctx)
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout:    30 * time.Second,
-		ScheduleToStartTimeout: queueTimeout,
+		StartToCloseTimeout:    build,
+		ScheduleToStartTimeout: queue,
 		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second, MaximumAttempts: 10},
 	})
 }
 
 // longOpts is for polling activities that heartbeat.
 func longOpts(ctx workflow.Context, wait time.Duration) workflow.Context {
+	run, _, queue, beat, _ := act(ctx)
 	return workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout:    wait + 20*time.Second,
-		ScheduleToStartTimeout: queueTimeout,
-		HeartbeatTimeout:       8 * time.Second,
+		StartToCloseTimeout:    wait + run,
+		ScheduleToStartTimeout: queue,
+		HeartbeatTimeout:       beat,
 		RetryPolicy:            &temporal.RetryPolicy{InitialInterval: time.Second, BackoffCoefficient: 1.5, MaximumInterval: 10 * time.Second},
 	})
 }
@@ -113,6 +141,7 @@ func longOpts(ctx workflow.Context, wait time.Duration) workflow.Context {
 // advances the cursor in one database transaction. It continues as new after a
 // while so its history stays small.
 func ScanWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
 	for i := 0; i < 300; i++ {
 		var r ScanResult
 		if err := call(ctx, opts(ctx), &r, a.ScanOnce); err != nil {
@@ -128,6 +157,7 @@ func ScanWorkflow(ctx workflow.Context, in Input) error {
 // SweepPlannerWorkflow decides what to sweep and makes sure each open sweep has
 // a workflow. A frozen factory just means nothing is planned this round.
 func SweepPlannerWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
 	for i := 0; i < 300; i++ {
 		var frozen bool
 		if err := call(ctx, planOpts(ctx), &frozen, a.PlanSweeps); err != nil {
@@ -147,6 +177,7 @@ func SweepPlannerWorkflow(ctx workflow.Context, in Input) error {
 // ColdPlannerWorkflow decides which hot partitions hold more than their high-water mark and makes sure each open cold move
 // has a workflow.
 func ColdPlannerWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
 	for i := 0; i < 300; i++ {
 		var n int
 		if err := call(ctx, planOpts(ctx), &n, a.PlanColdMoves); err != nil {
@@ -165,6 +196,7 @@ func ColdPlannerWorkflow(ctx workflow.Context, in Input) error {
 // WithdrawalReconcilerWorkflow starts a workflow for every open withdrawal that
 // has none, which repairs a crash between the API's commit and its start call.
 func WithdrawalReconcilerWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
 	for i := 0; i < 300; i++ {
 		var n int
 		if err := call(ctx, opts(ctx), &n, a.StartOpenWithdrawals); err != nil {
@@ -356,6 +388,7 @@ func cancelNonce(ctx workflow.Context, t Timings, o OwnerArg) (txResult, error) 
 // Its workflow ID is the withdrawal ID. The API already committed the row,
 // the hold and the outbox event.
 func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
 	id, t := in.ID, in.T
 	var st WdState
 	if err := call(ctx, opts(ctx), &st, a.LoadWithdrawal, id); err != nil {
@@ -492,6 +525,7 @@ func awaitApprovals(ctx workflow.Context, t Timings, id string, st WdState) (app
 // sweep ID: build and enqueue, wait for the gateway, assemble and broadcast,
 // wait, then account for what actually moved.
 func SweepWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
 	id, t := in.ID, in.T
 	var st SweepState
 	if err := call(ctx, opts(ctx), &st, a.LoadSweep, id); err != nil {
@@ -555,6 +589,7 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 // pins the destination and caps the amount itself), broadcast, wait, settle. A move that fails ends cleanly and the planner
 // plans another if the partition is still above its mark.
 func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
 	id, t := in.ID, in.T
 	var st ColdState
 	if err := call(ctx, opts(ctx), &st, a.LoadColdMove, id); err != nil {
@@ -601,6 +636,7 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 // now and then to keep its history short. Then it broadcasts, follows the transaction to confirmation and books it. A transaction
 // that does not confirm raises one ALERT and keeps waiting: a new nonce is a new ceremony, never automatic.
 func RefillWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
 	id, t := in.ID, in.T
 	for i := 0; i < 300; i++ {
 		var st RefillView
