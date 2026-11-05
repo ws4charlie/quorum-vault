@@ -44,6 +44,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/ws4charlie/quorum-vault/e2e"
+	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
@@ -59,7 +60,11 @@ const ether = 1_000_000_000_000_000_000
 var (
 	binDir   string
 	buildErr error
+	mpcBin   mpcstack.Binaries
 )
+
+// mpcMode reports whether the hot keys are two-party MPC keys (QV_CUSTODY_SIGNER=mpc) instead of HSM keys (hsm, the default).
+func mpcMode() bool { return os.Getenv("QV_CUSTODY_SIGNER") == "mpc" }
 
 func TestMain(m *testing.M) {
 	code := 0
@@ -70,6 +75,17 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		binDir = dir
+		switch os.Getenv("QV_CUSTODY_SIGNER") {
+		case "", "hsm", "mpc":
+		default:
+			fmt.Fprintf(os.Stderr, "QV_CUSTODY_SIGNER=%q: want hsm or mpc\n", os.Getenv("QV_CUSTODY_SIGNER"))
+			os.Exit(1)
+		}
+		if mpcMode() { // the production mpc-party (needs the cb-mpc build) and qv-cosigner
+			if mpcBin, err = mpcstack.Build(dir); err != nil {
+				buildErr = err
+			}
+		}
 		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core"} {
 			out, err := exec.Command("go", "build", "-o", filepath.Join(dir, b), "github.com/ws4charlie/quorum-vault/cmd/"+b).CombinedOutput()
 			if err != nil {
@@ -105,6 +121,7 @@ type opts struct {
 	stuckAfter      string // default 8s
 	noRelay         bool
 	minSweepWei     string
+	mpcProxy        bool // mpc mode: A reaches B through the session proxy (partition, latency, tamper)
 }
 
 type proc struct {
@@ -172,6 +189,8 @@ type system struct {
 	tokABI                    abi.ABI
 	factoryABI                abi.ABI
 	shardAddr                 []common.Address
+	mpc                       *mpcstack.Stack // mpc mode only
+	cosGuardDSN               string
 	chainName                 string
 	queue                     string
 
@@ -324,21 +343,34 @@ func newSystem(t *testing.T, o opts) *system {
 	s.factory = s.mustSend(s.deployer, nil, new(big.Int), evm.FactoryDeployData(common.Address{}, crypto.PubkeyToAddress(s.admin.PublicKey), crypto.PubkeyToAddress(s.guardian.PublicKey))).ContractAddress
 	s.usdt = s.mustSend(s.deployer, nil, new(big.Int), readBin(t, "UsdtLike.bin")).ContractAddress
 
-	// Hot shards: HSM keys that never leave the token.
-	tok := hsmtest.Token(t, "quorumvault")
-	gen := hsmsigner.NewGenerator(tok)
+	// Hot shards: HSM keys that never leave the token, or (mpc mode) keys derived from a two-party DKG whose shares live
+	// in two parties' own HSM tokens.
 	signers := map[string]gateway.SignerFile{}
 	var keys []struct{ id, pub string }
-	for i := 0; i < o.shards; i++ {
-		k, err := gen.Generate(s.ctx, "p3b-"+uuid.NewString()[:8], 1)
-		if err != nil {
-			t.Fatal(err)
+	var mpcShards []mpcstack.Shard
+	if mpcMode() {
+		s.mpc = mpcstack.New(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy})
+		s.mpc.DKG()
+		for i := 0; i < o.shards; i++ {
+			sh := s.mpc.Derive(i)
+			mpcShards = append(mpcShards, sh)
+			s.shardAddr = append(s.shardAddr, sh.Addr)
+			s.fundETH(s.shardAddr[i], eth(0))
 		}
-		id := k.HSMKeyID
-		t.Cleanup(func() { tok.DestroyPrivateKey(context.Background(), id) })
-		s.shardAddr = append(s.shardAddr, common.HexToAddress(k.Address))
-		keys = append(keys, struct{ id, pub string }{hex.EncodeToString(k.HSMKeyID), hex.EncodeToString(k.PublicKey)})
-		s.fundETH(s.shardAddr[i], eth(0)) // exists, empty; funded below with the ledger entry
+	} else {
+		tok := hsmtest.Token(t, "quorumvault")
+		gen := hsmsigner.NewGenerator(tok)
+		for i := 0; i < o.shards; i++ {
+			k, err := gen.Generate(s.ctx, "p3b-"+uuid.NewString()[:8], 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := k.HSMKeyID
+			t.Cleanup(func() { tok.DestroyPrivateKey(context.Background(), id) })
+			s.shardAddr = append(s.shardAddr, common.HexToAddress(k.Address))
+			keys = append(keys, struct{ id, pub string }{hex.EncodeToString(k.HSMKeyID), hex.EncodeToString(k.PublicKey)})
+			s.fundETH(s.shardAddr[i], eth(0)) // exists, empty; funded below with the ledger entry
+		}
 	}
 
 	// Approvers.
@@ -395,11 +427,15 @@ func newSystem(t *testing.T, o opts) *system {
 		for i := range s.shardAddr {
 			p := s.cfg.PartitionKey(sym, i).String()
 			hot[p] = s.shardAddr[i].Hex()
-			signers[p] = gateway.SignerFile{Token: "quorumvault", KeyID: keys[i].id, PublicKey: keys[i].pub}
+			if mpcMode() {
+				signers[p] = s.mpc.GatewaySigner(mpcShards[i])
+			} else {
+				signers[p] = gateway.SignerFile{Token: "quorumvault", KeyID: keys[i].id, PublicKey: keys[i].pub}
+			}
 		}
 	}
 	gf := gateway.File{
-		Approvers: apprFiles, Signers: signers, SignTimeout: "3s", MaxIntentAge: "24h",
+		Approvers: apprFiles, Signers: signers, SignTimeout: signTimeout(), MaxIntentAge: "24h",
 		Chains: map[string]gateway.ChainFile{s.chainName: {
 			EVM: &gateway.EVMFile{ChainID: 11155111, Factory: s.factory.Hex(), SweepDestination: s.shardAddr[0].Hex(), HotAddresses: hot,
 				Tokens: map[string]gateway.TokenFile{"USDT": {Address: s.usdt.Hex(), Decimals: 6}}, MaxTxFeeWei: "100000000000000000"},
@@ -413,6 +449,16 @@ func newSystem(t *testing.T, o opts) *system {
 	}
 	s.gwPath = filepath.Join(s.dir, "gateway.json")
 	writeJSON(t, s.gwPath, gf)
+	if mpcMode() {
+		// The cosigner (party B's authorizer) has its own copy of the signing-zone rules, without any signer entries, and
+		// its own replay-guard database. It also reads the gateway's guard to see what the gateway reserved.
+		cf2 := gf
+		cf2.Signers = nil
+		cosPath := filepath.Join(s.dir, "cosigner.json")
+		writeJSON(t, cosPath, cf2)
+		s.cosGuardDSN = s.newGuardDB()
+		s.mpc.StartCosigner(cosPath, s.cosGuardDSN, s.guardDSN)
+	}
 
 	// In-process service for funding and Reconcile (reads only, plus FundHot).
 	adapter, err := evm.New(s.ctx, s.cfg.EVM, s.pool)
@@ -474,6 +520,18 @@ func newSystem(t *testing.T, o opts) *system {
 	s.startWorker("")
 	s.startCore()
 	return s
+}
+
+// signTimeout bounds one signer call at the gateway. An HSM answers in milliseconds; two parties running a protocol over the
+// network need seconds on a slow runner, so mpc mode allows 30 s (QV_CUSTODY_SIGN_TIMEOUT overrides it).
+func signTimeout() string {
+	if v := os.Getenv("QV_CUSTODY_SIGN_TIMEOUT"); v != "" {
+		return v
+	}
+	if mpcMode() {
+		return "30s"
+	}
+	return "3s"
 }
 
 func writeJSON(t *testing.T, path string, v any) {
