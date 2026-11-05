@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -329,7 +330,98 @@ func (a *Activities) StartOpenColdMoves(ctx context.Context) (int, error) {
 			return 0, fmt.Errorf("start cold move %s: %w", m.ID, err)
 		}
 	}
-	return len(open), nil
+	refills, err := a.D.Svc.OpenRefills(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, r := range refills {
+		if err := a.start(ctx, r.ID, RefillWorkflow, Input{ID: r.ID, T: a.D.T}); err != nil {
+			return 0, fmt.Errorf("start refill %s: %w", r.ID, err)
+		}
+	}
+	return len(open) + len(refills), nil
+}
+
+// ---- refill steps (cold to hot, after an offline ceremony) ----
+
+// RefillView is a refill as the workflow needs it.
+type RefillView struct {
+	Status     string
+	Parked     bool
+	Stuck      bool
+	AgeSeconds int64 // since the row last changed (for a broadcast refill: since it was broadcast)
+}
+
+// LoadRefill reads the refill.
+func (a *Activities) LoadRefill(ctx context.Context, id string) (RefillView, error) {
+	r, err := a.D.Svc.GetRefill(ctx, id)
+	if err != nil {
+		return RefillView{}, err
+	}
+	var age int64
+	if err := a.D.Svc.Pool.QueryRow(ctx, `SELECT extract(epoch from now() - updated_at)::bigint FROM refills WHERE id=$1`, id).Scan(&age); err != nil {
+		return RefillView{}, err
+	}
+	return RefillView{Status: r.Status, Parked: r.Parked(), Stuck: r.Stuck, AgeSeconds: age}, nil
+}
+
+// BroadcastRefill sends the imported, signed transaction and books it as on its way. A nonce that another transaction used
+// parks the refill: it is never retried with a new nonce (that needs a new ceremony).
+func (a *Activities) BroadcastRefill(ctx context.Context, id string) (string, error) {
+	h, err := a.D.Svc.BroadcastRefill(ctx, id, func() { Hit("refill", "after_send") })
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "nonce too low") {
+			a.log().Error("ALERT: the cold address's nonce was used by another transaction; the signed refill can never mine. Needs an operator", "refill", id, "error", err.Error())
+			_ = a.D.Svc.ParkRefill(ctx, id, "the nonce was used by another transaction: "+err.Error())
+			return "", temporal.NewNonRetryableApplicationError("cold nonce consumed", "nonce_consumed", err)
+		}
+		return "", err
+	}
+	Hit("refill", "after_record")
+	return h, nil
+}
+
+// WaitRefillTx polls the transaction for up to wait and returns "pending", "confirmed" or "reverted".
+func (a *Activities) WaitRefillTx(ctx context.Context, id string, wait time.Duration) (string, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		st, err := a.D.Svc.RefillTxState(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		if st != "pending" {
+			Hit("refill", "after_confirm")
+			return string(st), nil
+		}
+		activity.RecordHeartbeat(ctx)
+		if time.Now().After(deadline) {
+			return "pending", nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// SettleRefill books a mined refill.
+func (a *Activities) SettleRefill(ctx context.Context, id string, reverted bool) error {
+	if err := a.D.Svc.SettleRefill(ctx, id, reverted); err != nil {
+		return nonRetry(err)
+	}
+	Hit("refill", "after_settle")
+	return nil
+}
+
+// AlertRefillStuck logs the ALERT for a refill that was broadcast and has not confirmed, once.
+func (a *Activities) AlertRefillStuck(ctx context.Context, id string) error {
+	first, err := a.D.Svc.MarkRefillStuck(ctx, id)
+	if err == nil && first {
+		a.log().Error("ALERT: a cold refill was broadcast and has not confirmed. It is never retried with a new nonce: look at the transaction, "+
+			"and if it was dropped, re-export and run a new ceremony only after the old one can no longer mine", "refill", id)
+	}
+	return err
 }
 
 // ColdState is a cold move as the workflow needs it.

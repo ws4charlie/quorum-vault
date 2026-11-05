@@ -174,12 +174,13 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 	var open int
 	if err := s.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
-		+ (SELECT count(*) FROM cold_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))`, c.Chain).Scan(&open); err != nil {
+		+ (SELECT count(*) FROM cold_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
+		+ (SELECT count(*) FROM refills WHERE chain=$1 AND status IN ('signed','broadcast'))`, c.Chain).Scan(&open); err != nil {
 		return rep, err
 	}
 	rep.InFlight = open
 	for _, sym := range c.AssetList {
-		for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym)} {
+		for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
 			p, err := s.posted(ctx, id)
 			if err != nil {
 				return rep, err

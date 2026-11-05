@@ -44,6 +44,14 @@ type ColdFile struct {
 	// ShardLimits overrides Limits for one shard: key "<asset>/<shard index>".
 	ShardLimits  map[string]LimitFile `json:"shard_limits"`
 	PlanInterval string               `json:"plan_interval"` // default 5s
+	Refill       RefillFile           `json:"refill"`
+}
+
+// RefillFile configures refills (cold to hot, through an offline ceremony).
+type RefillFile struct {
+	TokenGas   uint64 `json:"token_gas"`   // gas limit written into a token refill request, default 90000
+	StuckAfter string `json:"stuck_after"` // ALERT when a broadcast refill has not confirmed after this, default 30m
+	Poll       string `json:"poll"`        // how often the refill workflow looks for the imported file, default 15s
 }
 
 // LimitFile is the low-water mark, high-water mark and target of one hot partition.
@@ -146,6 +154,9 @@ type Config struct {
 	// Cold: limits per hot partition ID; empty when hot-to-cold is not configured.
 	ColdLimits       map[string]HotLimits
 	ColdPlanInterval time.Duration
+	RefillTokenGas   uint64
+	RefillStuckAfter time.Duration
+	RefillPoll       time.Duration
 }
 
 // Asset is a configured asset.
@@ -406,6 +417,16 @@ func (c *Config) Required(asset string, amount *big.Int) (n int, auto bool) {
 func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 	var err error
 	if c.ColdPlanInterval, err = dur("cold plan_interval", cf.PlanInterval, 5*time.Second); err != nil {
+		return err
+	}
+	c.RefillTokenGas = cf.Refill.TokenGas
+	if c.RefillTokenGas == 0 {
+		c.RefillTokenGas = 90000
+	}
+	if c.RefillStuckAfter, err = dur("cold refill stuck_after", cf.Refill.StuckAfter, 30*time.Minute); err != nil {
+		return err
+	}
+	if c.RefillPoll, err = dur("cold refill poll", cf.Refill.Poll, 15*time.Second); err != nil {
 		return err
 	}
 	if len(cf.Addresses) == 0 && len(cf.Limits) == 0 && len(cf.ShardLimits) == 0 {
