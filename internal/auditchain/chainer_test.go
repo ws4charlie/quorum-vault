@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -362,4 +363,40 @@ func TestTamperingIsCaught(t *testing.T) {
 		os.WriteFile(p, []byte("not json\n"), 0o600)
 		check(t, pool, p, "not an anchor")
 	})
+}
+
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) { l.mu.Lock(); defer l.mu.Unlock(); return l.b.Write(p) }
+func (l *lockedBuf) String() string              { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
+
+// A chainer that cannot chain says so at error level with the lag, keeps retrying, and skips nothing.
+func TestStalledChainerAlerts(t *testing.T) {
+	pool := dbtest.New(t)
+	writeAudit(t, pool, 3)
+	// A row the chainer cannot turn into an entry stops the chain at that row.
+	tx, _ := pool.Begin(context.Background())
+	tx.Exec(context.Background(), `INSERT INTO outbox (id, topic, key, payload) VALUES (gen_random_uuid(), 'qv.audit', 'bad', '{"no":"type"}')`)
+	tx.Commit(context.Background())
+	buf := &lockedBuf{}
+	c := NewChainer(pool, ChainerOptions{Idle: 10 * time.Millisecond, Backoff: 10 * time.Millisecond, Logger: slog.New(slog.NewJSONHandler(buf, nil))})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	waitFor(t, func() bool { return strings.Contains(buf.String(), "ALERT audit chainer cannot chain") })
+	cancel()
+	<-done
+	out := buf.String()
+	if !strings.Contains(out, `"level":"ERROR"`) || !strings.Contains(out, "unchained_rows") || !strings.Contains(out, "oldest_unchained_age") {
+		t.Fatalf("alert = %s", out)
+	}
+	if n := strings.Count(out, "ALERT"); n != 1 {
+		t.Fatalf("%d alerts in a burst of retries, want 1", n)
+	}
+	if rows, _, err := Behind(context.Background(), pool); err != nil || rows != 4 {
+		t.Fatalf("behind = %d, %v; the three good rows are held behind the bad one (all in one batch)", rows, err)
+	}
 }

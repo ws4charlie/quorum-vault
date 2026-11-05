@@ -70,10 +70,25 @@ the chain was published under another `-audit-source`).
 
 ## Cost
 
-One signed job through the gateway (claim, decide, reserve, HSM sign, store, complete), 300 sequential jobs on SoftHSM and a
-local Postgres: **5.8 ms before, 7.6 ms after** (median, +1.8 ms: the two appends `sign.allowed` and `sign.completed`). Measure
-again with `QV_MEASURE=1 go test -run TestMeasureCostPerSignedJob ./internal/gateway/`. SoftHSM numbers say nothing about
-capacity; the point is the relative cost.
+One signed job through the gateway (claim, decide, reserve, HSM sign, store, complete), 320 jobs per run, SoftHSM and a local
+Postgres, two runs each, base commit against this branch:
+
+| Workers | Base: jobs/s, p95 | Branch: jobs/s, p95 |
+|---:|---|---|
+| 1 | 117-120, 8.6-9.1 ms | 99-100, 10.6-10.7 ms |
+| 8 | 257-261, 33-35 ms | 256-260, 34-36 ms |
+| 32 | 254-261, 123-128 ms | 250-254, 127-131 ms |
+
+With one worker the two appends cost about 1.7 ms per job (about 17 % fewer jobs/s). With 8 and 32 workers throughput is the same
+as before: the per-chain guard lock already makes jobs take turns, and the audit lock is taken last, inside it. SoftHSM numbers say
+nothing about capacity; the point is the relative cost. Measure again with `QV_MEASURE=1 go test -run TestMeasureCostPerSignedJob
+./internal/gateway/`.
+
+## When the chain stalls
+
+The chainer never skips a row, so one row it cannot chain stops the trail. It logs `ALERT audit chainer cannot chain` at error
+level, with the number of unchained rows and the age of the oldest (`auditchain.Behind`), at once and then at most once a minute.
+`qv-gateway` and `qv-cosigner` started without `-brokers` log an `ALERT` that their heads are not published.
 
 ## Gotchas met
 

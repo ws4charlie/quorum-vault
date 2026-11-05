@@ -67,6 +67,9 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if *brokers == "" {
+		log.Error("ALERT no -brokers: this zone's audit chain heads are not published, so a truncated or rewritten chain cannot be detected from outside the database")
+	}
 	if *brokers != "" {
 		pub, err := outbox.NewKafkaPublisher(strings.Split(*brokers, ","))
 		if err != nil {

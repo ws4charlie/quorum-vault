@@ -38,6 +38,7 @@ type Chainer struct {
 	pool *pgxpool.Pool
 	opt  ChainerOptions
 
+	lastAlert    time.Time
 	beforeCommit func() error // test hook: a crash after appending, before committing
 }
 
@@ -140,7 +141,7 @@ func (c *Chainer) Run(ctx context.Context) error {
 		case ctx.Err() != nil:
 			return nil
 		case err != nil:
-			c.opt.Logger.Warn("audit chainer failed", "error", err.Error())
+			c.alert(ctx, err)
 			wait = c.opt.Backoff
 		case n > 0:
 			continue
@@ -151,6 +152,32 @@ func (c *Chainer) Run(ctx context.Context) error {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// Behind says how far the chain is behind the outbox: how many audit rows are not chained and how old the oldest is.
+func Behind(ctx context.Context, pool *pgxpool.Pool) (rows int, oldest time.Duration, err error) {
+	var age *float64
+	err = pool.QueryRow(ctx, `SELECT count(*), EXTRACT(EPOCH FROM now() - min(created_at)) FROM outbox WHERE topic = $1 AND chained_at IS NULL`,
+		outbox.TopicAudit).Scan(&rows, &age)
+	if age != nil {
+		oldest = time.Duration(*age * float64(time.Second))
+	}
+	return
+}
+
+// alert reports a stalled chain. The chainer retries for ever and never skips a row, so while it fails the trail stops growing;
+// this is the only sign of it. The relay has no metrics endpoint, so the lag (rows and age of the oldest) goes into the ALERT line.
+// The first failure is reported at once, then at most once a minute.
+func (c *Chainer) alert(ctx context.Context, err error) {
+	if time.Since(c.lastAlert) < time.Minute && !c.lastAlert.IsZero() {
+		return
+	}
+	c.lastAlert = time.Now()
+	attrs := []any{"error", err.Error()}
+	if n, age, berr := Behind(context.WithoutCancel(ctx), c.pool); berr == nil {
+		attrs = append(attrs, "unchained_rows", n, "oldest_unchained_age", age.Round(time.Second).String())
+	}
+	c.opt.Logger.Error("ALERT audit chainer cannot chain: the audit trail has stopped growing; retrying, no row is skipped", attrs...)
 }
 
 // Event turns an outbox audit payload into a chain entry. The payload must carry "type"; "actor" names who did it (the system
