@@ -56,7 +56,15 @@ func (c *Cosigner) Decide(ctx context.Context, r wire.Request) wire.Response {
 }
 
 func (c *Cosigner) decide(ctx context.Context, r wire.Request) wire.Response {
-	no := func(format string, a ...any) wire.Response { return wire.Response{Reason: fmt.Sprintf(format, a...)} }
+	// A refusal is recorded in the cosigner's own audit chain before it is answered. If that fails the cosigner is unavailable.
+	no := func(format string, a ...any) wire.Response {
+		reason := fmt.Sprintf(format, a...)
+		if err := c.dec.RecordRefusal(ctx, r.JobID, "", r.Digest, reason); err != nil {
+			c.log.Error("cosigner could not record a refusal (unavailable)", "job_id", r.JobID, "error", err.Error())
+			return wire.Response{Unavailable: true, Reason: "cosigner_error: " + err.Error()}
+		}
+		return wire.Response{Reason: reason}
+	}
 	if pb.Algorithm(r.Algorithm) != pb.Algorithm_ALGORITHM_ECDSA_SECP256K1 {
 		return no("cosigner: only secp256k1 ECDSA signing is supported")
 	}

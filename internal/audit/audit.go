@@ -130,6 +130,36 @@ func (l *Log) Append(ctx context.Context, ev domain.AuditEvent) (domain.AuditEve
 		return domain.AuditEvent{}, fmt.Errorf("audit: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	ev, err = AppendTx(ctx, tx, ev, "")
+	if err != nil {
+		return domain.AuditEvent{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.AuditEvent{}, fmt.Errorf("audit: commit: %w", err)
+	}
+	return ev, nil
+}
+
+// AppendTx stores ev at the end of the chain inside the caller's transaction, which keeps the append lock until it
+// ends: call it last. sourceID, when not empty, is the UUID of what the entry was made from (an outbox row); the database
+// refuses a second entry with the same one. Seq, At, PrevHash and Hash are set here, as in Append.
+func AppendTx(ctx context.Context, tx pgx.Tx, ev domain.AuditEvent, sourceID string) (domain.AuditEvent, error) {
+	if ev.Actor == "" || ev.Type == "" {
+		return domain.AuditEvent{}, errors.New("audit: actor and type are required")
+	}
+	var err error
+	if ev.RequestID, err = normUUID("request_id", ev.RequestID); err != nil {
+		return domain.AuditEvent{}, err
+	}
+	if ev.WalletID, err = normUUID("wallet_id", ev.WalletID); err != nil {
+		return domain.AuditEvent{}, err
+	}
+	if ev.KeyID, err = normUUID("key_id", ev.KeyID); err != nil {
+		return domain.AuditEvent{}, err
+	}
+	if sourceID, err = normUUID("source_id", sourceID); err != nil {
+		return domain.AuditEvent{}, err
+	}
 
 	// Store payload in jsonb's normalized text form and hash that same form,
 	// so Verify (which reads payload::text back) recomputes identical bytes.
@@ -165,14 +195,11 @@ func (l *Log) Append(ctx context.Context, ev domain.AuditEvent) (domain.AuditEve
 		payload = string(ev.Payload)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO audit_log
-		(seq, at, actor, type, request_id, wallet_id, key_id, payload, prev_hash, hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)`,
+		(seq, at, actor, type, request_id, wallet_id, key_id, payload, prev_hash, hash, source_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)`,
 		ev.Seq, ev.At, ev.Actor, ev.Type, nullable(ev.RequestID), nullable(ev.WalletID), nullable(ev.KeyID),
-		payload, ev.PrevHash, ev.Hash); err != nil {
+		payload, ev.PrevHash, ev.Hash, nullable(sourceID)); err != nil {
 		return domain.AuditEvent{}, fmt.Errorf("audit: insert: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.AuditEvent{}, fmt.Errorf("audit: commit: %w", err)
 	}
 	return ev, nil
 }
@@ -224,7 +251,18 @@ func (l *Log) List(ctx context.Context, f Filter) ([]domain.AuditEvent, error) {
 // seq whose prev_hash, hash or position (seq must be 1, 2, 3, ...) is wrong.
 // An empty log is valid.
 func (l *Log) Verify(ctx context.Context) (ok bool, firstBadSeq int64, err error) {
-	rows, err := l.pool.Query(ctx, `SELECT `+selectCols+` FROM audit_log ORDER BY seq`)
+	return VerifyChain(ctx, l.pool)
+}
+
+// Querier is what a pool and a transaction both offer.
+type Querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// VerifyChain is Verify on any connection.
+func VerifyChain(ctx context.Context, q Querier) (ok bool, firstBadSeq int64, err error) {
+	rows, err := q.Query(ctx, `SELECT `+selectCols+` FROM audit_log ORDER BY seq`)
 	if err != nil {
 		return false, 0, fmt.Errorf("audit: verify: %w", err)
 	}

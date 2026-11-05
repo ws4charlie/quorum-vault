@@ -272,8 +272,22 @@ func TestGuardDatabaseDownIsUnavailableNotRefused(t *testing.T) {
 	if got.Allow || !got.Unavailable {
 		t.Fatalf("want unavailable and not allowed, got %+v", got)
 	}
-	// A real refusal is still a decision, never unavailable.
+	// A refusal needs its audit record first: with the guard database gone it cannot be recorded, so it is an outage too
+	// (the answer is still "no"). With the database up, a refusal is a decision.
 	got = c.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: int32(pb.Algorithm_ALGORITHM_ED25519)})
+	if got.Allow || !got.Unavailable {
+		t.Fatalf("a refusal that cannot be recorded is unavailable, got %+v", got)
+	}
+	pool2, _ := gatewaytest.NewGuardDB(t)
+	guard2, err := gateway.OpenGuard(context.Background(), pool2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := cosigner.New(h.Cfg, guard2, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = c2.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: int32(pb.Algorithm_ALGORITHM_ED25519)})
 	if got.Allow || got.Unavailable {
 		t.Fatalf("a malformed request is a refusal, got %+v", got)
 	}
@@ -323,4 +337,47 @@ func TestCosignerRebalance(t *testing.T) {
 		e.allow(e.h.Rebalance("r3", gatewaytest.AddrShard2, gatewaytest.AddrShard2, 1000, 1))
 		e.refuse(e.req(e.h.Rebalance("r4", gatewaytest.AddrShard2, gatewaytest.AddrShard2, 100, 2)), gateway.ReasonRebalanceRate)
 	})
+}
+
+// The cosigner keeps its own audit chain in its own guard database: what it allowed, and every refusal with its reason,
+// including the ones it makes before the shared decision code runs.
+func TestCosignerAuditsEveryDecision(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	hot := crypto.PubkeyToAddress(key.PublicKey)
+	h := gatewaytest.New(t, 31337, hot)
+	pool, _ := gatewaytest.NewGuardDB(t)
+	guard, err := gateway.OpenGuard(context.Background(), pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := cosigner.New(h.Cfg, guard, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &env{t: t, h: h, c: c, pub: crypto.CompressPubkey(&key.PublicKey), hot: hot}
+	e.allow(h.Withdrawal("ok", gatewaytest.AddrUser, 100, 0, "alice"))
+	e.refuse(e.req(h.Withdrawal("noapp", gatewaytest.AddrUser, 100, 1)), gateway.ReasonApprovals)
+	if r := c.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: int32(pb.Algorithm_ALGORITHM_ED25519)}); r.Allow || r.Unavailable {
+		t.Fatalf("got %+v", r)
+	}
+	rows, err := pool.Query(context.Background(), `SELECT actor, type, coalesce(payload->>'reason', '') FROM audit_log ORDER BY seq`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var a, ty, reason string
+		if err := rows.Scan(&a, &ty, &reason); err != nil {
+			t.Fatal(err)
+		}
+		if a != "qv-cosigner" {
+			t.Errorf("actor %q", a)
+		}
+		got = append(got, ty+":"+reason)
+	}
+	if len(got) != 3 || got[0] != "sign.allowed:" || !strings.HasPrefix(got[1], "sign.refused:"+gateway.ReasonApprovals) ||
+		!strings.HasPrefix(got[2], "sign.refused:cosigner: only secp256k1") {
+		t.Fatalf("audit = %q", got)
+	}
 }

@@ -246,8 +246,10 @@ func (s *Service) ExportRefill(ctx context.Context, id string) (coldsign.Request
 		req.Revision = cur.Revision + 1
 		out = req.File()
 		b, _ := json.Marshal(req)
-		_, err = tx.Exec(ctx, `UPDATE refills SET revision=$2, request=$3::jsonb, request_hash=$4, updated_at=now() WHERE id=$1`, id, req.Revision, string(b), out.RequestHash)
-		return err
+		if _, err = tx.Exec(ctx, `UPDATE refills SET revision=$2, request=$3::jsonb, request_hash=$4, updated_at=now() WHERE id=$1`, id, req.Revision, string(b), out.RequestHash); err != nil {
+			return err
+		}
+		return auditEvent(ctx, tx, id, "refill.exported", map[string]any{"kind": r.Kind, "revision": req.Revision, "request_hash": out.RequestHash})
 	})
 	return out, err
 }
@@ -433,7 +435,10 @@ func (s *Service) FundCold(ctx context.Context, id string, shard int, asset stri
 	}
 	p := s.Cfg.PartitionKey(asset, shard).String()
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		return s.transfer(ctx, tx, "fund-cold:"+id, coldAcct(p), opFundAcct(s.Cfg.Chain, asset), amount, map[string]any{"kind": "cold_funding"})
+		if err := s.transfer(ctx, tx, "fund-cold:"+id, coldAcct(p), opFundAcct(s.Cfg.Chain, asset), amount, map[string]any{"kind": "cold_funding"}); err != nil {
+			return err
+		}
+		return auditOnce(ctx, tx, "fund-cold:"+id, id, "cold.funded", map[string]any{"asset": asset, "shard": shard, "amount": amount.String()})
 	})
 }
 
@@ -554,7 +559,10 @@ func (s *Service) SpendCold(ctx context.Context, id string, shard int, asset str
 	}
 	p := s.Cfg.PartitionKey(asset, shard).String()
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		return s.transfer(ctx, tx, "spend-cold:"+id, opFundAcct(s.Cfg.Chain, asset), coldAcct(p), amount, map[string]any{"kind": "cold_spend"})
+		if err := s.transfer(ctx, tx, "spend-cold:"+id, opFundAcct(s.Cfg.Chain, asset), coldAcct(p), amount, map[string]any{"kind": "cold_spend"}); err != nil {
+			return err
+		}
+		return auditOnce(ctx, tx, "spend-cold:"+id, id, "cold.spent", map[string]any{"asset": asset, "shard": shard, "amount": amount.String()})
 	})
 }
 
@@ -566,8 +574,11 @@ func (s *Service) BookGuardianFee(ctx context.Context, txHash string) (*big.Int,
 		return nil, err
 	}
 	return fee, InTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		return s.transfer(ctx, tx, "guardian-fee:"+txHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), opFundAcct(s.Cfg.Chain, s.Cfg.Native), fee,
-			map[string]any{"kind": "guardian_network_fee", "tx": txHash})
+		if err := s.transfer(ctx, tx, "guardian-fee:"+txHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), opFundAcct(s.Cfg.Chain, s.Cfg.Native), fee,
+			map[string]any{"kind": "guardian_network_fee", "tx": txHash}); err != nil {
+			return err
+		}
+		return auditOnce(ctx, tx, "guardian-fee:"+txHash, txHash, "guardian.freeze", map[string]any{"tx": txHash, "fee": fee.String()})
 	})
 }
 

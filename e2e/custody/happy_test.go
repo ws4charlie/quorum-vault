@@ -78,4 +78,9 @@ func TestHappyPathETHAndToken(t *testing.T) {
 	if fee := s.posted(custody.FeeAccount(s.chainName, "ETH")); fee.Cmp(eth(100)) >= 0 {
 		t.Fatalf("fee account %s: nothing was charged", fee)
 	}
+	// The audit trail: who asked for and approved each withdrawal, in the core chain; what the gateway allowed, in its own;
+	// and both heads published, so a cut or rewritten table disagrees with what left the database.
+	s.requireAudit("customer.created", "deposit_address.created", "withdrawal.requested", "withdrawal.approval", "withdrawal.approved")
+	s.requireGatewayAudit("sign.allowed", "sign.completed")
+	s.requireAnchors()
 }

@@ -113,6 +113,7 @@ func TestHumanRejectionVoids(t *testing.T) {
 		t.Fatalf("available %s held %s", a, h)
 	}
 	s.reconcileClean()
+	s.requireAudit("withdrawal.requested", "withdrawal.rejected", "withdrawal.voided")
 }
 
 func TestInsufficientFundsIsRefused(t *testing.T) {
@@ -181,6 +182,7 @@ func TestFrozenFactoryDefersSweeps(t *testing.T) {
 		t.Fatalf("%d failed sweeps", n)
 	}
 	s.reconcileClean()
+	s.requireAudit("factory.frozen", "factory.unfrozen")
 }
 
 // The gateway refuses a withdrawal the business side let through. The nonce must be
@@ -215,6 +217,13 @@ func TestGatewayRejectionReleasesNonceAndHold(t *testing.T) {
 	}
 	s.waitIdle(30 * time.Second)
 	s.reconcileClean()
+	// The gateway's refusal is in its own chain, with the reason.
+	s.requireGatewayAudit("sign.refused")
+	var reason string
+	if err := s.guardPool().QueryRow(s.ctx, `SELECT payload->>'reason' FROM audit_log WHERE type='sign.refused' ORDER BY seq LIMIT 1`).Scan(&reason); err != nil || !strings.HasPrefix(reason, "policy_per_tx_cap") {
+		t.Fatalf("recorded refusal reason %q, %v", reason, err)
+	}
+	s.requireAudit("withdrawal.voided")
 }
 
 // A transaction that does not mine is replaced with a higher fee; the replacement

@@ -100,6 +100,7 @@ func TestRebalanceFeedsADryShardAndWithdrawalsGoThere(t *testing.T) {
 		t.Fatalf("%d failed rebalances", n)
 	}
 	s.reconcileClean()
+	s.requireAudit("rebalance.started")
 }
 
 // A rebalance and a move to cold do not fight: the rebalance is planned first and feeds the dry shard, so no refill is asked for

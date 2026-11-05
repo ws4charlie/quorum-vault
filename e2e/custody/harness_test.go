@@ -246,6 +246,7 @@ type system struct {
 	apiURL                       string
 	extraEnv                     []string
 	tag                          string // makes withdrawal IDs unique to this system (see withdraw)
+	auditSrc                     string // the names this system's audit heads are published under (the topic is shared between runs)
 }
 
 func freePort(t *testing.T) int {
@@ -366,6 +367,7 @@ func newSystem(t *testing.T, o opts) *system {
 
 	s.chainName = "evm-" + uuid.NewString()[:8]
 	s.queue = "qv-e2e-" + uuid.NewString()[:8]
+	s.auditSrc = "e2e-" + uuid.NewString()[:8]
 
 	s.tm.phase("databases (Postgres, guard DBs)")
 	// Chain: factory (deployed frozen), token, keys. All keys are generated now.
@@ -768,11 +770,12 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 func (s *system) startGateway() {
 	s.gateway = s.spawn("qv-gateway", []string{"QV_HSM_PIN=" + hsmtest.PIN()},
 		"-config", s.gwPath, "-jobs-dsn", s.gatewayJobsDSN(), "-guard-dsn", s.guardDSN, "-interval", "200ms", "-lease", gatewayLease(s.o),
-		"-worker-id", "gw-"+uuid.NewString()[:6])
+		"-worker-id", "gw-"+uuid.NewString()[:6], "-brokers", "127.0.0.1:19092", "-audit-source", s.auditSrc+"-gateway", "-anchor-interval", "2s")
 }
 
 func (s *system) startRelay() {
-	s.relay = s.spawn("qv-relay", nil, "-dsn", s.bizDSN, "-brokers", "127.0.0.1:19092", "-idle", "200ms")
+	s.relay = s.spawn("qv-relay", nil, "-dsn", s.bizDSN, "-brokers", "127.0.0.1:19092", "-idle", "200ms",
+		"-audit-source", s.auditSrc+"-core", "-anchor-interval", "2s")
 }
 
 // startWorker starts qv-worker; failpoint "" arms nothing.

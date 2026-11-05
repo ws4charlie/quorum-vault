@@ -17,8 +17,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ws4charlie/quorum-vault/internal/auditchain"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
+	"github.com/ws4charlie/quorum-vault/internal/outbox"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 )
 
@@ -31,12 +33,18 @@ func main() {
 }
 
 func run(log *slog.Logger) error {
+	if len(os.Args) > 1 && os.Args[1] == "verify" {
+		return auditchain.VerifyCommand(context.Background(), os.Args[2:], "gateway", "QV_GATEWAY_GUARD_DSN", os.Stdout)
+	}
 	configPath := flag.String("config", "", "signing-zone config file (required)")
 	jobsDSN := flag.String("jobs-dsn", os.Getenv("QV_GATEWAY_JOBS_DSN"), "business database DSN for role qv_gateway (env QV_GATEWAY_JOBS_DSN)")
 	guardDSN := flag.String("guard-dsn", os.Getenv("QV_GATEWAY_GUARD_DSN"), "replay-guard database DSN, a different database (env QV_GATEWAY_GUARD_DSN)")
 	interval := flag.Duration("interval", time.Second, "poll interval when the queue is empty")
 	lease := flag.Duration("lease", 2*time.Minute, "how long a claimed job stays ours")
 	worker := flag.String("worker-id", "", "worker id (default hostname-pid)")
+	brokers := flag.String("brokers", os.Getenv("QV_KAFKA_BROKERS"), "Kafka brokers for publishing the head of this zone's audit chain on qv.audit.heads (optional; env QV_KAFKA_BROKERS)")
+	auditSource := flag.String("audit-source", "gateway", "name this chain's heads are published under on qv.audit.heads (several deployments sharing one topic need distinct names)")
+	anchorEvery := flag.Duration("anchor-interval", time.Minute, "publish the audit chain head at least this often, and at once when it changes")
 	flag.Parse()
 
 	if *configPath == "" || *jobsDSN == "" || *guardDSN == "" {
@@ -97,6 +105,18 @@ func run(log *slog.Logger) error {
 	guard, err := gateway.OpenGuard(ctx, gp)
 	if err != nil {
 		return err
+	}
+	if *brokers == "" {
+		log.Error("ALERT no -brokers: this zone's audit chain heads are not published, so a truncated or rewritten chain cannot be detected from outside the database")
+	}
+	if *brokers != "" {
+		pub, err := outbox.NewKafkaPublisher(strings.Split(*brokers, ","))
+		if err != nil {
+			return err
+		}
+		defer pub.Close()
+		// Publishing the head never holds up a decision; if Kafka is down the heads catch up when it is back.
+		go auditchain.PublishHeads(ctx, guard.Querier(), *auditSource, pub, auditchain.AnchorOptions{Interval: *anchorEvery, Logger: log})
 	}
 	id := *worker
 	if id == "" {

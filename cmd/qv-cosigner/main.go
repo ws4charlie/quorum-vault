@@ -18,8 +18,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ws4charlie/quorum-vault/internal/auditchain"
 	"github.com/ws4charlie/quorum-vault/internal/cosigner"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
+	"github.com/ws4charlie/quorum-vault/internal/outbox"
 )
 
 func main() {
@@ -31,10 +33,16 @@ func main() {
 }
 
 func run(log *slog.Logger) error {
+	if len(os.Args) > 1 && os.Args[1] == "verify" {
+		return auditchain.VerifyCommand(context.Background(), os.Args[2:], "cosigner", "QV_COSIGNER_GUARD_DSN", os.Stdout)
+	}
 	configPath := flag.String("config", "", "signing-zone config of party B's side (required)")
 	guardDSN := flag.String("guard-dsn", os.Getenv("QV_COSIGNER_GUARD_DSN"), "replay-guard database DSN of the cosigner: its own database, never the gateway's (env QV_COSIGNER_GUARD_DSN)")
 	otherDSN := flag.String("gateway-guard-dsn", os.Getenv("QV_GATEWAY_GUARD_DSN"), "the gateway's guard DSN, only to refuse sharing a database with it (optional)")
 	socket := flag.String("socket", "", "unix socket path to listen on (required)")
+	brokers := flag.String("brokers", os.Getenv("QV_KAFKA_BROKERS"), "Kafka brokers for publishing the head of this zone's audit chain on qv.audit.heads (optional; env QV_KAFKA_BROKERS)")
+	auditSource := flag.String("audit-source", "cosigner", "name this chain's heads are published under on qv.audit.heads (several deployments sharing one topic need distinct names)")
+	anchorEvery := flag.Duration("anchor-interval", time.Minute, "publish the audit chain head at least this often, and at once when it changes")
 	flag.Parse()
 	if *configPath == "" || *guardDSN == "" || *socket == "" {
 		return fmt.Errorf("-config, -guard-dsn and -socket are required")
@@ -58,6 +66,18 @@ func run(log *slog.Logger) error {
 	guard, err := gateway.OpenGuard(ctx, pool)
 	if err != nil {
 		return err
+	}
+	if *brokers == "" {
+		log.Error("ALERT no -brokers: this zone's audit chain heads are not published, so a truncated or rewritten chain cannot be detected from outside the database")
+	}
+	if *brokers != "" {
+		pub, err := outbox.NewKafkaPublisher(strings.Split(*brokers, ","))
+		if err != nil {
+			return err
+		}
+		defer pub.Close()
+		// Publishing the head never holds up a decision; if Kafka is down the heads catch up when it is back.
+		go auditchain.PublishHeads(ctx, guard.Querier(), *auditSource, pub, auditchain.AnchorOptions{Interval: *anchorEvery, Logger: log})
 	}
 	c, err := cosigner.New(cfg, guard, log, nil)
 	if err != nil {

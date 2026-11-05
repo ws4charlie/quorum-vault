@@ -98,13 +98,75 @@ func retryable(err error) bool {
 	return errors.As(err, &pe) && (pe.Code == "40P01" || pe.Code == "40001")
 }
 
-// emit writes one outbox event for a flow, in the flow's transaction.
+type actorKey struct{}
+
+// WithActor names who caused what happens under ctx; the audit events written under it carry that name. The /v2 API sets it
+// from the X-Actor header. Work nobody asked for (the planners, the workflows) has no actor and is recorded as "system".
+func WithActor(ctx context.Context, actor string) context.Context {
+	return context.WithValue(ctx, actorKey{}, actor)
+}
+
+func actorOf(ctx context.Context) string {
+	if a, _ := ctx.Value(actorKey{}).(string); a != "" {
+		return a
+	}
+	return "system"
+}
+
+// audited lists the flow events that are also audit events, with the name they carry in the audit log. The others only fan
+// out to consumers. Payloads hold amounts, addresses and hashes, never keys or signatures.
+var audited = map[string]string{
+	"withdrawal.requested":  "withdrawal.requested",
+	"withdrawal.approved":   "withdrawal.approved",
+	"withdrawal.failed":     "withdrawal.voided",
+	"refill.requested":      "refill.requested",
+	"refill.signed":         "refill.imported",
+	"refill.closed":         "refill.closed",
+	"cold_action.requested": "cold_action.requested",
+	"cold_move.planned":     "cold_move.started",
+	"rebalance.planned":     "rebalance.started",
+}
+
+// emit writes one outbox event for a flow, in the flow's transaction. An audited event is written a second time to the audit
+// topic, in the same transaction, so the audit entry exists exactly when the change does.
 func emit(ctx context.Context, tx pgx.Tx, topic, key, typ string, fields map[string]any) error {
 	p := map[string]any{"type": typ, "id": key}
 	for k, v := range fields {
 		p[k] = v
 	}
-	return outbox.Write(ctx, tx, topic, key, p)
+	if err := outbox.Write(ctx, tx, topic, key, p); err != nil {
+		return err
+	}
+	if name, ok := audited[typ]; ok && topic != outbox.TopicAudit {
+		return auditEvent(ctx, tx, key, name, fields)
+	}
+	return nil
+}
+
+// audit writes an audit event: who (the "actor" field, else "by", else the actor of ctx, else the system), what, and about
+// which subject, with the other fields as details.
+func auditEvent(ctx context.Context, tx pgx.Tx, subject, typ string, fields map[string]any) error {
+	return outbox.Write(ctx, tx, outbox.TopicAudit, subject, auditPayload(ctx, typ, subject, fields))
+}
+
+// auditOnce is audit for a step that is idempotent by caller-supplied ID: repeating it writes nothing new.
+func auditOnce(ctx context.Context, tx pgx.Tx, seed, subject, typ string, fields map[string]any) error {
+	return outbox.WriteOnce(ctx, tx, seed+"\x00"+typ, outbox.TopicAudit, subject, auditPayload(ctx, typ, subject, fields))
+}
+
+func auditPayload(ctx context.Context, typ, subject string, fields map[string]any) map[string]any {
+	p := map[string]any{"type": typ, "id": subject}
+	for k, v := range fields {
+		p[k] = v
+	}
+	if a, _ := p["actor"].(string); a == "" {
+		if by, _ := p["by"].(string); by != "" {
+			p["actor"] = by
+		} else {
+			p["actor"] = actorOf(ctx)
+		}
+	}
+	return p
 }
 
 func parseBig(s string) *big.Int {
