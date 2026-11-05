@@ -119,12 +119,25 @@ jobs:
           key: cbmpc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mpc-party/cbmpc.pin', 'mpc-party/scripts/fetch-build-cbmpc.sh') }}
       - name: Build cb-mpc at the pinned commit
         run: mpc-party/scripts/fetch-build-cbmpc.sh
+      # Pure-Go API module (generated gRPC code): no cgo, no cb-mpc, no go-ethereum.
+      - name: mpc-party/api vet, build, test
+        working-directory: mpc-party/api
+        run: |
+          go vet ./...
+          go build ./...
+          go test -count=1 ./...
+          ! go list -deps ./... | grep -E 'go-ethereum|cb-mpc/internal'
       - name: go vet
         working-directory: mpc-party
         run: go vet ./...
+      # Includes the service (internal/server), the real-process tests (e2e: separate binaries, generated certificates,
+      # kill/hang/drop tests, throughput) and the wrapper tests. The prod binary is built without -tags devauth.
+      - name: go build service (production tags)
+        working-directory: mpc-party
+        run: go build -o /dev/null ./cmd/mpc-party
       - name: go test -race
         working-directory: mpc-party
-        run: go test -race -count=1 -timeout 15m ./...
+        run: go test -race -count=1 -timeout 25m ./...
       - name: Fuzz entry points (short)
         working-directory: mpc-party
         run: go test -run '^$' -fuzz FuzzEntryPoints -fuzztime 30s ./internal/cbmpc

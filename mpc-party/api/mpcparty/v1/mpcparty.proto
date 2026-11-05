@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+package qv.mpcparty.v1;
+
+option go_package = "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1;mpcpartyv1";
+
+// ---- Caller API (served on the caller port; Sign/DKG/Node/Derive/Refresh only by party A) ----
+
+service MpcParty {
+  // Admin: create a new HD keyset with the peer. Includes a mandatory SelfTest; nothing is stored unless it passed.
+  rpc DKG(DKGRequest) returns (DKGResponse);
+  // Public key and chain code (xpub material) of a hardened node.
+  rpc Node(NodeRequest) returns (NodeResponse);
+  // Register a derived signing key. Returns a stable key_id and the public key.
+  rpc Derive(DeriveRequest) returns (DeriveResponse);
+  // Sign once per job_id. Idempotent: a retry returns the stored signature.
+  rpc Sign(SignRequest) returns (SignResponse);
+  // Admin: refresh the shares of a keyset. Includes a mandatory SelfTest; the old shares stay in force unless it passed.
+  rpc Refresh(RefreshRequest) returns (RefreshResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+enum Curve {
+  CURVE_UNSPECIFIED = 0;
+  CURVE_SECP256K1 = 1; // ECDSA HD keyset (EVM, BTC P2WPKH)
+  CURVE_ED25519 = 2;   // Ed25519 HD keyset (Solana)
+}
+
+enum Algorithm {
+  ALGORITHM_UNSPECIFIED = 0;
+  ALGORITHM_ECDSA_SECP256K1 = 1; // digest is the 32-byte hash to sign; response is DER, low-S
+  ALGORITHM_ED25519 = 2;         // digest is the full message; response is 64 bytes
+}
+
+message DKGRequest {
+  string keyset_id = 1;
+  Curve curve = 2;
+}
+message DKGResponse {
+  bytes root_public_key = 1;
+}
+
+message NodeRequest {
+  string keyset_id = 1;
+  repeated uint32 hardened_path = 2;
+}
+message NodeResponse {
+  bytes public_key = 1; // 33 bytes (secp256k1) or 32 (ed25519)
+  bytes chain_code = 2; // 32 bytes
+}
+
+message DeriveRequest {
+  string keyset_id = 1;
+  repeated uint32 hardened_path = 2;
+  repeated uint32 path = 3; // non-hardened indices (< 2^31)
+}
+message DeriveResponse {
+  string key_id = 1;
+  bytes public_key = 2;
+}
+
+message SignRequest {
+  string key_id = 1;
+  Algorithm algorithm = 2;
+  bytes digest = 3;
+  string job_id = 4;
+  // Opaque package (signed intent, approvals) forwarded to party B, which hands it to its Authorizer before it
+  // joins the protocol. The service does not interpret it.
+  bytes intent_package = 5;
+}
+message SignResponse {
+  bytes signature = 1;
+  bool replayed = 2; // true if the stored signature of an earlier call with the same job_id was returned
+}
+
+message RefreshRequest {
+  string keyset_id = 1;
+}
+message RefreshResponse {
+  bytes root_public_key = 1;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  string role = 1; // "A" or "B"
+  bool peer_reachable = 2;
+  int32 active_sessions = 3;
+  string version = 4;
+  string cbmpc_commit = 5;
+}
+
+// ---- Typed error detail, attached to every gRPC status the service returns for protocol failures ----
+
+enum ErrorKind {
+  ERROR_KIND_UNSPECIFIED = 0;
+  ERROR_KIND_TRANSPORT = 1;     // peer or link failed: retry with a new session, no key action
+  ERROR_KIND_CRYPTOGRAPHIC = 2; // a check on the peer's data failed: freeze the keyset, page a human
+  ERROR_KIND_INTERNAL = 3;      // bad request, local fault, unsupported: alert
+  ERROR_KIND_REFUSED = 4;       // an Authorizer (local or the peer's) refused the request; nothing ran
+  ERROR_KIND_LIMIT = 5;         // a configured limit was exceeded; nothing ran
+}
+
+message ErrorDetail {
+  ErrorKind kind = 1;
+  string op = 2;
+  uint32 code = 3;   // cb-mpc / shim code, 0 if none
+  string message = 4;
+  bool peer = 5;     // true if the failure was reported by the peer
+}
+
+// ---- Peer API (served on the peer port, mutual TLS pinned to the other party's certificate) ----
+
+service Peer {
+  // One stream per protocol session, opened by party A. Frames: OPEN, ACK, DATA, ABORT, FIN.
+  rpc Session(stream Frame) returns (stream Frame);
+}
+
+enum FrameKind {
+  FRAME_KIND_UNSPECIFIED = 0;
+  FRAME_KIND_OPEN = 1;  // A -> B, first frame; payload is Open
+  FRAME_KIND_ACK = 2;   // B -> A, session accepted (B's authorizer and limits passed)
+  FRAME_KIND_DATA = 3;  // opaque cb-mpc protocol message
+  FRAME_KIND_ABORT = 4; // either way, payload is a reason; the receiver's blocked Recv fails
+  FRAME_KIND_FIN = 5;   // either way, payload is Fin; both sides wait for the other's FIN before returning
+}
+
+message Frame {
+  string session_id = 1; // 32 hex chars, random, chosen by A, unique; repeated on every frame
+  FrameKind kind = 2;
+  bytes payload = 3;
+}
+
+enum Op {
+  OP_UNSPECIFIED = 0;
+  OP_DKG = 1;
+  OP_NODE = 2;
+  OP_DERIVE = 3;
+  OP_SIGN = 4;
+  OP_REFRESH = 5;
+}
+
+message Open {
+  Op op = 1;
+  string keyset_id = 2;
+  Curve curve = 3;
+  repeated uint32 hardened_path = 4;
+  repeated uint32 path = 5;
+  // sign only
+  string key_id = 6;
+  Algorithm algorithm = 7;
+  bytes digest = 8;
+  string job_id = 9;
+  bytes intent_package = 10;
+  bytes expected_public_key = 11; // sign: public key A believes key_id has; B refuses on mismatch
+}
+
+message Fin {
+  bool ok = 1;
+  // For ops that end in a commit (DKG, Refresh): A's FIN says commit=true only after its SelfTest passed; B stores
+  // the new shares only then and answers with its own FIN.
+  bool commit = 2;
+  ErrorKind kind = 3;
+  uint32 code = 4;
+  string message = 5;
+  bytes result = 6; // op-dependent public result B computed (root key, node, derived key); A compares with its own
+}

@@ -5,11 +5,17 @@ module github.com/ws4charlie/quorum-vault/mpc-party
 
 go 1.26.10
 
+require github.com/ws4charlie/quorum-vault/mpc-party/api v0.0.0
+
+replace github.com/ws4charlie/quorum-vault/mpc-party/api => ./api
+
 require (
 	filippo.io/edwards25519 v1.1.0
 	github.com/btcsuite/btcd v0.24.2
 	github.com/btcsuite/btcd/btcec/v2 v2.5.1
 	github.com/btcsuite/btcd/btcutil v1.2.0
+	google.golang.org/grpc v1.84.0
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -18,6 +24,9 @@ require (
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/kcalvinalvin/anet v0.0.0-20251112173137-d8ddc1f6dbee // indirect
-	golang.org/x/crypto v0.25.0 // indirect
-	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 )
