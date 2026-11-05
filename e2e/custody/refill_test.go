@@ -189,9 +189,14 @@ func TestRefillImportAndReexportAttacks(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := s.ethBalance(s.coldAddr)
-	if err := s.rc.CallContext(s.ctx, nil, "eth_sendTransaction", map[string]any{"from": s.coldAddr, "to": randAddr(), "value": hexutil.EncodeBig(big.NewInt(1)), "gas": "0x5208"}); err != nil {
+	var opTx string
+	if err := s.rc.CallContext(s.ctx, &opTx, "eth_sendTransaction", map[string]any{"from": s.coldAddr, "to": randAddr(), "value": hexutil.EncodeBig(big.NewInt(1)), "gas": "0x5208"}); err != nil {
 		t.Fatal(err)
 	}
+	s.waitFor(30*time.Second, "the operator's transaction to mine", func() bool {
+		_, err := s.ec.TransactionReceipt(s.ctx, common.HexToHash(opTx))
+		return err == nil
+	})
 	s.fundETH(s.coldAddr, before) // the books know nothing of this spend: put the balance back, the nonce stays moved
 	rf2 := s.exportRefill(id)
 	if rf2.Request.Nonce != 1 || rf2.Request.Revision != 2 || rf2.RequestHash == rf1.RequestHash {
