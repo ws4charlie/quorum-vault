@@ -119,12 +119,13 @@ func requireCustody(t *testing.T) {
 
 // opts tunes a system. Zero values give the standard setup.
 type opts struct {
-	shards          int    // hot shards, default 1
-	frozen          bool   // factory deployed frozen and left frozen
-	gwETHPerTx      string // gateway per-tx cap for ETH (wei), default huge
-	businessOneTier bool   // business config knows only the lowest tier (the gateway still has two)
-	approvalTimeout string // default 20s
-	stuckAfter      string // default 4s (scaled)
+	shards          int      // hot shards, default 1
+	frozen          bool     // factory deployed frozen and left frozen
+	gwETHPerTx      string   // gateway per-tx cap for ETH (wei), default huge
+	gwETHDest       []string // when set, the gateway lets ETH withdrawals pay only these addresses (default: any_destination)
+	businessOneTier bool     // business config knows only the lowest tier (the gateway still has two)
+	approvalTimeout string   // default 20s
+	stuckAfter      string   // default 4s (scaled)
 	noRelay         bool
 	minSweepWei     string
 	// signTimeout overrides the gateway sign timeout (and with it the retry window and the lease) for a test whose signatures are
@@ -517,12 +518,17 @@ func newSystem(t *testing.T, o opts) *system {
 				ColdAddresses: map[string]string{"omnibus/native": s.coldAddr.Hex(), "omnibus/token": s.coldAddr.Hex()},
 				Tokens:        map[string]gateway.TokenFile{"USDT": {Address: s.usdt.Hex(), Decimals: 6}}, MaxTxFeeWei: "100000000000000000"},
 			Assets: map[string]gateway.AssetFile{
-				"ETH": {PerTxCap: o.gwETHPerTx, DailyCap: "1000000000000000000000000000",
+				"ETH": {AnyDestination: true, PerTxCap: o.gwETHPerTx, DailyCap: "1000000000000000000000000000",
 					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: fmt.Sprint(int64(ether)), Approvals: 2}}, ToColdDailyCap: "1000000000000000000000000000", RebalanceDailyCap: "1000000000000000000000000000"},
-				"USDT": {PerTxCap: "1000000000000000", DailyCap: "1000000000000000000", ToColdDailyCap: "1000000000000000000", RebalanceDailyCap: "1000000000000000000",
+				"USDT": {AnyDestination: true, PerTxCap: "1000000000000000", DailyCap: "1000000000000000000", ToColdDailyCap: "1000000000000000000", RebalanceDailyCap: "1000000000000000000",
 					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "2000000000", Approvals: 2}}},
 			},
-			SweepsPerHour: 100000, CancelsPerHour: 1000, ToColdPerHour: 1000, RebalancePerHour: 1000}},
+			SweepsPerHour: 100000, WithdrawalsPerHour: 100000, CancelsPerHour: 1000, ToColdPerHour: 1000, RebalancePerHour: 1000}},
+	}
+	if len(o.gwETHDest) > 0 {
+		a := gf.Chains[s.chainName].Assets["ETH"]
+		a.AnyDestination, a.WithdrawalDestinations = false, o.gwETHDest
+		gf.Chains[s.chainName].Assets["ETH"] = a
 	}
 	s.gf = gf
 	s.gwPath = filepath.Join(s.dir, "gateway.json")

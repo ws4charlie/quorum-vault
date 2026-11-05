@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,4 +145,29 @@ func (s *system) requireAnchors() {
 	}
 	run("qv-relay", s.bizDSN, s.auditSrc+"-core")
 	run("qv-gateway", s.guardDSN, s.auditSrc+"-gateway")
+}
+
+// The signing zone bounds where withdrawals can go: the business zone lets any destination through, the gateway refuses the one
+// that is not on its list, the hold is voided, and the refusal is in the gateway's own audit chain.
+func TestGatewayRefusesUnlistedDestination(t *testing.T) {
+	ok, evil := randAddr(), randAddr()
+	half := new(big.Int).Div(eth(1), big.NewInt(2)) // one approval is enough below 1 ETH
+	s, _ := funded(t, opts{gwETHDest: []string{ok.Hex()}}, "c-dest", 10)
+	w := s.withdraw("initiator", "k-evil", "c-dest", "ETH", evil, half)
+	got := s.waitWd(w.ID, "failed", 90*time.Second)
+	if !strings.Contains(got.Reason, "policy_destination") {
+		t.Fatalf("reason %q", got.Reason)
+	}
+	if s.ethBalance(evil).Sign() != 0 {
+		t.Fatal("paid out to an unlisted address")
+	}
+	w2 := s.withdraw("initiator", "k-ok", "c-dest", "ETH", ok, half)
+	s.waitWd(w2.ID, "confirmed", 60*time.Second)
+	s.requireGatewayAudit("sign.refused", "sign.allowed")
+	var reason string
+	if err := s.guardPool().QueryRow(s.ctx, `SELECT payload->>'reason' FROM audit_log WHERE type='sign.refused' ORDER BY seq LIMIT 1`).Scan(&reason); err != nil || !strings.HasPrefix(reason, "policy_destination") {
+		t.Fatalf("recorded reason %q, %v", reason, err)
+	}
+	s.waitIdle(30 * time.Second)
+	s.reconcileClean()
 }

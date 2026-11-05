@@ -311,3 +311,27 @@ func (v *Verifier) verifyCancel(tx *types.Transaction, from common.Address, i si
 	}
 	return nil
 }
+
+// Recipient returns who a transaction pays, read from the transaction itself and not from any intent: for an ERC-20 transfer on a
+// configured token the recipient in the calldata (never the token contract), otherwise the transaction's own destination. A
+// contract creation has no recipient and is an error.
+func (v *Verifier) Recipient(payload []byte) (common.Address, error) {
+	pl, err := decodePayload(payload)
+	if err != nil {
+		return common.Address{}, err
+	}
+	tx, _, _, err := pl.tx()
+	if err != nil {
+		return common.Address{}, err
+	}
+	to := tx.To()
+	if to == nil {
+		return common.Address{}, errors.New("evm: contract creation has no recipient")
+	}
+	if _, ok := v.cfg.symbolOf(*to); ok && len(tx.Data()) > 0 {
+		if r, _, err := unpackTransfer(tx.Data()); err == nil {
+			return r, nil
+		}
+	}
+	return *to, nil
+}

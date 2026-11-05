@@ -19,9 +19,12 @@ import (
 // (EVM nonce), Sender the account it belongs to.
 type TxInfo struct {
 	Sender string
-	Nonce  uint64
-	Tip    *big.Int // priority fee; the guard compares fees to allow replacements
-	FeeCap *big.Int
+	// Destination is who the transaction pays, read from the transaction itself (the recipient of an ERC-20 transfer, not the
+	// token contract). Empty when the chain codec cannot say.
+	Destination string
+	Nonce       uint64
+	Tip         *big.Int // priority fee; the guard compares fees to allow replacements
+	FeeCap      *big.Int
 }
 
 // ChainCodec is the per-chain part of the gateway: offline verification, the
@@ -69,7 +72,11 @@ func (c *EVMCodec) Decode(payload []byte) (TxInfo, error) {
 	if !ok1 || !ok2 || !common.IsHexAddress(p.From) {
 		return TxInfo{}, fmt.Errorf("gateway: decode evm payload: bad fee or sender")
 	}
-	return TxInfo{Sender: common.HexToAddress(p.From).Hex(), Nonce: p.Nonce, Tip: tip, FeeCap: feeCap}, nil
+	dest, err := c.Verifier.Recipient(payload)
+	if err != nil {
+		return TxInfo{}, fmt.Errorf("gateway: decode evm payload: %w", err)
+	}
+	return TxInfo{Sender: common.HexToAddress(p.From).Hex(), Destination: dest.Hex(), Nonce: p.Nonce, Tip: tip, FeeCap: feeCap}, nil
 }
 
 // OwnsSender implements ChainCodec.

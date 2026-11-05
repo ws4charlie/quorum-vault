@@ -23,6 +23,7 @@
       },
       "assets": {
         "ETH": {
+          "withdrawal_destinations": ["0x00000000000000000000000000000000000c0DE5"],
           "per_tx_cap": "5000000000000000000",
           "daily_cap": "20000000000000000000",
           "to_cold_daily_cap": "200000000000000000000",
@@ -33,6 +34,7 @@
           ]
         },
         "USDT": {
+          "withdrawal_destinations": ["0x00000000000000000000000000000000000c0DE5"],
           "per_tx_cap": "10000000000",
           "daily_cap": "40000000000",
           "to_cold_daily_cap": "400000000000",
@@ -44,6 +46,7 @@
         }
       },
       "sweeps_per_hour": 60,
+      "withdrawals_per_hour": 120,
       "cancels_per_hour": 5,
       "to_cold_per_hour": 4,
       "rebalance_per_hour": 4

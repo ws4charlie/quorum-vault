@@ -166,11 +166,11 @@ func newHarnessChainID(t *testing.T, chainID uint64) *harness {
 				Tokens:        map[string]TokenFile{"USDT": {Address: addrToken.Hex(), Decimals: 6}},
 				MaxTxFeeWei:   "300000000000000"},
 			Assets: map[string]AssetFile{
-				"ETH": {PerTxCap: "5000", DailyCap: "8000", Tiers: []TierFile{{"0", 1}, {"1000", 2}}, ToColdDailyCap: "6000", RebalanceDailyCap: "6000"},
-				"USDT": {PerTxCap: "5000000", DailyCap: "8000000",
+				"ETH": {AnyDestination: true, PerTxCap: "5000", DailyCap: "8000", Tiers: []TierFile{{"0", 1}, {"1000", 2}}, ToColdDailyCap: "6000", RebalanceDailyCap: "6000"},
+				"USDT": {AnyDestination: true, PerTxCap: "5000000", DailyCap: "8000000",
 					Tiers: []TierFile{{"0", 1}, {"1000000", 2}}, ToColdDailyCap: "6000000", RebalanceDailyCap: "6000000"},
 			},
-			SweepsPerHour: 2, CancelsPerHour: 3, ToColdPerHour: 2, RebalancePerHour: 2,
+			SweepsPerHour: 2, WithdrawalsPerHour: 1000, CancelsPerHour: 3, ToColdPerHour: 2, RebalancePerHour: 2,
 		}},
 	}
 	raw, _ := json.Marshal(f)

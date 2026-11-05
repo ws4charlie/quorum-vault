@@ -11,6 +11,8 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
@@ -270,6 +272,11 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 		if !ok {
 			return reject(ReasonPolicyAsset, "no policy for %s on %s", i.Asset, cc.Name)
 		}
+		// Where the money goes is read from the transaction, not from the intent: the intent is what the business zone claims.
+		dest := common.HexToAddress(info.Destination)
+		if !common.IsHexAddress(info.Destination) || !p.AllowsDestination(dest) {
+			return reject(ReasonDestination, "%s is not a configured %s withdrawal destination on %s", info.Destination, i.Asset, cc.Name)
+		}
 		if amount.Cmp(p.PerTxCap) > 0 {
 			return reject(ReasonPerTxCap, "amount %s exceeds the per-transaction cap %s", amount, p.PerTxCap)
 		}
@@ -277,6 +284,13 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 			return reject(ReasonTier, "amount %s needs %d distinct approvals, have %d", amount, need, valid)
 		}
 		if !known {
+			n, err := gt.CountSince(ctx, "withdrawal", now.Add(-time.Hour))
+			if err != nil {
+				return err
+			}
+			if n >= cc.WithdrawalsPerHour {
+				return reject(ReasonWithdrawRate, "%d withdrawals in the last hour, limit %d", n, cc.WithdrawalsPerHour)
+			}
 			sum, err := gt.WithdrawnSince(ctx, i.Asset, now.Add(-24*time.Hour))
 			if err != nil {
 				return err

@@ -70,9 +70,11 @@ type ChainFile struct {
 	EVM *EVMFile `json:"evm"`
 	// Assets maps asset symbol to its withdrawal policy. Every asset the chain
 	// verifier knows (including the native one) needs an entry.
-	Assets         map[string]AssetFile `json:"assets"`
-	SweepsPerHour  int                  `json:"sweeps_per_hour"`
-	CancelsPerHour int                  `json:"cancels_per_hour"`
+	Assets        map[string]AssetFile `json:"assets"`
+	SweepsPerHour int                  `json:"sweeps_per_hour"`
+	// WithdrawalsPerHour limits how many withdrawals are first signed in a rolling hour on this chain. Required, > 0.
+	WithdrawalsPerHour int `json:"withdrawals_per_hour"`
+	CancelsPerHour     int `json:"cancels_per_hour"`
 	// ToColdPerHour limits hot-to-cold moves; 0 refuses them all.
 	ToColdPerHour int `json:"to_cold_per_hour"`
 	// RebalancePerHour limits moves between hot shards; 0 refuses them all.
@@ -88,6 +90,10 @@ type AssetFile struct {
 	ToColdDailyCap string `json:"to_cold_daily_cap"`
 	// RebalanceDailyCap caps what moves between hot shards may carry in a rolling 24 hours, per asset. Empty or 0 refuses them.
 	RebalanceDailyCap string `json:"rebalance_daily_cap"`
+	// WithdrawalDestinations lists the only addresses withdrawals of this asset may pay. Either this list or AnyDestination must
+	// be set, never both and never neither: an open policy is written down on purpose.
+	WithdrawalDestinations []string `json:"withdrawal_destinations,omitempty"`
+	AnyDestination         bool     `json:"any_destination,omitempty"`
 }
 
 // TierFile: withdrawals of at least MinAmount need Approvals distinct approvers.
@@ -140,6 +146,8 @@ type ChainConfig struct {
 	SweepsPerHour  int
 	CancelsPerHour int
 	ToColdPerHour  int
+	// WithdrawalsPerHour limits withdrawals first signed per rolling hour.
+	WithdrawalsPerHour int
 	// RebalancePerHour limits moves between hot shards (zero: none allowed).
 	RebalancePerHour int
 }
@@ -153,6 +161,15 @@ type AssetPolicy struct {
 	ToColdDailyCap *big.Int
 	// RebalanceDailyCap caps moves between hot shards per rolling day (zero: none allowed).
 	RebalanceDailyCap *big.Int
+	// Destinations is the set withdrawals may pay (compared as addresses, so checksum case never matters); AnyDestination
+	// means the config said so explicitly.
+	Destinations   map[common.Address]bool
+	AnyDestination bool
+}
+
+// AllowsDestination reports whether a withdrawal of this asset may pay dest.
+func (p AssetPolicy) AllowsDestination(dest common.Address) bool {
+	return p.AnyDestination || p.Destinations[dest]
 }
 
 // Tier: amounts >= Min need Approvals distinct approvers.
@@ -276,6 +293,9 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	if cf.EVM == nil {
 		return nil, fmt.Errorf("gateway: config: chain %q has no supported chain section (only evm)", name)
 	}
+	if cf.WithdrawalsPerHour <= 0 {
+		return nil, fmt.Errorf("gateway: config: chain %q: withdrawals_per_hour is required and must be > 0", name)
+	}
 	if cf.SweepsPerHour < 0 || cf.CancelsPerHour < 0 || cf.ToColdPerHour < 0 || cf.RebalancePerHour < 0 {
 		return nil, fmt.Errorf("gateway: config: chain %q: rate limits must be >= 0", name)
 	}
@@ -325,7 +345,7 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	}
 	sort.Strings(want)
 	cc := &ChainConfig{Name: name, EVM: ec, Assets: map[string]AssetPolicy{},
-		SweepsPerHour: cf.SweepsPerHour, CancelsPerHour: cf.CancelsPerHour, ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour}
+		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour, ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour}
 	for _, s := range want {
 		af, ok := cf.Assets[s]
 		if !ok {
@@ -366,6 +386,24 @@ func (af AssetFile) build(where string, enabledApprovers int) (AssetPolicy, erro
 		if p.RebalanceDailyCap, err = amount(where+" rebalance_daily_cap", af.RebalanceDailyCap); err != nil {
 			return p, err
 		}
+	}
+	switch {
+	case af.AnyDestination && len(af.WithdrawalDestinations) > 0:
+		return p, fmt.Errorf("gateway: config: %s: withdrawal_destinations and any_destination are both set; choose one", where)
+	case !af.AnyDestination && len(af.WithdrawalDestinations) == 0:
+		return p, fmt.Errorf("gateway: config: %s: set withdrawal_destinations (a list) or any_destination: true; withdrawals to no one in particular are not the default", where)
+	}
+	p.AnyDestination = af.AnyDestination
+	p.Destinations = map[common.Address]bool{}
+	for _, d := range af.WithdrawalDestinations {
+		a, err := addr(where+" withdrawal destination", d)
+		if err != nil {
+			return p, err
+		}
+		if a == (common.Address{}) {
+			return p, fmt.Errorf("gateway: config: %s: the zero address is not a withdrawal destination", where)
+		}
+		p.Destinations[a] = true
 	}
 	if len(af.Tiers) == 0 {
 		return p, fmt.Errorf("gateway: config: %s: no approval tiers", where)

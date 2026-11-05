@@ -104,6 +104,24 @@ func packTransfer(to common.Address, amount *big.Int) ([]byte, error) {
 	return erc20ABI.Pack("transfer", to, amount)
 }
 
+// unpackTransfer decodes calldata that must be exactly an ERC-20 transfer(to, amount) call.
+func unpackTransfer(data []byte) (to common.Address, amount *big.Int, err error) {
+	if err = loadABIs(); err != nil {
+		return
+	}
+	m := erc20ABI.Methods["transfer"]
+	if len(data) < 4 || !bytes.Equal(data[:4], m.ID) {
+		return to, nil, fmt.Errorf("evm: calldata is not transfer")
+	}
+	args, err := m.Inputs.Unpack(data[4:])
+	if err != nil || len(args) != 2 {
+		return to, nil, fmt.Errorf("evm: bad transfer calldata")
+	}
+	to, _ = args[0].(common.Address)
+	amount, _ = args[1].(*big.Int)
+	return to, amount, nil
+}
+
 // unpackDeployAndFlush decodes calldata that must be exactly a deployAndFlush call.
 func unpackDeployAndFlush(data []byte) (salt [32]byte, tokens []common.Address, err error) {
 	if err = loadABIs(); err != nil {

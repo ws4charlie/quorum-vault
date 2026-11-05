@@ -26,6 +26,8 @@ const (
 	ReasonPerTxCap      = "policy_per_tx_cap"      // 4
 	ReasonDailyCap      = "policy_daily_cap"       // 4
 	ReasonTier          = "policy_approvals"       // 4 fewer distinct approvers than the amount requires
+	ReasonDestination   = "policy_destination"     // 4 withdrawal pays an address that is not on the asset's list
+	ReasonWithdrawRate  = "policy_withdrawal_rate" // 4 too many withdrawals in the last hour
 	ReasonSweepRate     = "policy_sweep_rate"      // 4
 	ReasonCancelRate    = "policy_cancel_rate"     // 4
 	ReasonCancelTarget  = "policy_cancel_target"   // 4 sender is not a hot address the gateway owns
