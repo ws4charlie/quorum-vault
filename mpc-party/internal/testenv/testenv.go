@@ -3,6 +3,8 @@
 package testenv
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -13,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -187,4 +190,75 @@ func (e *Env) Admin(op, keysetID string) *pb.AdminAuth {
 func (e *Env) CertCallerKey() ed25519.PrivateKey {
 	_, k, _ := ed25519.GenerateKey(rand.Reader)
 	return k
+}
+
+// StaticSealer is a test-only AES-256-GCM sealer with an in-memory key. It lives here, not in the server package, so that a
+// production build of the service contains no insecure sealer at all.
+type StaticSealer struct{ gcm cipher.AEAD }
+
+func NewStaticSealer(t testing.TB) *StaticSealer {
+	t.Helper()
+	k := make([]byte, 32)
+	rand.Read(k)
+	b, _ := aes.NewCipher(k)
+	g, _ := cipher.NewGCM(b)
+	return &StaticSealer{g}
+}
+
+func (s *StaticSealer) Seal(aad, pt []byte) ([]byte, error) {
+	n := make([]byte, s.gcm.NonceSize())
+	rand.Read(n)
+	return s.gcm.Seal(n, n, pt, aad), nil
+}
+
+func (s *StaticSealer) Open(aad, ct []byte) ([]byte, error) {
+	n := s.gcm.NonceSize()
+	if len(ct) < n+s.gcm.Overhead() {
+		return nil, errors.New("short")
+	}
+	return s.gcm.Open(nil, ct[:n], ct[n:], aad)
+}
+
+// Store builds a file store for one party with a fresh StaticSealer.
+func Store(t testing.TB, cfg *server.Config) *server.FileStore {
+	t.Helper()
+	fs, err := server.NewFileStore(cfg.DataDir, cfg.Role, NewStaticSealer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fs
+}
+
+// HSMEnv points SOFTHSM2_CONF at the repo-local SoftHSM config written by scripts/setup-softhsm.sh (<repo root>/data/softhsm)
+// and returns the PIN (QV_HSM_PIN or the documented dev-only default). The test is skipped when SoftHSM is not set up,
+// unless QV_REQUIRE_HSM=1, then it fails.
+func HSMEnv(t testing.TB) (pin string) {
+	t.Helper()
+	dir, _ := os.Getwd()
+	conf := ""
+	for d := dir; ; d = filepath.Dir(d) {
+		c := filepath.Join(d, "data", "softhsm", "softhsm2.conf")
+		if _, err := os.Stat(c); err == nil {
+			conf = c
+			break
+		}
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	if os.Getenv("SOFTHSM2_CONF") != "" {
+		conf = os.Getenv("SOFTHSM2_CONF")
+	}
+	if conf == "" {
+		if os.Getenv("QV_REQUIRE_HSM") == "1" {
+			t.Fatal("QV_REQUIRE_HSM=1 but no SoftHSM config: run scripts/setup-softhsm.sh")
+		}
+		t.Skip("no SoftHSM config: run scripts/setup-softhsm.sh")
+	}
+	os.Setenv("SOFTHSM2_CONF", conf)
+	pin = os.Getenv("QV_HSM_PIN")
+	if pin == "" {
+		pin = "user-dev-1234" // dev-only value, documented in .env.example
+	}
+	return pin
 }

@@ -99,6 +99,15 @@ message UnfreezeRequest {
 }
 message UnfreezeResponse {}
 
+message KeysetStatus {
+  string keyset_id = 1;
+  uint64 generation = 2;        // current generation
+  bool resolved = 3;            // reconciled with the peer since this process started; unresolved keysets answer UNAVAILABLE
+  uint64 backup_generation = 4; // generation of the last verified backup, 0 = none
+  bool backup_stale = 5;        // the keyset moved on since the last verified backup
+  bool frozen = 6;
+}
+
 message HealthRequest {}
 message HealthResponse {
   string role = 1; // "A" or "B"
@@ -106,6 +115,7 @@ message HealthResponse {
   int32 active_sessions = 3;
   string version = 4;
   string cbmpc_commit = 5;
+  repeated KeysetStatus keysets = 6;
 }
 
 // ---- Typed error detail, attached to every gRPC status the service returns for protocol failures ----
@@ -159,6 +169,7 @@ enum Op {
   OP_SIGN = 4;
   OP_REFRESH = 5;
   OP_UNFREEZE = 6;
+  OP_RECONCILE = 7; // after a restart: agree on one generation, prove it with a SelfTest
 }
 
 message Open {
@@ -175,6 +186,7 @@ message Open {
   bytes intent_package = 10;
   bytes expected_public_key = 11; // sign: REQUIRED. The key the authorizer judges; B refuses an empty one and aborts if the derived key differs
   AdminAuth admin = 12;           // dkg, refresh, unfreeze
+  uint64 generation = 13;         // the generation of the keyset the initiator uses; the follower refuses a different one (UNAVAILABLE: retry)
 }
 
 message Fin {
@@ -186,4 +198,8 @@ message Fin {
   uint32 code = 4;
   string message = 5;
   bytes result = 6; // op-dependent public result B computed (root key, node, derived key); A compares with its own
+  // Durable two-phase commit of DKG and Refresh (see peer.go). Each is sent once, after the sender made the step durable.
+  bool prepared = 7; // B -> A: B has durably stored the candidate generation
+  bool switched = 8; // B -> A: B has made the candidate current
+  bool confirm = 9;  // A -> B: both parties are on the new generation; delete the old one
 }

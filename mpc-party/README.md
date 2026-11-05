@@ -144,7 +144,7 @@ go build -o /tmp/mpc-party ./cmd/mpc-party                       # production bu
 ```
 
 Make certificates (any tool; the tests generate P-256 self-signed ones) for party A, party B and one caller, and compute
-pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Write a 32-byte hex key to `seal.key` (test sealer only).
+pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Create the SoftHSM tokens with `../scripts/setup-softhsm.sh` (A: `qv-party-1`, B: `qv-party-2`) and export the PIN (`QV_PARTY_PIN`, or use `pin_file`, mode 0400). (The insecure test sealer exists only in `-tags devauth` builds.)
 `b.json`:
 
 ```json
@@ -154,7 +154,7 @@ pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Write a 32-byte hex key
   "peer_pins": ["<sha256 of a.crt>"], "caller_pins": ["<sha256 of caller.crt>"],
   "data_dir": "data-b",
   "admin_keys": ["<64 hex chars: an operator's Ed25519 public key>"],
-  "sealer": {"type": "insecure-static-key-for-tests", "key_file": "seal.key"},
+  "sealer": {"type": "pkcs11", "token": "qv-party-2", "pin_env": "QV_PARTY_PIN"},
   "authorizer": {"type": "dev-allow-all", "accept_risk": "I UNDERSTAND THIS PARTY SIGNS ANYTHING WITHOUT POLICY CHECKS"}
 }
 ```
@@ -203,3 +203,15 @@ duration, outcome, kind); no secrets.
   signature checked by both parties and is logged as `AUDIT keyset unfrozen`. A malicious A can freeze a keyset by sending
   garbage (denial of service, not theft); that is the price of failing closed.
 - Log lines to alert on: `ALERT keyset frozen after a cryptographic failure`, `ALERT cannot persist keyset freeze`.
+
+## P5b-4: sealing, generations, backup
+
+- **Sealer** `pkcs11` (`token`, optional `lib`, and `pin_env` or `pin_file`): AES-256-GCM in the party's own token; AAD binds role,
+  keyset id, generation. Missing token / wrong PIN: the process refuses to start. HSM error at run time: `UNAVAILABLE`.
+- **Generations and reconciliation**: DKG and Refresh are a durable two-phase commit; after a restart every keyset is reconciled
+  with the peer and proven by a self-test before it serves (until then `UNAVAILABLE`). Details: `docs/learn/p5b-4-sealing-backup.md`.
+- **Backups**: `mpc-party backup gen-recovery-key | export | verify | restore` (offline restore), runbook
+  `docs/runbooks/mpc-backup-restore.md`; `Health` reports `backup_generation` and `backup_stale` per keyset. Freeze:
+  `docs/runbooks/mpc-keyset-freeze.md`. Drill: `scripts/restore-drill.sh`.
+- Crash testing: `-tags devauth` builds read `QV_FAILPOINT=<name>` and exit at that step (e2e `TestCrashMatrix*`). Production
+  builds contain neither the failpoints nor the insecure sealer.

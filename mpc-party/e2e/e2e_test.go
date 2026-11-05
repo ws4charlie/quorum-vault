@@ -4,6 +4,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -63,9 +64,10 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
-func start(t *testing.T, bin, cfg string) *proc {
+func start(t *testing.T, bin, cfg string, env ...string) *proc {
 	t.Helper()
 	p := &proc{cmd: exec.Command(bin, "-config", cfg), stderr: &syncBuf{}, done: make(chan struct{})}
+	p.cmd.Env = append(os.Environ(), env...)
 	p.cmd.Stderr = p.stderr
 	if err := p.cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -142,12 +144,12 @@ func (cl *cluster) waitReady(t *testing.T) {
 	t.Fatalf("parties not ready.\nA: %s\nB: %s", cl.a.stderr, cl.b.stderr)
 }
 
-func (cl *cluster) restartB(t *testing.T) {
-	cl.b = start(t, binDev, cl.cfgB)
+func (cl *cluster) restartB(t *testing.T, env ...string) {
+	cl.b = start(t, binDev, cl.cfgB, env...)
 }
 
-func (cl *cluster) restartA(t *testing.T) {
-	cl.a = start(t, binDev, cl.cfgA)
+func (cl *cluster) restartA(t *testing.T, env ...string) {
+	cl.a = start(t, binDev, cl.cfgA, env...)
 }
 
 func ctx(t testing.TB, d time.Duration) context.Context {
@@ -190,4 +192,11 @@ func retry(t *testing.T, d time.Duration, f func() error) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("did not recover within %v: %v", d, err)
+}
+
+func verifyEd25519(t testing.TB, pub, msg, sig []byte) {
+	t.Helper()
+	if !ed25519.Verify(ed25519.PublicKey(pub), msg, sig) {
+		t.Fatal("Ed25519 signature does not verify")
+	}
 }

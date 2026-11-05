@@ -111,6 +111,11 @@ jobs:
           go-version-file: mpc-party/go.mod
       - name: Install C++ toolchain
         run: mpc-party/scripts/install-toolchain-linux.sh
+      # The sealer tests and the restore drill use SoftHSM tokens qv-party-1 and qv-party-2.
+      - name: Install SoftHSM2 and create the tokens
+        run: |
+          sudo apt-get install -y softhsm2
+          ./scripts/setup-softhsm.sh
       # Key: pinned cb-mpc commit + build script. Changing either rebuilds OpenSSL and the library (about 2 minutes).
       - name: Cache cb-mpc build
         uses: actions/cache@v4
@@ -137,7 +142,13 @@ jobs:
         run: go build -o /dev/null ./cmd/mpc-party
       - name: go test -race
         working-directory: mpc-party
+        env:
+          QV_REQUIRE_HSM: "1"
         run: go test -race -count=1 -timeout 25m ./...
+      # Destroys party B in a local stack, restores it from its backup, signs. About 10 s.
+      - name: Restore drill
+        working-directory: mpc-party
+        run: scripts/restore-drill.sh
       - name: Fuzz entry points (short)
         working-directory: mpc-party
         run: go test -run '^$' -fuzz FuzzEntryPoints -fuzztime 30s ./internal/cbmpc

@@ -21,10 +21,44 @@ func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rat
 		var f *Fail
 		if err != nil && errors.As(err, &f) {
 			s.maybeFreeze(open, f)
+			if f.Peer && (f.CB == CodeUnresolved || f.CB == CodeGenMismatch) && open.KeysetId != "" && open.Op != pb.Op_OP_DKG {
+				s.unresolve(open.KeysetId) // the peer restarted or is on another generation: reconcile before more work
+			}
 		}
 	}()
 	if s.peerClient == nil {
 		return nil, invalid(name, "this party has no peer connection")
+	}
+	// Per-keyset gating: refuse work on a keyset that has not been reconciled since the restart; one DKG/Refresh at a time;
+	// sessions that use the keyset hold the gate shared so that the commit window of a refresh runs alone.
+	var rt *ksRT
+	if open.KeysetId != "" {
+		rt = s.rt(open.KeysetId)
+		switch open.Op {
+		case pb.Op_OP_DKG, pb.Op_OP_REFRESH:
+			if holder, ok := rt.tryBusy(name); !ok {
+				return nil, busyFail(name, open.KeysetId, holder)
+			}
+			defer rt.done()
+			if open.Op == pb.Op_OP_REFRESH && !rt.isResolved() {
+				return nil, unresolvedFail(name, open.KeysetId)
+			}
+		default:
+			if !rt.isResolved() {
+				return nil, unresolvedFail(name, open.KeysetId)
+			}
+		}
+		if open.Op != pb.Op_OP_DKG {
+			if open.Op != pb.Op_OP_REFRESH {
+				rt.gate.RLock()
+				defer rt.gate.RUnlock()
+			}
+			_, g, err := s.keyset(ctx, open.KeysetId, 0)
+			if err != nil {
+				return nil, err
+			}
+			open.Generation = g
+		}
 	}
 	if !s.rl.allow(rateKey) {
 		return nil, limitFail(name, "rate limit of %.0f sessions/s exceeded for %q", s.cfg.Limits.SessionsPerSecKey, rateKey)
@@ -121,27 +155,82 @@ func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rat
 		tr.sendFin(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, Message: "parties computed different results"})
 		return nil, failf(pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, codes.Aborted, name, "the two parties computed different results")
 	}
-	commit := res.apply != nil
-	if err := tr.sendFin(&pb.Fin{Ok: true, Commit: commit}); err != nil {
-		return nil, fromWrapper(name, &transportErr{err})
-	}
-	if commit {
-		// B stores first and tells us; only then do we store. A crash between the two is a mismatch that P5b-4's durable
-		// two-phase commit closes; until then the operator re-runs the operation.
-		cctx, c5 := context.WithTimeout(ctx, s.cfg.Limits.RecvTimeout())
-		ack, err := tr.waitFin(cctx)
-		c5()
-		if err != nil {
+	if res.cand == nil {
+		if err := tr.sendFin(&pb.Fin{Ok: true}); err != nil {
 			return nil, fromWrapper(name, &transportErr{err})
 		}
-		if !ack.GetOk() {
-			return nil, peerFail(name, ack)
-		}
-		if err := res.apply(ctx); err != nil {
-			return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, name, "peer committed but local commit failed: %v", err)
-		}
+		return res, nil
+	}
+	if err := s.commitA(ctx, name, open, tr, bfin, res.cand, rt); err != nil {
+		return nil, err
 	}
 	return res, nil
+}
+
+// commitA is party A's half of the durable two-phase commit of a DKG or Refresh (B's half is in peer.go).
+//
+//	B stored the candidate (prepared)        A stores the candidate
+//	A records its DECISION durably           A tells B to commit
+//	B switches, tells A (switched)           A switches, tells B (confirm)
+//	both delete the old generation
+//
+// A crash anywhere is repaired by reconciliation (reconcile.go): before A's decision is durable the candidate is dropped,
+// after it the commit is completed. Old shares exist until both parties confirmed.
+func (s *Server) commitA(ctx context.Context, name string, open *pb.Open, tr *sessTransport, bfin *pb.Fin, c *candidate, rt *ksRT) (err error) {
+	if !bfin.GetPrepared() {
+		tr.sendFin(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, Message: "peer did not store the candidate"})
+		return failf(pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, codes.Aborted, name, "party B did not durably store the new generation")
+	}
+	decided := false
+	defer func() {
+		if err == nil {
+			return
+		}
+		if !decided {
+			s.store.DropCandidate(context.Background(), c.id) // nothing was decided: forget the candidate
+			return
+		}
+		// A decided to commit but could not finish: the outcome is settled by reconciliation, not by this call.
+		s.unresolve(c.id)
+	}()
+	if e := s.store.PutCandidate(ctx, c.id, c.gen, c.ks); e != nil {
+		tr.sendFin(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_INTERNAL, Message: "A could not store the candidate"})
+		return failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, name, "cannot store the new generation: %v", e)
+	}
+	failpoint("a_after_candidate_stored")
+
+	rt.gate.Lock() // from the decision until A switched, no session of this keyset runs on either party
+	defer rt.gate.Unlock()
+	if e := s.store.RecordDecision(ctx, c.id, c.gen); e != nil {
+		tr.sendFin(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_INTERNAL, Message: "A could not record its decision"})
+		return failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, name, "cannot record the commit decision: %v", e)
+	}
+	decided = true
+	failpoint("a_after_decision")
+	if e := tr.sendFin(&pb.Fin{Ok: true, Commit: true}); e != nil {
+		return failf(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, codes.Unavailable, name, "commit decided but party B was unreachable; reconciliation will finish it: %v", e)
+	}
+	wctx, cancel := context.WithTimeout(ctx, s.cfg.Limits.RecvTimeout())
+	sw, e := tr.waitFin(wctx)
+	cancel()
+	if e != nil {
+		return failf(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, codes.Unavailable, name, "commit decided but party B did not answer; reconciliation will finish it: %v", e)
+	}
+	if !sw.GetOk() || !sw.GetSwitched() {
+		return failf(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, codes.Unavailable, name, "commit decided but party B failed to switch (%s); reconciliation will finish it", sw.GetMessage())
+	}
+	failpoint("a_after_switched_recv")
+	if e := s.store.Promote(ctx, c.id, c.gen); e != nil {
+		return failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, name, "cannot switch to the new generation: %v", e)
+	}
+	s.cache.drop(c.id)
+	failpoint("a_after_promote")
+	tr.sendFin(&pb.Fin{Ok: true, Confirm: true}) // best effort: if lost, reconciliation confirms
+	s.store.DeleteGenerationsBelow(ctx, c.id, c.gen)
+	failpoint("a_after_delete_old")
+	s.rt(c.id).setResolved(true)
+	s.log.Warn("keyset moved to a new generation: existing backups are STALE, export new backups", "role", "A", "keyset_id", c.id, "generation", c.gen)
+	return nil
 }
 
 // transportErr marks an error that is a plain link failure.
