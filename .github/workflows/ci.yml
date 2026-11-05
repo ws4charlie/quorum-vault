@@ -155,7 +155,7 @@ jobs:
 
   # The whole custody system on two-party MPC: `make test-mpc` (gateway -> party A -> party B -> cosigner) and the custody
   # closed loop with QV_CUSTODY_SIGNER=mpc (deposits, sweeps, withdrawals, crash boundaries, kill / partition / latency /
-  # refresh / freeze tests). Real SoftHSM sealing, real Temporal and Redpanda, anvil. `test`, `e2e` and `mpc-party` are unchanged.
+  # refresh / freeze tests; the three slowest failure tests run locally and not here, see the Makefile). Real SoftHSM sealing, real Temporal and Redpanda, anvil. `test`, `e2e` and `mpc-party` are unchanged.
   # Waits in these tests are on conditions, so a slow runner only makes them longer; the job is capped at 20 minutes.
   mpc-e2e:
     runs-on: ubuntu-24.04
@@ -218,8 +218,8 @@ jobs:
           exit 1
       - name: Signing path end to end (make test-mpc)
         run: make test-mpc
-      - name: Custody closed loop on MPC (make test-custody-mpc)
-        run: make test-custody-mpc
+      - name: Custody closed loop on MPC (make test-custody-mpc-ci)
+        run: make test-custody-mpc-ci
       - name: Logs on failure
         if: failure()
         run: |

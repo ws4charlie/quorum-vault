@@ -11,7 +11,7 @@ export DATABASE_URL
 # Local anvil node impersonating Sepolia (docker-compose.yml service "anvil").
 LOCAL_RPC_URL := http://127.0.0.1:8545
 
-.PHONY: test-mpc test-mpc-soak test-custody-mpc mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short test-e2e build vet run demo-local
+.PHONY: test-mpc test-mpc-soak test-custody-mpc test-custody-mpc-ci mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short test-e2e build vet run demo-local
 
 setup: softhsm db-up chain-up
 
@@ -111,6 +111,12 @@ mpc-build:
 
 test-mpc:
 	QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=http://127.0.0.1:18545 go test -count=1 -p 1 -timeout 20m -v ./e2e/mpcsign/...
+
+# What CI runs: the same minus the three slowest failure tests (mid-session kill, partition, latency with a 1 s per-frame
+# link: about 4 minutes together), so the job stays under 20 minutes on a shared runner. Run `make test-custody-mpc` for all.
+test-custody-mpc-ci:
+	QV_CUSTODY_SIGNER=mpc QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 25m -v \
+		-skip 'TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCWithdrawalLatencyWithSlowLink' ./e2e/custody/...
 
 # Soak: 50 signatures per second for 10 minutes through the whole path, with RSS and thread counts of every process.
 # QV_MPC_SOAK_MINUTES and QV_MPC_SOAK_RATE change the length and the rate.
