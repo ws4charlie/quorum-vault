@@ -353,6 +353,7 @@ func (s *stack) provision(t *testing.T, noCosigner bool) {
 	for _, q := range []string{
 		fmt.Sprintf(`INSERT INTO assets (chain, symbol, decimals) VALUES ('%s','ETH',18),('%s','USDT',6)`, gatewaytest.Chain, gatewaytest.Chain),
 		fmt.Sprintf(`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('%s','qv-us','%s','ETH','hot','omnibus',0)`, gatewaytest.Partition, gatewaytest.Chain),
+		fmt.Sprintf(`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('%s','qv-us','%s','ETH','hot','omnibus',1)`, gatewaytest.ColdPartition, gatewaytest.Chain),
 	} {
 		if _, err := s.biz.Exec(context.Background(), q); err != nil {
 			t.Fatal(err)
