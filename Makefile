@@ -11,7 +11,7 @@ export DATABASE_URL
 # Local anvil node impersonating Sepolia (docker-compose.yml service "anvil").
 LOCAL_RPC_URL := http://127.0.0.1:8545
 
-.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery test-demo-v1 mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short build vet run demo-local
+.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery test-demo-v1 mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short build vet run demo-local
 
 setup: softhsm db-up chain-up
 
@@ -110,10 +110,15 @@ test-e2e-evm:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 40m -v $(if $(TEST),-run '$(TEST)') ./e2e/custody/...
 
 # The heavy tests, which pull-request CI leaves to the nightly run: every crash boundary, a component killed at each custody
-# boundary, the freeze test, and the three slowest link tests (kill mid-session, partition, latency up to 1 s per frame).
-E2E_EVM_FAILURE := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestRefillCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCWithdrawalLatencyWithSlowLink
+# boundary, the freeze test, and the link tests (kill mid-session, partition).
+E2E_EVM_FAILURE := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestRefillCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal
 test-e2e-evm-failure:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 40m -v -run '$(E2E_EVM_FAILURE)' ./e2e/custody/...
+
+# The signing latency with delay added between the two parties (20 ms, 100 ms, 1 s per frame): a measurement of a real duration (about
+# 2 minutes) that asserts little, so it is not part of test-e2e-evm. The nightly workflow runs it.
+test-e2e-evm-latency:
+	$(E2E_EVM_ENV) QV_E2E_LATENCY=1 go test -count=1 -p 1 -timeout 20m -v -run 'TestMPCWithdrawalLatencyWithSlowLink' ./e2e/custody/...
 
 # Pull-request CI: everything except the failure tests, in three groups that run in parallel jobs (each on its own runner with its
 # own anvil, Temporal, Redpanda and Postgres). Together with test-e2e-evm-failure they cover test-e2e-evm.

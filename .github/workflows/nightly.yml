@@ -44,3 +44,5 @@ jobs:
         run: make test-mpc
       - name: make test-e2e-evm (all tests)
         run: make test-e2e-evm
+      - name: make test-e2e-evm-latency (the slow-link measurement)
+        run: make test-e2e-evm-latency

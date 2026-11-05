@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/ethereum/go-ethereum/common"
 	"math/big"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -202,6 +203,9 @@ func TestMPCPartitionBetweenPartiesDuringWithdrawal(t *testing.T) {
 // large enough to matter (one second), which also has to complete inside the gateway's sign timeout.
 func TestMPCWithdrawalLatencyWithSlowLink(t *testing.T) {
 	requireMPC(t)
+	if os.Getenv("QV_E2E_LATENCY") != "1" {
+		t.Skip("a measurement, not a check: run it with `make test-e2e-evm-latency` (QV_E2E_LATENCY=1)")
+	}
 	s, _ := funded(t, opts{mpcProxy: true, signTimeout: sd(40 * time.Second)}, "c-lat", 30) // slow on purpose: a 1 s-per-frame signature takes 13 s
 	cases := []struct {
 		name  string
