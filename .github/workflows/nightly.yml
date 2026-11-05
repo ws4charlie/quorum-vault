@@ -1,0 +1,46 @@
+name: nightly
+
+# The full MPC end-to-end set once a night and on demand (Actions tab > nightly > Run workflow): the signing path, then every
+# custody test on two-party MPC, including the heavy ones that pull requests skip. Pull requests run the light groups in
+# .github/workflows/ci.yml. To run a single test by name, use the Makefile locally: make test-custody-mpc TEST=TestName
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+
+  mpc-nightly:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+      # A shared runner is slower than a laptop: every condition wait in the custody tests gets three times as long.
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+      - name: make test-mpc
+        run: make test-mpc
+      - name: make test-custody-mpc (all tests)
+        run: make test-custody-mpc

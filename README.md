@@ -1,73 +1,81 @@
 # quorum-vault
 
-> **Testnet only.** Ethereum Sepolia (chain id 11155111). All PINs and
-> passwords in this repo are dev-only defaults. Never point this code at
+> **Testnet and local chains only.** Everything runs against a local anvil node that impersonates Sepolia
+> (chain id 11155111). All PINs and passwords in this repo are dev-only defaults. Never point this code at
 > real funds or real keys.
 
-quorum-vault is a small working model of how an institution manages wallets
-at scale. Keys are generated inside an HSM over raw PKCS#11 and never leave
-it. A 2-of-3 GG20 threshold-ECDSA cluster (tss-lib) runs a distributed
-keygen with no dealer, and seals each party's share under an AES key inside
-that party's own HSM token. Every signature passes a policy engine (limits,
-allowlist, velocity), an approval queue with dual control, and a key
-lifecycle check (`active -> sign_only -> retired`). Every step is written to
-a hash-chained, append-only audit log. Each run ends in an EIP-1559 Sepolia
-transaction whose recovered sender is checked locally, and which is broadcast
-and mined on a local anvil node that impersonates Sepolia. The design note
-[DESIGN_SCALE.md](DESIGN_SCALE.md) works out how this design scales to 1M
-wallets.
+quorum-vault is a working model of how an institution holds customer crypto. It has two layers:
+
+- **The custody core (`/v2`)**: customers, deposit addresses, **deposits, sweeps and withdrawals on EVM chains** with a
+  double-entry ledger, holds, nonce management, stuck-transaction replacement, crash-safe Temporal workflows, an outbox to
+  Redpanda, and a `Reconcile` check that compares the books with the chain. Hot wallets sign with **two-party MPC**
+  (`mpc-party` A and B, Coinbase's cb-mpc), behind a **signing gateway** and a **cosigner** that are separate trust zones
+  and each re-check every request.
+- **The `/v1` demo**: one binary with an HTTP API, policy (limits, allowlist, velocity), dual-control approvals, key lifecycle,
+  a hash-chained audit log, and an **HSM-only** signer. It is where those ideas were first built; the older GG20 MPC backend was
+  removed (see [History](#history)).
+
+[DESIGN_SCALE.md](DESIGN_SCALE.md) works out how the design scales to 1M wallets, with measured figures.
 
 ## Architecture
 
 ```mermaid
-flowchart TB
-  client["Client (X-Actor header)"] --> api["HTTP API"]
-  api --> orch["Signing orchestrator<br/>request → policy → approval → sign → verify"]
-  orch --> pol["Policy engine<br/>limits · allowlist · velocity · tier"]
-  orch --> apq["Approval queue<br/>dual control"]
-  orch --> reg["Key registry<br/>active → sign_only → retired"]
-  orch --> eth["Ethereum adapter<br/>EIP-1559 · low-S · v recovery"]
-  orch --> sig{{"Signer interface"}}
-  sig --> hsm["HSM signer<br/>PKCS#11 C_Sign"]
-  sig --> mpc["MPC signer<br/>GG20 2-of-3 / 3-of-3"]
-  hsm --> t0[("SoftHSM token<br/>quorumvault")]
-  mpc --> t1[("qv-party-1")] & t2[("qv-party-2")] & t3[("qv-party-3")]
-  pol & apq & reg & orch --> db[("Postgres")]
-  orch --> aud["Audit log<br/>SHA-256 hash chain, append-only"]
-  aud --> db
+flowchart LR
+  user["Operators / customers"] --> core["qv-core<br/>/v2 API · Reconcile"]
+  core --> biz[("Business Postgres<br/>ledger · withdrawals · sweeps · nonces<br/>outbox · sign_jobs")]
+  core --> tmp["Temporal"]
+  worker["qv-worker<br/>workflows · watchdog"] <--> tmp
+  worker --> biz
+  worker --> chain["EVM node"]
+  relay["qv-relay"] --> biz
+  relay --> rp["Redpanda"]
+  gw["qv-gateway<br/>signing zone 1"] -- sign_jobs --> biz
+  gw -- "mTLS, pinned" --> A["mpc-party A"]
+  A -- "mTLS, pinned" --> B["mpc-party B"]
+  B -- "unix socket" --> cs["qv-cosigner<br/>signing zone 2"]
+  A --> ta[("SoftHSM qv-party-1")]
+  B --> tb[("SoftHSM qv-party-2")]
 ```
 
-Details: components, data model, state machines and a sequence diagram of
-an MPC cold-wallet signature are in [docs/architecture.md](docs/architecture.md).
+Components, data model, state machines and a sequence diagram of a withdrawal signed by two parties:
+[docs/architecture.md](docs/architecture.md).
 
-## Features
+## What is here
 
-| Requirement | Where | Proof |
+| Capability | Where | Proof |
 |---|---|---|
-| HSM key generated in token, non-exportable (`CKA_TOKEN`, `CKA_SENSITIVE`, `!CKA_EXTRACTABLE`), secp256k1, token found by label | [internal/hsm](internal/hsm) | `TestPrivateKeyNotExportable`: reading `CKA_VALUE` returns `CKR_ATTRIBUTE_SENSITIVE` |
-| Key registry and lifecycle: generate, rotate (drain), retire (`C_DestroyObject`) | [internal/keys](internal/keys) | `TestRotationDrill`; [docs/rotation-ceremony.md](docs/rotation-ceremony.md) |
-| Policy engine: per-tx and daily limits, allowlist, velocity, approval threshold | [internal/policy](internal/policy) | allow / deny / needs-approval tests |
-| Approval queue: approver ≠ requester, one vote each, any reject ends it | [internal/approval](internal/approval) | self-approval → HTTP 403 in the demo |
-| Append-only, hash-chained audit log with `Verify` | [internal/audit](internal/audit) | DB triggers reject UPDATE/DELETE/TRUNCATE; `GET /audit/verify` |
-| MPC 2-of-3 GG20: dealerless keygen, sealed shares, threshold sign | [internal/mpc](internal/mpc) | `TestSignRefusesOneParty`, `TestCopiedShareWithOtherTokenFails` |
-| Hot/cold tiering: hot = 2-of-3, cold = 3-of-3 + 2 approvals | [internal/signing](internal/signing) | `TestMPCColdWalletFullQuorum`, demo step 3 |
-| Policy-gated signed Sepolia tx from both backends, verified locally | [internal/chain/eth](internal/chain/eth), [scripts/demo-sepolia.sh](scripts/demo-sepolia.sh) | recovered sender == wallet address, checked by the server and again offline by `quorumvault verify-tx` |
-| Broadcast + receipt: the same Sepolia txs mined on a local node, in CI on every push | [e2e](e2e), [.github/workflows/ci.yml](.github/workflows/ci.yml) job `e2e` | receipt status 1, node-reported `from` == wallet address, exact balance deltas (value + gasUsed × effectiveGasPrice), nonce N+1, denied request sends nothing |
-| Measured latencies, rounds, messages | [docs/measurements](docs/measurements) | tables below |
-| Scale design note | [DESIGN_SCALE.md](DESIGN_SCALE.md) | — |
+| Deposit addresses (CREATE2 forwarders), scan, crediting, sweeps to the hot wallet | [internal/custody](internal/custody), [internal/chain/evm](internal/chain/evm), [contracts](contracts) | `e2e/custody` happy path, 50 customers at once |
+| Withdrawals: holds, tiers, dual-control approvals, nonce allocation, fee replacement, cancel, settle or void | [internal/custody](internal/custody), [internal/workflow](internal/workflow) | `e2e/custody`: reverted, dropped, stuck, consumed-nonce, duplicate-request tests |
+| Double-entry ledger and `Reconcile` (books against the chain, to the wei) | [internal/ledger](internal/ledger), `/v2/reconcile` | clean `Reconcile` at the end of every custody test |
+| Crash safety: worker killed at every workflow boundary, gateway and relay restarted | [internal/workflow](internal/workflow) | `TestCrashAtEveryBoundary` (7 boundaries) |
+| Workflow watchdog: a loop that stops making progress is alerted, terminated and restarted | [internal/workflow/watchdog.go](internal/workflow/watchdog.go) | `TestWatchdog*` |
+| Signing gateway (zone 1) and cosigner (zone 2): approver signatures, policy, replay guard, each with its own database | [internal/gateway](internal/gateway), [internal/cosigner](internal/cosigner) | attack tests, rogue-party tests |
+| Two-party MPC signer: DKG, derive, sign, refresh, freeze, sealing in HSM tokens, backup and restore | [mpc-party](mpc-party), [internal/mpcsigner](internal/mpcsigner) | `make test-mpc`, the custody tests with `QV_CUSTODY_SIGNER=mpc` |
+| Failure tests on MPC: kill a party or the cosigner, partition, latency, refresh and freeze under live withdrawals | [e2e/custody/mpc_test.go](e2e/custody/mpc_test.go) | see [measurements](docs/measurements/mpc-service.md) |
+| `/v1` demo: HSM keys non-exportable, policy, approvals, key lifecycle, hash-chained audit log | [internal/hsm](internal/hsm), [internal/policy](internal/policy), [internal/approval](internal/approval), [internal/keys](internal/keys), [internal/audit](internal/audit) | unit tests, `make test-e2e`, [demo script](scripts/demo-sepolia.sh) |
+| Runbooks: MPC backup and restore, keyset freeze, key rotation | [docs/runbooks](docs/runbooks), [docs/rotation-ceremony.md](docs/rotation-ceremony.md) | `mpc-party/scripts/restore-drill.sh` |
 
-**Broadcast:** verified on a local [anvil](https://getfoundry.sh/anvil/)
-node started with chain ID 11155111, so it accepts our Sepolia transactions
-byte for byte. The e2e tests broadcast HSM and MPC (2-of-3 and 3-of-3)
-transactions through the real HTTP API, wait for receipts and check them;
-CI runs them on every push (job `e2e`). Real Sepolia is optional: set
-`SEPOLIA_RPC_URL` to a Sepolia node and fund the wallet address from a
-faucet.
+## Limits, honestly
+
+- **Local chains only.** Tested against anvil with instant blocks and zero confirmations. Nothing here has met reorgs, real
+  fee markets or a real network.
+- **SoftHSM.** The tokens are software: no tamper resistance, dev PINs. The structure (own token per party, PIN from the
+  environment, non-exportable wrap key) is what a hardware HSM would need, not a substitute for one.
+- **Both parties run on one machine, run by one team.** The cryptographic and protocol separation is real; the operational
+  separation is not.
+- **The cold tier is not built.** There is one hot tier. The design is in [DESIGN_SCALE.md](DESIGN_SCALE.md).
+- **2-of-2, not t-of-n.** Losing one party stops signing until it is restored from its backup.
+- **EVM only.** No Bitcoin, no Solana (the signer supports Ed25519 keysets; nothing uses them).
+- **`X-Actor` is not authentication.** It names the caller for dual control. No real identity, no UI.
+- **Measured on a laptop**, not on target hardware, and not under a real load-test yet (P4).
+- **cb-mpc has had no external review in this project**, and its soundness history is why the signer freezes a keyset on any
+  cryptographic failure.
 
 ## Quickstart
 
-Prerequisites: Go ≥ 1.25 with CGO (the PKCS#11 binding is cgo), SoftHSM2,
-Docker (Postgres and the local anvil chain), `jq` and `curl` for the demo.
+Prerequisites: Go ≥ 1.25 with CGO, SoftHSM2, Docker (Postgres, anvil, and for the custody tests Temporal and Redpanda), `jq` and
+`curl` for the demo. For the MPC parts also a C++ toolchain (clang, cmake, ninja); `make mpc-build` fetches and builds cb-mpc
+at the pinned commit into `mpc-party/.deps` (a few minutes once).
 
 ```bash
 brew install softhsm jq        # Ubuntu: apt-get install softhsm2 jq
@@ -78,166 +86,142 @@ make setup        # SoftHSM tokens in ./data/softhsm + Postgres 16 on localhost:
 ```
 
 ```bash
-make test-short   # unit + integration tests; skips the slow MPC ceremonies
+make test-short   # unit and integration tests, fast
 ```
 
 ```bash
-make test         # full suite incl. MPC keygen/sign (minutes); fails instead of skipping if DB/HSM are missing
+make test         # every package; fails instead of skipping if Postgres or SoftHSM is missing (the e2e packages skip without their env)
 ```
 
-Run the server, then the demo in a second terminal:
+### The `/v1` demo (HSM)
 
 ```bash
 make run          # go run ./cmd/quorumvault, listens on :8080
 ```
 
 ```bash
-./scripts/demo-sepolia.sh
+./scripts/demo-sepolia.sh --local   # in a second terminal; funds the wallets on anvil and prints each receipt
 ```
 
-The demo creates an HSM hot wallet, an MPC hot wallet and an MPC cold
-wallet, sets policies and allowlists, and signs four transactions: HSM
-allow, HSM over-threshold (self-approval refused, a second person
-approves), MPC 2-of-3, and MPC cold 3-of-3 after two approvals. It ends with
-the audit trail and `{"ok":true}` from the chain check. The first MPC wallet
-takes 10–15 s while each party generates and seals its Paillier pre-params;
-later ones take ~3 s.
+The demo creates an HSM hot wallet and an HSM cold wallet, sets policies and allowlists, and signs three transactions: allowed,
+over-threshold (self-approval refused, a second person approves), and a cold one that needs two approvals. It also shows that
+asking for an `mpc` wallet is refused with a pointer to `/v2`. It ends with the audit trail and `{"ok":true}`. Run the server
+with `SEPOLIA_RPC_URL=http://127.0.0.1:8545 make run` to broadcast to the local node.
 
-### Local chain
+### The custody system
 
-`make chain-up` starts anvil (`ghcr.io/foundry-rs/foundry:v1.8.5`) on
-127.0.0.1:8545 with chain ID 11155111: a throwaway in-memory chain that
-impersonates Sepolia and mines each transaction at once. Then:
+The end-to-end tests start every process for you. They need Temporal and Redpanda, and an anvil with chain id 11155111:
 
 ```bash
-make test-e2e     # HSM + MPC transfers broadcast, mined and checked by receipt (~1 min with cached MPC pre-params)
+make infra-up     # Temporal + Redpanda (docker compose)
 ```
 
 ```bash
-SEPOLIA_RPC_URL=http://127.0.0.1:8545 make run   # server fills nonce/fees from the node and broadcasts
+docker run -d --name qv-anvil -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111"
 ```
 
 ```bash
-./scripts/demo-sepolia.sh --local   # funds the wallets with anvil_setBalance, prints each receipt
+make test-custody                 # the closed loop with HSM hot keys (about 5 minutes)
 ```
 
-The e2e tests and the demo's local mode refuse to run unless the node says
-it is anvil, reports chain ID 11155111 and is on localhost (or the compose
-host `anvil`), so they can never send to a real network. `make chain-down`
-stops it; its state is gone with it.
+```bash
+make mpc-build                    # once: cb-mpc at the pinned commit
+make test-mpc                     # gateway -> party A -> party B -> cosigner, about 1 minute
+make test-custody-mpc             # the closed loop with two-party MPC hot keys plus all failure tests (about 15 minutes)
+```
 
-Configuration (all optional; see [.env.example](.env.example), copy to `.env`):
+`QV_CUSTODY_SIGNER=hsm|mpc` chooses the signer for `e2e/custody`. To run one test, or a few, by name (a Go `-run` regexp):
+
+```bash
+make test-custody-mpc TEST=TestMPCRefreshDuringLiveWithdrawals
+```
+
+Pull requests run the light tests in three parallel CI jobs (`make test-custody-mpc-1`, `-2`, `-3`) next to `make test-mpc`; the
+heavy ones (every crash boundary, a component killed at each custody boundary, freeze, partition, latency) run nightly or on
+demand from the Actions tab (`nightly` > Run workflow), and locally with `make test-custody-mpc-failure`. Crash boundaries can be
+picked with `QV_CRASH_BOUNDARIES=withdrawal.after_broadcast,sweep.after_settle`.
+
+Soak: `make test-mpc-soak` (50 signatures per second for 10 minutes; `QV_MPC_SOAK_MINUTES` and `QV_MPC_SOAK_RATE` change it). The
+`mpc-party` module has its own tests: `cd mpc-party && go test ./...`, and `mpc-party/scripts/restore-drill.sh` destroys a party
+and restores it from backup.
+
+### Configuration
+
+All optional; see [.env.example](.env.example).
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `DATABASE_URL` | `postgres://qv@localhost:55432/quorumvault?sslmode=disable` | Postgres (dev only: trust auth, bound to 127.0.0.1) |
-| `QV_HTTP_ADDR` | `:8080` | listen address |
-| `QV_DATA_DIR` | `./data` | MPC sealed shares and pre-params |
-| `QV_PKCS11_LIB` | `/opt/homebrew/lib/softhsm/libsofthsm2.so` (macOS), `/usr/lib/softhsm/libsofthsm2.so` (Linux) | PKCS#11 module |
 | `SOFTHSM2_CONF` | `./data/softhsm/softhsm2.conf` | repo-local token store |
 | `QV_HSM_PIN` | `user-dev-1234` (dev only) | user PIN of all tokens |
-| `SEPOLIA_RPC_URL` | empty | if set: nonce/fees from the node, and broadcast (`QV_BROADCAST=0` disables); `http://127.0.0.1:8545` = local anvil |
+| `QV_PKCS11_LIB` | the SoftHSM2 library of the OS | PKCS#11 module |
+| `SEPOLIA_RPC_URL` | empty | `/v1` demo: nonce and fees from this node, and broadcast |
+| `QV_CUSTODY_SIGNER` | `hsm` | `e2e/custody`: `hsm` or `mpc` |
+| `QV_E2E_TIMEOUT_SCALE` | `1` | stretches every condition wait in the custody tests (CI sets 3) |
 
-## API
+## The `/v1` API
 
-Every mutating call needs an `X-Actor: <name>` header (401 without it).
-Wei amounts are decimal strings; bytes are 0x-hex. Errors are
-`{"error": "..."}` with 400, 401, 403 (self-approval), 404, 409 (state
-conflict / duplicate), 422 (invalid).
+Every mutating call needs an `X-Actor: <name>` header (401 without it). Wei amounts are decimal strings; bytes are 0x-hex.
+Errors are `{"error": "..."}` with 400, 401, 403 (self-approval), 404, 409 (conflict), 422 (invalid).
 
 | Method | Path | Does |
 |---|---|---|
 | GET | `/healthz` | DB and HSM token check |
-| POST | `/wallets` | `{name, tier: hot\|cold, backend: hsm\|mpc}` → wallet + key v1 (MPC runs a DKG) |
+| POST | `/wallets` | `{name, tier: hot\|cold, backend: hsm}` → wallet + key v1 (`mpc` is refused: use `/v2`) |
 | GET | `/wallets`, `/wallets/{id}` | list; one wallet with keys, policy, allowlist |
 | POST | `/wallets/{id}/rotate` | new key version `active`, old one `sign_only` |
 | PUT | `/wallets/{id}/policy` | limits, velocity, `required_approvals` (0 = tier default: hot 1, cold 2) |
-| POST | `/wallets/{id}/allowlist` | `{address, label}` |
-| DELETE | `/wallets/{id}/allowlist/{address}` | remove a destination |
-| POST | `/keys` | `{}` → new HSM wallet + key; `{wallet_id}` → next HSM key version |
-| GET | `/keys?wallet_id=` | key metadata (public key, address, state, timestamps) |
-| POST | `/keys/{id}/retire` | `sign_only` → `retired`; HSM private key destroyed |
-| POST | `/sign-requests` | `{wallet_id, to, value_wei, nonce, …}` → `signed`, `pending_approval`, `denied` or `failed`, with `raw_tx`, `from`, `timings_ms` |
+| POST / DELETE | `/wallets/{id}/allowlist`, `/wallets/{id}/allowlist/{address}` | add / remove a destination |
+| POST | `/keys` | `{}` → new HSM wallet + key; `{wallet_id}` → next key version |
+| GET | `/keys?wallet_id=` | key metadata |
+| POST | `/keys/{id}/retire` | `sign_only` → `retired`; the HSM private key is destroyed |
+| POST | `/sign-requests` | `{wallet_id, to, value_wei, nonce, …}` → `signed`, `pending_approval`, `denied` or `failed` |
 | GET | `/sign-requests?wallet_id=`, `/sign-requests/{id}` | list / one |
 | POST | `/sign-requests/{id}/approve`, `/reject` | vote; the deciding approval signs in the same call |
-| GET | `/audit?wallet_id=&request_id=&limit=` | events with `prev_hash` and `hash` |
-| GET | `/audit/verify` | walks the chain; first bad `seq` if broken |
+| GET | `/audit`, `/audit/verify` | events with hashes; walks the chain |
 
-## Measured numbers
+The `/v2` API (customers, deposit addresses, balances, withdrawals, approvals, `reconcile`) is served by `qv-core`; routes are in
+[internal/custody/api.go](internal/custody/api.go) and used throughout [e2e/custody](e2e/custody).
 
-Apple M3 Pro, 12 logical CPUs, macOS, Go 1.27.3, SoftHSM 2.7.0, Postgres 16
-in Docker. All MPC parties in one process (no network). Sources:
-[docs/measurements/mpc.md](docs/measurements/mpc.md) (10 runs per row),
-[docs/measurements/e2e.md](docs/measurements/e2e.md) (one demo run).
+## Numbers
 
-| Operation | Latency | Rounds | Messages | Bytes |
-|---|---:|---:|---:|---:|
-| HSM `C_Sign` (SoftHSM) | ~0.9 ms | — | — | — |
-| HSM request end to end, allow → signed | 17.5 ms | — | — | — |
-| MPC pre-params, 3 parties in parallel (once, cached) | 5.1–16.0 s | — | — | — |
-| MPC keygen (DKG, 3 parties) | 2.7–3.0 s | 3 | 24 | 1.35 MB |
-| MPC sign 2-of-3, median | 367–375 ms | 9 | 20 | 21 KB |
-| MPC sign 3-of-3, median | 494 ms | 9 | 60 | 64 KB |
-| MPC 2-of-3 request end to end | 382 ms | | | |
-| MPC 3-of-3 final approve call (2nd approval → signed) | 500 ms | | | |
-| Broadcast to local anvil (`eth_sendRawTransaction`, mined in the call) | 0.3–1.5 ms | — | — | — |
+Apple M3 Pro, Go 1.27.3, SoftHSM 2.7.0, all processes on one machine. Sources:
+[docs/measurements/closed-loop.md](docs/measurements/closed-loop.md) (HSM), [docs/measurements/mpc-service.md](docs/measurements/mpc-service.md)
+(two-party MPC), [docs/spikes/p5a-cbmpc.md](docs/spikes/p5a-cbmpc.md) (the library).
 
-On a network, add about 9 × RTT per MPC signature (9 sequential rounds); at
-50 ms RTT that is +450 ms. [DESIGN_SCALE.md](DESIGN_SCALE.md#3-key-partitioning-regional-deployment-quorum-geography)
-works through the regional cases.
+| | HSM signer | Two-party MPC signer |
+|---|---:|---:|
+| Withdrawal, request to confirmed, median | 412 ms | 409 ms |
+| 20 withdrawals at once, all confirmed | 1.18 s | 2.41 s |
+| One signature (library, no network) | — | 49 ms |
+| Soak: 50 signatures/s for 10 min, whole path | — | 30 000 of 30 000, 0 failed |
+| Added 100 ms per frame between the parties, sign job | — | 1.55 s |
 
-## Security model
+## Security notes
 
-- **Non-exportable HSM keys.** EC key pairs are generated in the token with
-  `CKA_TOKEN`, `CKA_SENSITIVE`, `!CKA_EXTRACTABLE`; the code only ever holds
-  a `CKA_ID`. Retiring a key destroys the private key object.
-- **Sealed MPC shares.** Each party's keygen output and Paillier pre-params
-  are encrypted with `CKM_AES_GCM` under a non-extractable AES-256 key inside
-  that party's own token; AAD `<keyRef>|party-<id>` binds a file to its key
-  and party. A stolen disk, or one party's share file copied to another
-  party, is useless.
-- **No dealer.** The MPC private key never exists in one place, including
-  during keygen.
-- **Dual control on spending.** Approver ≠ requester (HTTP 403); one vote
-  per approver, enforced by a DB unique constraint; cold wallets need two
-  approvals and all three parties.
-- **Policy before signature.** No signer is called unless the request row
-  moved `approved → signing` by compare-and-set: one winner, never a double
-  signature.
-- **Verify before store.** Every signature is low-S normalised, its recovery
-  id found by `ecrecover`, and the recovered sender compared with the key's
-  address before anything is stored.
-- **Tamper-evident audit.** DB triggers reject UPDATE, DELETE and TRUNCATE;
-  each row hashes the previous one; `GET /audit/verify` finds the first bad
-  row.
-- **Testnet only, dev-only secrets.** Sepolia chain id is inside every
-  signed digest (no mainnet replay). The PINs and the DB password are public
-  dev defaults.
-- **Known gaps (by design for a demo).** `X-Actor` is not authentication;
-  all MPC parties share one process; key admin needs only one actor. See
-  [DESIGN_SCALE.md §7](DESIGN_SCALE.md#7-what-this-repo-does-not-do-and-how-production-would).
-
-## Design tradeoffs
-
-| Choice | Why | Cost |
-|---|---|---|
-| Raw PKCS#11 (`miekg/pkcs11`), not a wrapper | shows the real Cryptoki calls and attributes | more code; session and handle care |
-| SoftHSM | free, scriptable, real PKCS#11 | software only: no tamper resistance |
-| GG20 via tss-lib, parties in one process | the brief's library; the library's own tests work this way | one memory dump leaks every share; no network latency in the numbers |
-| Seal shares with `CKM_AES_GCM` instead of `C_WrapKey` | a tss-lib share is a data blob, not a PKCS#11 key object; GCM adds integrity and AAD binding | the share is plaintext in memory during a ceremony |
-| Drain (`sign_only`) before retire | requests that were already approved finish with the key their approvers saw | an extra state; old address stays usable for a while |
-| Audit append after commit | `domain.Auditor` has no transaction parameter | a crash in between can lose one event (fix: outbox) |
-| Per-wallet mutex around evaluate + insert | concurrent requests see each other in velocity and daily windows | single instance only (fix: DB advisory lock) |
-| Allowed requests stored as `approved` | one `approved → signing` path for both cases | `approved` counts toward 24h spend immediately |
+- **Keys.** HSM keys are non-exportable (`CKA_SENSITIVE`, `!CKA_EXTRACTABLE`). MPC shares are sealed with an AES key inside each
+  party's own token; the associated data binds role, keyset and generation. A refresh commits in two durable phases and a crash
+  at any step converges to one working generation.
+- **Two gates.** The gateway and party B's cosigner each check approver signatures, policy and the replay guard from their own
+  config and database. An attacker who owns party A, or the business database, cannot get a signature for a request that was not
+  approved.
+- **Freeze.** A cryptographic failure freezes the keyset on both parties until an operator signs an unfreeze.
+- **Ledger.** Money moves only through balanced entries; a withdrawal's hold is released only when its nonce is settled or
+  provably cancelled.
+- **No secrets in the repo**; the PINs and database password are public dev defaults.
 
 ## Documentation
 
-- [DESIGN_SCALE.md](DESIGN_SCALE.md): signer pools, HSM sizing, quorum
-  geography, backup and recovery, ceremonies, compliance hooks, production gaps
-- [docs/architecture.md](docs/architecture.md): components, data model, state
-  machines, MPC sign sequence
+- [DESIGN_SCALE.md](DESIGN_SCALE.md): scaling to 1M wallets, with measured numbers and what is still to be measured
+- [docs/architecture.md](docs/architecture.md): processes, trust zones, data model, state machines
+- [docs/runbooks](docs/runbooks): MPC backup and restore, keyset freeze
 - [docs/rotation-ceremony.md](docs/rotation-ceremony.md): key rotation drill
-  with API calls, roles, verification, rollback
-- [docs/measurements/](docs/measurements): raw benchmark and demo output
-- [docs/learn/](docs/learn): study guides per component (foundations, HSM
-  lifecycle, policy and audit, MPC, sign path, local chain), each with a quiz
+- [docs/measurements](docs/measurements): raw benchmark and test output
+- [docs/learn](docs/learn): study guides per task, each with a quiz
+
+## History
+
+The first version used a 2-of-3 GG20 threshold-ECDSA cluster (tss-lib) with all three parties in one process. GG20 has known
+attacks and nothing in the custody path used it, so it was removed in P5b-6. Its study guide
+([docs/learn/t3-mpc-gg20.md](docs/learn/t3-mpc-gg20.md)) and measurements ([docs/measurements/mpc.md](docs/measurements/mpc.md))
+are kept as a record.

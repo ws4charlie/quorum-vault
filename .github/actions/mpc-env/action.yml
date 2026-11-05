@@ -1,0 +1,53 @@
+name: mpc-env
+description: >
+  Everything the two-party MPC end-to-end tests need on a runner: Go, the C++ toolchain, SoftHSM with the project's tokens,
+  the cached cb-mpc build, anvil (chain id 11155111, port 18545) and, with infra, Temporal and Redpanda.
+  The calling job provides the Postgres service and checks the repository out.
+inputs:
+  infra:
+    description: "'true' also starts Temporal and Redpanda (the custody tests need them)"
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+    - name: Start anvil (chain ID 11155111) on 18545
+      shell: bash
+      run: |
+        docker run -d --name anvil -p 127.0.0.1:18545:8545 \
+          ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111"
+    - name: Start Temporal and Redpanda
+      if: inputs.infra == 'true'
+      shell: bash
+      run: docker compose --profile infra up -d --wait temporal-db temporal redpanda
+    - name: Install C++ toolchain
+      shell: bash
+      run: mpc-party/scripts/install-toolchain-linux.sh
+    - name: Install SoftHSM2 and create the tokens (quorumvault, qv-party-1, qv-party-2)
+      shell: bash
+      run: |
+        sudo apt-get install -y softhsm2
+        ./scripts/setup-softhsm.sh
+    # Same cache key as the mpc-party job, so the jobs share one build of cb-mpc.
+    - name: Cache cb-mpc build
+      uses: actions/cache@v4
+      with:
+        path: mpc-party/.deps
+        key: cbmpc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mpc-party/cbmpc.pin', 'mpc-party/scripts/fetch-build-cbmpc.sh') }}
+    - name: Build cb-mpc at the pinned commit
+      shell: bash
+      run: mpc-party/scripts/fetch-build-cbmpc.sh
+    - name: Wait for anvil
+      shell: bash
+      run: |
+        for i in $(seq 1 30); do
+          if curl -sf -X POST -H 'Content-Type: application/json' \
+            --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' http://127.0.0.1:18545; then
+            echo; exit 0
+          fi
+          sleep 1
+        done
+        docker logs anvil
+        exit 1

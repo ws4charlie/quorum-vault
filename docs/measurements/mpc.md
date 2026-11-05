@@ -1,5 +1,7 @@
 # MPC measurements (2-of-3 GG20, tss-lib)
 
+> **History.** GG20 (tss-lib) was removed in P5b-6. It has known attacks (for example TSSHOCK, 2023, against GG18/GG20 implementations) and nothing in the custody path used it any more; the two-party signer is cb-mpc behind `mpc-party`. These numbers describe the removed design and are kept as a record. Current numbers: [mpc-service.md](mpc-service.md).
+
 Produced by `CGO_ENABLED=1 go run ./cmd/mpcbench -n 10 -fresh-preparams` (raw output below, unedited).
 
 - Date: 2026-11-02 21:34 CST

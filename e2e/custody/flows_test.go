@@ -3,6 +3,7 @@ package custody_test
 import (
 	"fmt"
 	"math/big"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -284,8 +285,14 @@ func TestCrashAtEveryBoundary(t *testing.T) {
 	}
 	steps = append(steps, step{"sweep", "after_broadcast"}, step{"sweep", "after_settle"})
 
+	// QV_CRASH_BOUNDARIES=withdrawal.after_broadcast,... runs only those boundaries (pull-request CI runs one; the nightly run
+	// and the default run all seven).
+	only := os.Getenv("QV_CRASH_BOUNDARIES")
 	for i, st := range steps {
 		fp := st.kind + "." + st.point
+		if only != "" && !strings.Contains(","+only+",", ","+fp+",") {
+			continue
+		}
 		current = fp
 		s.worker.stop()
 		s.startWorker(fp)

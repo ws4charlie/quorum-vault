@@ -29,7 +29,6 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/hsm/hsmtest"
 	"github.com/ws4charlie/quorum-vault/internal/hsmsigner"
 	"github.com/ws4charlie/quorum-vault/internal/keys"
-	"github.com/ws4charlie/quorum-vault/internal/mpc"
 	"github.com/ws4charlie/quorum-vault/internal/policy"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 	"github.com/ws4charlie/quorum-vault/internal/signing"
@@ -91,14 +90,7 @@ func newEnv(t *testing.T) *env {
 	rpcURL := requireChain(t)
 	ctx := context.Background()
 	pool := dbtest.New(t)
-	lib := hsmtest.Lib(t)
 	tok := hsmtest.Token(t, "quorumvault")
-	mpcDir := filepath.Join(repoDir(t), "data", "mpc-e2e")
-	cluster, err := mpc.NewCluster(mpc.DefaultConfig(mpcDir, hsmtest.PIN()), lib)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { cluster.Close() })
 	node, err := eth.Dial(ctx, rpcURL)
 	if err != nil {
 		t.Fatal(err)
@@ -111,13 +103,12 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(ec.Close)
 
 	aud := audit.New(pool)
-	reg := keys.New(pool, aud, hsmsigner.NewGenerator(tok), signing.NewMPCGenerator(cluster, aud, nil))
+	reg := keys.New(pool, aud, hsmsigner.NewGenerator(tok))
 	pol := policy.New(pool, aud, nil)
 	svc := signing.New(signing.Config{
 		Pool: pool, Registry: reg, Policy: pol, Approvals: approval.New(pool, aud), Audit: aud,
 		Signers: map[domain.Backend]signing.SignerFunc{
 			domain.BackendHSM: func(k domain.Key) (signer.Signer, error) { return hsmsigner.New(tok, k) },
-			domain.BackendMPC: func(k domain.Key) (signer.Signer, error) { return mpc.NewSigner(cluster, k) },
 		},
 		RPC: node, Broadcast: true,
 	})
@@ -132,8 +123,6 @@ func newEnv(t *testing.T) *env {
 				if err := tok.DestroyPrivateKey(context.Background(), k.HSMKeyID); err != nil && !errors.Is(err, hsm.ErrKeyNotFound) {
 					t.Logf("cleanup: %v", err)
 				}
-			case domain.BackendMPC:
-				os.RemoveAll(filepath.Join(mpcDir, "keys", k.MPCKeyRef))
 			}
 		}
 	})
@@ -329,13 +318,7 @@ func newAddress(t *testing.T) common.Address {
 	return a
 }
 
-func participants(p map[string]any) int {
-	ps, _ := p["participants"].([]any)
-	return len(ps)
-}
-
-// TestLocalChain shares one service (DB, HSM token, MPC cluster and its
-// pre-params) across its subtests; MPC keygen dominates the runtime.
+// TestLocalChain shares one service (DB, HSM token) across its subtests.
 func TestLocalChain(t *testing.T) {
 	e := newEnv(t)
 
@@ -458,31 +441,11 @@ func TestLocalChain(t *testing.T) {
 		e.verifyAudit()
 	})
 
-	t.Run("MPCHotThresholdMines", func(t *testing.T) {
-		if testing.Short() {
-			t.Skip("MPC ceremony: skipped under -short")
-		}
+	t.Run("ColdFullQuorumMines", func(t *testing.T) {
 		e := *e
 		e.t = t
 		to := newAddress(t)
-		wid, from := e.wallet("e2e-mpc-hot", "hot", "mpc", to)
-		e.fund(from)
-		r := e.submit(wid, to, milliEth1)
-		e.mined(r, from)
-		if n := participants(e.event(r.Request.ID, domain.EventSignCompleted)); n != 2 {
-			t.Fatalf("participants %d, want 2", n)
-		}
-		e.verifyAudit()
-	})
-
-	t.Run("MPCColdFullQuorumMines", func(t *testing.T) {
-		if testing.Short() {
-			t.Skip("MPC ceremony: skipped under -short")
-		}
-		e := *e
-		e.t = t
-		to := newAddress(t)
-		wid, from := e.wallet("e2e-mpc-cold", "cold", "mpc", to)
+		wid, from := e.wallet("e2e-cold", "cold", "hsm", to)
 		e.fund(from)
 		r := e.submit(wid, to, big.NewInt(1))
 		if r.Request.Status != string(domain.StatusPendingApproval) {
@@ -492,9 +455,6 @@ func TestLocalChain(t *testing.T) {
 			t.Fatalf("after 1 of 2 approvals: status %s", r.Request.Status)
 		}
 		e.mined(e.approve("carol", r.Request.ID), from)
-		if n := participants(e.event(r.Request.ID, domain.EventSignCompleted)); n != 3 {
-			t.Fatalf("participants %d, want 3", n)
-		}
 		if got := e.balanceAt(to, nil); got.Cmp(big.NewInt(1)) != 0 {
 			t.Fatalf("recipient balance %s, want 1 wei", got)
 		}

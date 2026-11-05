@@ -102,7 +102,7 @@ func TestWithSessionConcurrent(t *testing.T) {
 
 func TestClosedToken(t *testing.T) {
 	lib := hsmtest.Lib(t)
-	tok, err := lib.OpenToken("qv-party-3", hsmtest.PIN())
+	tok, err := lib.OpenToken("qv-party-2", hsmtest.PIN())
 	if err != nil {
 		t.Fatal(err)
 	}

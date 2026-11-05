@@ -42,7 +42,7 @@ jobs:
 
   # Broadcast + receipt checks: the e2e package against a local anvil node
   # impersonating Sepolia (chain ID 11155111). Same commands as `make chain-up`
-  # + `make test-e2e`. Not -short: includes the MPC wallets.
+  # + `make test-e2e`. Not -short.
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -153,13 +153,45 @@ jobs:
         working-directory: mpc-party
         run: go test -run '^$' -fuzz FuzzEntryPoints -fuzztime 30s ./internal/cbmpc
 
-  # The whole custody system on two-party MPC: `make test-mpc` (gateway -> party A -> party B -> cosigner) and the custody
-  # closed loop with QV_CUSTODY_SIGNER=mpc (deposits, sweeps, withdrawals, crash boundaries, kill / partition / latency /
-  # refresh / freeze tests; the three slowest failure tests run locally and not here, see the Makefile). Real SoftHSM sealing, real Temporal and Redpanda, anvil. `test`, `e2e` and `mpc-party` are unchanged.
-  # Waits in these tests are on conditions, so a slow runner only makes them longer; the job is capped at 20 minutes.
-  mpc-e2e:
+  # The two-party MPC signer and the custody system on it, in parallel jobs (each with its own runner, Postgres, anvil, and for
+  # the custody ones Temporal and Redpanda), so a pull request waits for the slowest group, not for the sum. The heavy tests
+  # (every crash boundary, kill at each custody boundary, freeze, link failures) run nightly: .github/workflows/nightly.yml.
+  # See the Makefile for what is in each group. None of these is a required check; `test` is.
+
+  mpc-signing:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "false"
+      - name: make test-mpc
+        run: make test-mpc
+
+  custody-mpc-1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16-alpine
@@ -184,46 +216,74 @@ jobs:
       QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: ./.github/actions/mpc-env
         with:
-          go-version-file: go.mod
-      - name: Install C++ toolchain
-        run: mpc-party/scripts/install-toolchain-linux.sh
-      - name: Install SoftHSM2 and create the tokens (quorumvault, qv-party-1, qv-party-2)
-        run: |
-          sudo apt-get install -y softhsm2
-          ./scripts/setup-softhsm.sh
-      # Same cache key as the mpc-party job, so the two jobs share one build of cb-mpc.
-      - name: Cache cb-mpc build
-        uses: actions/cache@v4
+          infra: "true"
+      - name: make test-custody-mpc-1
+        run: make test-custody-mpc-1
+
+  custody-mpc-2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+      # A shared runner is slower than a laptop: every condition wait in the custody tests gets three times as long.
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
         with:
-          path: mpc-party/.deps
-          key: cbmpc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mpc-party/cbmpc.pin', 'mpc-party/scripts/fetch-build-cbmpc.sh') }}
-      - name: Build cb-mpc at the pinned commit
-        run: mpc-party/scripts/fetch-build-cbmpc.sh
-      - name: Start anvil (chain ID 11155111) on 18545
-        run: |
-          docker run -d --name anvil -p 127.0.0.1:18545:8545 \
-            ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111"
-      - name: Start Temporal and Redpanda
-        run: docker compose --profile infra up -d --wait temporal-db temporal redpanda
-      - name: Wait for anvil
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sf -X POST -H 'Content-Type: application/json' \
-              --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' "$QV_ANVIL_RPC"; then
-              echo; exit 0
-            fi
-            sleep 1
-          done
-          docker logs anvil
-          exit 1
-      - name: Signing path end to end (make test-mpc)
-        run: make test-mpc
-      - name: Custody closed loop on MPC (make test-custody-mpc-ci)
-        run: make test-custody-mpc-ci
-      - name: Logs on failure
-        if: failure()
-        run: |
-          docker logs anvil | tail -50
-          docker compose --profile infra logs --tail 50 temporal redpanda
+          infra: "true"
+      - name: make test-custody-mpc-2
+        run: make test-custody-mpc-2
+
+  custody-mpc-3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+      # A shared runner is slower than a laptop: every condition wait in the custody tests gets three times as long.
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+      - name: make test-custody-mpc-3
+        run: make test-custody-mpc-3

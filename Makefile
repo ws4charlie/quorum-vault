@@ -11,7 +11,7 @@ export DATABASE_URL
 # Local anvil node impersonating Sepolia (docker-compose.yml service "anvil").
 LOCAL_RPC_URL := http://127.0.0.1:8545
 
-.PHONY: test-mpc test-mpc-soak test-custody-mpc test-custody-mpc-ci mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short test-e2e build vet run demo-local
+.PHONY: test-mpc test-mpc-soak test-custody-mpc test-custody-mpc-failure test-custody-mpc-1 test-custody-mpc-2 test-custody-mpc-3 mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short test-e2e build vet run demo-local
 
 setup: softhsm db-up chain-up
 
@@ -39,7 +39,7 @@ infra-down:
 
 # Smoke test against `make infra-up`: a Temporal workflow and a Redpanda round trip.
 test-infra:
-	QV_REQUIRE_INFRA=1 go test -count=1 -v ./internal/infratest/...
+	QV_REQUIRE_INFRA=1 go test -count=1 -v ./internal/infratest/... ./internal/workflow/...
 
 test:
 	QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 ./...
@@ -48,7 +48,7 @@ test-short:
 	go test -short -p 1 ./...
 
 # Broadcast + receipt checks on the local anvil node (make chain-up first).
-# Not -short: includes the MPC wallets.
+# Not -short: the full broadcast and receipt checks.
 test-e2e:
 	SEPOLIA_RPC_URL=$(LOCAL_RPC_URL) QV_REQUIRE_CHAIN=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 \
 		go test -count=1 -p 1 -timeout 20m -v ./e2e/...
@@ -98,10 +98,34 @@ build-worker:
 test-custody:
 	QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 30m -v ./e2e/custody/...
 
-# The same closed loop with the hot keys on two-party MPC (mpc-party A and B, qv-cosigner, real SoftHSM sealing), plus the
+# The closed loop with the hot keys on two-party MPC (mpc-party A and B, qv-cosigner, real SoftHSM sealing), plus the
 # failure tests that only exist in this mode. Needs `make mpc-build`, `make softhsm`, `make infra-up`, Postgres and anvil.
+# test-custody-mpc runs ALL tests (about 15 minutes). To run one test, or a few, by name (a Go -run regexp):
+#   make test-custody-mpc TEST=TestMPCRefreshDuringLiveWithdrawals
+#   make test-custody-mpc TEST='TestMPCRefresh|TestHappyPath'
+# and, to run only some crash boundaries of TestCrashAtEveryBoundary: QV_CRASH_BOUNDARIES=withdrawal.after_broadcast.
+CUSTODY_MPC_ENV := QV_CUSTODY_SIGNER=mpc QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1
 test-custody-mpc:
-	QV_CUSTODY_SIGNER=mpc QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 40m -v ./e2e/custody/...
+	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 40m -v $(if $(TEST),-run '$(TEST)') ./e2e/custody/...
+
+# The heavy tests, which pull-request CI leaves to the nightly run: every crash boundary, a component killed at each custody
+# boundary, the freeze test, and the three slowest link tests (kill mid-session, partition, latency up to 1 s per frame).
+FAILURE_MPC := TestCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCWithdrawalLatencyWithSlowLink
+test-custody-mpc-failure:
+	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 40m -v -run '$(FAILURE_MPC)' ./e2e/custody/...
+
+# Pull-request CI: everything except the heavy tests, in three groups that run in parallel jobs (each on its own runner with its
+# own anvil, Temporal, Redpanda and Postgres). Together with test-custody-mpc-failure they cover test-custody-mpc.
+CUSTODY_GROUP_1 := TestTwoApproversAndInitiatorCannotApprove|TestApprovalTimeoutVoidsTheHold|TestHumanRejectionVoids|TestInsufficientFundsIsRefused|TestFrozenFactoryDefersSweeps|TestGatewayRejectionReleasesNonceAndHold|TestDuplicateRequestsAndSignals|TestHappyPathETHAndToken|TestWorkflowReplayOfRecordedHistories
+CUSTODY_GROUP_2 := TestRevertedWithdrawalVoidsAndRecordsFee|TestDroppedTransactionIsReplacedAndPaidOnce|TestConsumedNonceParksWithOneAlert|TestRestartedWorkflowAfterMinedReplacementSettlesOnce|TestStuckTransactionIsReplacedOnce|TestGatewayAndRelayRestart|TestMeasureClosedLoop|TestFiftyCustomersConcurrent
+CUSTODY_GROUP_3 := TestMPCRefreshDuringLiveWithdrawals|TestCrashAtEveryBoundary
+test-custody-mpc-1:
+	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(CUSTODY_GROUP_1)' ./e2e/custody/...
+test-custody-mpc-2:
+	$(CUSTODY_MPC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(CUSTODY_GROUP_2)' ./e2e/custody/...
+# Group 3 keeps one crash boundary on pull requests: the worker dies right after the broadcast.
+test-custody-mpc-3:
+	$(CUSTODY_MPC_ENV) QV_CRASH_BOUNDARIES=withdrawal.after_broadcast go test -count=1 -p 1 -timeout 25m -v -run '$(CUSTODY_GROUP_3)' ./e2e/custody/...
 
 # cb-mpc signing path end to end (needs the C++ build once: `make mpc-build`; Postgres; anvil on 127.0.0.1:18545 with chain
 # id 11155111 for the mining test: docker run -d --name qv-anvil-p5b3 -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111").
@@ -111,12 +135,6 @@ mpc-build:
 
 test-mpc:
 	QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=http://127.0.0.1:18545 go test -count=1 -p 1 -timeout 20m -v ./e2e/mpcsign/...
-
-# What CI runs: the same minus the three slowest failure tests (mid-session kill, partition, latency with a 1 s per-frame
-# link: about 4 minutes together), so the job stays under 20 minutes on a shared runner. Run `make test-custody-mpc` for all.
-test-custody-mpc-ci:
-	QV_CUSTODY_SIGNER=mpc QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 25m -v \
-		-skip 'TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCWithdrawalLatencyWithSlowLink' ./e2e/custody/...
 
 # Soak: 50 signatures per second for 10 minutes through the whole path, with RSS and thread counts of every process.
 # QV_MPC_SOAK_MINUTES and QV_MPC_SOAK_RATE change the length and the rate.
