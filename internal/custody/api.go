@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ws4charlie/quorum-vault/internal/audit"
 	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 )
@@ -63,7 +64,14 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v2/cold/actions", a.requestAction)
 	mux.HandleFunc("POST /v2/refills/{id}/close", a.closeRefill)
 	mux.HandleFunc("POST /v2/guardian/freezes", a.guardianFreeze)
-	return mux
+	mux.HandleFunc("GET /v2/audit/verify", a.auditVerify)
+	// Whoever the X-Actor header names is the actor of everything the request causes, in the audit trail.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if actor := r.Header.Get("X-Actor"); ValidID(actor) {
+			r = r.WithContext(WithActor(r.Context(), actor))
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -317,6 +325,10 @@ func (a *API) reject(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, fmt.Errorf("%w: rejections are not available", ErrInvalid))
 		return
 	}
+	if err := a.svc.RecordRejection(r.Context(), id, actor, body.Reason); err != nil {
+		a.fail(w, err)
+		return
+	}
 	// Signal-with-start: delivered even if the workflow has not started yet.
 	if err := rj.RejectWithdrawal(r.Context(), id, actor+": "+body.Reason); err != nil {
 		a.fail(w, err)
@@ -504,4 +516,23 @@ func (a *API) guardianFreeze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"tx": body.Tx, "fee": fee.String()})
+}
+
+// auditVerify walks the core audit chain from genesis and reports whether it is intact, with its head.
+func (a *API) auditVerify(w http.ResponseWriter, r *http.Request) {
+	ok, bad, err := audit.VerifyChain(r.Context(), a.svc.Pool)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	head, err := audit.Head(r.Context(), a.svc.Pool, "core")
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	out := map[string]any{"ok": ok, "head_seq": head.Seq, "head_hash": head.Hash}
+	if !ok {
+		out["first_bad_seq"] = bad
+	}
+	writeJSON(w, http.StatusOK, out)
 }

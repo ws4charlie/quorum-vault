@@ -158,6 +158,7 @@ func TestFactoryAdminRotationCeremony(t *testing.T) {
 		t.Fatalf("spend: %d %v", code, out)
 	}
 	s.reconcileClean() // the cold fees of both ceremonies, the funding and the spend are all in the books
+	s.requireAudit("cold.funded", "cold.spent", "cold_action.requested", "refill.exported", "refill.imported")
 }
 
 func TestGuardianFreezeAndCeremonyUnfreeze(t *testing.T) {
@@ -221,6 +222,7 @@ func TestGuardianFreezeAndCeremonyUnfreeze(t *testing.T) {
 	s.waitFor(90*time.Second, "the waiting deposit to be swept", func() bool { return s.ethBalance(b).Sign() == 0 })
 	s.waitIdle(60 * time.Second)
 	s.reconcileClean()
+	s.requireAudit("guardian.freeze", "factory.frozen", "factory.unfrozen", "cold_action.requested")
 }
 
 func TestAdminRoleTransferTwoSteps(t *testing.T) {
@@ -307,4 +309,9 @@ func TestParkedRefillIsClosedByAnOperator(t *testing.T) {
 	_ = next
 	_ = json.Marshal
 	_ = coldsign.KindFreeze
+	s.requireAudit("refill.closed")
+	var by string
+	if err := s.pool.QueryRow(s.ctx, `SELECT actor FROM audit_log WHERE type='refill.closed'`).Scan(&by); err != nil || by != "ops" {
+		t.Fatalf("refill.closed actor = %q, %v", by, err)
+	}
 }

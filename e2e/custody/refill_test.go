@@ -151,6 +151,7 @@ func TestRefillCeremonyEndToEnd(t *testing.T) {
 		t.Fatalf("cold nonce = %d after importing twice", n)
 	}
 	t.Logf("refill ceremony ok: %s ETH moved cold -> hot, tx %s, Reconcile clean", "60", signed.TxHash)
+	s.requireAudit("cold.funded", "refill.requested", "refill.exported", "refill.imported")
 }
 
 func TestRefillImportAndReexportAttacks(t *testing.T) {

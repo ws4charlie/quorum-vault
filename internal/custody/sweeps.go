@@ -169,6 +169,9 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 		}
 		fee, err := s.Chain.EstimateSweepFee(ctx, chain.SweepIntent{ID: "estimate", Asset: asset, From: addr, ToPartition: c.SinkPartition(asset), Amount: amt})
 		if errors.Is(err, evm.ErrSweepFrozen) {
+			if oerr := s.observeFactory(ctx, true); oerr != nil {
+				return created, oerr
+			}
 			return created, ErrSweepFrozen
 		}
 		if errors.Is(err, evm.ErrDestinationMismatch) {
@@ -181,6 +184,11 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 			return created, ErrSweepFrozen
 		}
 		s.mismatchAlerted.Store(false)
+		if err == nil {
+			if oerr := s.observeFactory(ctx, false); oerr != nil {
+				return created, oerr
+			}
+		}
 		if err != nil {
 			log.Warn("sweep fee estimate failed; skipping", "address", addr, "asset", asset, "error", err.Error())
 			continue
@@ -233,6 +241,11 @@ func (s *Service) BuildSweepJob(ctx context.Context, id string) (string, error) 
 		u, err := s.Chain.BuildSweep(ctx, tx, chain.SweepIntent{ID: id, Asset: sw.Asset, From: sw.From, ToPartition: sw.PartitionID, Amount: sw.Amount})
 		if errors.Is(err, evm.ErrSweepFrozen) || errors.Is(err, evm.ErrDestinationMismatch) {
 			frozen = true
+			if errors.Is(err, evm.ErrSweepFrozen) {
+				if oerr := s.observeFactoryTx(ctx, tx, true); oerr != nil {
+					return oerr
+				}
+			}
 			_, uerr := tx.Exec(ctx, `UPDATE sweeps SET status='failed', failure_reason='sweeping is frozen', updated_at=now() WHERE id=$1`, id)
 			return uerr
 		}
@@ -519,4 +532,34 @@ var _ = common.Address{}
 func (s *Service) ParkSweep(ctx context.Context, id, reason string) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE sweeps SET failure_reason=$2, updated_at=now() WHERE id=$1 AND status NOT IN ('confirmed','failed')`, id, ParkedPrefix+" "+reason)
 	return err
+}
+
+// observeFactory records what core has just learned about the forwarder factory: frozen (its destination is zero) or sweeping.
+// Only a change is recorded, once: "factory.frozen" or "factory.unfrozen", by the chain, since core learns it, not causes it.
+func (s *Service) observeFactory(ctx context.Context, frozen bool) error {
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error { return s.observeFactoryTx(ctx, tx, frozen) })
+}
+
+func (s *Service) observeFactoryTx(ctx context.Context, tx pgx.Tx, frozen bool) error {
+	var prev *bool
+	err := tx.QueryRow(ctx, `SELECT frozen FROM factory_state WHERE chain=$1 FOR UPDATE`, s.Cfg.Chain).Scan(&prev)
+	switch {
+	case err == nil && *prev == frozen:
+		return nil
+	case err != nil && !isNoRows(err):
+		return err
+	case err != nil && !frozen:
+		// First look and it is working: nothing changed, nothing to say.
+		_, err = tx.Exec(ctx, `INSERT INTO factory_state (chain, frozen) VALUES ($1, false) ON CONFLICT DO NOTHING`, s.Cfg.Chain)
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO factory_state (chain, frozen) VALUES ($1, $2)
+		ON CONFLICT (chain) DO UPDATE SET frozen=$2, updated_at=now()`, s.Cfg.Chain, frozen); err != nil {
+		return err
+	}
+	typ := "factory.unfrozen"
+	if frozen {
+		typ = "factory.frozen"
+	}
+	return auditEvent(ctx, tx, s.Cfg.Chain, typ, map[string]any{"actor": "chain", "chain": s.Cfg.Chain})
 }

@@ -84,6 +84,23 @@ func IsRejection(err error) (string, bool) {
 // Decide runs steps 1 to 5 for job and, if everything passes, reserves its digest. signerPub is the public key that
 // would sign (nil: no signer). A policy refusal is returned as a rejection (see IsRejection).
 func (d *Decider) Decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.PublicKey) (*Verdict, error) {
+	arec := &auditRecord{mode: d.mode, job: job}
+	v, err := d.decide(ctx, job, signerPub, arec)
+	if err != nil {
+		// A refusal is recorded before it is reported. If the record cannot be written, that is an outage, not a refusal:
+		// the caller retries, and nothing is answered without a record.
+		if rj, ok := IsRejection(err); ok {
+			arec.reason = rj
+			if aerr := d.guard.auditAlone(ctx, *arec, EventSignRefused); aerr != nil {
+				return nil, aerr
+			}
+		}
+		return nil, err
+	}
+	return v, nil
+}
+
+func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.PublicKey, arec *auditRecord) (*Verdict, error) {
 	// 1. Intent.
 	intent, err := parseIntent(job)
 	if err != nil {
@@ -112,7 +129,11 @@ func (d *Decider) Decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 
 	// 3. Approvals, from configured keys only.
 	hash := intent.Hash()
-	valid := d.countApprovals(hash[:], job.Approvals)
+	approvers := d.validApprovers(hash[:], job.Approvals)
+	valid := len(approvers)
+	arec.intent = &intentFacts{ID: intent.ID, Kind: intent.Kind, Asset: intent.Asset, Amount: amount.String(), Sender: info.Sender,
+		Nonce: info.Nonce, IntentHash: hash[:]}
+	arec.approvers = approvers
 	if intent.Kind == "withdrawal" && valid == 0 {
 		return nil, reject(ReasonApprovals, "no valid approval from a configured, enabled approver")
 	}
@@ -146,13 +167,16 @@ func (d *Decider) Decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 		if prior != nil {
 			if prior.Signature != nil {
 				v.Signature, v.Replayed = prior.Signature, true // signed before: return it, never sign again
-				return nil
+				return gt.audit(ctx, *arec, EventSignReplayed)
 			}
 			if d.mode == ModeGateway && now.Sub(prior.Reserved) < d.cfg.SignTimeout {
 				return errInProgress // another worker is signing this digest
 			}
 			v.NeedSign = true // a stale reservation (gateway) or a retry of the same digest (cosigner)
-			return gt.Touch(ctx, job.Digest, now)
+			if err := gt.Touch(ctx, job.Digest, now); err != nil {
+				return err
+			}
+			return gt.audit(ctx, *arec, EventSignAllowed)
 		}
 
 		// 6a. Reserve.
@@ -163,7 +187,10 @@ func (d *Decider) Decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 			return fmt.Errorf("%w: %v", errSigner, err)
 		}
 		v.NeedSign = true
-		return gt.Record(ctx, rel)
+		if err := gt.Record(ctx, rel); err != nil {
+			return err
+		}
+		return gt.audit(ctx, *arec, EventSignAllowed)
 	})
 	if err != nil {
 		return nil, err
@@ -204,7 +231,13 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 // signature over hash verifies. Unknown or disabled actors, bad signatures and
 // repeats of one actor count for nothing.
 func (d *Decider) countApprovals(hash []byte, approvals []signjob.Approval) int {
+	return len(d.validApprovers(hash, approvals))
+}
+
+// validApprovers names the distinct approvers counted by countApprovals, in the order they were given.
+func (d *Decider) validApprovers(hash []byte, approvals []signjob.Approval) []string {
 	seen := map[string]bool{}
+	out := []string{}
 	for _, a := range approvals {
 		ap, ok := d.cfg.Approvers[a.Actor]
 		if !ok || !ap.Enabled || seen[a.Actor] {
@@ -212,9 +245,10 @@ func (d *Decider) countApprovals(hash []byte, approvals []signjob.Approval) int 
 		}
 		if len(a.Signature) == ed25519.SignatureSize && ed25519.Verify(ap.Key, hash, a.Signature) {
 			seen[a.Actor] = true
+			out = append(out, a.Actor)
 		}
 	}
-	return len(seen)
+	return out
 }
 
 func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i signjob.Intent, codec ChainCodec,

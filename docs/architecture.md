@@ -94,9 +94,25 @@ M-of-N is enforced in software with SoftHSM. Details and runbook: [learn/p6-2-co
 
 ## Audit log
 
-`internal/audit` keeps a hash-chained, append-only `audit_log` table: each row stores the hash of the one before it, database
-triggers refuse UPDATE, DELETE and TRUNCATE, and `Verify` walks the chain to find the first bad row. The table has no foreign
-keys on purpose, so it outlives the rows it describes. Nothing in the `/v2` path writes to it yet.
+Three hash chains, one per trust zone, each in its own database: **core** (the business database), the **gateway**'s guard
+database, and the **cosigner**'s guard database. Each row stores the hash of the row before it; database triggers refuse UPDATE,
+DELETE and TRUNCATE; `internal/audit` appends and verifies.
+
+- **Core.** Business code writes an audit event to the outbox in the same transaction as the change, so the event exists exactly
+  when the change does. One chainer in `qv-relay` (one at a time, by advisory lock) appends the events not yet chained to the
+  chain, once each. It picks "not yet chained", never "after the last seq", because a row with a lower seq can commit later.
+  Chaining inside the business transactions would make them all queue for the chain head. The outbox row cannot be edited or
+  deleted once written.
+- **Gateway and cosigner.** Every decision is recorded in the zone's own database, in the transaction that decides: the permission
+  to sign together with the reservation of the digest, the stored signature, and every refusal with its reason. If the record
+  cannot be written, nothing is signed and nothing is answered: the job is retried. This works with `qv-core` down, and the
+  business zone cannot touch it.
+- **Anchors.** Each chain publishes its head (count and last hash) to Kafka topic `qv.audit.heads` whenever it changes and at a
+  set interval. A chain cut short or rewritten by someone who can switch the triggers off is still a valid chain, but it no longer
+  has the entry that was published. If Kafka is down chaining and signing go on, and the heads catch up.
+- **Checking.** `GET /v2/audit/verify` checks the core chain. `qv-relay verify`, `qv-gateway verify` and `qv-cosigner verify`
+  check a chain against a file of published heads (`-anchors`). Details and what each kind of tampering looks like:
+  [learn/p6b-2-audit.md](learn/p6b-2-audit.md).
 
 ## A withdrawal signed by two parties
 
@@ -144,5 +160,5 @@ unfreeze it; withdrawals then park with their hold and nonce kept (see
 | Party B's cosigner | a compromised party A or gateway cannot get a signature for something B's own config and database refuse | a compromise of B's host and A's host together |
 | Gateway zone | the business database cannot make the gateway sign: it re-verifies approver signatures and policy | anyone who holds the approver keys and the gateway config |
 | Policy + approval before `sign` | no signer call without an `approved` row | a caller who can reach the signer packages directly |
-| Append-only triggers + hash chain | silent edits or deletions in the middle of the log | a DB superuser rewriting the whole chain (needs external anchoring) |
+| Append-only triggers + hash chain + published heads | silent edits or deletions in the log; a cut or rewritten chain disagrees with the heads that left the database | an attacker who also rewrites what is already in Kafka |
 | `X-Actor` header | names the caller for dual control | anything: it is not authentication |

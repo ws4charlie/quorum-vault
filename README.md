@@ -49,7 +49,7 @@ Components, data model, state machines and a sequence diagram of a withdrawal si
 | Signing gateway (zone 1) and cosigner (zone 2): approver signatures, policy, replay guard, each with its own database | [internal/gateway](internal/gateway), [internal/cosigner](internal/cosigner) | attack tests, rogue-party tests |
 | Two-party MPC signer: DKG, derive, sign, refresh, freeze, sealing in HSM tokens, backup and restore | [mpc-party](mpc-party), [internal/mpcsigner](internal/mpcsigner) | `make test-mpc`, the custody tests with `QV_CUSTODY_SIGNER=mpc` |
 | Failure tests on MPC: kill a party or the cosigner, partition, latency, refresh and freeze under live withdrawals | [e2e/custody/mpc_test.go](e2e/custody/mpc_test.go) | see [measurements](docs/measurements/mpc-service.md) |
-| Tamper-evident audit log (hash chain, append-only table) | [internal/audit](internal/audit) | unit tests |
+| Tamper-evident audit: a hash chain in each trust zone (core, gateway, cosigner), heads published to Kafka, verify commands | [internal/audit](internal/audit), [internal/auditchain](internal/auditchain) | `TestTamperingIsCaught`, `e2e/custody` audit checks |
 | Runbooks: MPC backup and restore, keyset freeze | [docs/runbooks](docs/runbooks) | `mpc-party/scripts/restore-drill.sh` |
 
 ## Limits, honestly

@@ -86,6 +86,7 @@ func TestColdMoveExcessEthAndToken(t *testing.T) {
 	if a, _, _ := s.balance("c-cold", "USDT"); a.Cmp(big.NewInt(800_000_000)) != 0 {
 		t.Fatalf("customer available %s", a)
 	}
+	s.requireAudit("cold_move.started")
 }
 
 // The amount a move may take is the hot balance less the liquidity open withdrawals have reserved on it.

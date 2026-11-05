@@ -11,6 +11,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ws4charlie/quorum-vault/internal/audit"
+	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
 //go:embed store.sql
@@ -245,17 +248,35 @@ func (t *GuardTx) Touch(ctx context.Context, digest []byte, at time.Time) error 
 
 // Finish stores sig for a reserved digest and returns the signature that is
 // stored: the first one written wins, a later one is discarded and the stored
-// bytes are returned instead. Only the returned value may be released.
+// bytes are returned instead. Only the returned value may be released. The
+// record "sign.completed" is written in the same transaction: no signature is
+// released without it.
 func (g *Guard) Finish(ctx context.Context, digest, sig []byte, at time.Time) ([]byte, error) {
-	if _, err := g.pool.Exec(ctx, `UPDATE signed_digests SET signature=$2, signed_at=$3 WHERE digest=$1 AND signature IS NULL`, digest, sig, at); err != nil {
+	tx, err := g.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: store signature: %w", err)
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if _, err := tx.Exec(ctx, `UPDATE signed_digests SET signature=$2, signed_at=$3 WHERE digest=$1 AND signature IS NULL`, digest, sig, at); err != nil {
 		return nil, fmt.Errorf("gateway: store signature: %w", err)
 	}
 	var stored []byte
-	if err := g.pool.QueryRow(ctx, `SELECT signature FROM signed_digests WHERE digest=$1`, digest).Scan(&stored); err != nil {
+	var intentID string
+	if err := tx.QueryRow(ctx, `SELECT signature, intent_id FROM signed_digests WHERE digest=$1`, digest).Scan(&stored, &intentID); err != nil {
 		return nil, fmt.Errorf("gateway: read stored signature: %w", err)
 	}
 	if stored == nil {
 		return nil, errors.New("gateway: digest has no reservation")
+	}
+	ev, err := auditRecord{mode: ModeGateway, job: signjob.Job{ID: intentID, Digest: digest}}.completedEvent(intentID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := audit.AppendTx(ctx, tx, ev, ""); err != nil {
+		return nil, fmt.Errorf("gateway: audit %s: %w", EventSignCompleted, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("gateway: store signature: %w", err)
 	}
 	return stored, nil
 }

@@ -38,3 +38,34 @@ CREATE TABLE IF NOT EXISTS nonce_claims (
     kind      text NOT NULL,
     PRIMARY KEY (chain, sender, nonce)
 );
+
+-- The zone's own hash-chained audit log (same shape as the business database's, see internal/audit): every decision, signed or
+-- refused, in this database, so it does not depend on the business zone being up or honest. Append-only by trigger.
+CREATE TABLE IF NOT EXISTS audit_log (
+    seq        bigserial PRIMARY KEY,
+    at         timestamptz NOT NULL,
+    actor      text NOT NULL,
+    type       text NOT NULL,
+    request_id uuid,
+    wallet_id  uuid,
+    key_id     uuid,
+    payload    jsonb,
+    prev_hash  bytea NOT NULL,
+    hash       bytea NOT NULL,
+    source_id  uuid UNIQUE
+);
+
+CREATE OR REPLACE FUNCTION audit_log_append_only() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_log is append-only';
+END;
+$$;
+
+CREATE OR REPLACE TRIGGER audit_log_no_update_delete
+    BEFORE UPDATE OR DELETE ON audit_log
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+
+CREATE OR REPLACE TRIGGER audit_log_no_truncate
+    BEFORE TRUNCATE ON audit_log
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();

@@ -592,3 +592,11 @@ func (s *Service) ParkWithdrawal(ctx context.Context, id, reason string) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE withdrawals SET failure_reason=$2, updated_at=now() WHERE id=$1 AND status NOT IN ('confirmed','failed')`, id, ParkedPrefix+" "+reason)
 	return err
 }
+
+// RecordRejection records that actor rejected the withdrawal, and why. The rejection itself reaches the workflow as a signal;
+// this is the audit trail of who said no. It does not change the withdrawal.
+func (s *Service) RecordRejection(ctx context.Context, id, actor, reason string) error {
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		return auditEvent(ctx, tx, id, "withdrawal.rejected", map[string]any{"actor": actor, "withdrawal": id, "reason": reason})
+	})
+}
