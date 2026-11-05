@@ -43,7 +43,7 @@ Pull requests used to run one 15-minute MPC job. Now four jobs run in parallel, 
 and (for the custody ones) Temporal and Redpanda: `mpc-signing` (`make test-mpc`) and `e2e-evm-flows`, `e2e-evm-tx-failures` and `e2e-evm-recovery` (Make targets `test-<job>`; the groups are named for what they test, the chain first); the groups are listed in the Makefile). The setup steps live once, in the composite action
 [mpc-env](../../.github/actions/mpc-env/action.yml). The heavy tests are in `make test-e2e-evm-failure` and run nightly
 ([nightly.yml](../../.github/workflows/nightly.yml): the signing path and the full custody set, 45 minutes allowed, also runnable on
-demand). Group 3 keeps a single crash boundary, `withdrawal.after_broadcast`, through `QV_CRASH_BOUNDARIES`. Only `test` is a
+demand). The `recovery` group keeps a single crash boundary, `withdrawal.after_broadcast`, through `QV_CRASH_BOUNDARIES`. Only `test` is a
 required check. One test by name: `make test-e2e-evm TEST=TestName`.
 
 ## Quiz
