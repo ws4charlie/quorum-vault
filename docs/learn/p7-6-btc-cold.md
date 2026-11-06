@@ -4,16 +4,27 @@
 
 `Reconcile` used to skip its chain checks for Bitcoin. Now three sources must agree: the ledger, the output table (`btc_utxos`), and the chain.
 
-- **The chain is read from the node, not from our tables.** `Adapter.BalanceBatch` runs `scantxoutset` for a set of addresses (100 at a time; the node is
-  busy during a call, so it is never on a request path) at the node's tip and reports the height. A balance counts only outputs the books should have
-  by now: change and sweep outputs of our own transactions at the spend depth, everything else (deposits, operator funding) at the deposit depth.
-- **Checks:** `hot` (ledger against chain, per shard), `cold` (what moves delivered, against the cold address), `deposit_addresses` (suspense stays
-  on its address, so it is part of what the chain holds), `hot_outputs` and `deposit_outputs` (the table against the ledger, suspense left out) and
-  `outputs_on_chain` (`AuditOutputs`: a row whose output is not unspent on chain, a differing value, a settled output on a hot address that the table
-  does not hold). A deposit output without a row is reported only if no deposit of ours explains it.
-- A difference names the address, both figures and the height it read, logs an ALERT, and changes nothing.
-- With anything in flight (a sweep, a withdrawal, a move) the chain comparisons are skipped and counted, as the clearing residuals are: the books and
-  the chain see an output at different depths. Run it when the cell is quiet.
+- **The chain is read from the node, not from our tables.** `Adapter.ChainView` runs `scantxoutset` for a set of addresses (100 at a time; the node is
+  busy during a call, so it is never on a request path) at the node's tip and reports the height.
+- **In flight is computed, not skipped.** The books and the chain differ only by things the cell can name from `btc_attempts` (every transaction it sent,
+  with its inputs and outputs) and from what the books booked at broadcast. For the comparison:
+  - a table row whose output is gone from the chain is explained when a confirmed transaction of ours spends it (`SpentInFlight`, taken out of the
+    ledger side);
+  - an unspent output that is not in the table is explained when it is an output of a transaction of ours that the books have not settled
+    (`btc_attempts.settled_at`, migration 0016; an output to a cold address is counted only after settlement) or is younger than the credit depth
+    (not credited yet);
+  - what a sweep (sweep -> dep) and a move (tocold -> hot) booked at broadcast is undone on the ledger side, and the clearing accounts are expected to
+    hold exactly the broadcast, unsettled amounts.
+  Everything else is a real difference, in flight or not.
+- **Consistent reads.** The safe head and a stamp of the books are read before and after; if a block or a change in the books arrived during the read it
+  is repeated, up to 3 times. Only then is the comparison skipped, and the report says so (`skipped_chain_checks`) and is **not Clean**. Skips that last
+  longer than `reconcile.max_skip` (default 15 minutes) raise an ALERT.
+- **Checks:** `hot` (ledger against chain, per shard), `cold` (what moves delivered, against the cold address), `deposit_addresses` (suspense included,
+  it stays on its address), `hot_outputs` and `deposit_outputs` (table against ledger, suspense left out) and `outputs_on_chain` (row by row: a row not
+  unspent on chain and not explained, a differing value, a hot-address output the table does not hold, a deposit-address output no deposit of ours
+  explains).
+- A difference names the address, both figures and the height it read, logs an ALERT, and changes nothing. The scan-caught-up check is separate: while the
+  scan lags behind the safe head the report is not clean.
 
 ## Hot to cold
 

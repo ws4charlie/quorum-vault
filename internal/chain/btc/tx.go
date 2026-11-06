@@ -303,6 +303,9 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 	if err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `UPDATE btc_attempts SET settled_at = COALESCE(settled_at, now()) WHERE chain=$1 AND txid=$2`, a.cfg.Chain, txid); err != nil {
+		return err
+	}
 	for _, in := range p.Inputs {
 		if _, err := tx.Exec(ctx, `UPDATE btc_utxos SET status='spent', updated_at=now() WHERE chain=$1 AND txid=$2 AND vout=$3`, a.cfg.Chain, in.TxID, in.Vout); err != nil {
 			return err

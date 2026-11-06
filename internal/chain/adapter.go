@@ -211,16 +211,26 @@ type OutputDiff struct {
 	Detail  string
 }
 
-// OutputAuditor is implemented by a chain cell that keeps its own outputs (Bitcoin). AuditOutputs compares them with the chain's UTXO set and returns
-// every disagreement and the chain height it read. It changes nothing.
-type OutputAuditor interface {
-	AuditOutputs(ctx context.Context) (diffs []OutputDiff, height uint64, err error)
+// ChainView is what the chain says, put in the terms of the books at this moment, for a chain cell that keeps its own outputs (Bitcoin). The
+// books and the chain differ by things the cell can name from its own records of the transactions it sent; the view leaves those out of the
+// chain side and lists them, so that what is left is a real difference.
+type ChainView struct {
+	Height uint64 // the tip the UTXO set was read at
+	// Balance of each address as the books should see it: unspent outputs that are in the output table, or that nothing explains away. Left out:
+	// outputs of our own transactions that are not settled yet, and outputs of others younger than the credit depth (not credited yet).
+	Balance map[string]*big.Int
+	// SpentInFlight is, per address, the value of table rows that a confirmed transaction of ours has already spent but the books have not settled.
+	SpentInFlight map[string]*big.Int
+	// Unsettled counts the outputs left out of Balance for those reasons.
+	Unsettled int
+	// Diffs are the disagreements nothing explains.
+	Diffs []OutputDiff
 }
 
-// BatchBalancer is implemented by a chain cell whose balance read is expensive (Bitcoin: the node is busy during it), so the reconciliation asks for
-// many addresses at once. It returns the balance of each address and the height it read.
-type BatchBalancer interface {
-	BalanceBatch(ctx context.Context, addrs []string) (map[string]*big.Int, uint64, error)
+// ChainViewer is implemented by a chain cell that can produce a ChainView for a set of addresses. The read is of the node's UTXO set at its tip and
+// keeps the node busy: callers batch and run it on their own cadence, never on a request path.
+type ChainViewer interface {
+	ChainView(ctx context.Context, addrs []string) (ChainView, error)
 }
 
 // Settler is implemented by a chain cell that must update its own books when a transaction of an owner settles, in the settlement's database

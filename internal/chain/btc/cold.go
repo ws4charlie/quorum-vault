@@ -187,14 +187,29 @@ func (a *Adapter) Balance(ctx context.Context, address, asset string, _ uint64) 
 	return m[c], nil
 }
 
-// AuditOutputs compares the output table with the chain's UTXO set, output by output, for every hot shard and for the deposit addresses that
-// hold a row. It reports: a row (available or reserved) whose output is not unspent on chain, and a settled output on a hot address that has no row.
-// A deposit output on chain without a row is reported only when no deposit of ours explains it (a suspense deposit stays on its address on purpose).
-// It changes nothing.
-func (a *Adapter) AuditOutputs(ctx context.Context) ([]chain.OutputDiff, uint64, error) {
-	addrSet := map[string]bool{}
+// ChainView reads the node's UTXO set for the addresses and puts it in the terms of the books (see chain.ChainView). A table row whose output is gone
+// from the chain is explained when a confirmed transaction of ours spends it (btc_attempts holds every transaction we sent, with its inputs); an
+// unspent output that is not in the table is explained when it is an output of a transaction of ours (not settled yet) or younger than the credit
+// depth. A deposit output of a customer that nothing explains, a hot output that is not in the table, a differing value or a missing row nothing
+// explains are returned as differences. It changes nothing.
+func (a *Adapter) ChainView(ctx context.Context, addrs []string) (chain.ChainView, error) {
+	set := map[string]bool{}
+	canon := make([]string, 0, len(addrs))
+	add := func(ad string) {
+		if ad != "" && !set[ad] {
+			set[ad] = true
+			canon = append(canon, ad)
+		}
+	}
+	for _, ad := range addrs {
+		c, err := a.NormalizeAddress(ad)
+		if err != nil {
+			return chain.ChainView{}, err
+		}
+		add(c)
+	}
 	for _, sh := range a.shards {
-		addrSet[sh.address] = true
+		add(sh.address)
 	}
 	type row struct {
 		txid    string
@@ -204,76 +219,178 @@ func (a *Adapter) AuditOutputs(ctx context.Context) ([]chain.OutputDiff, uint64,
 		deposit bool
 		address string
 	}
-	rows, err := a.pool.Query(ctx, `SELECT txid, vout, value, status, deposit, COALESCE(address,'') FROM btc_utxos WHERE chain=$1 AND status IN ('available','reserved')`, a.cfg.Chain)
+	rows, err := a.pool.Query(ctx, `SELECT txid, vout, value, status, deposit, COALESCE(address,''), partition_id FROM btc_utxos WHERE chain=$1 AND status IN ('available','reserved')`, a.cfg.Chain)
 	if err != nil {
-		return nil, 0, err
+		return chain.ChainView{}, err
 	}
 	var table []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.txid, &r.vout, &r.value, &r.status, &r.deposit, &r.address); err != nil {
+		var part string
+		if err := rows.Scan(&r.txid, &r.vout, &r.value, &r.status, &r.deposit, &r.address, &part); err != nil {
 			rows.Close()
-			return nil, 0, err
+			return chain.ChainView{}, err
 		}
+		if !r.deposit {
+			sh, err := a.shardOf(part)
+			if err != nil {
+				rows.Close()
+				return chain.ChainView{}, err
+			}
+			r.address = sh.address
+		}
+		add(r.address)
 		table = append(table, r)
-		if r.deposit {
-			addrSet[r.address] = true
-		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, 0, err
+		return chain.ChainView{}, err
 	}
-	addrs := make([]string, 0, len(addrSet))
-	for ad := range addrSet {
-		addrs = append(addrs, ad)
-	}
-	sort.Strings(addrs)
-	us, tip, err := a.scan(ctx, addrs)
+	sort.Strings(canon)
+	us, tip, err := a.scan(ctx, canon)
 	if err != nil {
-		return nil, 0, err
+		return chain.ChainView{}, err
 	}
-	own, err := a.settledDepths(ctx, us)
+	own, err := a.ownTxids(ctx, us)
 	if err != nil {
-		return nil, 0, err
+		return chain.ChainView{}, err
+	}
+	ours, err := a.settledDepths(ctx, us) // every transaction of ours, settled or not
+	if err != nil {
+		return chain.ChainView{}, err
 	}
 	onChain := map[string]unspent{}
 	for _, u := range us {
 		onChain[fmt.Sprintf("%s:%d", u.Txid, u.Vout)] = u
 	}
+	v := chain.ChainView{Height: uint64(tip), Balance: map[string]*big.Int{}, SpentInFlight: map[string]*big.Int{}}
+	for _, ad := range canon {
+		v.Balance[ad] = new(big.Int)
+		v.SpentInFlight[ad] = new(big.Int)
+	}
 	inTable := map[string]bool{}
-	var diffs []chain.OutputDiff
 	for _, r := range table {
 		k := fmt.Sprintf("%s:%d", r.txid, r.vout)
 		inTable[k] = true
 		u, ok := onChain[k]
 		if !ok {
-			ad := r.address
-			if !r.deposit {
-				ad = "hot"
+			spent, err := a.spentByConfirmedAttempt(ctx, r.txid, r.vout)
+			if err != nil {
+				return chain.ChainView{}, err
 			}
-			diffs = append(diffs, chain.OutputDiff{Address: ad, Output: k, Detail: fmt.Sprintf("the table holds %d sats (%s) but the output is not unspent on chain: spent behind our back, or never there", r.value, r.status)})
+			if spent {
+				v.SpentInFlight[r.address].Add(v.SpentInFlight[r.address], big.NewInt(r.value))
+				continue
+			}
+			v.Diffs = append(v.Diffs, chain.OutputDiff{Address: r.address, Output: k,
+				Detail: fmt.Sprintf("the table holds %d sats (%s) but the output is not unspent on chain and no confirmed transaction of ours spent it", r.value, r.status)})
 			continue
 		}
-		if amt, err := Sats(u.Amount.String()); err == nil && amt.Int64() != r.value {
-			diffs = append(diffs, chain.OutputDiff{Address: u.address(), Output: k, Detail: fmt.Sprintf("the table holds %d sats, the chain %s", r.value, amt)})
+		amt, err := Sats(u.Amount.String())
+		if err != nil {
+			return chain.ChainView{}, err
 		}
+		if amt.Int64() != r.value {
+			v.Diffs = append(v.Diffs, chain.OutputDiff{Address: r.address, Output: k, Detail: fmt.Sprintf("the table holds %d sats, the chain %s", r.value, amt)})
+		}
+		v.Balance[r.address].Add(v.Balance[r.address], amt)
 	}
 	for _, u := range us {
 		k := fmt.Sprintf("%s:%d", u.Txid, u.Vout)
-		if inTable[k] || !a.settled(u, tip, own) {
+		if inTable[k] {
 			continue
 		}
 		ad := u.address()
+		if own[u.Txid] || (!ours[u.Txid] && tip-u.Height+1 < int64(a.cfg.Confirmations)) {
+			v.Unsettled++ // an output of ours the books record at settlement, or a payment not yet deep enough to credit
+			continue
+		}
+		amt, err := Sats(u.Amount.String())
+		if err != nil {
+			return chain.ChainView{}, err
+		}
+		if b, ok := v.Balance[ad]; ok {
+			b.Add(b, amt)
+		}
 		if _, hot := a.byAddr[ad]; hot {
-			diffs = append(diffs, chain.OutputDiff{Address: ad, Output: k, Detail: "an unspent output on a hot address that the table does not hold"})
+			v.Diffs = append(v.Diffs, chain.OutputDiff{Address: ad, Output: k, Detail: "an unspent output on a hot address that the table does not hold"})
+			continue
+		}
+		var known bool
+		if err := a.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM deposits WHERE chain=$1 AND dedup_key=$2) OR NOT EXISTS (SELECT 1 FROM deposit_addresses WHERE chain=$1 AND address=$3)`,
+			a.cfg.Chain, a.cfg.Chain+":"+k, ad).Scan(&known); err != nil {
+			return chain.ChainView{}, err
+		}
+		if !known { // on a customer's deposit address, old enough, and no deposit of ours explains it (a suspense deposit does): the scan has not seen it
+			v.Diffs = append(v.Diffs, chain.OutputDiff{Address: ad, Output: k, Detail: "an unspent output on a deposit address that no deposit of ours explains"})
 		}
 	}
-	sort.Slice(diffs, func(i, j int) bool { return diffs[i].Output < diffs[j].Output })
-	return diffs, uint64(tip), nil
+	sort.Slice(v.Diffs, func(i, j int) bool { return v.Diffs[i].Output < v.Diffs[j].Output })
+	return v, nil
+}
+
+// ownTxids returns which of the unspent outputs' transactions are transactions of ours that the books have not settled yet.
+func (a *Adapter) ownTxids(ctx context.Context, us []unspent) (map[string]bool, error) {
+	ids := map[string]bool{}
+	for _, u := range us {
+		ids[u.Txid] = true
+	}
+	own := map[string]bool{}
+	if len(ids) == 0 {
+		return own, nil
+	}
+	list := make([]string, 0, len(ids))
+	for id := range ids {
+		list = append(list, id)
+	}
+	rows, err := a.pool.Query(ctx, `SELECT txid FROM btc_attempts WHERE chain=$1 AND txid = ANY($2) AND settled_at IS NULL`, a.cfg.Chain, list)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		own[id] = true
+	}
+	return own, rows.Err()
+}
+
+// spentByConfirmedAttempt reports whether a transaction of ours that is in a block spends the output.
+func (a *Adapter) spentByConfirmedAttempt(ctx context.Context, txid string, vout uint32) (bool, error) {
+	probe, _ := json.Marshal([]map[string]any{{"txid": txid, "vout": vout}})
+	rows, err := a.pool.Query(ctx, `SELECT txid FROM btc_attempts WHERE chain=$1 AND broadcast_at IS NOT NULL AND payload->'inputs' @> $2::jsonb`, a.cfg.Chain, string(probe))
+	if err != nil {
+		return false, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return false, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, id := range ids {
+		n, err := a.confirmations(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		if n >= 1 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 var (
-	_ chain.MoveCapacity  = (*Adapter)(nil)
-	_ chain.OutputAuditor = (*Adapter)(nil)
+	_ chain.MoveCapacity = (*Adapter)(nil)
+	_ chain.ChainViewer  = (*Adapter)(nil)
 )

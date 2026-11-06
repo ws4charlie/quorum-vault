@@ -38,6 +38,13 @@ type File struct {
 	Withdrawal WithdrawalFile `json:"withdrawal"`
 	Scan       ScanFile       `json:"scan"`
 	Cold       ColdFile       `json:"cold"`
+	Reconcile  ReconcileFile  `json:"reconcile"`
+}
+
+// ReconcileFile configures Reconcile.
+type ReconcileFile struct {
+	// MaxSkip is how long the chain comparisons may be skipped (a block kept arriving during each read) before an ALERT is raised. Default 15m.
+	MaxSkip string `json:"max_skip"`
 }
 
 // ColdFile configures hot-to-cold moves. Without addresses and limits nothing is moved. The business config's copy of the
@@ -167,10 +174,11 @@ type Config struct {
 	Assets    map[string]Asset
 	AssetList []string // sorted
 
-	SweepK          int
-	SweepRetryAfter time.Duration
-	MinSweepWei     *big.Int
-	PlanInterval    time.Duration
+	SweepK           int
+	SweepRetryAfter  time.Duration
+	ReconcileMaxSkip time.Duration
+	MinSweepWei      *big.Int
+	PlanInterval     time.Duration
 
 	ApprovalWindow  time.Duration
 	ApprovalTimeout time.Duration
@@ -370,6 +378,9 @@ func (f File) Build() (*Config, error) {
 		return nil, err
 	}
 	if c.SweepRetryAfter, err = dur("retry_after", s.RetryAfter, time.Minute); err != nil {
+		return nil, err
+	}
+	if c.ReconcileMaxSkip, err = dur("reconcile max_skip", f.Reconcile.MaxSkip, 15*time.Minute); err != nil {
 		return nil, err
 	}
 	if c.Family == FamilyBTC {

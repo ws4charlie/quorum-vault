@@ -39,7 +39,8 @@ type Service struct {
 	Cfg    *Config
 	Now    func() time.Time
 
-	mismatchAlerted atomic.Bool // the "destination changed on chain" ALERT was given and the mismatch has not cleared since
+	reconSkipSince  atomic.Int64 // Unix time the chain comparisons of Reconcile began to be skipped (0: they are not)
+	mismatchAlerted atomic.Bool  // the "destination changed on chain" ALERT was given and the mismatch has not cleared since
 }
 
 // New returns a Service. Led defaults to the Postgres ledger.

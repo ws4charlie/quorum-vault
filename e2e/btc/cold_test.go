@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ type recCheck struct {
 
 type recon struct {
 	Clean    bool
+	Skipped  int `json:"skipped_chain_checks"`
 	Height   uint64
 	InFlight int `json:"in_flight"`
 	Checks   []recCheck
@@ -55,6 +57,16 @@ func (r recon) failed() []recCheck {
 	return f
 }
 
+func (r recon) failedExcept(name string) []recCheck {
+	var f []recCheck
+	for _, c := range r.failed() {
+		if c.Name != name {
+			f = append(f, c)
+		}
+	}
+	return f
+}
+
 func (r recon) has(name string) (ran bool) {
 	for _, c := range r.Checks {
 		if c.Name == name && !c.Skipped {
@@ -78,7 +90,10 @@ func (s *system) reconcileClean() recon {
 	var r recon
 	s.waitFor(90*time.Second, "Reconcile is clean", func() bool {
 		r = s.reconcile()
-		return r.Clean && r.InFlight == 0 && r.has("hot") && r.has("deposit_addresses") && r.has("hot_outputs") && r.has("outputs_on_chain")
+		if !r.Clean {
+			s.t.Logf("not clean yet: %s %+v", r.failedNames(), r.failed())
+		}
+		return r.Clean && r.has("hot") && r.has("deposit_addresses") && r.has("hot_outputs") && r.has("outputs_on_chain")
 	})
 	return r
 }
@@ -512,3 +527,91 @@ func (s *system) dropBreak() {
 		s.t.Fatal(err)
 	}
 }
+
+// mustBeClean asserts that Reconcile, right now, runs every chain comparison and finds nothing, whatever is in flight.
+func (s *system) mustBeClean(stage string) recon {
+	s.t.Helper()
+	r := s.reconcile()
+	r.Clean = len(r.failedExcept("scan_caught_up")) == 0 // the worker is stopped in these stages, so the scan may lag: that is its own check
+	if !r.Clean || r.Skipped != 0 || !r.has("hot") || !r.has("deposit_addresses") || !r.has("outputs_on_chain") {
+		s.t.Fatalf("%s (%d in flight): clean=%v skipped=%d failed: %s\n%+v", stage, r.InFlight, r.Clean, r.Skipped, r.failedNames(), r.failedExcept("scan_caught_up"))
+	}
+	return r
+}
+
+// inFlightStages drives one open transaction through every stage and asks for Reconcile at each: built and unsigned, in the mempool, with one
+// confirmation, past the spend depth, and settled. The worker is stopped once the transaction is broadcast so that settlement waits and the
+// stages in between can be looked at.
+func inFlightStages(t *testing.T, s *system, trigger func(), built, broadcast, settled func() bool) {
+	t.Helper()
+	_ = syscallStop(s)
+	trigger()
+	s.waitFor(60*time.Second, "the transaction is built", built)
+	s.mustBeClean("built, not signed")
+	_ = syscallCont(s)
+	s.waitFor(60*time.Second, "the transaction is broadcast", broadcast)
+	s.worker.stop() // settlement waits from here
+	s.mustBeClean("in the mempool")
+	s.node.mine(1, "")
+	s.mustBeClean("one confirmation")
+	s.node.mine(1, "")
+	s.mustBeClean("at the spend depth, not settled")
+	s.node.mine(1, "")
+	r := s.mustBeClean("past the spend depth, not settled")
+	if r.InFlight == 0 {
+		t.Fatal("nothing in flight: the stages did not test what they should")
+	}
+	s.startWorker()
+	s.waitFor(90*time.Second, "settled", settled)
+	s.node.mine(8, "")
+	s.reconcileClean()
+}
+
+func TestReconcileCleanWithAWithdrawalInFlightAndACatchesARealDifference(t *testing.T) {
+	s := coldSystem(t, opts{}, 50_000_000)
+	s.deposit("c1", 30_000_000)
+	var id string
+	inFlightStages(t, s,
+		func() { id = s.withdraw("ini", "k1", "c1", s.node.fresh(), 10_000_000).ID },
+		func() bool { return s.utxoCount("reserved") > 0 },
+		func() bool { return s.getWd(id).Status == "broadcast" },
+		func() bool { return s.getWd(id).Status == "confirmed" })
+	// A real difference while another withdrawal is open: coins sent to the hot address behind our back (the scan is stopped, so nothing explains them).
+	id = s.withdraw("ini", "k2", "c1", s.node.fresh(), 5_000_000).ID
+	s.waitWd(id, "broadcast", 60*time.Second)
+	s.worker.stop()
+	s.node.pay(map[string]string{s.hotAddr: btcAmount(1_000_000)})
+	s.node.mine(6, "")
+	r := s.reconcile()
+	if r.Clean || r.InFlight == 0 || !strings.Contains(r.failedNames(), "hot ") || !strings.Contains(r.failedNames(), "outputs_on_chain") {
+		t.Fatalf("a real difference during an open withdrawal: clean=%v in flight %d failed: %s", r.Clean, r.InFlight, r.failedNames())
+	}
+}
+
+func TestReconcileCleanWithASweepInFlight(t *testing.T) {
+	s := sweepSystem(t, opts{}, 0)
+	addr := s.newCustomer("c1")
+	inFlightStages(t, s,
+		func() {
+			s.node.pay(map[string]string{addr: btcAmount(30_000_000)})
+			s.node.pay(map[string]string{addr: btcAmount(800)}) // suspense on the same address
+			s.node.mine(6, "")
+		},
+		func() bool {
+			return s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND deposit AND status='reserved'`, s.chain) > 0
+		},
+		func() bool { return s.sweepsIn("broadcast") == 1 },
+		func() bool { return s.sweepsIn("confirmed") == 1 })
+}
+
+func TestReconcileCleanWithAColdMoveInFlight(t *testing.T) {
+	s := coldSystem(t, opts{coldLow: "1000000", coldHigh: "30000000", coldTarget: "10000000"}, 0)
+	inFlightStages(t, s,
+		func() { s.node.pay(map[string]string{s.hotAddr: btcAmount(45_000_000)}); s.node.mine(6, "") },
+		func() bool { return s.utxoCount("reserved") > 0 },
+		func() bool { n, _, _ := s.coldMovesIn("broadcast"); return n == 1 },
+		func() bool { n, _, _ := s.coldMovesIn("confirmed"); return n == 1 })
+}
+
+func syscallStop(s *system) error { return s.gateway.cmd.Process.Signal(syscall.SIGSTOP) }
+func syscallCont(s *system) error { return s.gateway.cmd.Process.Signal(syscall.SIGCONT) }
