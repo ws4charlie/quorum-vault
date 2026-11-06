@@ -198,6 +198,13 @@ func (s *Service) creditDeposit(ctx context.Context, tx pgx.Tx, d chain.Observed
 		}
 		to = custAcct(*customer, c.Chain, d.Asset)
 	}
+	if status == "credited" {
+		if rec, ok := s.Chain.(chain.DepositRecorder); ok { // the cell keeps the output a sweep will spend (Bitcoin); suspense stays where it is
+			if err := rec.RecordDeposit(ctx, tx, d); err != nil {
+				return false, err
+			}
+		}
+	}
 	meta := map[string]any{"deposit": id, "tx": d.TxHash}
 	if err := s.transfer(ctx, tx, "dep-credit:"+id, depAcct(c.Chain, d.Asset), to, d.Amount, meta); err != nil {
 		return false, err

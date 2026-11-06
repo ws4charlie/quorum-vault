@@ -85,6 +85,9 @@ func unsignedOf(chainName string, built *Unsigned, raw []byte, ref chain.KeyRef)
 // BuildReplacement builds the fee bump of the owner's newest attempt: the same inputs and the same payment, less change, a higher fee (see the rule
 // above). Without a change output, or when the change would fall to dust, it returns chain.ErrCannotBump: the attempt cannot be bumped.
 func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	if ownerKind == "sweep" { // a sweep has one output and no change: its bump is a later task, and until then it waits with an ALERT
+		return chain.UnsignedTx{}, fmt.Errorf("%w: fee bumps of a sweep are not built yet", chain.ErrCannotBump)
+	}
 	if ownerKind != "withdrawal" {
 		return chain.UnsignedTx{}, errLater
 	}
@@ -123,6 +126,9 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 // Once it confirms, no other transaction can spend those inputs, so a half-signed one can never confirm. It returns chain.ErrNotSupported when
 // nothing was built, and chain.ErrCannotBump when the inputs cannot pay for it.
 func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	if ownerKind == "sweep" { // as above: a sweep whose signature may exist parks with an ALERT and releases nothing
+		return chain.UnsignedTx{}, fmt.Errorf("%w: the cancel of a sweep is not built yet", chain.ErrCannotBump)
+	}
 	if ownerKind != "withdrawal" {
 		return chain.UnsignedTx{}, errLater
 	}

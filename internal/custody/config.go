@@ -294,7 +294,7 @@ func (c *Config) buildBTC(cf ChainFile) error {
 	if err := c.BTC.Validate(); err != nil {
 		return fmt.Errorf("custody: config: %w", err)
 	}
-	c.SinkShard = -1
+	c.SinkShard = 0 // sweeps pay the first hot shard
 	if len(cf.Assets) != 1 {
 		return fmt.Errorf("custody: config: family btc has exactly one asset, %s", btc.Native)
 	}
@@ -309,7 +309,7 @@ func (c *Config) buildBTC(cf ChainFile) error {
 	if err != nil {
 		return err
 	}
-	// PriceWei is the evm sweep rule's unit; bitcoin's sweep rule is a later task.
+	// PriceWei 1: the sweep rule compares in the chain's own smallest unit (satoshis here), so min_sweep_wei is satoshis for this family.
 	c.Assets[btc.Native] = Asset{Symbol: btc.Native, Decimals: btc.Decimals, MinDeposit: min, PriceWei: big.NewInt(1)}
 	c.AssetList = []string{btc.Native}
 	return nil
