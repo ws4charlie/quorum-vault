@@ -9,6 +9,8 @@
 //	approve       an operator signs a request with their own key
 //	sign          check the request, count the approvals, sign in the HSM, write the signed transaction file
 //
+// A Bitcoin config ("family": "btc") and a Bitcoin request take the same commands; keygen -network <name> also prints the Bitcoin cold address.
+//
 // SoftHSM cannot enforce M-of-N with cards the way a real HSM does, so THIS TOOL enforces it in software with operator
 // signatures. That is a stand-in, and the output says so.
 package main
@@ -61,6 +63,7 @@ func run(args []string, out, errw io.Writer) error {
 	operator := fs.String("operator", "", "operator name")
 	lib := fs.String("lib", hsm.DefaultLibPath(), "PKCS#11 module (keygen)")
 	token := fs.String("token", "qv-cold", "token label (keygen)")
+	network := fs.String("network", "", "bitcoin network (keygen): also print the cold address for it (mainnet, testnet3, signet, regtest)")
 	pinEnv := fs.String("pin-env", "QV_COLD_PIN", "environment variable holding the token PIN (keygen)")
 	var approvals multi
 	fs.Var(&approvals, "approval", "approval file (repeatable)")
@@ -103,7 +106,20 @@ func run(args []string, out, errw io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(errw, "cold address %s\n", crypto.PubkeyToAddress(*pk))
-		return write(map[string]string{"key_id": hex.EncodeToString(id), "public_key": hex.EncodeToString(pub), "address": crypto.PubkeyToAddress(*pk).Hex()})
+		res := map[string]string{"key_id": hex.EncodeToString(id), "public_key": hex.EncodeToString(pub), "address": crypto.PubkeyToAddress(*pk).Hex()}
+		if *network != "" { // the same key as a Bitcoin cold key: a compressed key and its P2WPKH address on the network
+			comp, err := coldsign.CompressPublicKey(hex.EncodeToString(pub))
+			if err != nil {
+				return err
+			}
+			addr, err := coldsign.BTCAddressOf(*network, comp)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(errw, "bitcoin cold address (%s) %s\n", *network, addr)
+			res["btc_public_key"], res["btc_address"] = comp, addr
+		}
+		return write(res)
 
 	case "operator-key":
 		if *keyPath == "" {
@@ -117,6 +133,9 @@ func run(args []string, out, errw io.Writer) error {
 		return nil
 
 	case "inspect", "sign":
+		if cb, err := os.ReadFile(*cfgPath); err == nil && coldsign.IsBTCConfig(cb) {
+			return runBTC(cmd, *cfgPath, *reqPath, approvals, out, write)
+		}
 		cfg, err := coldsign.LoadConfig(*cfgPath)
 		if err != nil {
 			return err
@@ -178,6 +197,9 @@ func run(args []string, out, errw io.Writer) error {
 		if *keyPath == "" || *operator == "" || *reqPath == "" {
 			return fmt.Errorf("approve needs -operator, -key and -request")
 		}
+		if rb, err := os.ReadFile(*reqPath); err == nil && coldsign.IsBTCRequest(rb) {
+			return approveBTC(*operator, *keyPath, *reqPath, out, write)
+		}
 		rf, err := readJSON[coldsign.RequestFile](*reqPath)
 		if err != nil {
 			return err
@@ -226,4 +248,83 @@ type tokenSigner struct {
 
 func (s tokenSigner) SignDigest(ctx context.Context, digest [32]byte) (*big.Int, *big.Int, error) {
 	return s.tok.SignECDSA(ctx, s.id, digest)
+}
+
+// runBTC is inspect and sign for a Bitcoin config: the same steps, the Bitcoin rules.
+func runBTC(cmd, cfgPath, reqPath string, approvals []string, out io.Writer, write func(any) error) error {
+	cfg, err := coldsign.LoadBTCConfig(cfgPath)
+	if err != nil {
+		return err
+	}
+	rf, err := readJSON[coldsign.BTCRequestFile](reqPath)
+	if err != nil {
+		return err
+	}
+	r, _, cerr := cfg.Check(rf)
+	fmt.Fprintf(out, "REQUEST\n%s  hash      %s\n", r.Summary(), rf.RequestHash)
+	var apps []coldsign.Approval
+	for _, p := range approvals {
+		a, err := readJSON[coldsign.Approval](p)
+		if err != nil {
+			return err
+		}
+		apps = append(apps, a)
+	}
+	names, ignored := cfg.CountApprovals(rf.RequestHash, apps)
+	fmt.Fprintf(out, "APPROVALS  %d of %d required: %v\n", len(names), cfg.Threshold, names)
+	for _, ig := range ignored {
+		fmt.Fprintf(out, "  not counted: %s\n", ig)
+	}
+	fmt.Fprintln(out, softwareNote)
+	if cerr != nil {
+		return cerr
+	}
+	if cmd == "inspect" {
+		fmt.Fprintln(out, "CHECK      this signer would accept the request (the approvals and the record of signed outpoints are checked at signing)")
+		return nil
+	}
+	pin := os.Getenv(cfg.HSM.PinEnv)
+	if pin == "" {
+		return fmt.Errorf("the token PIN is not in $%s", cfg.HSM.PinEnv)
+	}
+	l, err := hsm.LoadLib(orDefault(cfg.HSM.Lib, hsm.DefaultLibPath()))
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	tok, err := l.OpenToken(cfg.HSM.Token, pin)
+	if err != nil {
+		return err
+	}
+	defer tok.Close()
+	id, err := hex.DecodeString(cfg.HSM.KeyID)
+	if err != nil {
+		return fmt.Errorf("config hsm.key_id: %w", err)
+	}
+	signed, _, err := cfg.Sign(context.Background(), rf, apps, tokenSigner{tok: tok, id: id})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "SIGNED     tx %s by %s\n", signed.TxID, signed.Signer)
+	return write(signed)
+}
+
+func approveBTC(operator, keyPath, reqPath string, out io.Writer, write func(any) error) error {
+	rf, err := readJSON[coldsign.BTCRequestFile](reqPath)
+	if err != nil {
+		return err
+	}
+	if rf.RequestHash != rf.Request.HashHex() {
+		return fmt.Errorf("the request file is damaged: its hash does not match its content; do not approve")
+	}
+	seedHex, err := os.ReadFile(keyPath)
+	if err != nil {
+		return err
+	}
+	seed, err := hex.DecodeString(strings.TrimSpace(string(seedHex)))
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return fmt.Errorf("operator key file must hold %d hex bytes", ed25519.SeedSize)
+	}
+	fmt.Fprintf(out, "You are approving, as %s:\n%s  hash      %s\n", operator, rf.Request.Summary(), rf.RequestHash)
+	return write(coldsign.Approve(operator, ed25519.NewKeyFromSeed(seed), rf.RequestHash))
 }
