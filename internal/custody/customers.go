@@ -73,6 +73,9 @@ func (s *Service) EnsureDepositAddress(ctx context.Context, actor, customer, cha
 	if !exists {
 		return DepositAddress{}, fmt.Errorf("%w: customer %q", ErrNotFound, customer)
 	}
+	if s.Cfg.Family != FamilyEVM {
+		return s.ensureIndexedAddress(ctx, actor, customer)
+	}
 	d, err := s.Chain.DeriveDepositAddress(ctx, customer, 0)
 	if err != nil {
 		return DepositAddress{}, err
@@ -143,3 +146,43 @@ func (s *Service) Balances(ctx context.Context, customer string) ([]AssetBalance
 }
 
 func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
+
+// ensureIndexedAddress is EnsureDepositAddress for families whose addresses come from a key tree (Bitcoin): each customer gets
+// the next unused derivation index of the chain, under a lock, so two customers never share an address. The derivation itself
+// is offline (the account xpub); no key and no MPC is involved.
+func (s *Service) ensureIndexedAddress(ctx context.Context, actor, customer string) (DepositAddress, error) {
+	out := DepositAddress{Customer: customer, Chain: s.Cfg.Chain}
+	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "deposit-index:"+s.Cfg.Chain); err != nil {
+			return err
+		}
+		err := tx.QueryRow(ctx, `SELECT address, kind FROM deposit_addresses WHERE customer_id=$1 AND chain=$2`, customer, s.Cfg.Chain).Scan(&out.Address, &out.Kind)
+		if err == nil {
+			return nil
+		}
+		if !isNoRows(err) {
+			return err
+		}
+		var next int64
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(derivation_index)+1, 0) FROM deposit_addresses WHERE chain=$1 AND kind='xpub'`, s.Cfg.Chain).Scan(&next); err != nil {
+			return err
+		}
+		d, err := s.Chain.DeriveDepositAddress(ctx, customer, uint64(next))
+		if err != nil {
+			return err
+		}
+		for _, c := range s.coldAddressList() {
+			if strings.EqualFold(c, d.Address) {
+				return fmt.Errorf("%w: the deposit address %s is a configured cold address", ErrInvalid, d.Address)
+			}
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO deposit_addresses (customer_id, chain, asset, address, derivation_index, kind) VALUES ($1,$2,NULL,$3,$4,$5)`,
+			customer, d.Chain, d.Address, int64(d.DerivationIndex), d.Kind); err != nil {
+			return err
+		}
+		out.Address, out.Kind = d.Address, d.Kind
+		return emit(ctx, tx, outbox.TopicAudit, "deposit-address:"+d.Address, "deposit_address.created",
+			map[string]any{"actor": actor, "customer": customer, "chain": d.Chain, "address": d.Address, "index": d.DerivationIndex})
+	})
+	return out, err
+}

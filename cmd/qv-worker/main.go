@@ -103,7 +103,7 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	if *wdStall > 0 {
-		wd := &workflow.Watchdog{Engine: workflow.NewEngine(tc, *queue, cfg), Chain: cfg.Chain, OpenOwners: workflow.OpenOwnerIDs(svc),
+		wd := &workflow.Watchdog{Engine: workflow.NewEngine(tc, *queue, cfg), Chain: cfg.Chain, Family: cfg.Family, OpenOwners: workflow.OpenOwnerIDs(svc),
 			Interval: *wdEvery, StallAfter: *wdStall, Log: log}
 		go wd.Run(ctx)
 	}
