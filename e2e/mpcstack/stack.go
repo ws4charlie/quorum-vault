@@ -331,13 +331,28 @@ func RSSAndThreads(pid int) (rssKB, threads int, err error) {
 	return rssKB, threads, nil
 }
 
+var (
+	freeMu    sync.Mutex
+	freeGiven = map[string]bool{}
+)
+
+// FreeAddr returns 127.0.0.1:port for a port that was free a moment ago. The kernel may hand out a port again as soon as it is closed,
+// so an address is never returned twice in a test binary: two processes must not be given the same port.
 func FreeAddr(t testing.TB) string {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	freeMu.Lock()
+	defer freeMu.Unlock()
+	for {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := l.Addr().String()
+		l.Close()
+		if !freeGiven[addr] {
+			freeGiven[addr] = true
+			return addr
+		}
 	}
-	defer l.Close()
-	return l.Addr().String()
 }
 
 // ---- the stack ----
