@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strconv"
 	"strings"
@@ -40,6 +41,45 @@ func voutOf(dedupKey string) (uint32, error) {
 		return 0, fmt.Errorf("btc: dedup key %q: %w", dedupKey, err)
 	}
 	return uint32(n), nil
+}
+
+// The two reasons a sweep waits for the fee rate; stable strings, so a change in the numbers alone is not logged again.
+const (
+	waitAboveCap     = "the fee rate is above max_fee_rate: no sweep goes, urgent or not"
+	waitAboveCeiling = "the fee rate is above sweep_max_fee_rate: routine sweeps wait, sweeps of at least sweep_urgent_value go"
+)
+
+// urgent reports whether a sweep of amount sats goes regardless of the routine ceiling.
+func (a *Adapter) urgent(amount uint64) bool {
+	return a.cfg.SweepUrgentValue > 0 && amount >= a.cfg.SweepUrgentValue
+}
+
+// sweepRate is the fee rate a sweep of amount pays now, or why it waits: above max_fee_rate nothing goes; above sweep_max_fee_rate only an urgent
+// sweep does (and pays up to max_fee_rate). The node's estimate decides, the configured fallback when it has none.
+func (a *Adapter) sweepRate(ctx context.Context, amount uint64) (rate uint64, wait string) {
+	raw := a.rawFeeRate(ctx)
+	switch {
+	case raw > a.cfg.MaxFeeRate:
+		return 0, waitAboveCap
+	case raw > a.cfg.SweepMaxFeeRate && !a.urgent(amount):
+		return 0, waitAboveCeiling
+	}
+	return raw, ""
+}
+
+// noteSweepWait logs a change in why sweeps wait, once per change (an ALERT-free warning: nothing is wrong, the fee is high).
+func (a *Adapter) noteSweepWait(why string) {
+	a.waitMu.Lock()
+	defer a.waitMu.Unlock()
+	if why == a.sweepWhy {
+		return
+	}
+	a.sweepWhy = why
+	if why == "" {
+		slog.Info("btc sweeps resume: the fee rate allows them again")
+		return
+	}
+	slog.Warn("btc sweeps wait", "why", why)
 }
 
 // RecordDeposit stores a credited deposit output (the caller calls it in the scan transaction that credits it): the output of a deposit address, with the
@@ -96,11 +136,18 @@ func (a *Adapter) SweepCandidates(ctx context.Context) ([]chain.SweepCandidate, 
 		return nil, err
 	}
 	kept := out[:0]
+	why := ""
 	for _, c := range out {
-		if c.Amount.Sign() > 0 {
-			kept = append(kept, c)
+		if c.Amount.Sign() == 0 {
+			continue
 		}
+		if _, wait := a.sweepRate(ctx, c.Amount.Uint64()); wait != "" {
+			why = wait
+			continue
+		}
+		kept = append(kept, c)
 	}
+	a.noteSweepWait(why)
 	return kept, nil
 }
 
@@ -151,7 +198,11 @@ func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent
 		return chain.UnsignedTx{}, fmt.Errorf("btc: sweep amount %v out of range", s.Amount)
 	}
 	want := s.Amount.Uint64()
-	rate := a.feeRate(ctx)
+	rate, wait := a.sweepRate(ctx, want)
+	if wait != "" {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: %s", chain.ErrSweepFeePolicy, wait)
+	}
+	rate = min(rate, a.cfg.MaxFeeRate)
 	var picked []utxo
 	var paths []string
 	var sum uint64
@@ -202,11 +253,7 @@ func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	u := chain.UnsignedTx{Chain: a.cfg.Chain, Digest: built.Digests[0], Payload: raw, KeyRef: chain.KeyRef{PartitionID: sh.partition, Path: paths[0]}}
-	for i, d := range built.Digests[1:] {
-		u.More = append(u.More, chain.SigInput{Digest: d, KeyRef: chain.KeyRef{PartitionID: sh.partition, Path: paths[i+1]}})
-	}
-	return u, nil
+	return unsignedOf(a.cfg.Chain, built, raw, sh.partition, p), nil
 }
 
 // MovedAssets is what a sweep took out of its deposit address, from the attempt's payload: the sum of its inputs, which is also what the signing

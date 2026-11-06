@@ -24,6 +24,7 @@ type fakeNode struct {
 	sent        []string // raw transactions given to sendrawtransaction
 	sendErr     *RPCError
 	spent       map[string]bool // "txid:vout" -> spent on chain (gettxout answers null)
+	estimate    float64         // sat/vB the node answers to estimatesmartfee; 0: no estimate
 	beforeTxOut func()          // called (unlocked state allowed) before gettxout answers, to change the chain between two reads
 }
 
@@ -53,6 +54,10 @@ func (n *fakeNode) serve(w http.ResponseWriter, r *http.Request) {
 	case "getblockchaininfo":
 		res = map[string]any{"chain": "regtest"}
 	case "estimatesmartfee":
+		if n.estimate > 0 {
+			res = map[string]any{"feerate": n.estimate / 1e5}
+			break
+		}
 		res = map[string]any{"errors": []string{"Insufficient data or no feerate found"}}
 	case "getrawtransaction":
 		var id string

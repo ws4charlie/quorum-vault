@@ -2,6 +2,7 @@ package btce2e
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,4 +278,89 @@ func TestSweepLeavesOutAnOutputBelowItsSpendingCostAndNeverTouchesSuspense(t *te
 		t.Fatalf("%d suspense deposits of 800", n)
 	}
 	s.ledgerOK()
+}
+
+// setFallback restarts the worker with another fallback fee rate: the regtest node has no estimate, so this is how the fee "falls".
+func (s *system) setFallback(rate uint64) {
+	s.t.Helper()
+	s.cf.Chain.BTC.FallbackFeeRate = rate
+	s.writeConfig(s.cf)
+	s.restartWorker()
+}
+
+// Above the sweep ceiling a routine sweep waits (one log line for the state, not one per pass) and an urgent one goes; when the fee falls the routine
+// one runs.
+func TestSweepFeeAboveTheCeilingWaitsAndRunsWhenTheFeeFalls(t *testing.T) {
+	s := sweepSystem(t, opts{fallbackRate: 30, sweepMaxRate: 10, sweepUrgent: 3_000_000}, 0)
+	s.requireNoEstimate()
+	s.deposit("c1", 1_000_000)
+	s.deposit("c2", 4_000_000) // at least sweep_urgent_value: goes at the market rate
+	s.untilSweepsConfirmed(1, 90*time.Second)
+	sw := s.sweepRows()
+	if len(sw) != 1 || sw[0].Amount != 4_000_000 {
+		t.Fatalf("sweeps %+v", sw)
+	}
+	if want := feeAt(s, 1, 30); sw[0].Fee != want {
+		t.Fatalf("the urgent sweep paid %d, want %d (30 sat/vB)", sw[0].Fee, want)
+	}
+	s.holds(4*time.Second, "the routine sweep waits above the ceiling", func() bool { return len(s.sweepRows()) == 1 })
+	if n := s.logCount("btc sweeps wait"); n != 1 {
+		t.Fatalf("the wait was logged %d times, want once", n)
+	}
+	s.setFallback(5)
+	s.untilSweepsConfirmed(2, 120*time.Second)
+	sw = s.sweepRows()
+	if len(sw) != 2 || sw[1].Amount != 1_000_000 || sw[1].Fee != feeAt(s, 1, 5) {
+		t.Fatalf("sweeps %+v", sw)
+	}
+	s.ledgerOK()
+}
+
+// A sweep the gateway refuses every time (here its rate limit: one sweep an hour) does not spin: the planner backs off, retries later, and nothing is
+// voided or lost.
+func TestSweepRefusedByTheGatewayRateLimitBacksOffAndRetriesLater(t *testing.T) {
+	s := sweepSystem(t, opts{gwSweepsPerHour: 1, retryAfter: "5s"}, 0)
+	s.newCustomer("c1")
+	s.newCustomer("c2")
+	a1, a2 := s.addressOf("c1"), s.addressOf("c2")
+	s.node.pay(map[string]string{a1: btcAmount(3_000_000), a2: btcAmount(4_000_000)})
+	s.node.mine(6, "")
+	s.waitAvailable("c1", 3_000_000, 60*time.Second)
+	s.waitAvailable("c2", 4_000_000, 60*time.Second)
+	s.waitSweeps("failed", 1, 60*time.Second)
+	failedAddr := ""
+	for _, w := range s.sweepRows() {
+		if w.Status == "failed" {
+			failedAddr = w.From
+			if !strings.Contains(w.Reason, "policy_sweep_rate") {
+				t.Fatalf("reason %q", w.Reason)
+			}
+		}
+	}
+	s.holds(3*time.Second, "one failure, not one per pass", func() bool { return s.sweepsIn("failed") == 1 })
+	s.waitSweeps("failed", 2, 60*time.Second) // retried later, and refused again
+	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND deposit AND status='available' AND address=$2`, s.chain, failedAddr) != 1 {
+		t.Fatal("the refused address's output is not available again")
+	}
+	if a := s.available("c1").Int64() + s.available("c2").Int64(); a != 7_000_000 {
+		t.Fatalf("customers have %d", a)
+	}
+	s.untilSweepsConfirmedOrFailed()
+	s.ledgerOK()
+}
+
+func (s *system) addressOf(customer string) string {
+	var a string
+	if err := s.pool.QueryRow(s.ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 AND customer_id=$2`, s.chain, customer).Scan(&a); err != nil {
+		s.t.Fatal(err)
+	}
+	return a
+}
+
+// untilSweepsConfirmedOrFailed mines until no sweep is in flight.
+func (s *system) untilSweepsConfirmedOrFailed() {
+	s.t.Helper()
+	stop := s.keepMining()
+	defer stop()
+	s.waitFor(90*time.Second, "no sweep in flight", func() bool { return s.sweepsIn("broadcast")+s.sweepsIn("signing")+s.sweepsIn("planned") == 0 })
 }

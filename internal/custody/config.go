@@ -117,6 +117,9 @@ type SweepFile struct {
 	K            int    `json:"k"`             // fee multiple, PLAN says 20-50
 	MinSweepWei  string `json:"min_sweep_wei"` // floor of the rule, in wei value
 	PlanInterval string `json:"plan_interval"` // how often the planner runs, default 5s
+	// RetryAfter is how long the planner leaves an address alone after a sweep of it failed (a refusal by the gateway, for example its rate limit),
+	// doubling for each failure in a row up to an hour. Default 1m. Bitcoin only.
+	RetryAfter string `json:"retry_after"`
 }
 
 // WithdrawalFile configures withdrawals.
@@ -164,9 +167,10 @@ type Config struct {
 	Assets    map[string]Asset
 	AssetList []string // sorted
 
-	SweepK       int
-	MinSweepWei  *big.Int
-	PlanInterval time.Duration
+	SweepK          int
+	SweepRetryAfter time.Duration
+	MinSweepWei     *big.Int
+	PlanInterval    time.Duration
 
 	ApprovalWindow  time.Duration
 	ApprovalTimeout time.Duration
@@ -268,7 +272,10 @@ type BTCFile struct {
 	FallbackFeeRate    uint64 `json:"fallback_fee_rate"`
 	MaxFeeRate         uint64 `json:"max_fee_rate"`
 	MaxTxFeeSats       uint64 `json:"max_tx_fee_sats"`
-	StuckAfterBlocks   uint64 `json:"stuck_after_blocks"`
+	// SweepMaxFeeRate (sat/vB) is the most a routine sweep pays (default max_fee_rate); SweepUrgentValue (sats) is the amount from which a sweep
+	// goes regardless, up to max_fee_rate. Both are checked at start.
+	SweepMaxFeeRate  uint64 `json:"sweep_max_fee_rate"`
+	SweepUrgentValue uint64 `json:"sweep_urgent_value"`
 }
 
 // BTCShardFile is one hot shard of the btc family.
@@ -287,7 +294,7 @@ func (c *Config) buildBTC(cf ChainFile) error {
 	c.BTC = btc.Config{Chain: cf.Name, Network: b.Network, RPCURL: b.RPCURL, RPCUser: b.RPCUser, RPCPass: b.RPCPassword,
 		Confirmations: b.Confirmations, AccountXpub: b.AccountXpub, HotAddresses: b.HotAddresses, BatchBlocks: b.BatchBlocks,
 		SpendConfirmations: b.SpendConfirmations, MaxInputs: b.MaxInputs, FallbackFeeRate: b.FallbackFeeRate, MaxFeeRate: b.MaxFeeRate,
-		MaxTxFeeSats: b.MaxTxFeeSats, StuckAfterBlocks: b.StuckAfterBlocks}
+		MaxTxFeeSats: b.MaxTxFeeSats, SweepMaxFeeRate: b.SweepMaxFeeRate, SweepUrgentValue: b.SweepUrgentValue}
 	for i, h := range b.HotShards {
 		c.BTC.HotShards = append(c.BTC.HotShards, btc.HotShardConfig{PartitionID: c.PartitionKey(btc.Native, i).String(), Address: h.Address, Path: h.Path})
 	}
@@ -361,6 +368,15 @@ func (f File) Build() (*Config, error) {
 	}
 	if c.PlanInterval, err = dur("plan_interval", s.PlanInterval, 5*time.Second); err != nil {
 		return nil, err
+	}
+	if c.SweepRetryAfter, err = dur("retry_after", s.RetryAfter, time.Minute); err != nil {
+		return nil, err
+	}
+	if c.Family == FamilyBTC {
+		c.BTC.SweepK = uint64(c.SweepK)
+		if c.MinSweepWei.IsUint64() {
+			c.BTC.MinSweep = c.MinSweepWei.Uint64()
+		}
 	}
 
 	w := f.Withdrawal

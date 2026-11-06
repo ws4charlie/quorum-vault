@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -20,6 +21,9 @@ type Adapter struct {
 	acct   *Account
 	shards []shard          // in shard order
 	byAddr map[string]shard // canonical address -> shard
+
+	waitMu   sync.Mutex
+	sweepWhy string // why sweeps are waiting now ("" when they are not), to log a change once
 }
 
 // shard is one hot shard of the cell.

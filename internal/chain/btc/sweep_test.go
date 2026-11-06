@@ -7,6 +7,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 )
 
@@ -219,20 +221,215 @@ func TestSweepMovedAssetsAndSettle(t *testing.T) {
 	}
 }
 
-// A sweep that needs a bump or a cancel is not built yet: it says so with the typed error that waits with an ALERT and releases nothing.
-func TestSweepBumpAndCancelAreRefusedForNow(t *testing.T) {
+// The fee policy: above the sweep ceiling a routine sweep waits and an urgent one goes (paying the market rate), above the cap nothing goes, and
+// with no estimate the fallback applies. The build refuses with the typed error and reserves nothing.
+func TestSweepFeeCeilingUrgentValueAndCap(t *testing.T) {
 	e := newWEnv(t)
-	addr := e.depositAddr(5)
-	e.recordDeposit(addr, 300_000)
-	if _, err := e.buildSweep("s1", addr, 300_000); err != nil {
+	e.a.cfg.SweepMaxFeeRate, e.a.cfg.SweepUrgentValue = 20, 1_000_000
+	small, big := e.depositAddr(1), e.depositAddr(2)
+	e.recordDeposit(small, 500_000)
+	e.recordDeposit(big, 2_000_000)
+	addrs := func() map[string]bool {
+		c, err := e.a.SweepCandidates(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]bool{}
+		for _, x := range c {
+			m[x.Address] = true
+		}
+		return m
+	}
+	if m := addrs(); !m[small] || !m[big] { // no estimate: the fallback of 10 is under the ceiling
+		t.Fatalf("with the fallback: %v", m)
+	}
+	e.node.estimate = 15
+	if m := addrs(); !m[small] || !m[big] {
+		t.Fatalf("under the ceiling: %v", m)
+	}
+	e.node.estimate = 30 // above the ceiling of 20, under the cap of 50
+	if m := addrs(); m[small] || !m[big] {
+		t.Fatalf("above the ceiling only the urgent sweep goes: %v", m)
+	}
+	if _, err := e.buildSweep("s-small", small, 500_000); !errors.Is(err, chain.ErrSweepFeePolicy) {
+		t.Fatalf("a routine sweep above the ceiling: %v", err)
+	}
+	u, err := e.buildSweep("s-big", big, 2_000_000)
+	if err != nil {
 		t.Fatal(err)
 	}
-	tx, _ := e.a.pool.Begin(context.Background())
-	defer tx.Rollback(context.Background())
-	if _, err := e.a.BuildReplacement(context.Background(), tx, "sweep", "s1"); !errors.Is(err, chain.ErrCannotBump) {
-		t.Fatalf("replacement: %v", err)
+	if got, want := e.payload(u).Outputs[0].Value, 2_000_000-vsize(1, e.a.sinkShard().script)*30; got != want {
+		t.Fatalf("the urgent sweep pays the market rate: output %d, want %d", got, want)
 	}
-	if _, err := e.a.BuildCancel(context.Background(), tx, "sweep", "s1"); !errors.Is(err, chain.ErrCannotBump) {
-		t.Fatalf("cancel: %v", err)
+	e.node.estimate = 60 // above the cap of 50
+	if m := addrs(); m[small] || m[big] {
+		t.Fatalf("above the cap nothing goes: %v", m)
 	}
+	e.recordDeposit(big, 2_000_000)
+	if _, err := e.buildSweep("s-big2", big, 2_000_000); !errors.Is(err, chain.ErrSweepFeePolicy) {
+		t.Fatalf("an urgent sweep above the cap: %v", err)
+	}
+	if e.count("reserved") != 1 { // only s-big
+		t.Fatalf("%d reserved", e.count("reserved"))
+	}
+}
+
+func (e *wEnv) sweepReplace(id string) (chain.UnsignedTx, error) {
+	var u chain.UnsignedTx
+	err := e.commit(func(tx pgx.Tx) (err error) {
+		u, err = e.a.BuildReplacement(context.Background(), tx, "sweep", id)
+		return
+	})
+	return u, err
+}
+
+func (e *wEnv) sweepCancel(id string) (chain.UnsignedTx, error) {
+	var u chain.UnsignedTx
+	err := e.commit(func(tx pgx.Tx) (err error) {
+		u, err = e.a.BuildCancel(context.Background(), tx, "sweep", id)
+		return
+	})
+	return u, err
+}
+
+// A sweep is bumped by lowering its one output; the inputs stay and each is still signed under its own deposit key. A bump that would break the sweep
+// rule, pass the ceiling (routine) or the cap is refused with ErrCannotBump.
+func TestSweepReplacementRuleAndRefusals(t *testing.T) {
+	e := newWEnv(t)
+	e.a.cfg.SweepK, e.a.cfg.MinSweep, e.a.cfg.SweepMaxFeeRate, e.a.cfg.SweepUrgentValue = 20, 0, 40, 5_000_000
+	addr := e.depositAddr(6)
+	e.recordDeposit(addr, 300_000)
+	e.recordDeposit(addr, 400_000)
+	u0, err := e.buildSweep("s1", addr, 700_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p0 := e.payload(u0)
+	b0, _ := BuildUnsigned(p0, e.a.acct)
+	fee0 := e.fee(b0.TxID)
+	vs := uint64(EstimateVSize(b0.Tx))
+	u1, err := e.sweepReplace("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1 := e.payload(u1)
+	b1, _ := BuildUnsigned(p1, e.a.acct)
+	fee1 := e.fee(b1.TxID)
+	if want := max((fee0*115+99)/100, fee0+vs, 10*vs); fee1 != want {
+		t.Fatalf("fee %d, want %d", fee1, want)
+	}
+	if len(p1.Inputs) != 2 || len(p1.Outputs) != 1 || p1.Outputs[0].Value != 700_000-fee1 || !sameInput(p1.Inputs[0], p0.Inputs[0]) || !sameInput(p1.Inputs[1], p0.Inputs[1]) {
+		t.Fatalf("replacement %+v", p1)
+	}
+	if u1.KeyRef.Path != "0/6" || len(u1.More) != 1 || u1.More[0].KeyRef.Path != "0/6" {
+		t.Fatalf("key paths %q %+v", u1.KeyRef.Path, u1.More)
+	}
+	// The rule: at k = 20, 700000 sats allow a fee up to 35000; with k raised, the next bump breaks it.
+	e.a.cfg.SweepK = 20_000
+	if _, err := e.sweepReplace("s1"); !errors.Is(err, chain.ErrCannotBump) {
+		t.Fatalf("a bump that breaks the rule: %v", err)
+	}
+	e.a.cfg.SweepK = 20
+	// The ceiling: a routine sweep may not be bumped above 40 sat/vB.
+	e.a.cfg.SweepMaxFeeRate = 1
+	if _, err := e.sweepReplace("s1"); !errors.Is(err, chain.ErrCannotBump) {
+		t.Fatalf("a routine sweep above the ceiling: %v", err)
+	}
+	// An urgent one may go on, up to the fee cap.
+	e.a.cfg.SweepUrgentValue = 700_000
+	if _, err := e.sweepReplace("s1"); err != nil {
+		t.Fatalf("an urgent sweep above the ceiling: %v", err)
+	}
+	e.a.cfg.MaxTxFeeSats = 1
+	if _, err := e.sweepReplace("s1"); !errors.Is(err, chain.ErrCannotBump) {
+		t.Fatalf("above the fee cap: %v", err)
+	}
+}
+
+// The cancel of a sweep spends exactly its inputs back to the sink shard, each under its own deposit key, and its confirmation settles like the sweep:
+// the inputs are spent, the output is a hot output, and what moved is the sum of the inputs with the cancel's fee. Also for a deposit output recorded
+// without a partition.
+func TestSweepCancelAndItsSettlement(t *testing.T) {
+	e := newWEnv(t)
+	addr := e.depositAddr(7)
+	e.recordDeposit(addr, 300_000)
+	e.recordDeposit(addr, 400_000)
+	if _, err := e.a.pool.Exec(context.Background(), `UPDATE btc_utxos SET partition_id='' WHERE deposit`); err != nil {
+		t.Fatal(err)
+	}
+	u0, err := e.buildSweep("s1", addr, 700_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p0 := e.payload(u0)
+	res, err := e.a.Reservation(context.Background(), e.a.pool, "sweep", "s1")
+	if err != nil || !res.Open || res.Account != e.a.sinkShard().address {
+		t.Fatalf("reservation %+v %v", res, err)
+	}
+	uc, err := e.sweepCancel("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := e.payload(uc)
+	bc, _ := BuildUnsigned(pc, e.a.acct)
+	if len(pc.Inputs) != 2 || !sameInput(pc.Inputs[0], p0.Inputs[0]) || !sameInput(pc.Inputs[1], p0.Inputs[1]) || len(pc.Outputs) != 1 || pc.Outputs[0].Address != e.a.sinkShard().address {
+		t.Fatalf("cancel %+v", pc)
+	}
+	if uc.KeyRef.Path != "0/7" || uc.More[0].KeyRef.Path != "0/7" || uc.KeyRef.PartitionID != wPart {
+		t.Fatalf("key %+v", uc.KeyRef)
+	}
+	if e.fee(bc.TxID) <= e.fee(mustTxID(t, e, u0)) {
+		t.Fatal("the cancel must pay more than the sweep it replaces")
+	}
+	moved, err := e.a.MovedAssets(context.Background(), bc.TxID)
+	if err != nil || len(moved) != 1 || moved[0].Amount.Int64() != 700_000 || moved[0].Address != addr {
+		t.Fatalf("moved %v %v", moved, err)
+	}
+	if err := e.commit(func(tx pgx.Tx) error { return e.a.Settle(context.Background(), tx, "sweep", "s1", bc.TxID) }); err != nil {
+		t.Fatal(err)
+	}
+	if e.count("spent") != 2 || e.count("available") != 1 || e.count("reserved") != 0 {
+		t.Fatalf("spent %d available %d reserved %d", e.count("spent"), e.count("available"), e.count("reserved"))
+	}
+	var dep bool
+	if err := e.a.pool.QueryRow(context.Background(), `SELECT deposit FROM btc_utxos WHERE chain='btc-t' AND txid=$1`, bc.TxID).Scan(&dep); err != nil || dep {
+		t.Fatalf("the cancel's output is a hot output: %v %v", dep, err)
+	}
+}
+
+// A refused sweep with nothing signed gives its outputs back as deposit outputs, and the planner sees them again.
+func TestSweepReleaseKeepsDepositOutputs(t *testing.T) {
+	e := newWEnv(t)
+	addr := e.depositAddr(8)
+	e.recordDeposit(addr, 500_000)
+	if _, err := e.buildSweep("s1", addr, 500_000); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := e.a.SweepCandidates(context.Background()); len(c) != 0 {
+		t.Fatalf("a reserved output is a candidate: %v", c)
+	}
+	if err := e.commit(func(tx pgx.Tx) error { return e.a.ReleaseUnsigned(context.Background(), tx, "sweep", "s1") }); err != nil {
+		t.Fatal(err)
+	}
+	c, err := e.a.SweepCandidates(context.Background())
+	if err != nil || len(c) != 1 || c[0].Amount.Int64() != 500_000 {
+		t.Fatalf("after release: %v %v", c, err)
+	}
+	var dep bool
+	e.a.pool.QueryRow(context.Background(), `SELECT deposit FROM btc_utxos WHERE chain='btc-t' AND status='available'`).Scan(&dep)
+	if !dep {
+		t.Fatal("a released deposit output lost its mark")
+	}
+	// The same outputs build into the very same transaction again (another sweep ID): the unsent attempt of the first is gone.
+	if _, err := e.buildSweep("s2", addr, 500_000); err != nil {
+		t.Fatalf("a second sweep of released outputs: %v", err)
+	}
+}
+
+func mustTxID(t *testing.T, e *wEnv, u chain.UnsignedTx) string {
+	b, err := BuildUnsigned(e.payload(u), e.a.acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.TxID
 }

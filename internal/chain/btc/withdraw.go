@@ -30,6 +30,12 @@ func (a *Adapter) shardOf(partitionID string) (shard, error) {
 // feeRate is the fee rate for a withdrawal in satoshis per virtual byte: the node's estimate for confirmation in a couple of blocks, the
 // configured fallback when it has none, never above the configured ceiling (which is below the signing zone's) and never below the relay minimum.
 func (a *Adapter) feeRate(ctx context.Context) uint64 {
+	return min(a.rawFeeRate(ctx), a.cfg.MaxFeeRate)
+}
+
+// rawFeeRate is the market rate before the ceiling: the node's estimate, else the fallback, never below the relay minimum. A sweep compares it
+// with its own ceilings (sweepRate) instead of paying less than the market asks.
+func (a *Adapter) rawFeeRate(ctx context.Context) uint64 {
 	rate := a.cfg.FallbackFeeRate
 	var est struct {
 		FeeRate float64  `json:"feerate"` // BTC per kvB
@@ -38,7 +44,7 @@ func (a *Adapter) feeRate(ctx context.Context) uint64 {
 	if err := a.rpc.Call(ctx, &est, "estimatesmartfee", 2); err == nil && est.FeeRate > 0 && len(est.Errors) == 0 {
 		rate = uint64(math.Ceil(est.FeeRate * 1e5)) // BTC/kvB -> sat/vB
 	}
-	return min(max(rate, minRelayRate), a.cfg.MaxFeeRate)
+	return max(rate, minRelayRate)
 }
 
 // vsize is the virtual size of a transaction with nIn P2WPKH inputs and the given outputs, once witnessed.

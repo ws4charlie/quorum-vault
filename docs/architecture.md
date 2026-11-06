@@ -253,8 +253,12 @@ up to `max_inputs`, leaving out any output that costs more to spend than it carr
 sweep is open waits for the next one. The build reserves exactly the outputs the plan summed, one job per input, all under the address's own key; the
 gateway and cosigner require every input from that address and one output to the partition's own shard. The ledger moves the full amount from the
 deposit address to hot through the sweep account and books the fee, which is the operator's cost since the customer was credited the whole deposit.
-Settlement spends the deposit outputs and records the sweep's output as an available hot output; the scan does not book it as funding. Until fee
-policy and recovery arrive, a sweep that needs a fee bump or a cancel waits with an ALERT and releases nothing. See [learn/p7-5-btc-sweeps.md](learn/p7-5-btc-sweeps.md).
+Settlement spends the deposit outputs and records the sweep's output as an available hot output; the scan does not book it as funding. Routine sweeps wait while the fee rate is above
+`sweep_max_fee_rate`; a sweep of at least `sweep_urgent_value` goes anyway, up to `max_fee_rate`. A stuck sweep is replaced by one with a lower output,
+if it is still worth it. If one input is refused after another was signed, a cancel sends the same inputs to the hot shard and settles like the sweep
+with the cancel's fee, so the customer's credit and the sweep account stay right. A sweep refused with nothing signed gives its outputs back and the
+planner leaves the address alone for a growing while; an outside spend parks the sweep, and withdrawals go on. See
+[learn/p7-5-btc-sweeps.md](learn/p7-5-btc-sweeps.md).
 
 ## Trust boundaries
 

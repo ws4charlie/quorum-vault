@@ -281,7 +281,11 @@ func (a *Adapter) Reservation(ctx context.Context, q chain.Querier, ownerKind, o
 		if err := q.QueryRow(ctx, `SELECT partition_id FROM btc_utxos WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved' ORDER BY txid, vout LIMIT 1`, a.cfg.Chain, ownerKind, ownerID).Scan(&part); err != nil {
 			return chain.Reservation{}, err
 		}
-		if sh, err := a.shardOf(part); err == nil {
+		sh, err := a.shardOf(part)
+		if err != nil && ownerKind == "sweep" && len(a.shards) > 0 {
+			sh, err = a.sinkShard(), nil // a deposit output recorded by a cell without hot shards has no partition: the sink shard takes it
+		}
+		if err == nil {
 			r.Account = sh.address
 		}
 	}
@@ -351,8 +355,13 @@ func (a *Adapter) ReleaseUnsigned(ctx context.Context, tx pgx.Tx, ownerKind, own
 			return nil
 		}
 	}
-	_, err = tx.Exec(ctx, `UPDATE btc_utxos SET status='available', owner_kind=NULL, owner_id=NULL, updated_at=now() WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved'`,
-		a.cfg.Chain, ownerKind, ownerID)
+	if _, err = tx.Exec(ctx, `UPDATE btc_utxos SET status='available', owner_kind=NULL, owner_id=NULL, updated_at=now() WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved'`,
+		a.cfg.Chain, ownerKind, ownerID); err != nil {
+		return err
+	}
+	// Nothing was signed, so nothing of the owner was ever sent: its built attempts go. The same outputs may be built into the very same transaction
+	// again (a sweep planned a second time), and a transaction has one row.
+	_, err = tx.Exec(ctx, `DELETE FROM btc_attempts WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND broadcast_at IS NULL`, a.cfg.Chain, ownerKind, ownerID)
 	return err
 }
 
