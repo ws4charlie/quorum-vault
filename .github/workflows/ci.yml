@@ -374,6 +374,41 @@ jobs:
       - name: make test-e2e-btc-sweep-recovery
         run: make test-e2e-btc-sweep-recovery
 
+  # Bitcoin cell, reconciliation against the chain and hot-to-cold moves (bands, rounds under max_inputs, attacks, crash boundaries, cancel).
+  e2e-btc-cold:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+      - name: Start bitcoind (regtest) on 18443
+        run: docker compose --profile btc up -d --wait bitcoind
+      - name: make test-e2e-btc-cold
+        run: make test-e2e-btc-cold
+
   # Bitcoin cell, recovery: fee bumps, cancel, an outside spend, the crash boundaries, a killed gateway, a node restarted with an empty mempool.
   e2e-btc-recovery:
     runs-on: ubuntu-24.04

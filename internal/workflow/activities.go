@@ -462,12 +462,16 @@ type ColdState struct {
 	Status string
 	Part   string
 	Parked bool
+	// SettlesCancel: a confirmed cancel of the move spent its inputs and made an output of its own (Bitcoin), so it is settled (as a failed move)
+	// instead of just ended. False for chains where a cancel moves nothing, and in histories recorded before.
+	SettlesCancel bool
 }
 
 // LoadColdMove reads the move.
 func (a *Activities) LoadColdMove(ctx context.Context, id string) (ColdState, error) {
 	m, err := a.D.Svc.GetColdMove(ctx, id)
-	return ColdState{Status: m.Status, Part: m.PartitionID, Parked: m.Parked()}, err
+	_, settles := a.D.Svc.Chain.(chain.Settler)
+	return ColdState{Status: m.Status, Part: m.PartitionID, Parked: m.Parked(), SettlesCancel: settles}, err
 }
 
 // BuildColdMoveJob builds the move and enqueues its sign job in one transaction.

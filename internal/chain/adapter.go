@@ -197,6 +197,42 @@ type SweepSource interface {
 	SweepCandidates(ctx context.Context) ([]SweepCandidate, error)
 }
 
+// MoveCapacity is implemented by a chain cell where one transaction can spend only so many inputs (Bitcoin): MaxMove is the most one hot-to-cold
+// move from the partition can carry now, from the outputs that are available (a reserved output is not counted), after the fee. The planner caps
+// a move at it, so a shard of many small outputs is emptied in rounds instead of waiting for a move that cannot be built.
+type MoveCapacity interface {
+	MaxMove(ctx context.Context, partitionID string) (*big.Int, error)
+}
+
+// OutputDiff is one disagreement between a chain cell's own output table and the chain.
+type OutputDiff struct {
+	Address string
+	Output  string // txid:vout
+	Detail  string
+}
+
+// ChainView is what the chain says, put in the terms of the books at this moment, for a chain cell that keeps its own outputs (Bitcoin). The
+// books and the chain differ by things the cell can name from its own records of the transactions it sent; the view leaves those out of the
+// chain side and lists them, so that what is left is a real difference.
+type ChainView struct {
+	Height uint64 // the tip the UTXO set was read at
+	// Balance of each address as the books should see it: unspent outputs that are in the output table, or that nothing explains away. Left out:
+	// outputs of our own transactions that are not settled yet, and outputs of others younger than the credit depth (not credited yet).
+	Balance map[string]*big.Int
+	// SpentInFlight is, per address, the value of table rows that a confirmed transaction of ours has already spent but the books have not settled.
+	SpentInFlight map[string]*big.Int
+	// Unsettled counts the outputs left out of Balance for those reasons.
+	Unsettled int
+	// Diffs are the disagreements nothing explains.
+	Diffs []OutputDiff
+}
+
+// ChainViewer is implemented by a chain cell that can produce a ChainView for a set of addresses. The read is of the node's UTXO set at its tip and
+// keeps the node busy: callers batch and run it on their own cadence, never on a request path.
+type ChainViewer interface {
+	ChainView(ctx context.Context, addrs []string) (ChainView, error)
+}
+
 // Settler is implemented by a chain cell that must update its own books when a transaction of an owner settles, in the settlement's database
 // transaction (Bitcoin: its inputs become spent and its change becomes an available output).
 type Settler interface {

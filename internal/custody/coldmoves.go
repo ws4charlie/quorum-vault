@@ -139,16 +139,21 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 			case withIncoming.Cmp(lim.Low) < 0:
 				// Ask for a refill (one open at a time per cold address), and say so in the ALERT, once per outage.
 				need := new(big.Int).Sub(lim.Target, withIncoming)
-				rid, opened, err := s.openRefill(ctx, tx, p, asset, need)
-				if err != nil {
-					return err
+				rid, opened := "", false
+				if c.Family != FamilyBTC { // a Bitcoin refill is a later task (an offline ceremony): until then the ALERT is all there is
+					var err error
+					if rid, opened, err = s.openRefill(ctx, tx, p, asset, need); err != nil {
+						return err
+					}
 				}
 				if !alerted {
 					if _, err := tx.Exec(ctx, `INSERT INTO hot_low_alerts (partition_id) VALUES ($1) ON CONFLICT DO NOTHING`, p); err != nil {
 						return err
 					}
 					note := "refill request opened"
-					if !opened {
+					if c.Family == FamilyBTC {
+						note = "no refill is opened for this chain yet"
+					} else if !opened {
 						note = "a refill is already open for this cold address and must finish first"
 					}
 					log.Error("ALERT: hot wallet is below its low-water mark; it needs a refill from cold storage, which takes an offline ceremony",
@@ -166,20 +171,34 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 			if amt.Sign() <= 0 {
 				return nil
 			}
-			to, err := c.EVM.ColdAddress(p, asset)
+			toAddr, err := c.ColdAddressOf(p, asset)
 			if err != nil {
 				return err
 			}
+			if mc, ok := s.Chain.(chain.MoveCapacity); ok {
+				// One transaction carries at most max_inputs outputs: a bigger excess moves in rounds, each round what the oldest available
+				// outputs can carry. Reserved outputs are not counted, so a move never competes with a withdrawal for one.
+				capAmt, err := mc.MaxMove(ctx, p)
+				if err != nil {
+					return err
+				}
+				if capAmt.Sign() <= 0 {
+					return nil // nothing available to move yet: wait, and open no move
+				}
+				if capAmt.Cmp(amt) < 0 {
+					amt = capAmt
+				}
+			}
 			id := "cm-" + uuid.NewString()
 			tag, err := tx.Exec(ctx, `INSERT INTO cold_moves (id, chain, asset, partition_id, to_address, amount, status)
-				VALUES ($1,$2,$3,$4,$5,$6::numeric,'planned') ON CONFLICT DO NOTHING`, id, c.Chain, asset, p, to.Hex(), amt.String())
+				VALUES ($1,$2,$3,$4,$5,$6::numeric,'planned') ON CONFLICT DO NOTHING`, id, c.Chain, asset, p, toAddr, amt.String())
 			if err != nil {
 				return fmt.Errorf("custody: insert cold move: %w", err)
 			}
 			if tag.RowsAffected() == 1 {
-				mv = &ColdMove{ID: id, Asset: asset, PartitionID: p, To: to.Hex(), Amount: amt, Status: "planned"}
+				mv = &ColdMove{ID: id, Asset: asset, PartitionID: p, To: toAddr, Amount: amt, Status: "planned"}
 				return emit(ctx, tx, outbox.TopicColdMoves, id, "cold_move.planned",
-					map[string]any{"chain": c.Chain, "asset": asset, "partition": p, "to": to.Hex(), "amount": amt.String()})
+					map[string]any{"chain": c.Chain, "asset": asset, "partition": p, "to": toAddr, "amount": amt.String()})
 			}
 			return nil
 		})
@@ -271,6 +290,13 @@ func (s *Service) SettleColdMove(ctx context.Context, id, txHash string, status 
 			return err
 		}
 		final, evt, reason := "confirmed", "cold_move.confirmed", ""
+		if st, ok := s.Chain.(chain.Settler); ok {
+			// The cell's own books: the inputs of the confirmed transaction are spent and its change is an available output. On Bitcoin the
+			// only "failed" settlement is a confirmed cancel of the move (the same inputs back to the shard): its output is settled the same way.
+			if err := st.Settle(ctx, tx, OwnerKindToCold, id, txHash); err != nil {
+				return err
+			}
+		}
 		if status == chain.TxConfirmed {
 			if err := s.transfer(ctx, tx, "cm-cold:"+id, coldAcct(m.PartitionID), toColdAcct(s.Cfg.Chain, m.Asset), m.Amount,
 				map[string]any{"cold_move": id, "tx": txHash}); err != nil {
@@ -278,6 +304,9 @@ func (s *Service) SettleColdMove(ctx context.Context, id, txHash string, status 
 			}
 		} else {
 			final, evt, reason = "failed", "cold_move.failed", "transaction reverted"
+			if _, ok := s.Chain.(chain.Settler); ok {
+				reason = "cancelled: the move never confirmed, a cancel returned the inputs to the shard"
+			}
 			if err := s.transfer(ctx, tx, "cm-back:"+id, hotAcct(m.PartitionID), toColdAcct(s.Cfg.Chain, m.Asset), m.Amount,
 				map[string]any{"cold_move": id, "tx": txHash}); err != nil {
 				return err

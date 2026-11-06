@@ -93,7 +93,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	if ownerKind == "sweep" {
 		return a.buildSweepReplacement(ctx, tx, ownerID)
 	}
-	if ownerKind != "withdrawal" {
+	if ownerKind != "withdrawal" && ownerKind != "to-cold" {
 		return chain.UnsignedTx{}, errLater
 	}
 	p, oldFee, err := a.lastSend(ctx, tx, ownerKind, ownerID)
@@ -131,7 +131,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 // Once it confirms, no other transaction can spend those inputs, so a half-signed one can never confirm. It returns chain.ErrNotSupported when
 // nothing was built, and chain.ErrCannotBump when the inputs cannot pay for it.
 func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
-	if ownerKind != "withdrawal" && ownerKind != "sweep" {
+	if ownerKind != "withdrawal" && ownerKind != "sweep" && ownerKind != "to-cold" {
 		return chain.UnsignedTx{}, errLater
 	}
 	var n int

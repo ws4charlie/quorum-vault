@@ -70,7 +70,11 @@ type utxo struct {
 // nothing. The payment is the first output, change (when it is above dust) the second, to the shard's own address. A change at or under the dust limit
 // goes to the fee. If the available outputs cannot pay the amount and the fee, it returns chain.ErrNotEnoughOutputs: the withdrawal waits.
 func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.WithdrawalIntent) (chain.UnsignedTx, error) {
-	if w.OwnerKind != "" && w.OwnerKind != "withdrawal" {
+	kind := w.OwnerKind
+	if kind == "" {
+		kind = "withdrawal"
+	}
+	if kind != "withdrawal" && kind != "to-cold" { // a hot-to-cold move is built like a withdrawal: the shard's inputs, change back to the shard
 		return chain.UnsignedTx{}, errLater
 	}
 	sh, err := a.shardOf(w.PartitionID)
@@ -117,8 +121,8 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 			return chain.UnsignedTx{}, err
 		}
 		u.value = uint64(v)
-		if _, err := tx.Exec(ctx, `UPDATE btc_utxos SET status='reserved', owner_kind='withdrawal', owner_id=$4, updated_at=now() WHERE chain=$1 AND txid=$2 AND vout=$3`,
-			a.cfg.Chain, u.txid, u.vout, w.ID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE btc_utxos SET status='reserved', owner_kind=$5, owner_id=$4, updated_at=now() WHERE chain=$1 AND txid=$2 AND vout=$3`,
+			a.cfg.Chain, u.txid, u.vout, w.ID, kind); err != nil {
 			return chain.UnsignedTx{}, err
 		}
 		picked = append(picked, u)
@@ -146,8 +150,8 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO btc_attempts (chain, txid, owner_kind, owner_id, kind, payload, fee) VALUES ($1,$2,'withdrawal',$3,'send',$4::jsonb,$5)`,
-		a.cfg.Chain, built.TxID, w.ID, string(raw), int64(fee)); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO btc_attempts (chain, txid, owner_kind, owner_id, kind, payload, fee) VALUES ($1,$2,$6,$3,'send',$4::jsonb,$5)`,
+		a.cfg.Chain, built.TxID, w.ID, string(raw), int64(fee), kind); err != nil {
 		return chain.UnsignedTx{}, fmt.Errorf("btc: record attempt: %w", err)
 	}
 	ref := chain.KeyRef{PartitionID: w.PartitionID, Path: PathString(sh.path)}

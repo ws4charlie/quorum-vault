@@ -8,7 +8,7 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-sweep-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
+.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-sweep-recovery test-e2e-btc-cold setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
 
 setup: softhsm db-up chain-up
 
@@ -151,6 +151,11 @@ test-e2e-btc-recovery:
 E2E_BTC_SWEEP_RECOVERY := TestRecoverySweep
 test-e2e-btc-sweep-recovery:
 	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_SWEEP_RECOVERY)' ./e2e/btc/...
+
+# Reconciliation against the chain (scantxoutset) and hot-to-cold moves: bands, rounds under max_inputs, the attacks, crash boundaries, the cancel.
+E2E_BTC_COLD := TestCold|TestReconcile
+test-e2e-btc-cold:
+	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_COLD)' ./e2e/btc/...
 
 # cb-mpc signing path end to end (needs the C++ build once: `make mpc-build`; Postgres; anvil on 127.0.0.1:18545 with chain
 # id 11155111 for the mining test: docker run -d --name qv-anvil-p5b3 -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111").
