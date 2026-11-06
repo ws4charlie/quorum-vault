@@ -151,6 +151,7 @@ services:
       - -rpcpassword=qv-regtest-only
       - -fallbackfee=0.0002
       - -txindex=1
+      - -persistmempool=0 # a restarted node starts with an empty mempool, as a crash or eviction leaves it
     ports:
       - "127.0.0.1:18443:18443"
     healthcheck:

@@ -49,6 +49,16 @@ func (s *system) setupWithdrawals(o opts) {
 	s.cf.Withdrawal.HotWait = "4m"
 	s.cf.Withdrawal.SignTimeout = "20s"
 	s.cf.Withdrawal.StuckAfter = "10m"
+	if o.stuckAfter != "" {
+		s.cf.Withdrawal.StuckAfter = o.stuckAfter
+	}
+	if o.fallbackRate != 0 {
+		s.cf.Chain.BTC.FallbackFeeRate = o.fallbackRate
+	}
+	s.lease = "30s"
+	if o.lease != "" {
+		s.lease = o.lease
+	}
 
 	s.approv = map[string]ed25519.PrivateKey{}
 	apprFiles := map[string]gateway.ApproverFile{}
@@ -115,7 +125,7 @@ func (s *system) startGateway() {
 		}
 	})
 	jobs := strings.Replace(s.bizDSN, "//qv@", "//qv_gateway@", 1)
-	s.gateway = s.spawn("qv-gateway", "-config", s.gwPath, "-jobs-dsn", jobs, "-guard-dsn", s.gwGuard, "-interval", "200ms", "-lease", "30s", "-worker-id", "gw-"+uuid.NewString()[:6])
+	s.gateway = s.spawn("qv-gateway", "-config", s.gwPath, "-jobs-dsn", jobs, "-guard-dsn", s.gwGuard, "-interval", "200ms", "-lease", s.lease, "-worker-id", "gw-"+uuid.NewString()[:6])
 	p := s.gateway
 	s.waitFor(30*time.Second, "gateway started", func() bool { return fileContains(p.log, "gateway") })
 }

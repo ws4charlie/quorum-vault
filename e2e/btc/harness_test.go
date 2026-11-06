@@ -62,7 +62,11 @@ func TestMain(m *testing.M) {
 			if buildErr != nil {
 				break
 			}
-			out, err := exec.Command("go", "build", "-o", filepath.Join(dir, b), "github.com/ws4charlie/quorum-vault/cmd/"+b).CombinedOutput()
+			args := []string{"build", "-o", filepath.Join(dir, b)}
+			if b == "qv-worker" { // only a worker built with -tags devauth has the crash-test failpoints (QV_FAILPOINT)
+				args = append(args, "-tags", "devauth")
+			}
+			out, err := exec.Command("go", append(args, "github.com/ws4charlie/quorum-vault/cmd/"+b)...).CombinedOutput()
 			if err != nil {
 				buildErr = fmt.Errorf("build %s: %v\n%s", b, err, out)
 			}
@@ -94,10 +98,11 @@ func nodeURL() string {
 
 // node is bitcoind with a wallet of its own for the test: it mines and pays.
 type node struct {
-	t     *testing.T
-	root  *btc.RPC
-	w     *btc.RPC
-	miner string // the wallet's address, which receives the block rewards
+	t          *testing.T
+	root       *btc.RPC
+	w          *btc.RPC
+	miner      string // the wallet's address, which receives the block rewards
+	walletName string
 }
 
 func newNode(t *testing.T) *node {
@@ -115,22 +120,23 @@ func newNode(t *testing.T) *node {
 	if err := n.root.Call(ctx, nil, "createwallet", name); err != nil {
 		t.Fatal(err)
 	}
+	n.walletName = name
 	n.w = btc.NewRPC(nodeURL()+"/wallet/"+name, rpcUser, rpcPass)
 	if err := n.w.Call(ctx, &n.miner, "getnewaddress"); err != nil {
 		t.Fatal(err)
 	}
 	n.mine(101, "") // the first reward is spendable
-	// Regtest halves the block reward every 150 blocks, so a node that has run many tests pays little: mine until the wallet (0.05 BTC) can
+	// Regtest halves the block reward every 150 blocks, so a node that has run many tests pays little: mine until the wallet (1.5 BTC) can
 	// pay the tests, and say so when the node is spent (the reward reaches zero near height 9600).
 	for mined := 0; ; mined += 50 {
 		var bal float64
 		if err := n.w.Call(ctx, &bal, "getbalance"); err != nil {
 			t.Fatal(err)
 		}
-		if bal >= 0.05 {
+		if bal >= 1.5 {
 			break
 		}
-		if mined >= 1000 {
+		if mined >= 1500 {
 			t.Fatalf("the wallet has %v BTC after %d more blocks: the regtest block reward is spent; recreate the node (make btc-down btc-up)", bal, mined)
 		}
 		n.mine(50, "")
@@ -268,6 +274,9 @@ type system struct {
 	gwGuard string
 	tc      client.Client
 	tag     string
+
+	workerFailpoint string
+	lease           string
 }
 
 type opts struct {
@@ -275,6 +284,13 @@ type opts struct {
 	conf       uint64 // default 6
 	// withdraw starts the whole withdrawal path: the signing gateway and party B's cosigner, one hot shard, approvers and the automated key.
 	withdraw bool
+	// failpoint arms the first worker ("withdrawal.after_build", ...): it exits there, and the test restarts it without.
+	failpoint string
+	// fallbackRate is the builder's fee rate in sat/vB when the node has no estimate (default 5); stuckAfter how long a broadcast transaction may wait
+	// before it is bumped (default 10m, so a test that does not bump never does); lease how long the gateway keeps a claimed job (default 30s).
+	fallbackRate uint64
+	stuckAfter   string
+	lease        string
 	// gwDest, when set, is the only list of destinations the gateway lets withdrawals pay (otherwise any).
 	gwDest []string
 }
@@ -288,7 +304,9 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func (s *system) spawn(name string, args ...string) *proc {
+func (s *system) spawn(name string, args ...string) *proc { return s.spawnEnv(name, nil, args...) }
+
+func (s *system) spawnEnv(name string, env []string, args ...string) *proc {
 	s.t.Helper()
 	logPath := filepath.Join(s.dir, fmt.Sprintf("%s-%d.log", name, time.Now().UnixNano()))
 	lf, err := os.Create(logPath)
@@ -296,7 +314,7 @@ func (s *system) spawn(name string, args ...string) *proc {
 		s.t.Fatal(err)
 	}
 	cmd := exec.Command(filepath.Join(binDir, name), args...)
-	cmd.Env = append(os.Environ(), "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf())
+	cmd.Env = append(append(os.Environ(), "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf()), env...)
 	cmd.Stdout, cmd.Stderr = lf, lf
 	if err := cmd.Start(); err != nil {
 		s.t.Fatalf("start %s: %v", name, err)
@@ -449,6 +467,7 @@ func newSystem(t *testing.T, o opts) *system {
 	if o.withdraw {
 		s.startGateway()
 	}
+	s.workerFailpoint = o.failpoint
 	s.startWorker()
 	s.startCore()
 	return s
@@ -467,14 +486,25 @@ func (s *system) startWorker() {
 	if s.keyPath != "" {
 		args = append(args, "-auto-approver-key-file", s.keyPath)
 	}
-	s.worker = s.spawn("qv-worker", args...)
+	s.worker = s.spawnEnv("qv-worker", []string{"QV_FAILPOINT=" + s.workerFailpoint}, args...)
 	p := s.worker
 	s.waitFor(30*time.Second, "worker started", func() bool { return fileContains(p.log, "qv-worker started") })
 }
 
 func (s *system) restartWorker() {
 	s.worker.stop()
+	s.workerFailpoint = ""
 	s.startWorker()
+}
+
+// waitExit waits for a process to die (a failpoint), and restarts nothing.
+func (s *system) waitExit(p *proc, what string) {
+	s.t.Helper()
+	select {
+	case <-p.done:
+	case <-time.After(scale(90 * time.Second)):
+		s.t.Fatalf("%s did not stop", what)
+	}
 }
 
 func (s *system) startCore() {

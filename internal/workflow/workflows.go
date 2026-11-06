@@ -376,6 +376,14 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 func cancelNonce(ctx workflow.Context, t Timings, o OwnerArg) (txResult, error) {
 	var cj string
 	if err := call(ctx, opts(ctx), &cj, a.EnqueueCancel, o); err != nil {
+		if isType(err, errCannotBump) {
+			// The cancel cannot be built (the inputs cannot pay its fee): a signature may exist and nothing can free it. Never release; park.
+			workflow.GetLogger(ctx).Error("ALERT: a cancel is needed but cannot be built; manual intervention needed", "owner", o.ID, "error", err.Error())
+			if perr := call(ctx, opts(ctx), nil, a.Park, o, "a cancel is needed and cannot be built: "+err.Error()); perr != nil {
+				return txResult{}, perr
+			}
+			return txResult{}, temporal.NewNonRetryableApplicationError("cancel cannot be built: "+err.Error(), "cancel_refused", nil)
+		}
 		return txResult{}, err
 	}
 	if cj == "" {

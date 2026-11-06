@@ -232,6 +232,16 @@ Operator funding of a hot address is found by the scan at safe depth, recorded o
 transactions is never booked as funding. A refusal where nothing was signed gives the outputs back; a refusal after a signature may exist parks the
 withdrawal with an alert and releases nothing (fee bumps and cancel come next). See [learn/p7-4a-btc-withdrawals.md](learn/p7-4a-btc-withdrawals.md).
 
+## Bitcoin: when a withdrawal goes wrong
+
+A broadcast transaction that sticks is replaced by one that spends the same inputs and pays the same payment from less change, for a higher fee (the
+rule is in [learn/p7-4b-btc-recovery.md](learn/p7-4b-btc-recovery.md)); with no change to pay from, an ALERT is raised and the withdrawal keeps waiting,
+never voided. Whichever of the original and its replacements confirms is the one settled and whose fee is booked. If one input of an attempt is refused
+after another was signed, a signature exists, so the attempt is cancelled: a transaction that spends exactly the same inputs back to the partition's
+shard confirms first, and only then is the money released (the guard accepts such a cancel only for inputs one signed intent of the partition claimed).
+If the inputs of an attempt are spent on chain by something that is none of our transactions, the withdrawal is parked with an ALERT and nothing is
+released. A transaction the node forgot (a restart, an eviction) is sent again; a refusal by the node never makes an activity retry for ever.
+
 ## Trust boundaries
 
 | Boundary | Protects | Does not protect |
