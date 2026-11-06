@@ -117,6 +117,14 @@ func (f *fakeChain) Status(_ context.Context, h string) (chain.TxStatus, error) 
 	return f.statuses[h], nil
 }
 
+// Reservation models what the EVM cell holds for an owner: a row of evm_nonce_allocations that is allocated or broadcast.
+func (f *fakeChain) Reservation(ctx context.Context, q chain.Querier, kind, id string) (chain.Reservation, error) {
+	var n int
+	err := q.QueryRow(ctx, `SELECT count(*) FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3
+		AND status IN ('allocated','broadcast')`, testChain, kind, id).Scan(&n)
+	return chain.Reservation{Open: n > 0}, err
+}
+
 type fakeReader struct{ block uint64 }
 
 func (r fakeReader) SafeHead(context.Context) (uint64, error)        { return r.block, nil }
@@ -388,7 +396,7 @@ func TestVoidRefusesWhileTheNonceIsLive(t *testing.T) {
 			ON CONFLICT (chain, address, nonce) DO UPDATE SET status=EXCLUDED.status`, testChain, w.ID, st); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.VoidWithdrawal(ctx, w.ID, "x", ""); !errors.Is(err, ErrNonceOpen) {
+		if err := s.VoidWithdrawal(ctx, w.ID, "x", ""); !errors.Is(err, ErrReservationOpen) {
 			t.Fatalf("void with a %s nonce: %v", st, err)
 		}
 	}

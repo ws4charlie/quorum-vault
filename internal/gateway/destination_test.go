@@ -17,7 +17,7 @@ func (h *harness) restrict(limit int) {
 	cc := h.cfg.Chains[testChain]
 	for _, s := range []string{"ETH", "USDT"} {
 		p := cc.Assets[s]
-		p.AnyDestination, p.Destinations = false, map[common.Address]bool{addrUser: true}
+		p.AnyDestination, p.Destinations = false, map[string]bool{addrUser.Hex(): true}
 		cc.Assets[s] = p
 	}
 	cc.WithdrawalsPerHour = limit
@@ -47,7 +47,7 @@ func TestWithdrawalDestinationAllowlist(t *testing.T) {
 	h.mustSign(h.job("d5", tin("w-t1", addrUser), h.tokenTx(addrUser, 1000, 4), "alice"))
 	h.mustReject(h.job("d6", tin("w-t2", addrEvil), h.tokenTx(addrEvil, 1000, 5), "alice"), ReasonDestination)
 	// Listing the token contract as a destination would not make a transfer to it a transfer to the contract's holder.
-	if h.cfg.Chains[testChain].Assets["USDT"].AllowsDestination(addrToken) {
+	if h.cfg.Chains[testChain].Assets["USDT"].AllowsDestination(addrToken.Hex()) {
 		t.Fatal("the token contract is allowed")
 	}
 

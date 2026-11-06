@@ -292,8 +292,7 @@ func (s *Service) BuildRebalanceJob(ctx context.Context, id string) (string, err
 		if err != nil {
 			return err
 		}
-		if err := signjob.Enqueue(ctx, tx, signjob.Job{ID: jobID, PartitionID: m.PartitionID, KeyRef: u.KeyRef.Path, Chain: u.Chain,
-			Intent: ib, Digest: u.Digest, Payload: u.Payload}); err != nil {
+		if err := EnqueueUnsigned(ctx, tx, jobID, m.PartitionID, u, ib, nil); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, `UPDATE rebalance_moves SET status='signing', job_id=$2, updated_at=now() WHERE id=$1`, id, jobID)
@@ -377,12 +376,12 @@ func (s *Service) SettleRebalance(ctx context.Context, id, txHash string, status
 func (s *Service) FailRebalanceBeforeBroadcast(ctx context.Context, id, reason string) error {
 	o := Owner{Kind: OwnerKindRebalance, ID: id}
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		open, err := s.NonceOpen(ctx, tx, o)
+		open, err := s.ReservationOpen(ctx, tx, o)
 		if err != nil {
 			return err
 		}
 		if open {
-			return ErrNonceOpen
+			return ErrReservationOpen
 		}
 		tag, err := tx.Exec(ctx, `UPDATE rebalance_moves SET status='failed', failure_reason=$2, updated_at=now() WHERE id=$1 AND status IN ('planned','signing')`, id, reason)
 		if err != nil {

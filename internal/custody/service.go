@@ -54,7 +54,7 @@ var (
 	ErrIdempotencyConflict = errors.New("custody: idempotency key reused with a different request")
 	ErrSelfApproval        = errors.New("custody: the initiator cannot approve")
 	ErrNotPending          = errors.New("custody: withdrawal is no longer awaiting approval")
-	ErrNonceOpen           = errors.New("custody: the withdrawal's nonce is still live; resolve it before voiding")
+	ErrReservationOpen     = errors.New("custody: the transaction still holds a live reservation on the chain (EVM: a nonce); resolve it before voiding")
 	ErrExpired             = errors.New("custody: the approval window has passed")
 	ErrSweepFrozen         = errors.New("custody: sweeping is frozen")
 	ErrCursorMoved         = errors.New("custody: scan cursor moved")

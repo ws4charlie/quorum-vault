@@ -21,6 +21,9 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
+// FamilyEVM is the chain family of every chain cell so far.
+const FamilyEVM = "evm"
+
 // File is the JSON form of Config. Amounts are canonical decimal strings,
 // durations are Go duration strings.
 type File struct {
@@ -77,6 +80,9 @@ type HotLimits struct{ Low, High, Target *big.Int }
 
 // ChainFile configures the one EVM chain this core serves.
 type ChainFile struct {
+	// Family names the kind of chain: which adapter and reader a process opens for it (internal/chainfactory). Default
+	// "evm". An unknown family refuses to start. The fields below are those of the evm family.
+	Family           string               `json:"family,omitempty"`
 	Name             string               `json:"name"`
 	ChainID          uint64               `json:"chain_id"`
 	RPCURL           string               `json:"rpc_url"`
@@ -141,6 +147,7 @@ type ScanFile struct {
 // Config is the validated form of File.
 type Config struct {
 	Entity string
+	Family string // FamilyEVM
 	EVM    evm.Config
 	Chain  string
 	Native string
@@ -244,6 +251,12 @@ func (f File) Build() (*Config, error) {
 		c.Native = evm.DefaultNativeAsset
 	}
 	cf := f.Chain
+	switch cf.Family {
+	case "", FamilyEVM:
+		c.Family = FamilyEVM
+	default:
+		return nil, fmt.Errorf("custody: config: unknown chain family %q (known: %s)", cf.Family, FamilyEVM)
+	}
 	if cf.Name == "" || strings.ContainsAny(cf.Name, ":/") {
 		return nil, errors.New("custody: config: chain name must be non-empty and contain no ':' or '/'")
 	}

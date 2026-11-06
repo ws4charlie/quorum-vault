@@ -14,30 +14,66 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 )
 
-// TxInfo is what the replay guard needs from a built transaction. Other chains
-// plug in by implementing ChainCodec; Nonce is the chain's sequence number
-// (EVM nonce), Sender the account it belongs to.
+// TxInfo is what the replay guard and the policy need from a built transaction,
+// as the chain codec reads it from the payload.
 type TxInfo struct {
+	// Sender is the account the transaction belongs to; OwnsSender and CheckSigner judge it.
 	Sender string
 	// Destination is who the transaction pays, read from the transaction itself (the recipient of an ERC-20 transfer, not the
-	// token contract). Empty when the chain codec cannot say.
+	// token contract). Empty when the chain codec cannot say. Compare it after Canonical.
 	Destination string
-	Nonce       uint64
-	Tip         *big.Int // priority fee; the guard compares fees to allow replacements
-	FeeCap      *big.Int
+	// Claims names what the transaction consumes, so that no two intents can both confirm
+	// (EVM: one claim, the sender's nonce; Bitcoin, later: one claim per spent output). A claim is
+	// an opaque string, compared for equality.
+	Claims []string
+	// Fees are the fee components of the transaction (EVM: fee cap, tip; Bitcoin: the absolute fee). A replacement
+	// of a signed transaction must satisfy FeesRaised against them.
+	Fees []*big.Int
 }
 
 // ChainCodec is the per-chain part of the gateway: offline verification, the
-// guard's view of a payload, and which senders the gateway owns.
+// guard's view of a payload, and which senders the gateway owns. The guard's rules for
+// claims and fees are generic; what a claim is and what raising fees means is decided here.
 type ChainCodec interface {
 	chain.TxVerifier
-	// Decode reads the nonce, sender and fees from the payload. It is called
+	// Decode reads the claims, sender, destination and fees from the payload. It is called
 	// only after Verify accepted the payload.
 	Decode(payload []byte) (TxInfo, error)
 	// OwnsSender reports whether sender is a hot address the gateway signs for.
 	OwnsSender(sender string) bool
 	// CheckSigner reports whether pub is the key of info.Sender.
 	CheckSigner(info TxInfo, pub *ecdsa.PublicKey) error
+	// Canonical returns the canonical form of an address (EVM: checksum case; case never matters).
+	// Destinations are compared as canonical strings, so a policy list works for any chain.
+	Canonical(address string) (string, error)
+	// FeesRaised reports whether next may replace a transaction signed with prev: no component lower, at least one higher.
+	FeesRaised(prev, next []*big.Int) bool
+}
+
+// Chain families the gateway knows. A configured family it does not know refuses to start.
+const FamilyEVM = "evm"
+
+func familyOf(f string) (string, error) {
+	switch f {
+	case "", FamilyEVM:
+		return FamilyEVM, nil
+	}
+	return "", fmt.Errorf("unknown chain family %q (known: %s)", f, FamilyEVM)
+}
+
+// canonicalizer returns the address canonicalizer of a family (the config reads destination lists with it, before a
+// codec exists).
+func canonicalizer(family string) func(string) (string, error) {
+	return (&EVMCodec{}).Canonical // the only family so far
+}
+
+// NewCodec is the one place a family picks its codec. qv-gateway and qv-cosigner reach it through NewCodecs.
+func NewCodec(cc *ChainConfig) (ChainCodec, error) {
+	switch cc.Family {
+	case "", FamilyEVM:
+		return NewEVMCodec(cc.EVM)
+	}
+	return nil, fmt.Errorf("gateway: chain %q: unknown chain family %q", cc.Name, cc.Family)
 }
 
 // EVMCodec is the ChainCodec of one EVM chain.
@@ -76,7 +112,34 @@ func (c *EVMCodec) Decode(payload []byte) (TxInfo, error) {
 	if err != nil {
 		return TxInfo{}, fmt.Errorf("gateway: decode evm payload: %w", err)
 	}
-	return TxInfo{Sender: common.HexToAddress(p.From).Hex(), Destination: dest.Hex(), Nonce: p.Nonce, Tip: tip, FeeCap: feeCap}, nil
+	sender := common.HexToAddress(p.From).Hex()
+	return TxInfo{Sender: sender, Destination: dest.Hex(), Claims: []string{fmt.Sprintf("%s#%d", sender, p.Nonce)},
+		Fees: []*big.Int{feeCap, tip}}, nil
+}
+
+// Canonical implements ChainCodec: the EIP-55 checksum form.
+func (c *EVMCodec) Canonical(address string) (string, error) {
+	if !common.IsHexAddress(address) {
+		return "", fmt.Errorf("%q is not an address", address)
+	}
+	return common.HexToAddress(address).Hex(), nil
+}
+
+// FeesRaised implements ChainCodec for [fee cap, tip]: neither drops and at least one rises.
+func (c *EVMCodec) FeesRaised(prev, next []*big.Int) bool {
+	if len(prev) != len(next) {
+		return false
+	}
+	raised := false
+	for i := range prev {
+		switch next[i].Cmp(prev[i]) {
+		case -1:
+			return false
+		case 1:
+			raised = true
+		}
+	}
+	return raised
 }
 
 // OwnsSender implements ChainCodec.

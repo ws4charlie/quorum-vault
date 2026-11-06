@@ -101,7 +101,7 @@ func TestGuardLivesInItsOwnDatabase(t *testing.T) {
 	if n != 0 {
 		t.Fatal("guard database contains business tables")
 	}
-	h.biz.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_name IN ('signed_intents','signed_digests','nonce_claims')`).Scan(&n)
+	h.biz.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_name IN ('signed_intents','signed_digests','exclusive_claims','nonce_claims')`).Scan(&n)
 	if n != 0 {
 		t.Fatal("business database contains guard tables")
 	}

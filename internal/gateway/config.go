@@ -67,7 +67,10 @@ type ApproverFile struct {
 
 // ChainFile is one chain's verifier config and withdrawal policy.
 type ChainFile struct {
-	EVM *EVMFile `json:"evm"`
+	// Family names the kind of chain and so which section below is read, which codec verifies its transactions and how
+	// its addresses are written. Default "evm". An unknown family refuses to start.
+	Family string   `json:"family,omitempty"`
+	EVM    *EVMFile `json:"evm"`
 	// Assets maps asset symbol to its withdrawal policy. Every asset the chain
 	// verifier knows (including the native one) needs an entry.
 	Assets        map[string]AssetFile `json:"assets"`
@@ -141,6 +144,7 @@ type Approver struct {
 // ChainConfig is one chain's trust root.
 type ChainConfig struct {
 	Name           string
+	Family         string // FamilyEVM
 	EVM            evm.Config
 	Assets         map[string]AssetPolicy
 	SweepsPerHour  int
@@ -161,14 +165,14 @@ type AssetPolicy struct {
 	ToColdDailyCap *big.Int
 	// RebalanceDailyCap caps moves between hot shards per rolling day (zero: none allowed).
 	RebalanceDailyCap *big.Int
-	// Destinations is the set withdrawals may pay (compared as addresses, so checksum case never matters); AnyDestination
-	// means the config said so explicitly.
-	Destinations   map[common.Address]bool
+	// Destinations is the set withdrawals may pay, as canonical address strings of the chain's family (ChainCodec.Canonical;
+	// on EVM checksum case never matters); AnyDestination means the config said so explicitly.
+	Destinations   map[string]bool
 	AnyDestination bool
 }
 
-// AllowsDestination reports whether a withdrawal of this asset may pay dest.
-func (p AssetPolicy) AllowsDestination(dest common.Address) bool {
+// AllowsDestination reports whether a withdrawal of this asset may pay dest, a canonical address string.
+func (p AssetPolicy) AllowsDestination(dest string) bool {
 	return p.AnyDestination || p.Destinations[dest]
 }
 
@@ -290,8 +294,13 @@ func addr(what, s string) (common.Address, error) {
 }
 
 func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, error) {
+	family, err := familyOf(cf.Family)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: config: chain %q: %w", name, err)
+	}
+	canon := canonicalizer(family)
 	if cf.EVM == nil {
-		return nil, fmt.Errorf("gateway: config: chain %q has no supported chain section (only evm)", name)
+		return nil, fmt.Errorf("gateway: config: chain %q has no %s section", name, family)
 	}
 	if cf.WithdrawalsPerHour <= 0 {
 		return nil, fmt.Errorf("gateway: config: chain %q: withdrawals_per_hour is required and must be > 0", name)
@@ -302,7 +311,6 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	e := cf.EVM
 	ec := evm.Config{Chain: name, ChainID: e.ChainID, NativeAsset: e.NativeAsset,
 		HotAddresses: map[string]common.Address{}, Assets: map[string]evm.Token{}, ColdAddresses: map[string]common.Address{}}
-	var err error
 	if ec.Factory, err = addr("factory", e.Factory); err != nil {
 		return nil, err
 	}
@@ -344,14 +352,14 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 		want = append(want, s)
 	}
 	sort.Strings(want)
-	cc := &ChainConfig{Name: name, EVM: ec, Assets: map[string]AssetPolicy{},
+	cc := &ChainConfig{Name: name, Family: family, EVM: ec, Assets: map[string]AssetPolicy{},
 		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour, ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour}
 	for _, s := range want {
 		af, ok := cf.Assets[s]
 		if !ok {
 			return nil, fmt.Errorf("gateway: config: chain %q: asset %q has no policy", name, s)
 		}
-		if cc.Assets[s], err = af.build(name+"/"+s, enabledApprovers); err != nil {
+		if cc.Assets[s], err = af.build(name+"/"+s, enabledApprovers, canon); err != nil {
 			return nil, err
 		}
 	}
@@ -363,7 +371,7 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	return cc, nil
 }
 
-func (af AssetFile) build(where string, enabledApprovers int) (AssetPolicy, error) {
+func (af AssetFile) build(where string, enabledApprovers int, canon func(string) (string, error)) (AssetPolicy, error) {
 	var p AssetPolicy
 	var err error
 	if p.PerTxCap, err = amount(where+" per_tx_cap", af.PerTxCap); err != nil {
@@ -394,13 +402,13 @@ func (af AssetFile) build(where string, enabledApprovers int) (AssetPolicy, erro
 		return p, fmt.Errorf("gateway: config: %s: set withdrawal_destinations (a list) or any_destination: true; withdrawals to no one in particular are not the default", where)
 	}
 	p.AnyDestination = af.AnyDestination
-	p.Destinations = map[common.Address]bool{}
+	p.Destinations = map[string]bool{}
 	for _, d := range af.WithdrawalDestinations {
-		a, err := addr(where+" withdrawal destination", d)
+		a, err := canon(d)
 		if err != nil {
-			return p, err
+			return p, fmt.Errorf("gateway: config: %s withdrawal destination: %w", where, err)
 		}
-		if a == (common.Address{}) {
+		if a == (common.Address{}).Hex() { // the burn address of the evm family
 			return p, fmt.Errorf("gateway: config: %s: the zero address is not a withdrawal destination", where)
 		}
 		p.Destinations[a] = true

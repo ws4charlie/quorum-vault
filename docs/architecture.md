@@ -162,6 +162,29 @@ outage, no refusal, no void. If a party detects a bad message, it freezes the ke
 unfreeze it; withdrawals then park with their hold and nonce kept (see
 [learn/p5b-5-custody-on-mpc.md](learn/p5b-5-custody-on-mpc.md)).
 
+## The chain seam
+
+Nothing above the chain cell assumes EVM, except where listed in [learn/p7-1-chain-seam.md](learn/p7-1-chain-seam.md). A chain
+cell is a `chain.Adapter` in the business zone and a `ChainCodec` in the signing zone, picked by the chain's `family` (default
+`evm`; an unknown family refuses to start). `qv-core` and `qv-worker` open their chain through `internal/chainfactory`;
+`qv-gateway` and `qv-cosigner` build their codecs through `gateway.NewCodec`. One process serves one chain, on its own Temporal
+queue `qv-core-<chain>`, so two chain cells on one Temporal server never take each other's work.
+
+Four things were EVM-shaped and are now neutral:
+
+- **Several signatures per transaction.** A built transaction lists every input to sign, each with its own key. Each input is one sign
+  job. A transaction with one signature (all of EVM) keeps the job IDs it always had; input `i` after the first is `<id>.<i>`. The
+  workflow waits for all jobs of an attempt, a refusal of any job refuses the attempt, and `Assemble` gets all signatures in order.
+- **Exclusive attempts.** What makes two attempts unable to both confirm is a set of claims that the codec reads from the payload (EVM:
+  one claim, sender and nonce). The gateway's guard records claims, refuses a second intent on a claimed key, and lets a known
+  intent send a replacement only over the same claims and with higher fees, as the codec defines "higher". Several signatures of one
+  transaction (same payload) are not a replacement.
+- **Outcome of an attempt.** The adapter says whether the attempts of an owner are open, confirmed (by the transaction, a cancel, or
+  failed) or consumed by something this system did not make, and whether the owner still holds a reservation. `BuildCancel` is
+  optional: a chain without it has nothing to free after a refusal.
+- **Destinations.** The withdrawal allowlist holds canonical address strings; the codec defines the canonical form (EVM: checksum case,
+  so case never matters).
+
 ## Trust boundaries
 
 | Boundary | Protects | Does not protect |
