@@ -78,6 +78,29 @@ func (s *Service) ApplyScan(ctx context.Context, from uint64, res chain.ScanResu
 				n++
 			}
 		}
+		for _, f := range res.Funding {
+			rec, ok := s.Chain.(chain.FundingRecorder)
+			if !ok {
+				return fmt.Errorf("custody: the scan found funding of %s but the chain cell cannot record it", f.Address)
+			}
+			inserted, err := rec.RecordFunding(ctx, tx, f)
+			if err != nil {
+				return err
+			}
+			if !inserted {
+				continue // seen before: booked before
+			}
+			// The operator put its own money on a hot address: the hot mirror falls by the amount, the operator's account rises.
+			key := fmt.Sprintf("%s:%s:%d", f.Chain, f.TxHash, f.Vout)
+			if err := s.transfer(ctx, tx, "hot-fund:"+key, hotAcct(f.PartitionID), opFundAcct(c.Chain, f.Asset), f.Amount, map[string]any{"tx": f.TxHash, "vout": f.Vout, "kind": "hot_funding"}); err != nil {
+				return err
+			}
+			if err := emit(ctx, tx, outbox.TopicDeposits, "hot-fund:"+key, "hot.funded", map[string]any{"chain": f.Chain, "asset": f.Asset, "partition": f.PartitionID,
+				"address": f.Address, "amount": f.Amount.String(), "tx": f.TxHash, "vout": f.Vout, "height": f.BlockHeight}); err != nil {
+				return err
+			}
+			n++
+		}
 		for _, b := range res.Blocks {
 			if _, err := tx.Exec(ctx, `INSERT INTO scanned_blocks (chain, height, hash) VALUES ($1,$2,$3)
 				ON CONFLICT (chain, height) DO UPDATE SET hash = EXCLUDED.hash, scanned_at = now()`, c.Chain, int64(b.Height), b.Hash); err != nil {

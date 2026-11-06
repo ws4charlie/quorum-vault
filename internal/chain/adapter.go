@@ -155,7 +155,50 @@ type ScanResult struct {
 	// Deferred are deposits seen in a block that is final but whose funds are not yet spendable (a Bitcoin coinbase
 	// output). The caller stores them and credits each when its ReleaseAt is covered by a later scan.
 	Deferred []DeferredDeposit
+	// Funding lists payments to the cell's own hot addresses that did not come from a transaction of ours (operator funding). The
+	// caller records each in the same transaction (FundingRecorder) and books it as operator funding.
+	Funding []FundingOutput
 }
+
+// FundingOutput is an output paying one of the cell's hot addresses, seen at safe depth.
+type FundingOutput struct {
+	Chain       string
+	Asset       string
+	PartitionID string // the hot partition whose address was paid
+	Address     string
+	TxHash      string
+	Vout        uint32
+	Amount      *big.Int
+	BlockHeight uint64
+}
+
+// FundingRecorder is implemented by a chain cell that keeps its own outputs (Bitcoin's UTXO table). RecordFunding stores the output once
+// and reports whether it was new: only a new one is booked, so a rescan books nothing twice.
+type FundingRecorder interface {
+	RecordFunding(ctx context.Context, tx pgx.Tx, f FundingOutput) (inserted bool, err error)
+}
+
+// Settler is implemented by a chain cell that must update its own books when a transaction of an owner settles, in the settlement's database
+// transaction (Bitcoin: its inputs become spent and its change becomes an available output).
+type Settler interface {
+	Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txHash string) error
+}
+
+// Releaser is implemented by a chain cell whose reservation can be given back when the owner's attempt was refused and nothing was signed
+// (Bitcoin: reserved outputs become available again). The caller has already checked that no signature can exist.
+type Releaser interface {
+	ReleaseUnsigned(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) error
+}
+
+// AddressNormalizer is implemented by a cell that validates withdrawal destinations for its network and returns the canonical form.
+// Without it the service validates the destination as an EVM address.
+type AddressNormalizer interface {
+	NormalizeAddress(address string) (string, error)
+}
+
+// ErrNotEnoughOutputs is returned by BuildWithdrawal when the partition's available outputs cannot pay the amount and the fee now. It is
+// retryable: outputs may free up or arrive, so the withdrawal waits.
+var ErrNotEnoughOutputs = errors.New("chain: not enough available outputs")
 
 // ScannedBlock is the height and hash of a block a scan read.
 type ScannedBlock struct {

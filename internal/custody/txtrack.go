@@ -365,3 +365,54 @@ func sortedKeys[V any](m map[string]V) []string {
 	sort.Strings(out)
 	return out
 }
+
+// ReleaseIfUnsigned gives back what an owner reserved when its attempt was refused and no signature of it can exist, so the money may be
+// released. A signature can exist when any job of the owner is being signed, is done or failed (the gateway keeps its reservation for a failed
+// one). Jobs still pending are marked rejected in the same transaction, so no gateway claims one afterwards. Without a Releaser (EVM) or with a
+// signature that may exist, it does nothing and reports false.
+func (s *Service) ReleaseIfUnsigned(ctx context.Context, o Owner) (bool, error) {
+	rel, ok := s.Chain.(chain.Releaser)
+	if !ok {
+		return false, nil
+	}
+	released := false
+	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		released = false
+		prefix := string(OwnerTrack(o)) + ":"
+		rows, err := tx.Query(ctx, `SELECT id, status FROM sign_jobs WHERE starts_with(id, $1) FOR UPDATE`, prefix)
+		if err != nil {
+			return err
+		}
+		var pending []string
+		for rows.Next() {
+			var id, st string
+			if err := rows.Scan(&id, &st); err != nil {
+				rows.Close()
+				return err
+			}
+			switch st {
+			case signjob.StatusPending:
+				pending = append(pending, id)
+			case signjob.StatusRejected:
+			default: // signing, done, failed: a signature may exist
+				rows.Close()
+				return nil
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, id := range pending {
+			if _, err := tx.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='sibling_refused: another job of the attempt was refused', updated_at=now() WHERE id=$1 AND status='pending'`, id); err != nil {
+				return err
+			}
+		}
+		if err := rel.ReleaseUnsigned(ctx, tx, o.Kind, o.ID); err != nil {
+			return err
+		}
+		released = true
+		return nil
+	})
+	return released, err
+}

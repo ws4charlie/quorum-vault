@@ -15,9 +15,20 @@ import (
 // Adapter is the Bitcoin chain cell. Address derivation and deposit scanning work; everything that moves funds out returns
 // chain.ErrNotSupported until the tasks that build it.
 type Adapter struct {
-	cfg  *validatedConfig
-	rpc  *RPC
-	pool *pgxpool.Pool
+	cfg    *validatedConfig
+	rpc    *RPC
+	pool   *pgxpool.Pool
+	acct   *Account
+	shards []shard          // in shard order
+	byAddr map[string]shard // canonical address -> shard
+}
+
+// shard is one hot shard of the cell.
+type shard struct {
+	partition string
+	address   string // canonical
+	path      []uint32
+	script    []byte
 }
 
 var _ chain.Adapter = (*Adapter)(nil)
@@ -34,7 +45,20 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 	if pool == nil {
 		return nil, errors.New("btc: nil database pool")
 	}
-	a := &Adapter{cfg: v, rpc: NewRPC(cfg.RPCURL, cfg.RPCUser, cfg.RPCPass), pool: pool}
+	a := &Adapter{cfg: v, rpc: NewRPC(cfg.RPCURL, cfg.RPCUser, cfg.RPCPass), pool: pool, acct: &Account{Params: v.params, key: v.account}, byAddr: map[string]shard{}}
+	for _, h := range v.HotShards {
+		d, err := DecodeAddress(h.Address, v.params)
+		if err != nil {
+			return nil, err
+		}
+		script, err := OutputScript(h.Address, v.params)
+		if err != nil {
+			return nil, err
+		}
+		sh := shard{partition: h.PartitionID, address: d.Canonical, path: h.Path, script: script}
+		a.shards = append(a.shards, sh)
+		a.byAddr[sh.address] = sh
+	}
 	var info struct {
 		Chain string `json:"chain"`
 	}
@@ -85,9 +109,6 @@ func (a *Adapter) DeriveDepositAddress(_ context.Context, customerID string, ind
 
 var errLater = fmt.Errorf("btc: %w (a later P7 task)", chain.ErrNotSupported)
 
-func (a *Adapter) BuildWithdrawal(context.Context, pgx.Tx, chain.WithdrawalIntent) (chain.UnsignedTx, error) {
-	return chain.UnsignedTx{}, errLater
-}
 func (a *Adapter) BuildSweep(context.Context, pgx.Tx, chain.SweepIntent) (chain.UnsignedTx, error) {
 	return chain.UnsignedTx{}, errLater
 }
@@ -97,30 +118,15 @@ func (a *Adapter) BuildReplacement(context.Context, pgx.Tx, string, string) (cha
 func (a *Adapter) BuildCancel(context.Context, pgx.Tx, string, string) (chain.UnsignedTx, error) {
 	return chain.UnsignedTx{}, errLater
 }
-func (a *Adapter) Assemble(chain.UnsignedTx, []chain.Signature) (chain.SignedTx, error) {
-	return chain.SignedTx{}, errLater
-}
-func (a *Adapter) Broadcast(context.Context, chain.SignedTx) (string, error) { return "", errLater }
-func (a *Adapter) Status(context.Context, string) (chain.TxStatus, error)    { return "", errLater }
 func (a *Adapter) EstimateSweepFee(context.Context, chain.SweepIntent) (*big.Int, error) {
 	return nil, errLater
 }
-func (a *Adapter) TxFee(context.Context, string) (*big.Int, error) { return nil, errLater }
 func (a *Adapter) MovedAssets(context.Context, string) ([]chain.MovedAsset, error) {
 	return nil, errLater
-}
-func (a *Adapter) Outcome(context.Context, string, string) (chain.Outcome, error) {
-	return chain.Outcome{}, errLater
-}
-func (a *Adapter) Reservation(context.Context, chain.Querier, string, string) (chain.Reservation, error) {
-	return chain.Reservation{}, errLater
 }
 
 // The Adapter is also the custody.Reader of the chain. SafeHead works; the balance of an address and the height of a
 // transaction are needed by reconciliation, settlement of withdrawals and sweeps, which are later tasks.
-
-// TxBlock is not supported yet.
-func (a *Adapter) TxBlock(context.Context, string) (uint64, error) { return 0, errLater }
 
 // Balance is not supported yet: reconciliation of hot, cold and deposit balances against the chain needs it.
 func (a *Adapter) Balance(context.Context, string, string, uint64) (*big.Int, error) {

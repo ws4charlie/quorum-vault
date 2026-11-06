@@ -39,6 +39,28 @@ type Config struct {
 	HotAddresses []string
 	// BatchBlocks bounds how many blocks one Scan call reads (default 100).
 	BatchBlocks uint64
+	// HotShards are the cell's hot addresses, in shard order (shard i is HotShards[i]). Each must be the key of the account at its path.
+	HotShards []HotShardConfig
+	// SpendConfirmations is the depth at which a transaction of ours settles and its change is released (default 2). Our own transactions
+	// spend only our own inputs and nobody else can double-spend them, so a reorganization can only delay them.
+	SpendConfirmations uint64
+	// MaxInputs bounds the inputs of one transaction (default 20); the signing zone's cap must be at least as high.
+	MaxInputs int
+	// FallbackFeeRate is the fee rate in satoshis per virtual byte when the node has no estimate (default 5). MaxFeeRate is the ceiling
+	// (default 100), which must be below the signing zone's.
+	FallbackFeeRate uint64
+	MaxFeeRate      uint64
+	// MaxTxFeeSats is the most a transaction may pay in fee (default 100000, below the signing zone's cap).
+	MaxTxFeeSats uint64
+	// StuckAfterBlocks is how many blocks a broadcast transaction may stay unconfirmed before the workflow tries to bump it (later task).
+	StuckAfterBlocks uint64
+}
+
+// HotShardConfig is one hot shard: the partition it serves, its address and the path of its key below the account.
+type HotShardConfig struct {
+	PartitionID string
+	Address     string
+	Path        []uint32 // [BranchHot, index]
 }
 
 // Params returns the chain parameters of a network name.
@@ -74,6 +96,21 @@ func (c Config) withDefaults() Config {
 	}
 	if c.BatchBlocks == 0 {
 		c.BatchBlocks = 100
+	}
+	if c.SpendConfirmations == 0 {
+		c.SpendConfirmations = 2
+	}
+	if c.MaxInputs == 0 {
+		c.MaxInputs = 20
+	}
+	if c.FallbackFeeRate == 0 {
+		c.FallbackFeeRate = 5
+	}
+	if c.MaxFeeRate == 0 {
+		c.MaxFeeRate = 100
+	}
+	if c.MaxTxFeeSats == 0 {
+		c.MaxTxFeeSats = 100_000
 	}
 	return c
 }
@@ -123,6 +160,27 @@ func (c Config) validated() (*validatedConfig, error) {
 			return nil, fmt.Errorf("btc: config: hot address: %w", err)
 		}
 	}
+	for i, h := range c.HotShards {
+		if len(h.Path) != 2 || h.Path[0] != BranchHot {
+			return nil, fmt.Errorf("btc: config: hot shard %d: path %v is not on the hot branch [%d, index]", i, h.Path, BranchHot)
+		}
+		if err := v.checkAddress(h.Address); err != nil {
+			return nil, fmt.Errorf("btc: config: hot shard %d: %w", i, err)
+		}
+		want, err := v.addressAt2(h.Path)
+		if err != nil {
+			return nil, err
+		}
+		if d, err := DecodeAddress(h.Address, params); err != nil || d.Canonical != want {
+			return nil, fmt.Errorf("btc: config: hot shard %d: address %s is not the account's key at %s (that is %s)", i, h.Address, PathString(h.Path), want)
+		}
+	}
+	if c.MaxInputs < 1 || c.SpendConfirmations < 1 {
+		return nil, errors.New("btc: config: max_inputs and spend_confirmations must be positive")
+	}
+	if c.FallbackFeeRate > c.MaxFeeRate {
+		return nil, errors.New("btc: config: fallback_fee_rate is above max_fee_rate")
+	}
 	// The form of an address this config derives must belong to the network it names.
 	probe, err := v.addressAt(0)
 	if err != nil {
@@ -144,4 +202,10 @@ func (v *validatedConfig) checkAddress(a string) error {
 		return fmt.Errorf("address %q is not a %s address", a, v.Network)
 	}
 	return nil
+}
+
+// addressAt2 derives the P2WPKH address at a two-element path from the account key.
+func (v *validatedConfig) addressAt2(path []uint32) (string, error) {
+	a := &Account{Params: v.params, key: v.account}
+	return a.Address(path)
 }

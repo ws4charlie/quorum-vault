@@ -128,9 +128,55 @@ func (a *Adapter) matchBlock(ctx context.Context, blk Block, h uint64, tip int64
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// Outputs to a hot address that a transaction of ours made (change, later sweeps) are ours already: the settlement of that transaction records
+	// them, and booking them again as funding would count them twice.
+	hotTx := map[string]bool{}
+	for _, tx := range blk.Tx {
+		for _, o := range tx.Vout {
+			if _, hot := a.byAddr[o.ScriptPubKey.Address]; hot {
+				hotTx[tx.Txid] = true
+			}
+		}
+	}
+	if len(hotTx) > 0 {
+		ids := make([]string, 0, len(hotTx))
+		for id := range hotTx {
+			ids = append(ids, id)
+		}
+		rows, err := a.pool.Query(ctx, `SELECT txid FROM btc_attempts WHERE chain=$1 AND txid = ANY($2)`, a.cfg.Chain, ids)
+		if err != nil {
+			return fmt.Errorf("btc: read attempts: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			hotTx[id] = false
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
 	for _, tx := range blk.Tx {
 		coinbase := len(tx.Vin) > 0 && tx.Vin[0].Coinbase != ""
 		for _, o := range tx.Vout {
+			if sh, hot := a.byAddr[o.ScriptPubKey.Address]; hot {
+				if !hotTx[tx.Txid] || coinbase { // ours, or a coinbase (not supported to a hot address)
+					continue
+				}
+				amt, err := Sats(o.Value.String())
+				if err != nil {
+					return fmt.Errorf("btc: tx %s output %d: %w", tx.Txid, o.N, err)
+				}
+				if amt.Sign() > 0 {
+					res.Funding = append(res.Funding, chain.FundingOutput{Chain: a.cfg.Chain, Asset: Native, PartitionID: sh.partition, Address: sh.address,
+						TxHash: tx.Txid, Vout: o.N, Amount: new(big.Int).Set(amt), BlockHeight: h})
+				}
+				continue
+			}
 			if !ours[o.ScriptPubKey.Address] {
 				continue
 			}

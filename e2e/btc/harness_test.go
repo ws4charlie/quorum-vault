@@ -6,6 +6,7 @@ package btce2e
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,7 +58,7 @@ func TestMain(m *testing.M) {
 		if mpcBin, err = mpcstack.Build(dir); err != nil {
 			buildErr = err
 		}
-		for _, b := range []string{"qv-worker", "qv-core"} {
+		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway"} {
 			if buildErr != nil {
 				break
 			}
@@ -255,11 +256,27 @@ type system struct {
 	worker  *proc
 	core    *proc
 	start   int64 // the height the scan starts from
+
+	// withdrawals (opts.withdraw)
+	acct    *btc.Account
+	part    string // the hot partition
+	hotAddr string // its address, [1,0]
+	approv  map[string]ed25519.PrivateKey
+	keyPath string
+	gateway *proc
+	gwPath  string
+	gwGuard string
+	tc      client.Client
+	tag     string
 }
 
 type opts struct {
 	minDeposit string // default 1000 sats
 	conf       uint64 // default 6
+	// withdraw starts the whole withdrawal path: the signing gateway and party B's cosigner, one hot shard, approvers and the automated key.
+	withdraw bool
+	// gwDest, when set, is the only list of destinations the gateway lets withdrawals pay (otherwise any).
+	gwDest []string
 }
 
 func freePort(t *testing.T) int {
@@ -393,6 +410,10 @@ func newSystem(t *testing.T, o opts) *system {
 		Scan:       custody.ScanFile{Interval: "300ms", StartHeight: uint64(s.start)},
 	}
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
+	s.tag = uuid.NewString()[:8]
+	if o.withdraw {
+		s.setupWithdrawals(o)
+	}
 	s.writeConfig(s.cf)
 
 	addr := os.Getenv("QV_TEMPORAL_ADDR")
@@ -408,12 +429,26 @@ func newSystem(t *testing.T, o opts) *system {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.tc = tc
 	t.Cleanup(tc.Close)
-	t.Cleanup(func() { // the loops outlive their worker: end them with the test
-		for _, id := range []string{workflow.ScanID(s.chain)} {
-			_ = tc.TerminateWorkflow(s.ctx, id, "", "test over")
+	t.Cleanup(func() { // the workflows outlive their worker: end them with the test
+		ids := []string{workflow.ScanID(s.chain), workflow.ReconcilerID(s.chain)}
+		if rows, err := s.pool.Query(context.Background(), `SELECT id FROM withdrawals`); err == nil {
+			for rows.Next() {
+				var id string
+				if rows.Scan(&id) == nil {
+					ids = append(ids, id)
+				}
+			}
+			rows.Close()
+		}
+		for _, id := range ids {
+			_ = tc.TerminateWorkflow(context.Background(), id, "", "test over")
 		}
 	})
+	if o.withdraw {
+		s.startGateway()
+	}
 	s.startWorker()
 	s.startCore()
 	return s
@@ -428,7 +463,11 @@ func (s *system) writeConfig(cf custody.File) {
 }
 
 func (s *system) startWorker() {
-	s.worker = s.spawn("qv-worker", "-config", s.cfgPath, "-dsn", s.bizDSN, "-task-queue", s.queue)
+	args := []string{"-config", s.cfgPath, "-dsn", s.bizDSN, "-task-queue", s.queue}
+	if s.keyPath != "" {
+		args = append(args, "-auto-approver-key-file", s.keyPath)
+	}
+	s.worker = s.spawn("qv-worker", args...)
 	p := s.worker
 	s.waitFor(30*time.Second, "worker started", func() bool { return fileContains(p.log, "qv-worker started") })
 }
@@ -453,6 +492,10 @@ func (s *system) startCore() {
 }
 
 func (s *system) call(method, path string, body any) (int, map[string]any) {
+	return s.callWith(method, path, map[string]string{"X-Actor": "ops"}, body)
+}
+
+func (s *system) callWith(method, path string, hdr map[string]string, body any) (int, map[string]any) {
 	s.t.Helper()
 	var rd io.Reader
 	if body != nil {
@@ -463,7 +506,9 @@ func (s *system) call(method, path string, body any) (int, map[string]any) {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	req.Header.Set("X-Actor", "ops")
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		s.t.Fatalf("%s %s: %v", method, path, err)

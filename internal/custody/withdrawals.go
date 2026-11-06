@@ -184,7 +184,7 @@ func (s *Service) RequestWithdrawal(ctx context.Context, r WithdrawalRequest) (W
 	if r.Amount == nil || r.Amount.Sign() <= 0 {
 		return Withdrawal{}, false, fmt.Errorf("%w: amount must be positive", ErrInvalid)
 	}
-	to, err := NormalizeAddress(r.To)
+	to, err := s.normalizeDestination(r.To)
 	if err != nil {
 		return Withdrawal{}, false, err
 	}
@@ -283,7 +283,7 @@ func (s *Service) freeHot(ctx context.Context, q interface {
 // is chosen at request time; if no shard covers the amount yet the workflow waits.
 func (s *Service) pickShard(ctx context.Context, tx pgx.Tx, asset string, amount *big.Int) (string, error) {
 	best, bestFree := "", (*big.Int)(nil)
-	for i := range s.Cfg.HotShards {
+	for i := 0; i < s.Cfg.shardCount(); i++ {
 		p := s.Cfg.PartitionKey(asset, i).String()
 		free, err := s.freeHot(ctx, tx, p)
 		if err != nil {
@@ -516,6 +516,11 @@ func (s *Service) SettleWithdrawal(ctx context.Context, id, txHash string) error
 		if err := s.recordFee(ctx, tx, txHash, w.PartitionID, fee); err != nil {
 			return err
 		}
+		if st, ok := s.Chain.(chain.Settler); ok { // the cell's own books (Bitcoin: spent inputs, new change) change with the settlement
+			if err := st.Settle(ctx, tx, "withdrawal", id, txHash); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx, `UPDATE withdrawals SET status='confirmed', tx_hash=$2, fee=$3::numeric, updated_at=now() WHERE id=$1`, id, txHash, fee.String()); err != nil {
 			return err
 		}
@@ -598,4 +603,17 @@ func (s *Service) RecordRejection(ctx context.Context, id, actor, reason string)
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		return auditEvent(ctx, tx, id, "withdrawal.rejected", map[string]any{"actor": actor, "withdrawal": id, "reason": reason})
 	})
+}
+
+// normalizeDestination validates a withdrawal destination for the chain's network. A cell that knows its network's address forms says so
+// (chain.AddressNormalizer: Bitcoin); otherwise the destination is an EVM address.
+func (s *Service) normalizeDestination(to string) (string, error) {
+	if n, ok := s.Chain.(chain.AddressNormalizer); ok {
+		a, err := n.NormalizeAddress(to)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		return a, nil
+	}
+	return NormalizeAddress(to)
 }
