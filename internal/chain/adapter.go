@@ -197,6 +197,32 @@ type SweepSource interface {
 	SweepCandidates(ctx context.Context) ([]SweepCandidate, error)
 }
 
+// MoveCapacity is implemented by a chain cell where one transaction can spend only so many inputs (Bitcoin): MaxMove is the most one hot-to-cold
+// move from the partition can carry now, from the outputs that are available (a reserved output is not counted), after the fee. The planner caps
+// a move at it, so a shard of many small outputs is emptied in rounds instead of waiting for a move that cannot be built.
+type MoveCapacity interface {
+	MaxMove(ctx context.Context, partitionID string) (*big.Int, error)
+}
+
+// OutputDiff is one disagreement between a chain cell's own output table and the chain.
+type OutputDiff struct {
+	Address string
+	Output  string // txid:vout
+	Detail  string
+}
+
+// OutputAuditor is implemented by a chain cell that keeps its own outputs (Bitcoin). AuditOutputs compares them with the chain's UTXO set and returns
+// every disagreement and the chain height it read. It changes nothing.
+type OutputAuditor interface {
+	AuditOutputs(ctx context.Context) (diffs []OutputDiff, height uint64, err error)
+}
+
+// BatchBalancer is implemented by a chain cell whose balance read is expensive (Bitcoin: the node is busy during it), so the reconciliation asks for
+// many addresses at once. It returns the balance of each address and the height it read.
+type BatchBalancer interface {
+	BalanceBatch(ctx context.Context, addrs []string) (map[string]*big.Int, uint64, error)
+}
+
 // Settler is implemented by a chain cell that must update its own books when a transaction of an owner settles, in the settlement's database
 // transaction (Bitcoin: its inputs become spent and its change becomes an available output).
 type Settler interface {

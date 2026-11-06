@@ -537,6 +537,24 @@ func (c *Config) PartitionKey(asset string, shard int) partition.Key {
 	return partition.Key{Entity: c.Entity, Chain: c.Chain, Asset: asset, Tier: partition.TierHot, Pool: partition.PoolOmnibus, Shard: shard}
 }
 
+// ColdAddressOf is the cold address of a partition's pool and asset, for any family, in the form the family's chain cell takes (an evm address in
+// hex, a canonical bitcoin address).
+func (c *Config) ColdAddressOf(partitionID, asset string) (string, error) {
+	if c.Family == FamilyBTC {
+		k, err := partition.Parse(partitionID)
+		if err != nil {
+			return "", err
+		}
+		a, ok := c.BTC.ColdAddresses[string(k.Pool)+"/native"]
+		if !ok {
+			return "", fmt.Errorf("custody: no cold address for pool %q", k.Pool)
+		}
+		return btc.CanonicalAddress(c.BTC.Network, a)
+	}
+	a, err := c.EVM.ColdAddress(partitionID, asset)
+	return a.Hex(), err
+}
+
 // SinkPartition is where swept funds of asset land.
 func (c *Config) SinkPartition(asset string) string {
 	return c.PartitionKey(asset, c.SinkShard).String()
@@ -583,12 +601,22 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 	if len(cf.Addresses) == 0 && len(cf.Limits) == 0 && len(cf.ShardLimits) == 0 {
 		return nil
 	}
-	c.EVM.ColdAddresses = map[string]common.Address{}
-	for k, a := range cf.Addresses {
-		if !common.IsHexAddress(a) {
-			return fmt.Errorf("custody: config: cold address %q is not an address", k)
+	if c.Family == FamilyBTC {
+		c.BTC.ColdAddresses = map[string]string{}
+		for k, a := range cf.Addresses {
+			c.BTC.ColdAddresses[k] = a
 		}
-		c.EVM.ColdAddresses[k] = common.HexToAddress(a)
+		if err := c.BTC.Validate(); err != nil { // the cold addresses belong to the network and are not hot shards
+			return fmt.Errorf("custody: config: %w", err)
+		}
+	} else {
+		c.EVM.ColdAddresses = map[string]common.Address{}
+		for k, a := range cf.Addresses {
+			if !common.IsHexAddress(a) {
+				return fmt.Errorf("custody: config: cold address %q is not an address", k)
+			}
+			c.EVM.ColdAddresses[k] = common.HexToAddress(a)
+		}
 	}
 	parse := func(where string, lf LimitFile) (HotLimits, error) {
 		var l HotLimits
@@ -614,7 +642,7 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 	}
 	c.ColdLimits = map[string]HotLimits{}
 	for _, sym := range c.AssetList {
-		for i := range c.HotShards {
+		for i := 0; i < c.shardCount(); i++ {
 			lf, ok := cf.ShardLimits[fmt.Sprintf("%s/%d", sym, i)]
 			if !ok {
 				if lf, ok = cf.Limits[sym]; !ok {
@@ -625,7 +653,7 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 			if c.ColdLimits[p], err = parse("cold limits of "+p, lf); err != nil {
 				return err
 			}
-			if _, err := c.EVM.ColdAddress(p, sym); err != nil {
+			if _, err := c.ColdAddressOf(p, sym); err != nil {
 				return fmt.Errorf("custody: config: %s has limits but no cold address: %w", p, err)
 			}
 		}

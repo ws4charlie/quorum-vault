@@ -30,6 +30,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
+	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
@@ -264,16 +265,18 @@ type system struct {
 	start   int64 // the height the scan starts from
 
 	// withdrawals (opts.withdraw)
-	acct    *btc.Account
-	part    string // the hot partition
-	hotAddr string // its address, [1,0]
-	approv  map[string]ed25519.PrivateKey
-	keyPath string
-	gateway *proc
-	gwPath  string
-	gwGuard string
-	tc      client.Client
-	tag     string
+	acct     *btc.Account
+	part     string // the hot partition
+	hotAddr  string // its address, [1,0]
+	approv   map[string]ed25519.PrivateKey
+	keyPath  string
+	gateway  *proc
+	gwPath   string
+	gwFile   gateway.File
+	coldAddr string
+	gwGuard  string
+	tc       client.Client
+	tag      string
 
 	workerFailpoint string
 	lease           string
@@ -305,6 +308,10 @@ type opts struct {
 	sweepUrgent     uint64
 	gwSweepsPerHour int
 	retryAfter      string
+	// coldHigh, coldLow and coldTarget (satoshis) turn the hot-to-cold planner on for the hot shard; toColdCap is the gateway's daily cap for moves
+	// (default: far above any test).
+	coldHigh, coldLow, coldTarget string
+	toColdCap                     string
 	// gwDest, when set, is the only list of destinations the gateway lets withdrawals pay (otherwise any).
 	gwDest []string
 }

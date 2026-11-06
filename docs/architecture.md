@@ -260,6 +260,15 @@ with the cancel's fee, so the customer's credit and the sweep account stay right
 planner leaves the address alone for a growing while; an outside spend parks the sweep, and withdrawals go on. See
 [learn/p7-5-btc-sweeps.md](learn/p7-5-btc-sweeps.md).
 
+## Bitcoin: reconciliation and cold
+
+Reconcile compares the ledger, the output table and the chain. The chain is read with `scantxoutset` at the node's tip (batched, never on a request
+path), counting an output once the books should have it; a difference names the address, both figures and the height, logs an ALERT and changes
+nothing. Hot shards, cold addresses and deposit addresses (suspense included) are covered, and the output table is compared with the UTXO set row by
+row. With anything in flight the chain comparisons are skipped. Hot-to-cold uses the EVM planner and workflow: a move is a withdrawal of the shard's
+own outputs to the pool's cold address, with change back to the shard; its size is capped at what `max_inputs` of the oldest available outputs can
+carry, so a shard of many small outputs is emptied in rounds. See [learn/p7-6-btc-cold.md](learn/p7-6-btc-cold.md).
+
 ## Trust boundaries
 
 | Boundary | Protects | Does not protect |

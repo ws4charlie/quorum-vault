@@ -674,7 +674,7 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 		if err != nil {
 			return err
 		}
-		if cr.Kind == txCancelled {
+		if cr.Kind == txCancelled && !(st.SettlesCancel && cr.Hash != "") {
 			return call(ctx, opts(ctx), nil, a.FailColdMove, id, "gateway refused: "+r.Reason)
 		}
 		r = cr
@@ -683,6 +683,9 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 	case txMined, txReverted:
 		return call(ctx, opts(ctx), nil, a.SettleColdMove, id, r.Hash, r.Kind == txReverted)
 	case txCancelled:
+		if st.SettlesCancel && r.Hash != "" {
+			return call(ctx, opts(ctx), nil, a.SettleColdMove, id, r.Hash, true) // settled as a failed move, with the cancel's fee
+		}
 		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "cancelled")
 	}
 	return fmt.Errorf("unexpected outcome %q", r.Kind)

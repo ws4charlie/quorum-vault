@@ -54,7 +54,9 @@ type Config struct {
 	MaxTxFeeSats uint64
 	// SweepMaxFeeRate is the most a routine sweep pays per virtual byte (default MaxFeeRate; it must not be above it). Above it routine sweeps wait.
 	// SweepUrgentValue, in satoshis, is the amount from which a sweep goes regardless of that ceiling, up to MaxFeeRate (0: no such exception).
-	SweepMaxFeeRate  uint64
+	SweepMaxFeeRate uint64
+	// ColdAddresses is where hot-to-cold moves pay, "<pool>/native" -> address; it must match the signing zone's pin. Checked against the network.
+	ColdAddresses    map[string]string
 	SweepUrgentValue uint64
 	// SweepK and MinSweep are the sweep rule (value >= max(MinSweep, SweepK x fee)); the adapter needs them to refuse a fee bump that would break it.
 	// SweepK 0 and MinSweep 0 mean no rule.
@@ -184,6 +186,24 @@ func (c Config) validated() (*validatedConfig, error) {
 			return nil, fmt.Errorf("btc: config: hot shard %d: address %s is not the account's key at %s (that is %s)", i, h.Address, PathString(h.Path), want)
 		}
 	}
+	hotSet := map[string]bool{}
+	for _, h := range c.HotShards {
+		if d, err := DecodeAddress(h.Address, params); err == nil {
+			hotSet[d.Canonical] = true
+		}
+	}
+	for k, a := range c.ColdAddresses {
+		if !strings.HasSuffix(k, "/native") || len(k) <= len("/native") {
+			return nil, fmt.Errorf("btc: config: cold address key %q: want <pool>/native", k)
+		}
+		d, err := DecodeAddress(a, params)
+		if err != nil {
+			return nil, fmt.Errorf("btc: config: cold address for %q: %w", k, err)
+		}
+		if hotSet[d.Canonical] {
+			return nil, fmt.Errorf("btc: config: cold address for %q is a hot shard address", k)
+		}
+	}
 	if c.MaxInputs < 1 || c.SpendConfirmations < 1 {
 		return nil, errors.New("btc: config: max_inputs and spend_confirmations must be positive")
 	}
@@ -220,4 +240,17 @@ func (v *validatedConfig) checkAddress(a string) error {
 func (v *validatedConfig) addressAt2(path []uint32) (string, error) {
 	a := &Account{Params: v.params, key: v.account}
 	return a.Address(path)
+}
+
+// CanonicalAddress validates an address for the network and returns its canonical form.
+func CanonicalAddress(network, address string) (string, error) {
+	params, err := Params(network)
+	if err != nil {
+		return "", err
+	}
+	d, err := DecodeAddress(address, params)
+	if err != nil {
+		return "", err
+	}
+	return d.Canonical, nil
 }

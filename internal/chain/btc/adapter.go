@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
 	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -112,10 +111,4 @@ func (a *Adapter) DeriveDepositAddress(_ context.Context, customerID string, ind
 
 var errLater = fmt.Errorf("btc: %w (a later P7 task)", chain.ErrNotSupported)
 
-// The Adapter is also the custody.Reader of the chain. SafeHead works; the balance of an address and the height of a
-// transaction are needed by reconciliation, settlement of withdrawals and sweeps, which are later tasks.
-
-// Balance is not supported yet: reconciliation of hot, cold and deposit balances against the chain needs it.
-func (a *Adapter) Balance(context.Context, string, string, uint64) (*big.Int, error) {
-	return nil, errLater
-}
+// The Adapter is also the custody.Reader of the chain: SafeHead, TxBlock and Balance (cold.go).
