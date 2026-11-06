@@ -51,6 +51,8 @@ type IntentRecord struct {
 	Hash   []byte
 	Kind   string
 	Sender string
+	// PartitionID is the partition the intent was signed for (empty on rows from before it was recorded).
+	PartitionID string
 	// Claims is what the intent's transaction consumes, as the codec named it (EVM: one claim, sender plus nonce).
 	Claims []string
 }
@@ -69,6 +71,7 @@ type SigRecord struct {
 type Claim struct {
 	IntentID string
 	Kind     string
+	Pin      string
 }
 
 // GuardTx is a serialized view of the guard for one chain. All methods run in
@@ -112,8 +115,8 @@ func parseBig(s string) *big.Int {
 // Intent returns the record of an intent ID, or nil.
 func (t *GuardTx) Intent(ctx context.Context, id string) (*IntentRecord, error) {
 	var r IntentRecord
-	err := t.tx.QueryRow(ctx, `SELECT intent_id, intent_hash, kind, sender, COALESCE(claims, '{}') FROM signed_intents WHERE intent_id=$1`, id).
-		Scan(&r.ID, &r.Hash, &r.Kind, &r.Sender, &r.Claims)
+	err := t.tx.QueryRow(ctx, `SELECT intent_id, intent_hash, kind, sender, COALESCE(partition_id, ''), COALESCE(claims, '{}') FROM signed_intents WHERE intent_id=$1`, id).
+		Scan(&r.ID, &r.Hash, &r.Kind, &r.Sender, &r.PartitionID, &r.Claims)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -159,7 +162,7 @@ func (t *GuardTx) sig(ctx context.Context, where string, args ...any) (*SigRecor
 // Claim returns who owns claim on this chain, or nil.
 func (t *GuardTx) Claim(ctx context.Context, claim string) (*Claim, error) {
 	var c Claim
-	err := t.tx.QueryRow(ctx, `SELECT intent_id, kind FROM exclusive_claims WHERE chain=$1 AND claim=$2`, t.chain, claim).Scan(&c.IntentID, &c.Kind)
+	err := t.tx.QueryRow(ctx, `SELECT intent_id, kind, pin FROM exclusive_claims WHERE chain=$1 AND claim=$2`, t.chain, claim).Scan(&c.IntentID, &c.Kind, &c.Pin)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -203,7 +206,10 @@ type Release struct {
 	Asset       string
 	Amount      *big.Int
 	Sender      string
+	PartitionID string
 	Claims      []string // what the transaction consumes
+	Pins        []string // one per claim, or none (EVM); the codec's pin of each claim
+	Identity    string   // the codec's identity of the transaction; empty when the chain has none
 	Digest      []byte
 	Fees        []*big.Int
 	PayloadHash []byte
@@ -214,13 +220,35 @@ type Release struct {
 	TakeClaims  []string  // a cancel taking over the claims of a different intent
 }
 
+// pinOf is the pin of claim c (empty when the release has none).
+func (r Release) pinOf(c string) string {
+	for i, x := range r.Claims {
+		if x == c && i < len(r.Pins) {
+			return r.Pins[i]
+		}
+	}
+	return ""
+}
+
+// IdentityConflict returns the intent of a digest on this chain that has the same transaction identity as identity but another
+// payload hash, or "" if there is none.
+func (t *GuardTx) IdentityConflict(ctx context.Context, identity string, payloadHash []byte) (string, error) {
+	var id string
+	err := t.tx.QueryRow(ctx, `SELECT d.intent_id FROM signed_digests d JOIN signed_intents i ON i.intent_id = d.intent_id
+		WHERE i.chain=$1 AND d.tx_identity=$2 AND d.payload_hash IS DISTINCT FROM $3 LIMIT 1`, t.chain, identity, payloadHash).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}
+
 // Record stores the release. Unique keys on the intent ID, the digest and the
 // claim make a double release fail even if the lock were bypassed.
 func (t *GuardTx) Record(ctx context.Context, r Release) error {
 	if r.NewIntent {
-		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9)`,
-			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.At); err != nil {
+		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10)`,
+			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.PartitionID, r.At); err != nil {
 			return fmt.Errorf("record intent: %w", err)
 		}
 	}
@@ -228,8 +256,12 @@ func (t *GuardTx) Record(ctx context.Context, r Release) error {
 	for i, f := range r.Fees {
 		fees[i] = f.String()
 	}
-	if _, err := t.tx.Exec(ctx, `INSERT INTO signed_digests (digest, intent_id, fees, payload_hash, signature, reserved_at, signed_at)
-		VALUES ($1,$2,$3::numeric[],$4,$5,$6,NULL)`, r.Digest, r.IntentID, fees, r.PayloadHash, r.Signature, r.At); err != nil {
+	var identity any
+	if r.Identity != "" {
+		identity = r.Identity
+	}
+	if _, err := t.tx.Exec(ctx, `INSERT INTO signed_digests (digest, intent_id, fees, payload_hash, tx_identity, signature, reserved_at, signed_at)
+		VALUES ($1,$2,$3::numeric[],$4,$5,$6,$7,NULL)`, r.Digest, r.IntentID, fees, r.PayloadHash, identity, r.Signature, r.At); err != nil {
 		return fmt.Errorf("record digest: %w", err)
 	}
 	for _, c := range r.TakeClaims {
@@ -238,7 +270,7 @@ func (t *GuardTx) Record(ctx context.Context, r Release) error {
 		}
 	}
 	for _, c := range r.NewClaims {
-		if _, err := t.tx.Exec(ctx, `INSERT INTO exclusive_claims (chain, claim, intent_id, kind) VALUES ($1,$2,$3,$4)`, t.chain, c, r.IntentID, r.Kind); err != nil {
+		if _, err := t.tx.Exec(ctx, `INSERT INTO exclusive_claims (chain, claim, intent_id, kind, pin) VALUES ($1,$2,$3,$4,$5)`, t.chain, c, r.IntentID, r.Kind, r.pinOf(c)); err != nil {
 			return fmt.Errorf("claim: %w", err)
 		}
 	}

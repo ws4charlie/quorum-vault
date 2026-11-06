@@ -59,7 +59,9 @@ type reorgChain struct {
 	err error
 }
 
-func (r reorgChain) Scan(context.Context, uint64) (chain.ScanResult, error) { return chain.ScanResult{}, r.err }
+func (r reorgChain) Scan(context.Context, uint64) (chain.ScanResult, error) {
+	return chain.ScanResult{}, r.err
+}
 
 // A reorganization deeper than the safe depth stops scanning, keeps every credit, and stays stopped until an operator deletes the row.
 func TestDeepReorgHaltsScanningAndKeepsCredits(t *testing.T) {

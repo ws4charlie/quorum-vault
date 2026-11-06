@@ -525,3 +525,5 @@ func (s *system) cursor() int64 {
 	}
 	return n
 }
+
+func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }

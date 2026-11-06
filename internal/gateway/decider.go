@@ -119,7 +119,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 	if err := codec.Verify(u, intent); err != nil {
 		return nil, reject(ReasonTx, "%v", err)
 	}
-	info, err := codec.Decode(job.Payload)
+	info, err := codec.Decode(u)
 	if err != nil {
 		return nil, reject(ReasonTx, "%v", err)
 	}
@@ -160,7 +160,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 
 		// 5. Replay guard.
 		rel := Release{IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
-			Sender: info.Sender, Claims: info.Claims, Digest: job.Digest, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
+			Sender: info.Sender, PartitionID: intent.PartitionID, Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: job.Digest, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
 		prior, err := d.replay(ctx, gt, intent, rec, codec, &rel)
 		if err != nil {
 			return err
@@ -400,6 +400,9 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 // A claim is held by one intent. A known intent may add another digest of the same transaction (another input to
 // sign), or one of a replacement that has the same claims and higher fees.
 func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec *IntentRecord, codec ChainCodec, rel *Release) (*SigRecord, error) {
+	if len(rel.Pins) != 0 && len(rel.Pins) != len(rel.Claims) {
+		return nil, reject(ReasonPinChanged, "the codec gave %d pins for %d claims", len(rel.Pins), len(rel.Claims))
+	}
 	claims := map[string]*Claim{}
 	for _, c := range rel.Claims {
 		cl, err := gt.Claim(ctx, c)
@@ -407,6 +410,22 @@ func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec
 			return nil, err
 		}
 		claims[c] = cl
+		// A claim that exists keeps its pin, for every intent and in every path: another pin means another view of what the claim is
+		// worth (the segwit v0 fee attack signs one input under a payload that understates another).
+		if cl != nil && cl.Pin != rel.pinOf(c) {
+			return nil, reject(ReasonPinChanged, "%s of %s is already claimed with pin %q, not %q", c, rel.Sender, cl.Pin, rel.pinOf(c))
+		}
+	}
+	// One transaction identity has one payload: a second payload with the same identity is not a replacement (a replacement is a
+	// new transaction) but the same transaction described differently.
+	if rel.Identity != "" {
+		other, err := gt.IdentityConflict(ctx, rel.Identity, rel.PayloadHash)
+		if err != nil {
+			return nil, err
+		}
+		if other != "" {
+			return nil, reject(ReasonIdentity, "transaction %s was already signed for intent %s under a different payload", rel.Identity, other)
+		}
 	}
 	if rec != nil {
 		if !bytes.Equal(rec.Hash, rel.IntentHash) {
@@ -452,6 +471,13 @@ func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec
 		return nil, reject(ReasonIntentChanged, "digest was signed for intent %s", prior.IntentID)
 	}
 	rel.NewIntent = true
+	if i.Kind == "cancel" {
+		if sc, ok := codec.(StrictCancelCodec); ok && sc.StrictCancel() {
+			if err := d.strictCancel(ctx, gt, i, rel, claims); err != nil {
+				return nil, err
+			}
+		}
+	}
 	for _, c := range rel.Claims {
 		cl := claims[c]
 		switch {
@@ -486,4 +512,37 @@ func sameSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// strictCancel is the rule of a cancel on a chain where it can only free what was claimed. The guard has no chain to ask, so it is
+// decided here from its own records: every claim of the cancel exists (with its pin: replay checked that), all under one signed intent,
+// of the cancel's own partition, and together they are all of that intent's claims. Otherwise a cancel, which needs no approval, could spend
+// any input, a deposit output included, under no intent at all.
+func (d *Decider) strictCancel(ctx context.Context, gt *GuardTx, i signjob.Intent, rel *Release, claims map[string]*Claim) error {
+	owner := ""
+	for _, c := range rel.Claims {
+		cl := claims[c]
+		if cl == nil {
+			return reject(ReasonCancelClaims, "%s is not claimed by any signed intent: a cancel only spends what an attempt claimed", c)
+		}
+		if owner == "" {
+			owner = cl.IntentID
+		} else if owner != cl.IntentID {
+			return reject(ReasonCancelClaims, "the inputs of a cancel are claimed by two intents, %s and %s", owner, cl.IntentID)
+		}
+	}
+	orec, err := gt.Intent(ctx, owner)
+	if err != nil {
+		return err
+	}
+	if orec == nil {
+		return reject(ReasonCancelClaims, "the intent %s that holds the claims is not recorded", owner)
+	}
+	if orec.PartitionID != i.PartitionID {
+		return reject(ReasonCancelClaims, "the claims belong to intent %s of partition %q, the cancel is for partition %q", owner, orec.PartitionID, i.PartitionID)
+	}
+	if !sameSet(orec.Claims, rel.Claims) {
+		return reject(ReasonCancelClaims, "the cancel spends %d inputs, intent %s claimed %d: a cancel spends exactly the inputs of the attempt it frees", len(rel.Claims), owner, len(orec.Claims))
+	}
+	return nil
 }

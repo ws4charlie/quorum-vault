@@ -20,6 +20,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 )
 
@@ -43,11 +44,15 @@ type File struct {
 // SignerFile locates a partition's key: in an HSM token (backend "hsm", the default) or in the cb-mpc service
 // (backend "mpc": party A's key id and address, in MPC).
 type SignerFile struct {
-	Backend   string         `json:"backend,omitempty"` // "hsm" (default) or "mpc"
-	Token     string         `json:"token,omitempty"`   // hsm: token label
-	KeyID     string         `json:"key_id"`            // hsm: CKA_ID, hex; mpc: key id returned by party A's Derive
-	PublicKey string         `json:"public_key"`        // 65-byte uncompressed secp256k1, hex
-	MPC       *MPCSignerFile `json:"mpc,omitempty"`
+	Backend   string `json:"backend,omitempty"` // "hsm" (default) or "mpc"
+	Token     string `json:"token,omitempty"`   // hsm: token label
+	KeyID     string `json:"key_id"`            // hsm: CKA_ID, hex; mpc: key id returned by party A's Derive
+	PublicKey string `json:"public_key"`        // 65-byte uncompressed secp256k1, hex
+	// KeysetID and HardenedPath make an mpc signer for a whole key tree instead of one key (Bitcoin: every input has its own
+	// key). The job's key reference picks the key below HardenedPath, and party A derives it on demand. Instead of KeyID and PublicKey.
+	KeysetID     string         `json:"keyset_id,omitempty"`
+	HardenedPath []uint32       `json:"hardened_path,omitempty"`
+	MPC          *MPCSignerFile `json:"mpc,omitempty"`
 }
 
 // MPCSignerFile is how the gateway reaches party A (the caller port of mpc-party).
@@ -71,6 +76,8 @@ type ChainFile struct {
 	// its addresses are written. Default "evm". An unknown family refuses to start.
 	Family string   `json:"family,omitempty"`
 	EVM    *EVMFile `json:"evm"`
+	// BTC is the section of the btc family.
+	BTC *BTCFile `json:"btc,omitempty"`
 	// Assets maps asset symbol to its withdrawal policy. Every asset the chain
 	// verifier knows (including the native one) needs an entry.
 	Assets        map[string]AssetFile `json:"assets"`
@@ -119,6 +126,62 @@ type EVMFile struct {
 	MaxTxFeeWei   string               `json:"max_tx_fee_wei"`
 }
 
+// BTCFile is the signing-zone config of a Bitcoin chain. Everything the zone trusts about keys and addresses is here.
+type BTCFile struct {
+	Network     string `json:"network"`      // mainnet, testnet3, signet or regtest
+	AccountXpub string `json:"account_xpub"` // m/84'/coin'/0'
+	// HotShards maps a partition ID to its pinned hot address and the path it derives at; the address must be the account's key at that path.
+	HotShards map[string]HotShardFile `json:"hot_shards"`
+	// ColdAddresses: where hot-to-cold moves may go, "<pool>/native" -> address.
+	ColdAddresses map[string]string `json:"cold_addresses"`
+	MaxTxFeeSats  uint64            `json:"max_tx_fee_sats"`
+	MaxFeeRate    uint64            `json:"max_fee_rate"` // satoshis per virtual byte
+	MaxInputs     int               `json:"max_inputs"`
+}
+
+// HotShardFile is one pinned hot shard.
+type HotShardFile struct {
+	Address string   `json:"address"`
+	Path    []uint32 `json:"path"` // [1, index]
+}
+
+// buildBTC reads a btc chain: its verifier config, its one asset policy (BTC, amounts in satoshis) and the rate limits.
+func (cf ChainFile) buildBTC(name string, enabledApprovers int) (*ChainConfig, error) {
+	b := cf.BTC
+	if b == nil {
+		return nil, fmt.Errorf("gateway: config: chain %q has no btc section", name)
+	}
+	if cf.WithdrawalsPerHour <= 0 {
+		return nil, fmt.Errorf("gateway: config: chain %q: withdrawals_per_hour is required and must be > 0", name)
+	}
+	if cf.SweepsPerHour < 0 || cf.CancelsPerHour < 0 || cf.ToColdPerHour < 0 || cf.RebalancePerHour < 0 {
+		return nil, fmt.Errorf("gateway: config: chain %q: rate limits must be >= 0", name)
+	}
+	sc := btc.SigningConfig{Chain: name, Network: b.Network, AccountXpub: b.AccountXpub, HotShards: map[string]btc.HotShard{},
+		ColdAddresses: b.ColdAddresses, MaxTxFeeSats: b.MaxTxFeeSats, MaxFeeRate: b.MaxFeeRate, MaxInputs: b.MaxInputs}
+	for p, h := range b.HotShards {
+		sc.HotShards[p] = btc.HotShard{Address: h.Address, Path: h.Path}
+	}
+	v, err := btc.NewVerifier(sc)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: config: chain %q: %w", name, err)
+	}
+	if len(cf.Assets) != 1 {
+		return nil, fmt.Errorf("gateway: config: chain %q: a btc chain has exactly one asset, %s", name, btc.Native)
+	}
+	af, ok := cf.Assets[btc.Native]
+	if !ok {
+		return nil, fmt.Errorf("gateway: config: chain %q: asset %q has no policy", name, btc.Native)
+	}
+	pol, err := af.build(name+"/"+btc.Native, enabledApprovers, v.Canonical)
+	if err != nil {
+		return nil, err
+	}
+	return &ChainConfig{Name: name, Family: FamilyBTC, BTC: sc, Assets: map[string]AssetPolicy{btc.Native: pol},
+		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour,
+		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour}, nil
+}
+
 // TokenFile is a configured ERC-20.
 type TokenFile struct {
 	Address  string `json:"address"`
@@ -144,8 +207,9 @@ type Approver struct {
 // ChainConfig is one chain's trust root.
 type ChainConfig struct {
 	Name           string
-	Family         string // FamilyEVM
+	Family         string // FamilyEVM or FamilyBTC
 	EVM            evm.Config
+	BTC            btc.SigningConfig
 	Assets         map[string]AssetPolicy
 	SweepsPerHour  int
 	CancelsPerHour int
@@ -239,8 +303,12 @@ func (f File) build() (*Config, error) {
 				return nil, fmt.Errorf("gateway: config: signer %q: token is required for the hsm backend", p)
 			}
 		case "mpc":
-			if sf.MPC == nil || sf.MPC.Address == "" || sf.MPC.CertFile == "" || sf.MPC.KeyFile == "" || sf.MPC.ServerPin == "" || sf.KeyID == "" {
-				return nil, fmt.Errorf("gateway: config: signer %q: the mpc backend needs key_id and mpc.{address,cert_file,key_file,server_pin}", p)
+			deriving := sf.KeysetID != "" || len(sf.HardenedPath) > 0
+			if deriving && (sf.KeysetID == "" || len(sf.HardenedPath) == 0 || sf.KeyID != "" || sf.PublicKey != "") {
+				return nil, fmt.Errorf("gateway: config: signer %q: a key tree needs keyset_id and hardened_path, and no key_id or public_key", p)
+			}
+			if sf.MPC == nil || sf.MPC.Address == "" || sf.MPC.CertFile == "" || sf.MPC.KeyFile == "" || sf.MPC.ServerPin == "" || (sf.KeyID == "" && !deriving) {
+				return nil, fmt.Errorf("gateway: config: signer %q: the mpc backend needs key_id (or keyset_id and hardened_path) and mpc.{address,cert_file,key_file,server_pin}", p)
 			}
 		default:
 			return nil, fmt.Errorf("gateway: config: signer %q: unknown backend %q", p, sf.Backend)
@@ -298,7 +366,10 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	if err != nil {
 		return nil, fmt.Errorf("gateway: config: chain %q: %w", name, err)
 	}
-	canon := canonicalizer(family)
+	if family == FamilyBTC {
+		return cf.buildBTC(name, enabledApprovers)
+	}
+	canon := (&EVMCodec{}).Canonical
 	if cf.EVM == nil {
 		return nil, fmt.Errorf("gateway: config: chain %q has no %s section", name, family)
 	}

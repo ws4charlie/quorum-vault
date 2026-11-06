@@ -50,6 +50,39 @@
       "cancels_per_hour": 5,
       "to_cold_per_hour": 4,
       "rebalance_per_hour": 4
+    },
+    "btc-example": {
+      "family": "btc",
+      "btc": {
+        "network": "regtest",
+        "account_xpub": "tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV",
+        "hot_shards": {
+          "qv-us/btc-example/BTC/hot/omnibus/0": { "address": "bcrt1q6rg3k5k4g5xm3ghxkj94eflf2fckh5uch9wxdk", "path": [1, 0] },
+          "qv-us/btc-example/BTC/hot/omnibus/1": { "address": "bcrt1qz7z4ppgy3gusv5zcmasx4a2wpq2qk0d4el496t", "path": [1, 1] }
+        },
+        "cold_addresses": { "omnibus/native": "bcrt1qgn33jvqejtek6shugcz27eq322m2g95uxj6943" },
+        "max_tx_fee_sats": 50000,
+        "max_fee_rate": 200,
+        "max_inputs": 20
+      },
+      "assets": {
+        "BTC": {
+          "withdrawal_destinations": ["bcrt1qq8j5kay3uhhfdys7g64nljk68ercvre0l570gs"],
+          "per_tx_cap": "100000000",
+          "daily_cap": "500000000",
+          "to_cold_daily_cap": "2000000000",
+          "rebalance_daily_cap": "1000000000",
+          "tiers": [
+            { "min_amount": "0", "approvals": 1 },
+            { "min_amount": "50000000", "approvals": 2 }
+          ]
+        }
+      },
+      "sweeps_per_hour": 60,
+      "withdrawals_per_hour": 120,
+      "cancels_per_hour": 5,
+      "to_cold_per_hour": 4,
+      "rebalance_per_hour": 4
     }
   }
 }

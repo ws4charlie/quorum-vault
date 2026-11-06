@@ -84,12 +84,8 @@ func run(log *slog.Logger) error {
 	for k, v := range ms {
 		signers[k] = v
 	}
-	for name, cc := range cfg.Chains {
-		for p := range cc.EVM.HotAddresses {
-			if signers[p] == nil {
-				return fmt.Errorf("chain %q: hot partition %q has no signer", name, p)
-			}
-		}
+	if err := gateway.CheckSigners(cfg, signers); err != nil {
+		return err
 	}
 
 	jobs, err := pgxpool.New(ctx, *jobsDSN)

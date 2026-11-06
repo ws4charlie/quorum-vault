@@ -45,9 +45,9 @@ func (fakeCodec) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 	}
 	return fmt.Errorf("digest %x is not one of the payload's", u.Digest)
 }
-func (fakeCodec) Decode(payload []byte) (TxInfo, error) {
+func (fakeCodec) Decode(u chain.UnsignedTx) (TxInfo, error) {
 	var p fakePayload
-	if err := json.Unmarshal(payload, &p); err != nil {
+	if err := json.Unmarshal(u.Payload, &p); err != nil {
 		return TxInfo{}, err
 	}
 	return TxInfo{Sender: "fake-hot", Destination: p.Dest, Claims: p.Claims, Fees: []*big.Int{big.NewInt(p.Fee)}}, nil
