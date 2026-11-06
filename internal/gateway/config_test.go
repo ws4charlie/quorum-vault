@@ -38,10 +38,7 @@ func TestConfigRefusesBadFiles(t *testing.T) {
 		return b
 	}
 	chain := func(m map[string]any) map[string]any {
-		for _, c := range m["chains"].(map[string]any) {
-			return c.(map[string]any)
-		}
-		return nil
+		return m["chains"].(map[string]any)["evm-example"].(map[string]any) // the example also has a btc chain (TestExampleBTCChain)
 	}
 	cases := map[string][]byte{
 		"not json":         []byte("{"),
@@ -82,6 +79,41 @@ func TestRequiredApprovals(t *testing.T) {
 	for amount, want := range map[int64]int{0: 1, 999: 1, 1000: 2, 5000: 2} {
 		if got := p.RequiredApprovals(big.NewInt(amount)); got != want {
 			t.Errorf("amount %d: %d approvals, want %d", amount, got, want)
+		}
+	}
+}
+
+// The example's btc chain loads, and its checks are real: a key of another network, a hot shard off its path and a missing cap refuse.
+func TestExampleBTCChain(t *testing.T) {
+	cfg, err := LoadConfig("config.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc := cfg.Chains["btc-example"]
+	if cc == nil || cc.Family != FamilyBTC || cc.BTC.Network != "regtest" || len(cc.BTC.HotShards) != 2 || cc.Assets["BTC"].AnyDestination {
+		t.Fatalf("%+v", cc)
+	}
+	good, _ := os.ReadFile("config.example.json")
+	mutate := func(fn func(c map[string]any)) []byte {
+		var m map[string]any
+		json.Unmarshal(good, &m)
+		fn(m["chains"].(map[string]any)["btc-example"].(map[string]any)["btc"].(map[string]any))
+		b, _ := json.Marshal(m)
+		return b
+	}
+	for name, b := range map[string][]byte{
+		"mainnet network, regtest key": mutate(func(c map[string]any) { c["network"] = "mainnet" }),
+		"hot shard off its path": mutate(func(c map[string]any) {
+			c["hot_shards"].(map[string]any)["PLACEHOLDER-btc-partition-0"].(map[string]any)["path"] = []any{1, 5}
+		}),
+		"no fee cap":   mutate(func(c map[string]any) { delete(c, "max_tx_fee_sats") }),
+		"no input cap": mutate(func(c map[string]any) { delete(c, "max_inputs") }),
+		"mainnet cold address": mutate(func(c map[string]any) {
+			c["cold_addresses"] = map[string]any{"omnibus/native": "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"}
+		}),
+	} {
+		if _, err := ParseConfig(b); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }

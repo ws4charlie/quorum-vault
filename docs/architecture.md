@@ -201,6 +201,21 @@ path as EVM. The hash of every block read is stored with the cursor. If the chai
 the reorganization is deeper than the safe depth: the worker logs an ALERT, scanning for the chain stops, credits stay, and an operator
 decides (see [learn/p7-2-btc-deposits.md](learn/p7-2-btc-deposits.md)). A coinbase output is credited only at 100 confirmations.
 
+## Bitcoin signing zone
+
+The signing zone can decide, with no chain access, whether to sign one input of a Bitcoin transaction. A sign job carries the whole
+transaction (every input with its outpoint, value and derivation path; every output) and the digest of one input. The zone rebuilds the
+BIP143 digest of every input itself, from its own copy of the account xpub, and requires the job's digest to be that of exactly one input,
+signed under the key derived for that input; the key that would sign must be that derived key. Outputs must match the intent: the payment and
+at most one change to a pinned hot shard (withdrawal, hot to cold, rebalance), one pinned hot shard (sweep), or the same inputs back to a
+pinned hot shard (cancel). Fees, fee rate, input count, dust, version, locktime and RBF are checked. Bitcoin signs every input under
+its own derived key, so a partition's signer is a key tree: the gateway asks party A to derive the key of the job's path.
+
+The guard claims outpoints, each with a pin: the value of the input. A claim named again with another pin is refused, and a transaction
+id signed under a second payload is refused. This closes the segwit v0 fee attack, in which signatures gathered under payloads that understate
+each other's inputs are combined into one transaction with a fee neither payload showed. Details and the list of refusals:
+[learn/p7-3-btc-verifier.md](learn/p7-3-btc-verifier.md).
+
 ## Trust boundaries
 
 | Boundary | Protects | Does not protect |

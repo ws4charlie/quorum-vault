@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -71,7 +72,7 @@ func TestDecodeReadsTheRecipientFromTheTransaction(t *testing.T) {
 		"token transfer": {h.tokenTx(addrEvil, 5, 0), addrEvil},
 	} {
 		payload, _ := h.payloadFor(tc.spec)
-		info, err := codec.Decode(payload)
+		info, err := codec.Decode(chain.UnsignedTx{Payload: payload})
 		if err != nil || info.Destination != tc.want.Hex() {
 			t.Errorf("%s: destination %q, %v; want %s", name, info.Destination, err, tc.want)
 		}
@@ -143,10 +144,8 @@ func TestDestinationConfigValidation(t *testing.T) {
 	mutate := func(fn func(chain, eth map[string]any)) []byte {
 		var m map[string]any
 		json.Unmarshal(good, &m)
-		for _, c := range m["chains"].(map[string]any) {
-			cm := c.(map[string]any)
-			fn(cm, cm["assets"].(map[string]any)["ETH"].(map[string]any))
-		}
+		cm := m["chains"].(map[string]any)["evm-example"].(map[string]any) // the example also has a btc chain
+		fn(cm, cm["assets"].(map[string]any)["ETH"].(map[string]any))
 		b, _ := json.Marshal(m)
 		return b
 	}
@@ -175,9 +174,7 @@ func TestDestinationConfigValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, cc := range cfg.Chains {
-		if !cc.Assets["ETH"].AnyDestination || cc.WithdrawalsPerHour != 120 {
-			t.Fatalf("%+v", cc.Assets["ETH"])
-		}
+	if cc := cfg.Chains["evm-example"]; !cc.Assets["ETH"].AnyDestination || cc.WithdrawalsPerHour != 120 {
+		t.Fatalf("%+v", cc.Assets["ETH"])
 	}
 }

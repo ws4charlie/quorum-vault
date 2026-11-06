@@ -14,8 +14,10 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
@@ -231,3 +233,78 @@ func parseDER(der []byte) (signer.Signature, error) {
 }
 
 var _ signer.Signer = (*Signer)(nil)
+
+// Deriving is the signer of a whole keyset's subtree: the key of any path below HardenedPath is made on demand by party A's Derive
+// (which returns the same key id and public key every time) and signs through the same connection. It is how Bitcoin signs every input
+// under its own key. It implements signer.Signer only so it can sit in the gateway's signer map: SignDigest on it is an error, a job
+// has to name a path (At).
+type Deriving struct {
+	cfg DerivingConfig
+	cl  pb.MpcPartyClient
+	mu  sync.Mutex
+	by  map[string]*Signer
+	// base is the connection owner; children share its connection and do not close it.
+	base *Signer
+}
+
+// DerivingConfig is Config without a key: the keyset and the hardened path stand in for KeyID and PublicKey.
+type DerivingConfig struct {
+	Config
+	KeysetID     string
+	HardenedPath []uint32
+}
+
+// NewDeriving connects to party A. Config.KeyID and PublicKey are ignored.
+func NewDeriving(cfg DerivingConfig) (*Deriving, error) {
+	if cfg.KeysetID == "" || len(cfg.HardenedPath) == 0 {
+		return nil, errors.New("keyset id and hardened path are required")
+	}
+	// A throwaway valid key and id satisfy New's checks; the deriving signer never signs with them.
+	cfg.Config.KeyID = "deriving"
+	cfg.Config.PublicKey = crypto.FromECDSAPub(&ecdsa.PublicKey{Curve: crypto.S256(), X: crypto.S256().Params().Gx, Y: crypto.S256().Params().Gy})
+	base, err := New(cfg.Config)
+	if err != nil {
+		return nil, err
+	}
+	return &Deriving{cfg: cfg, cl: pb.NewMpcPartyClient(base.conn), by: map[string]*Signer{}, base: base}, nil
+}
+
+func (d *Deriving) Close()                  { d.base.Close() }
+func (d *Deriving) Backend() domain.Backend { return domain.BackendMPC }
+func (d *Deriving) Key() domain.Key {
+	return domain.Key{ID: d.cfg.PartitionID, Backend: domain.BackendMPC, Curve: domain.CurveSecp256k1}
+}
+func (d *Deriving) PublicKey() *ecdsa.PublicKey { return nil }
+func (d *Deriving) RetryOnTimeout() bool        { return true }
+func (d *Deriving) SignDigest(context.Context, [32]byte, signer.SignOptions) (signer.Result, error) {
+	return signer.Result{}, &Error{Kind: KindInternal, Message: "a deriving signer signs through At(path)"}
+}
+
+// At derives the key at path (idempotent at party A) and returns its signer.
+func (d *Deriving) At(ctx context.Context, path []uint32) (signer.Signer, error) {
+	key := fmt.Sprint(path)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if s := d.by[key]; s != nil {
+		return s, nil
+	}
+	x, cancel := context.WithTimeout(ctx, d.cfg.Timeout)
+	defer cancel()
+	r, err := d.cl.Derive(x, &pb.DeriveRequest{KeysetId: d.cfg.KeysetID, HardenedPath: d.cfg.HardenedPath, Path: path})
+	if err != nil {
+		return nil, classify(err)
+	}
+	pk, err := crypto.DecompressPubkey(r.PublicKey)
+	if err != nil {
+		return nil, &Error{Kind: KindCryptographic, Message: "party A returned a bad public key: " + err.Error()}
+	}
+	child := *d.base
+	child.cfg.KeyID = r.KeyId
+	child.cfg.PublicKey = crypto.FromECDSAPub(pk)
+	child.pub = pk
+	s := &child
+	d.by[key] = s
+	return s, nil
+}
+
+var _ signer.Deriver = (*Deriving)(nil)

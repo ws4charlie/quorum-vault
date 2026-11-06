@@ -35,6 +35,13 @@ type Signer interface {
 	SignDigest(ctx context.Context, digest [32]byte, opts SignOptions) (Result, error)
 }
 
+// Deriver is a signer for a whole tree of keys: At returns the signer of the key at path (below the tree's fixed hardened prefix).
+// Bitcoin signs every input under its own derived key, so a partition's signer is a Deriver and each job picks its key by path.
+type Deriver interface {
+	Signer
+	At(ctx context.Context, path []uint32) (Signer, error)
+}
+
 var (
 	curveN     = crypto.S256().Params().N
 	curveHalfN = new(big.Int).Rsh(curveN, 1)

@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS exclusive_claims (
     PRIMARY KEY (chain, claim)
 );
 
+-- A claim carries a pin: an opaque string the codec sets (Bitcoin: the value of the input the claim names; EVM: none, the empty
+-- string). A different pin on a claim that exists is refused. tx_identity is the codec's identity of the transaction a digest
+-- belongs to (Bitcoin: the txid, which does not commit to input values); one identity has one payload hash.
+ALTER TABLE exclusive_claims ADD COLUMN IF NOT EXISTS pin text NOT NULL DEFAULT '';
+ALTER TABLE signed_digests ADD COLUMN IF NOT EXISTS tx_identity text;
+CREATE INDEX IF NOT EXISTS signed_digests_identity ON signed_digests (tx_identity) WHERE tx_identity IS NOT NULL;
+
 -- Upgrade of a guard database written by the nonce-only schema. Idempotent, and a no-op on a fresh database.
 -- An EVM claim is "<sender>#<nonce>", the sender in the form the codec reports (checksum case).
 UPDATE signed_intents SET claims = ARRAY[sender || '#' || nonce::text] WHERE claims IS NULL AND nonce IS NOT NULL;

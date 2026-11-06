@@ -26,6 +26,15 @@ type TxInfo struct {
 	// (EVM: one claim, the sender's nonce; Bitcoin, later: one claim per spent output). A claim is
 	// an opaque string, compared for equality.
 	Claims []string
+	// Pins has one opaque string per claim, or none. The guard refuses a claim that exists when it is named again with
+	// another pin, in every path and for every intent (Bitcoin: the value of the input; EVM: no pins).
+	Pins []string
+	// Identity names the transaction all signatures of one attempt belong to (Bitcoin: the txid, which does not commit to input
+	// values). The guard refuses an identity that was signed under another payload. Empty: the chain has none (EVM).
+	Identity string
+	// SignerKey is the public key (compressed, 33 bytes) that must sign this job, when the codec knows it from the payload and its
+	// own config (Bitcoin: the derived key of the input the job's digest names). CheckSigner compares it.
+	SignerKey []byte
 	// Fees are the fee components of the transaction (EVM: fee cap, tip; Bitcoin: the absolute fee). A replacement
 	// of a signed transaction must satisfy FeesRaised against them.
 	Fees []*big.Int
@@ -36,9 +45,9 @@ type TxInfo struct {
 // claims and fees are generic; what a claim is and what raising fees means is decided here.
 type ChainCodec interface {
 	chain.TxVerifier
-	// Decode reads the claims, sender, destination and fees from the payload. It is called
-	// only after Verify accepted the payload.
-	Decode(payload []byte) (TxInfo, error)
+	// Decode reads the claims, sender, destination and fees from the payload of one job (u: its digest, key reference and the
+	// shared payload). It is called only after Verify accepted u.
+	Decode(u chain.UnsignedTx) (TxInfo, error)
 	// OwnsSender reports whether sender is a hot address the gateway signs for.
 	OwnsSender(sender string) bool
 	// CheckSigner reports whether pub is the key of info.Sender.
@@ -51,20 +60,19 @@ type ChainCodec interface {
 }
 
 // Chain families the gateway knows. A configured family it does not know refuses to start.
-const FamilyEVM = "evm"
+const (
+	FamilyEVM = "evm"
+	FamilyBTC = "btc"
+)
 
 func familyOf(f string) (string, error) {
 	switch f {
 	case "", FamilyEVM:
 		return FamilyEVM, nil
+	case FamilyBTC:
+		return FamilyBTC, nil
 	}
-	return "", fmt.Errorf("unknown chain family %q (known: %s)", f, FamilyEVM)
-}
-
-// canonicalizer returns the address canonicalizer of a family (the config reads destination lists with it, before a
-// codec exists).
-func canonicalizer(family string) func(string) (string, error) {
-	return (&EVMCodec{}).Canonical // the only family so far
+	return "", fmt.Errorf("unknown chain family %q (known: %s, %s)", f, FamilyEVM, FamilyBTC)
 }
 
 // NewCodec is the one place a family picks its codec. qv-gateway and qv-cosigner reach it through NewCodecs.
@@ -72,8 +80,16 @@ func NewCodec(cc *ChainConfig) (ChainCodec, error) {
 	switch cc.Family {
 	case "", FamilyEVM:
 		return NewEVMCodec(cc.EVM)
+	case FamilyBTC:
+		return NewBTCCodec(cc.BTC)
 	}
 	return nil, fmt.Errorf("gateway: chain %q: unknown chain family %q", cc.Name, cc.Family)
+}
+
+// KeyPathCodec is implemented by codecs whose jobs name the key to sign with by a derivation path in KeyRef (Bitcoin). The gateway asks a
+// signer.Deriver for that key before it decides.
+type KeyPathCodec interface {
+	KeyPath(keyRef string) ([]uint32, error)
 }
 
 // EVMCodec is the ChainCodec of one EVM chain.
@@ -96,7 +112,8 @@ func NewEVMCodec(cfg evm.Config) (*EVMCodec, error) {
 }
 
 // Decode implements ChainCodec for the evm.Payload JSON.
-func (c *EVMCodec) Decode(payload []byte) (TxInfo, error) {
+func (c *EVMCodec) Decode(u chain.UnsignedTx) (TxInfo, error) {
+	payload := u.Payload
 	var p evm.Payload
 	dec := json.NewDecoder(bytes.NewReader(payload))
 	dec.DisallowUnknownFields()

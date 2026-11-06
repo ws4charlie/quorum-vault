@@ -119,7 +119,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 	if err := codec.Verify(u, intent); err != nil {
 		return nil, reject(ReasonTx, "%v", err)
 	}
-	info, err := codec.Decode(job.Payload)
+	info, err := codec.Decode(u)
 	if err != nil {
 		return nil, reject(ReasonTx, "%v", err)
 	}
@@ -160,7 +160,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 
 		// 5. Replay guard.
 		rel := Release{IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
-			Sender: info.Sender, Claims: info.Claims, Digest: job.Digest, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
+			Sender: info.Sender, Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: job.Digest, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
 		prior, err := d.replay(ctx, gt, intent, rec, codec, &rel)
 		if err != nil {
 			return err
@@ -400,6 +400,9 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 // A claim is held by one intent. A known intent may add another digest of the same transaction (another input to
 // sign), or one of a replacement that has the same claims and higher fees.
 func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec *IntentRecord, codec ChainCodec, rel *Release) (*SigRecord, error) {
+	if len(rel.Pins) != 0 && len(rel.Pins) != len(rel.Claims) {
+		return nil, reject(ReasonPinChanged, "the codec gave %d pins for %d claims", len(rel.Pins), len(rel.Claims))
+	}
 	claims := map[string]*Claim{}
 	for _, c := range rel.Claims {
 		cl, err := gt.Claim(ctx, c)
@@ -407,6 +410,22 @@ func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec
 			return nil, err
 		}
 		claims[c] = cl
+		// A claim that exists keeps its pin, for every intent and in every path: another pin means another view of what the claim is
+		// worth (the segwit v0 fee attack signs one input under a payload that understates another).
+		if cl != nil && cl.Pin != rel.pinOf(c) {
+			return nil, reject(ReasonPinChanged, "%s of %s is already claimed with pin %q, not %q", c, rel.Sender, cl.Pin, rel.pinOf(c))
+		}
+	}
+	// One transaction identity has one payload: a second payload with the same identity is not a replacement (a replacement is a
+	// new transaction) but the same transaction described differently.
+	if rel.Identity != "" {
+		other, err := gt.IdentityConflict(ctx, rel.Identity, rel.PayloadHash)
+		if err != nil {
+			return nil, err
+		}
+		if other != "" {
+			return nil, reject(ReasonIdentity, "transaction %s was already signed for intent %s under a different payload", rel.Identity, other)
+		}
 	}
 	if rec != nil {
 		if !bytes.Equal(rec.Hash, rel.IntentHash) {
