@@ -196,11 +196,11 @@ func (s *system) approve(actor, id string) (int, map[string]any) {
 // booked it as operator funding.
 func (s *system) fundHot(sats int64) {
 	s.t.Helper()
-	before := s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1`, s.chain)
+	before := s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit`, s.chain)
 	s.node.pay(map[string]string{s.hotAddr: btcAmount(sats)})
 	s.node.mine(6, "")
 	s.waitFor(60*time.Second, "the hot funding is recorded", func() bool {
-		return s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1`, s.chain) > before
+		return s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit`, s.chain) > before
 	})
 }
 
@@ -216,12 +216,12 @@ func (s *system) deposit(customer string, sats int64) {
 }
 
 func (s *system) utxoCount(status string) int {
-	return s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND status=$2`, s.chain, status)
+	return s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND status=$2`, s.chain, status)
 }
 
 func (s *system) utxoValue(status string) int64 {
 	var v int64
-	if err := s.pool.QueryRow(s.ctx, `SELECT COALESCE(SUM(value),0) FROM btc_utxos WHERE chain=$1 AND status=$2`, s.chain, status).Scan(&v); err != nil {
+	if err := s.pool.QueryRow(s.ctx, `SELECT COALESCE(SUM(value),0) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND status=$2`, s.chain, status).Scan(&v); err != nil {
 		s.t.Fatal(err)
 	}
 	return v

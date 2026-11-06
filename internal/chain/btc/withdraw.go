@@ -102,7 +102,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 		}
 		var u utxo
 		var v int64
-		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available'
+		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit
 			ORDER BY created_at, txid, vout LIMIT 1 FOR UPDATE SKIP LOCKED`, a.cfg.Chain, w.PartitionID).Scan(&u.txid, &u.vout, &v)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats available in %s, %d needed plus fee", chain.ErrNotEnoughOutputs, sum, w.PartitionID, amount)

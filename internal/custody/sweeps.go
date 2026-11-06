@@ -76,7 +76,8 @@ func (s *Service) OpenSweeps(ctx context.Context) ([]Sweep, error) {
 	return out, rows.Err()
 }
 
-// valueWei converts base units of asset to wei using the fixed price table.
+// valueWei converts base units of asset to the rule's common unit with the fixed price table: wei for the evm family; for a family whose price
+// is 1 (Bitcoin), its own smallest unit, which is also the unit of its fee estimate.
 func (s *Service) valueWei(asset string, amt *big.Int) *big.Int {
 	return new(big.Int).Mul(amt, s.Cfg.Assets[asset].PriceWei)
 }
@@ -136,8 +137,19 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 	}
 	room := min(maxPerPass, maxOpen-open)
 	c := s.Cfg
-	un, err := s.unswept(ctx)
-	if err != nil {
+	var un map[[2]string]*big.Int
+	var err error
+	if src, ok := s.Chain.(chain.SweepSource); ok {
+		// The chain says what a sweep could take (Bitcoin: spendable outputs up to the input cap).
+		cands, cerr := src.SweepCandidates(ctx)
+		if cerr != nil {
+			return nil, cerr
+		}
+		un = map[[2]string]*big.Int{}
+		for _, cd := range cands {
+			un[[2]string{cd.Address, cd.Asset}] = cd.Amount
+		}
+	} else if un, err = s.unswept(ctx); err != nil {
 		return nil, err
 	}
 	keys := make([][2]string, 0, len(un))
@@ -184,7 +196,7 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 			return created, ErrSweepFrozen
 		}
 		s.mismatchAlerted.Store(false)
-		if err == nil {
+		if err == nil && c.Family != FamilyBTC {
 			if oerr := s.observeFactory(ctx, false); oerr != nil {
 				return created, oerr
 			}
@@ -252,8 +264,12 @@ func (s *Service) BuildSweepJob(ctx context.Context, id string) (string, error) 
 		if err != nil {
 			return err
 		}
+		dest, err := s.sweepDestination(sw.PartitionID)
+		if err != nil {
+			return err
+		}
 		intent := signjob.Intent{Kind: "sweep", ID: id, PartitionID: sw.PartitionID, Chain: s.Cfg.Chain, Asset: sw.Asset,
-			From: sw.From, To: s.Cfg.EVM.SweepDestination.Hex(), Amount: sw.Amount.String()}
+			From: sw.From, To: dest, Amount: sw.Amount.String()}
 		ib, err := json.Marshal(intent)
 		if err != nil {
 			return err
@@ -271,6 +287,18 @@ func (s *Service) BuildSweepJob(ctx context.Context, id string) (string, error) 
 		return "", ErrSweepFrozen
 	}
 	return jobID, nil
+}
+
+// sweepDestination is where a sweep of the partition pays: the factory's destination on the evm family, the partition's own shard address on Bitcoin.
+func (s *Service) sweepDestination(partitionID string) (string, error) {
+	if s.Cfg.Family != FamilyBTC {
+		return s.Cfg.EVM.SweepDestination.Hex(), nil
+	}
+	i, err := s.Cfg.ShardIndex(partitionID)
+	if err != nil {
+		return "", err
+	}
+	return s.Cfg.BTC.HotShards[i].Address, nil
 }
 
 // RecordSweepBroadcast stores the transaction hash and books the expected
@@ -365,6 +393,11 @@ func (s *Service) SettleSweep(ctx context.Context, id, txHash string, status cha
 		}
 		if err := s.recordSweepBroadcastTx(ctx, tx, sw, txHash); err != nil { // crash between broadcast and its record
 			return err
+		}
+		if st, ok := s.Chain.(chain.Settler); ok && status == chain.TxConfirmed { // the cell's own books: spent deposit outputs, a new hot output
+			if err := st.Settle(ctx, tx, "sweep", id, txHash); err != nil {
+				return err
+			}
 		}
 		byAsset := map[string]*big.Int{}
 		for _, m := range moved {

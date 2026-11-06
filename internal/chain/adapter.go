@@ -178,6 +178,25 @@ type FundingRecorder interface {
 	RecordFunding(ctx context.Context, tx pgx.Tx, f FundingOutput) (inserted bool, err error)
 }
 
+// DepositRecorder is implemented by a chain cell that keeps its own outputs and must know the credited outputs of deposit addresses (Bitcoin:
+// they are what a sweep spends). It is called in the transaction that credits the deposit, once per credited deposit, never for suspense.
+type DepositRecorder interface {
+	RecordDeposit(ctx context.Context, tx pgx.Tx, d ObservedDeposit) error
+}
+
+// SweepCandidate is what one deposit address could send in one sweep right now: the amount is exactly what the sweep would move.
+type SweepCandidate struct {
+	Address string
+	Asset   string
+	Amount  *big.Int
+}
+
+// SweepSource is implemented by a chain cell that knows which funds of a deposit address a sweep can take (Bitcoin: its available outputs,
+// up to the input cap, leaving out any that cost more to spend than they carry). A chain without it is planned from the credited deposits.
+type SweepSource interface {
+	SweepCandidates(ctx context.Context) ([]SweepCandidate, error)
+}
+
 // Settler is implemented by a chain cell that must update its own books when a transaction of an owner settles, in the settlement's database
 // transaction (Bitcoin: its inputs become spent and its change becomes an available output).
 type Settler interface {

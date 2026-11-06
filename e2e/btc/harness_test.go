@@ -291,6 +291,14 @@ type opts struct {
 	fallbackRate uint64
 	stuckAfter   string
 	lease        string
+	// sweep turns the sweep planner on (it needs withdraw: the gateway signs sweeps). By default the rule's floor is so high that nothing is ever
+	// swept, so tests of other things keep their outputs where they are. minSweep is the floor in satoshis, sweepK the fee multiple, maxInputs the
+	// input cap of a transaction, spendConf the spend depth (default 2).
+	sweep     bool
+	minSweep  string
+	sweepK    int
+	maxInputs int
+	spendConf uint64
 	// gwDest, when set, is the only list of destinations the gateway lets withdrawals pay (otherwise any).
 	gwDest []string
 }
@@ -429,8 +437,21 @@ func newSystem(t *testing.T, o opts) *system {
 	}
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
 	s.tag = uuid.NewString()[:8]
+	s.cf.Sweep = custody.SweepFile{MinSweepWei: "100000000000", PlanInterval: "500ms"} // 1000 BTC: nothing is swept
+	if o.sweep {
+		s.cf.Sweep.MinSweepWei, s.cf.Sweep.K = "0", o.sweepK
+		if o.minSweep != "" {
+			s.cf.Sweep.MinSweepWei = o.minSweep
+		}
+	}
+	if o.maxInputs > 0 {
+		s.cf.Chain.BTC.MaxInputs = o.maxInputs
+	}
 	if o.withdraw {
 		s.setupWithdrawals(o)
+	}
+	if o.spendConf > 0 {
+		s.cf.Chain.BTC.SpendConfirmations = o.spendConf
 	}
 	s.writeConfig(s.cf)
 
@@ -450,7 +471,16 @@ func newSystem(t *testing.T, o opts) *system {
 	s.tc = tc
 	t.Cleanup(tc.Close)
 	t.Cleanup(func() { // the workflows outlive their worker: end them with the test
-		ids := []string{workflow.ScanID(s.chain), workflow.ReconcilerID(s.chain)}
+		ids := []string{workflow.ScanID(s.chain), workflow.ReconcilerID(s.chain), workflow.PlannerID(s.chain)}
+		if rows, err := s.pool.Query(context.Background(), `SELECT id FROM sweeps`); err == nil {
+			for rows.Next() {
+				var id string
+				if rows.Scan(&id) == nil {
+					ids = append(ids, id)
+				}
+			}
+			rows.Close()
+		}
 		if rows, err := s.pool.Query(context.Background(), `SELECT id FROM withdrawals`); err == nil {
 			for rows.Next() {
 				var id string

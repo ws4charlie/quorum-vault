@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
@@ -108,16 +107,6 @@ func (a *Adapter) DeriveDepositAddress(_ context.Context, customerID string, ind
 }
 
 var errLater = fmt.Errorf("btc: %w (a later P7 task)", chain.ErrNotSupported)
-
-func (a *Adapter) BuildSweep(context.Context, pgx.Tx, chain.SweepIntent) (chain.UnsignedTx, error) {
-	return chain.UnsignedTx{}, errLater
-}
-func (a *Adapter) EstimateSweepFee(context.Context, chain.SweepIntent) (*big.Int, error) {
-	return nil, errLater
-}
-func (a *Adapter) MovedAssets(context.Context, string) ([]chain.MovedAsset, error) {
-	return nil, errLater
-}
 
 // The Adapter is also the custody.Reader of the chain. SafeHead works; the balance of an address and the height of a
 // transaction are needed by reconciliation, settlement of withdrawals and sweeps, which are later tasks.

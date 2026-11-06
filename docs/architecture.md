@@ -242,6 +242,20 @@ shard confirms first, and only then is the money released (the guard accepts suc
 If the inputs of an attempt are spent on chain by something that is none of our transactions, the withdrawal is parked with an ALERT and nothing is
 released. A transaction the node forgot (a restart, an eviction) is sent again; a refusal by the node never makes an activity retry for ever.
 
+## Bitcoin sweeps
+
+A credited deposit moves into the partition's hot shard by the same planner and workflow as EVM. The scan transaction that credits a deposit also
+records its output in `btc_utxos`, marked as a deposit output with the address and the key path `0/<index>`; an output booked to suspense is not
+recorded and stays where it is. Withdrawals select only hot outputs and sweeps only deposit outputs of one address, so neither ever sees the other's.
+The rule is the EVM one made neutral: sweep when the value is at least the larger of `min_sweep` and `k` times the fee, in satoshis (the asset's
+price is 1), the fee being the current rate times the size of that transaction. The planner makes one sweep per address, over its oldest outputs
+up to `max_inputs`, leaving out any output that costs more to spend than it carries; the rest wait for the next round, and a deposit that lands while a
+sweep is open waits for the next one. The build reserves exactly the outputs the plan summed, one job per input, all under the address's own key; the
+gateway and cosigner require every input from that address and one output to the partition's own shard. The ledger moves the full amount from the
+deposit address to hot through the sweep account and books the fee, which is the operator's cost since the customer was credited the whole deposit.
+Settlement spends the deposit outputs and records the sweep's output as an available hot output; the scan does not book it as funding. Until fee
+policy and recovery arrive, a sweep that needs a fee bump or a cancel waits with an ALERT and releases nothing. See [learn/p7-5-btc-sweeps.md](learn/p7-5-btc-sweeps.md).
+
 ## Trust boundaries
 
 | Boundary | Protects | Does not protect |
