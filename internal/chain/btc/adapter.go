@@ -112,12 +112,6 @@ var errLater = fmt.Errorf("btc: %w (a later P7 task)", chain.ErrNotSupported)
 func (a *Adapter) BuildSweep(context.Context, pgx.Tx, chain.SweepIntent) (chain.UnsignedTx, error) {
 	return chain.UnsignedTx{}, errLater
 }
-func (a *Adapter) BuildReplacement(context.Context, pgx.Tx, string, string) (chain.UnsignedTx, error) {
-	return chain.UnsignedTx{}, errLater
-}
-func (a *Adapter) BuildCancel(context.Context, pgx.Tx, string, string) (chain.UnsignedTx, error) {
-	return chain.UnsignedTx{}, errLater
-}
 func (a *Adapter) EstimateSweepFee(context.Context, chain.SweepIntent) (*big.Int, error) {
 	return nil, errLater
 }

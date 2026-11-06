@@ -196,6 +196,20 @@ type AddressNormalizer interface {
 	NormalizeAddress(address string) (string, error)
 }
 
+// Errors a chain cell gives for the ways sending or replacing a transaction can fail, so the workflows can tell them apart instead of retrying
+// for ever.
+var (
+	// ErrBroadcastStuck: the node refused the transaction for a reason a higher fee or time may cure (fee below the relay or mempool minimum, the
+	// replacement rules, a conflict with a pending transaction of ours). The attempt is stuck, not failed: the workflow keeps waiting and bumps.
+	ErrBroadcastStuck = errors.New("chain: the node refused the transaction for now")
+	// ErrInputsSpent: an input of the transaction is missing or already spent. It goes to the outcome check, which tells whether one of our own
+	// attempts spent it or something else did.
+	ErrInputsSpent = errors.New("chain: an input of the transaction is missing or spent")
+	// ErrCannotBump: no replacement or cancel can be built (no change to pay more from, change that would fall to dust, a fee ceiling). The
+	// workflow raises an ALERT and keeps waiting.
+	ErrCannotBump = errors.New("chain: the transaction cannot be bumped")
+)
+
 // ErrNotEnoughOutputs is returned by BuildWithdrawal when the partition's available outputs cannot pay the amount and the fee now. It is
 // retryable: outputs may free up or arrive, so the withdrawal waits.
 var ErrNotEnoughOutputs = errors.New("chain: not enough available outputs")

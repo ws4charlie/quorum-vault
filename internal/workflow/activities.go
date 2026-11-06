@@ -43,7 +43,8 @@ const (
 	errFrozen     = "sweep_frozen"
 	errNonceOpen  = "nonce_open"
 	errBadRequest = "bad_request"
-	errNoOutputs  = "no_outputs" // too few available outputs: retryable by waiting
+	errCannotBump = "cannot_bump" // no replacement or cancel can be built
+	errNoOutputs  = "no_outputs"  // too few available outputs: retryable by waiting
 )
 
 // Deps are what activities need.
@@ -83,6 +84,8 @@ func nonRetry(err error) error {
 		typ = errFrozen
 	case errors.Is(err, custody.ErrReservationOpen):
 		typ = errNonceOpen
+	case errors.Is(err, chain.ErrCannotBump):
+		typ = errCannotBump
 	case errors.Is(err, chain.ErrNotEnoughOutputs):
 		typ = errNoOutputs
 	case errors.Is(err, custody.ErrInvalid), errors.Is(err, ledger.ErrInsufficientFunds), errors.Is(err, ledger.ErrIdempotencyConflict):
@@ -719,14 +722,16 @@ func (a *Activities) ConsumedInfo(ctx context.Context, o OwnerArg) (string, erro
 
 // EnqueueReplacement builds and enqueues the n-th fee-bumped replacement on a track.
 func (a *Activities) EnqueueReplacement(ctx context.Context, o OwnerArg, track string, n int) (string, error) {
-	return a.D.Svc.EnqueueReplacement(ctx, o.owner(), custody.Track(track), n)
+	id, err := a.D.Svc.EnqueueReplacement(ctx, o.owner(), custody.Track(track), n)
+	return id, nonRetry(err)
 }
 
 // EnqueueCancel builds and enqueues the cancel that frees what the owner reserved (EVM: its nonce). It returns "" on a
 // chain without cancel: there is nothing to free. (The activity names WaitNonce and EnqueueCancel are kept for
 // workflow histories already recorded.)
 func (a *Activities) EnqueueCancel(ctx context.Context, o OwnerArg) (string, error) {
-	return a.D.Svc.EnqueueCancel(ctx, o.owner())
+	id, err := a.D.Svc.EnqueueCancel(ctx, o.owner())
+	return id, nonRetry(err)
 }
 
 var _ = big.NewInt

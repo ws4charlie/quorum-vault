@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
@@ -64,31 +66,51 @@ func (a *Adapter) Assemble(u chain.UnsignedTx, sigs []chain.Signature) (chain.Si
 	return chain.SignedTx{Chain: a.cfg.Chain, Raw: buf.Bytes()}, nil
 }
 
-// Broadcast hands the transaction to the node. The attempt row learns that it was broadcast first, so a crash after sending cannot lose
-// it. "Already in the mempool", "already known" and "already in a block" are success: sending the same transaction twice is safe.
+// Broadcast hands the transaction to the node. The attempt row learns that it was broadcast first (and keeps the raw transaction, so it can be
+// sent again), so a crash after sending cannot lose it. "Already in the mempool", "already known" and "already in a block" are success: sending
+// the same transaction twice is safe. Other refusals are classified (classifySend): inputs missing or spent, or stuck.
 func (a *Adapter) Broadcast(ctx context.Context, s chain.SignedTx) (string, error) {
 	var tx wire.MsgTx
 	if err := tx.Deserialize(bytes.NewReader(s.Raw)); err != nil {
 		return "", fmt.Errorf("btc: decode raw transaction: %w", err)
 	}
 	txid := tx.TxHash().String()
-	tag, err := a.pool.Exec(ctx, `UPDATE btc_attempts SET broadcast_at = COALESCE(broadcast_at, now()) WHERE chain=$1 AND txid=$2`, a.cfg.Chain, txid)
+	tag, err := a.pool.Exec(ctx, `UPDATE btc_attempts SET broadcast_at = COALESCE(broadcast_at, now()), raw = $3, last_sent_at = now() WHERE chain=$1 AND txid=$2`, a.cfg.Chain, txid, s.Raw)
 	if err != nil {
 		return "", err
 	}
 	if tag.RowsAffected() != 1 {
 		return "", fmt.Errorf("btc: %s is not a transaction this cell built", txid)
 	}
+	return a.send(ctx, txid, s.Raw)
+}
+
+func (a *Adapter) send(ctx context.Context, txid string, raw []byte) (string, error) {
 	var got string
-	err = a.rpc.Call(ctx, &got, "sendrawtransaction", hex.EncodeToString(s.Raw))
+	err := a.rpc.Call(ctx, &got, "sendrawtransaction", hex.EncodeToString(raw))
+	if err == nil {
+		return got, nil
+	}
+	return txid, classifySend(err)
+}
+
+// classifySend maps the node's answer to sendrawtransaction. nil: the node has it (already in the mempool, known, or in a block). A refusal
+// that is the node's own judgement (an RPC error) is never retried as a failing activity: inputs missing or spent is chain.ErrInputsSpent
+// (the outcome check decides who spent them), and everything else (fee below the relay or mempool minimum, the replacement rules, a conflict
+// with a pending transaction of ours) is chain.ErrBroadcastStuck. A transport error is returned as it is and is retried.
+func classifySend(err error) error {
 	var re *RPCError
-	if errors.As(err, &re) && (re.Code == -27 || strings.Contains(re.Message, "already in") || strings.Contains(re.Message, "already known") || strings.Contains(re.Message, "txn-already")) {
-		return txid, nil
+	if !errors.As(err, &re) {
+		return err
 	}
-	if err != nil {
-		return "", err
+	m := strings.ToLower(re.Message)
+	switch {
+	case re.Code == -27 || strings.Contains(m, "already in") || strings.Contains(m, "already known") || strings.Contains(m, "txn-already"):
+		return nil
+	case re.Code == -25 || strings.Contains(m, "missingorspent") || strings.Contains(m, "missing inputs") || strings.Contains(m, "inputs-missing"):
+		return fmt.Errorf("%w: %s", chain.ErrInputsSpent, re.Message)
 	}
-	return got, nil
+	return fmt.Errorf("%w: %s", chain.ErrBroadcastStuck, re.Message)
 }
 
 // confirmations of a transaction: -1 when the node does not know it, 0 in the mempool, else the depth. It needs the node to run with -txindex.
@@ -151,18 +173,33 @@ func (a *Adapter) TxBlock(ctx context.Context, txid string) (uint64, error) {
 	return h.Height, nil
 }
 
-// Outcome looks at every transaction broadcast for the owner: if one is confirmed (at the spend depth) it decides, otherwise the attempts are open.
+// resendEvery is how long a forgotten transaction waits before it is sent again.
+const resendEvery = 20 * time.Second
+
+// Outcome looks at every transaction broadcast for the owner.
+//   - One confirmed at the spend depth decides (a send, or our own cancel).
+//   - Else, if none of ours is in a block and an input of the latest attempt is spent on chain (gettxout without the mempool is null), something
+//     we did not make spent it: consumed. An input spent by our own attempt in a block is not that case, and neither is one our attempt only
+//     holds in the mempool.
+//   - Else the attempts are open, and if the node forgot the latest one (a restart with an empty mempool, an eviction) it is sent again, at most
+//     every resendEvery. Outcome is polled by the workflow, so this is where a forgotten transaction comes back.
 func (a *Adapter) Outcome(ctx context.Context, ownerKind, ownerID string) (chain.Outcome, error) {
-	rows, err := a.pool.Query(ctx, `SELECT txid, kind FROM btc_attempts WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND broadcast_at IS NOT NULL ORDER BY created_at`,
+	rows, err := a.pool.Query(ctx, `SELECT txid, kind, payload, raw, last_sent_at FROM btc_attempts WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND broadcast_at IS NOT NULL ORDER BY created_at, txid`,
 		a.cfg.Chain, ownerKind, ownerID)
 	if err != nil {
 		return chain.Outcome{}, err
 	}
-	type att struct{ txid, kind string }
+	type att struct {
+		txid, kind string
+		payload    []byte
+		raw        []byte
+		sent       *time.Time
+		conf       int64
+	}
 	var atts []att
 	for rows.Next() {
 		var t att
-		if err := rows.Scan(&t.txid, &t.kind); err != nil {
+		if err := rows.Scan(&t.txid, &t.kind, &t.payload, &t.raw, &t.sent); err != nil {
 			rows.Close()
 			return chain.Outcome{}, err
 		}
@@ -173,18 +210,61 @@ func (a *Adapter) Outcome(ctx context.Context, ownerKind, ownerID string) (chain
 		return chain.Outcome{}, err
 	}
 	out := chain.Outcome{State: chain.OutcomeOpen, Attempts: len(atts)}
-	for _, t := range atts {
-		st, err := a.Status(ctx, t.txid)
+	inBlock := false
+	for i := range atts {
+		c, err := a.confirmations(ctx, atts[i].txid)
 		if err != nil {
 			return chain.Outcome{}, err
 		}
-		if st == chain.TxConfirmed {
+		atts[i].conf = c
+		if c >= 1 {
+			inBlock = true
+		}
+		if c >= int64(a.cfg.SpendConfirmations) {
 			kind := chain.AttemptSend
-			if t.kind == "cancel" {
+			if atts[i].kind == "cancel" {
 				kind = chain.AttemptCancel
 			}
-			return chain.Outcome{State: chain.OutcomeConfirmed, Hash: t.txid, Kind: kind, Attempts: len(atts)}, nil
+			return chain.Outcome{State: chain.OutcomeConfirmed, Hash: atts[i].txid, Kind: kind, Attempts: len(atts)}, nil
 		}
+	}
+	if len(atts) == 0 {
+		return out, nil
+	}
+	latest := atts[len(atts)-1]
+	if !inBlock {
+		p, err := DecodePayload(latest.payload)
+		if err != nil {
+			return chain.Outcome{}, err
+		}
+		for _, in := range p.Inputs {
+			var o json.RawMessage
+			if err := a.rpc.Call(ctx, &o, "gettxout", in.TxID, in.Vout, false); err != nil {
+				return chain.Outcome{}, err
+			}
+			if string(o) == "null" || len(o) == 0 {
+				// A block may have been mined between reading the attempts and reading the output, and that block may hold our own attempt: look at the
+				// attempts again before calling the spend foreign.
+				for i := range atts {
+					c, err := a.confirmations(ctx, atts[i].txid)
+					if err != nil {
+						return chain.Outcome{}, err
+					}
+					if c >= 1 {
+						return out, nil
+					}
+				}
+				return chain.Outcome{State: chain.OutcomeConsumed, Attempts: len(atts),
+					Detail: fmt.Sprintf("input %s:%d was spent on chain by a transaction this system did not make", in.TxID, in.Vout)}, nil
+			}
+		}
+	}
+	if latest.conf < 0 && len(latest.raw) > 0 && (latest.sent == nil || time.Since(*latest.sent) >= resendEvery) {
+		_, serr := a.send(ctx, latest.txid, latest.raw)
+		if _, err := a.pool.Exec(ctx, `UPDATE btc_attempts SET last_sent_at = now() WHERE chain=$1 AND txid=$2`, a.cfg.Chain, latest.txid); err != nil {
+			return chain.Outcome{}, err
+		}
+		_ = serr // a refusal leaves it stuck: the workflow bumps it, or the outcome becomes consumed
 	}
 	return out, nil
 }
@@ -195,7 +275,17 @@ func (a *Adapter) Reservation(ctx context.Context, q chain.Querier, ownerKind, o
 	if err := q.QueryRow(ctx, `SELECT count(*) FROM btc_utxos WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved'`, a.cfg.Chain, ownerKind, ownerID).Scan(&n); err != nil {
 		return chain.Reservation{}, err
 	}
-	return chain.Reservation{Open: n > 0, Detail: fmt.Sprintf("%d outputs reserved", n)}, nil
+	r := chain.Reservation{Open: n > 0, Detail: fmt.Sprintf("%d outputs reserved", n)}
+	if n > 0 { // the shard address the reservation is on, for a cancel's destination
+		var part string
+		if err := q.QueryRow(ctx, `SELECT partition_id FROM btc_utxos WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved' ORDER BY txid, vout LIMIT 1`, a.cfg.Chain, ownerKind, ownerID).Scan(&part); err != nil {
+			return chain.Reservation{}, err
+		}
+		if sh, err := a.shardOf(part); err == nil {
+			r.Account = sh.address
+		}
+	}
+	return r, nil
 }
 
 // Settle runs in the settlement's transaction: the outputs the transaction spent become spent, and its change becomes an available output of the shard.
@@ -227,9 +317,41 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 	return nil
 }
 
-// ReleaseUnsigned gives the owner's reserved outputs back. The caller has checked that no signature of the attempt can exist.
+// ReleaseUnsigned gives the owner's reserved outputs back. The caller has checked that no signature of the attempt can exist. If the chain no
+// longer has one of them, something else spent it (a key signed outside this system): nothing is released and the reservation stays open, so the
+// caller parks the owner with an alert instead of freeing money that is not there.
 func (a *Adapter) ReleaseUnsigned(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) error {
-	_, err := tx.Exec(ctx, `UPDATE btc_utxos SET status='available', owner_kind=NULL, owner_id=NULL, updated_at=now() WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved'`,
+	rows, err := tx.Query(ctx, `SELECT txid, vout FROM btc_utxos WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved'`, a.cfg.Chain, ownerKind, ownerID)
+	if err != nil {
+		return err
+	}
+	type ref struct {
+		txid string
+		vout int
+	}
+	var refs []ref
+	for rows.Next() {
+		var r ref
+		if err := rows.Scan(&r.txid, &r.vout); err != nil {
+			rows.Close()
+			return err
+		}
+		refs = append(refs, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range refs {
+		var o json.RawMessage
+		if err := a.rpc.Call(ctx, &o, "gettxout", r.txid, r.vout, false); err != nil {
+			return err
+		}
+		if string(o) == "null" || len(o) == 0 {
+			return nil
+		}
+	}
+	_, err = tx.Exec(ctx, `UPDATE btc_utxos SET status='available', owner_kind=NULL, owner_id=NULL, updated_at=now() WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved'`,
 		a.cfg.Chain, ownerKind, ownerID)
 	return err
 }

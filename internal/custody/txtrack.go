@@ -188,7 +188,13 @@ func (s *Service) SubmitJob(ctx context.Context, attempt string, o Owner) (strin
 	if err != nil {
 		return "", fmt.Errorf("custody: assemble %s: %w", attempt, err)
 	}
-	return s.Chain.Broadcast(ctx, st)
+	h, err := s.Chain.Broadcast(ctx, st)
+	// A refusal that is the node's own judgement never makes the activity retry for ever. Inputs missing or spent go to the outcome check (who spent
+	// them?); a stuck attempt is waited on and bumped. Either way nothing was sent, so there is no hash to record.
+	if errors.Is(err, chain.ErrInputsSpent) || errors.Is(err, chain.ErrBroadcastStuck) {
+		return "", nil
+	}
+	return h, err
 }
 
 // RequeueJob enqueues the attempt newID as an exact copy (intent, digest, payload,
@@ -260,6 +266,17 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 		}
 		if have {
 			return nil
+		}
+		// A chain whose attempts can be released (Bitcoin) needs a cancel only when a signature may exist. If none can, the caller releases
+		// the reservation instead (ReleaseIfUnsigned), which is what "nothing to free" means there.
+		if _, ok := s.Chain.(chain.Releaser); ok {
+			_, may, err := jobStates(ctx, tx, o)
+			if err != nil {
+				return err
+			}
+			if !may {
+				return chain.ErrNotSupported
+			}
 		}
 		u, err := s.Chain.BuildCancel(ctx, tx, o.Kind, o.ID)
 		if err != nil {
@@ -366,10 +383,33 @@ func sortedKeys[V any](m map[string]V) []string {
 	return out
 }
 
+// jobStates reads the jobs of every attempt of an owner (its track), locking them: the IDs of the pending ones, and whether a signature may exist, which
+// is when any job is being signed, is done or failed (the gateway keeps its reservation for a failed one).
+func jobStates(ctx context.Context, tx pgx.Tx, o Owner) (pending []string, mayExist bool, err error) {
+	rows, err := tx.Query(ctx, `SELECT id, status FROM sign_jobs WHERE starts_with(id, $1) FOR UPDATE`, string(OwnerTrack(o))+":")
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, st string
+		if err := rows.Scan(&id, &st); err != nil {
+			return nil, false, err
+		}
+		switch st {
+		case signjob.StatusPending:
+			pending = append(pending, id)
+		case signjob.StatusRejected:
+		default: // signing, done, failed
+			mayExist = true
+		}
+	}
+	return pending, mayExist, rows.Err()
+}
+
 // ReleaseIfUnsigned gives back what an owner reserved when its attempt was refused and no signature of it can exist, so the money may be
-// released. A signature can exist when any job of the owner is being signed, is done or failed (the gateway keeps its reservation for a failed
-// one). Jobs still pending are marked rejected in the same transaction, so no gateway claims one afterwards. Without a Releaser (EVM) or with a
-// signature that may exist, it does nothing and reports false.
+// released. Jobs still pending are marked rejected in the same transaction, so no gateway claims one afterwards. Without a Releaser (EVM), or
+// with a signature that may exist (then a cancel is needed, see EnqueueCancel), it does nothing and reports false.
 func (s *Service) ReleaseIfUnsigned(ctx context.Context, o Owner) (bool, error) {
 	rel, ok := s.Chain.(chain.Releaser)
 	if !ok {
@@ -378,29 +418,8 @@ func (s *Service) ReleaseIfUnsigned(ctx context.Context, o Owner) (bool, error) 
 	released := false
 	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		released = false
-		prefix := string(OwnerTrack(o)) + ":"
-		rows, err := tx.Query(ctx, `SELECT id, status FROM sign_jobs WHERE starts_with(id, $1) FOR UPDATE`, prefix)
-		if err != nil {
-			return err
-		}
-		var pending []string
-		for rows.Next() {
-			var id, st string
-			if err := rows.Scan(&id, &st); err != nil {
-				rows.Close()
-				return err
-			}
-			switch st {
-			case signjob.StatusPending:
-				pending = append(pending, id)
-			case signjob.StatusRejected:
-			default: // signing, done, failed: a signature may exist
-				rows.Close()
-				return nil
-			}
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
+		pending, may, err := jobStates(ctx, tx, o)
+		if err != nil || may {
 			return err
 		}
 		for _, id := range pending {

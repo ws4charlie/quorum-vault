@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -84,3 +85,70 @@ func TestReleaseIfUnsignedOnlyWhenNoSignatureCanExist(t *testing.T) {
 		t.Fatalf("no releaser: %v %v", ok, err)
 	}
 }
+
+type cancelChain struct {
+	*releaseChain
+	built int
+}
+
+func (c *cancelChain) BuildCancel(context.Context, pgx.Tx, string, string) (chain.UnsignedTx, error) {
+	c.built++
+	return chain.UnsignedTx{Chain: testChain, Digest: []byte{9, 9}, Payload: []byte(`{}`), KeyRef: chain.KeyRef{Path: "k"}}, nil
+}
+func (c *cancelChain) Reservation(context.Context, chain.Querier, string, string) (chain.Reservation, error) {
+	return chain.Reservation{Open: true, Account: "shard"}, nil
+}
+
+// On a chain whose attempts can be released, a cancel is built only when a signature may exist; otherwise EnqueueCancel says there is nothing to free
+// and the caller releases the reservation. Refusals that the node makes of a broadcast are not retried for ever.
+func TestEnqueueCancelOnlyWhenASignatureMayExist(t *testing.T) {
+	ctx := context.Background()
+	s, fc := newSvc(t)
+	cc := &cancelChain{releaseChain: &releaseChain{fakeChain: fc}}
+	s.Chain = cc
+	part := s.Cfg.PartitionKey("ETH", 0).String()
+	intent, _ := json.Marshal(signjob.Intent{Kind: "withdrawal", ID: "w1", PartitionID: part, Chain: testChain})
+	mk := func(id string, statuses ...string) Owner {
+		o := Owner{Kind: "withdrawal", ID: id, PartitionID: part}
+		InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+			for i, st := range statuses {
+				jid := JobAt(OwnerTrack(o).FirstJob(), i)
+				if err := signjob.Enqueue(ctx, tx, signjob.Job{ID: jid, PartitionID: part, KeyRef: "k", Chain: testChain, Intent: intent, Digest: []byte{byte(i), 2}, Payload: []byte(`{}`)}); err != nil {
+					return err
+				}
+				tx.Exec(ctx, `UPDATE sign_jobs SET status=$2 WHERE id=$1`, jid, st)
+			}
+			return nil
+		})
+		return o
+	}
+	if id, err := s.EnqueueCancel(ctx, mk("a", "rejected")); err != nil || id != "" || cc.built != 0 {
+		t.Fatalf("all refused: id %q err %v built %d", id, err, cc.built)
+	}
+	if id, err := s.EnqueueCancel(ctx, mk("b", "done", "rejected")); err != nil || id == "" || cc.built != 1 {
+		t.Fatalf("a signature exists: id %q err %v built %d", id, err, cc.built)
+	}
+	// SubmitJob does not return the node's judgement as an error that would be retried for ever.
+	s.Chain = &sendChain{fakeChain: fc, err: chain.ErrBroadcastStuck}
+	o := mk("c", "done")
+	if h, err := s.SubmitJob(ctx, OwnerTrack(o).FirstJob(), o); err != nil || h != "" {
+		t.Fatalf("stuck: %q %v", h, err)
+	}
+	s.Chain = &sendChain{fakeChain: fc, err: chain.ErrInputsSpent}
+	if h, err := s.SubmitJob(ctx, OwnerTrack(o).FirstJob(), o); err != nil || h != "" {
+		t.Fatalf("inputs spent: %q %v", h, err)
+	}
+}
+
+type sendChain struct {
+	*fakeChain
+	err error
+}
+
+func (c *sendChain) Outcome(context.Context, string, string) (chain.Outcome, error) {
+	return chain.Outcome{State: chain.OutcomeOpen}, nil
+}
+func (c *sendChain) Assemble(chain.UnsignedTx, []chain.Signature) (chain.SignedTx, error) {
+	return chain.SignedTx{Raw: []byte{1}}, nil
+}
+func (c *sendChain) Broadcast(context.Context, chain.SignedTx) (string, error) { return "", c.err }

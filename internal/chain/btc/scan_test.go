@@ -20,9 +20,11 @@ type fakeNode struct {
 	blocks []Block // index = height
 	srv    *httptest.Server
 	// transactions: txid -> confirmations (0: in the mempool); a txid not here is unknown to the node
-	txs     map[string]int64
-	sent    []string // raw transactions given to sendrawtransaction
-	sendErr *RPCError
+	txs         map[string]int64
+	sent        []string // raw transactions given to sendrawtransaction
+	sendErr     *RPCError
+	spent       map[string]bool // "txid:vout" -> spent on chain (gettxout answers null)
+	beforeTxOut func()          // called (unlocked state allowed) before gettxout answers, to change the chain between two reads
 }
 
 type out struct {
@@ -31,7 +33,7 @@ type out struct {
 }
 
 func newNode(t *testing.T) *fakeNode {
-	n := &fakeNode{txs: map[string]int64{}}
+	n := &fakeNode{txs: map[string]int64{}, spent: map[string]bool{}}
 	n.srv = httptest.NewServer(http.HandlerFunc(n.serve))
 	t.Cleanup(n.srv.Close)
 	n.mine(nil...) // genesis
@@ -66,6 +68,19 @@ func (n *fakeNode) serve(w http.ResponseWriter, r *http.Request) {
 			m["blockhash"] = "bh"
 		}
 		res = m
+	case "gettxout":
+		var id string
+		var vout int
+		json.Unmarshal(req.Params[0], &id)
+		json.Unmarshal(req.Params[1], &vout)
+		if n.beforeTxOut != nil {
+			n.beforeTxOut()
+		}
+		if n.spent[fmt.Sprintf("%s:%d", id, vout)] {
+			json.NewEncoder(w).Encode(map[string]any{"result": nil, "error": nil})
+			return
+		}
+		res = map[string]any{"bestblock": "x", "confirmations": 10, "value": 1}
 	case "sendrawtransaction":
 		var raw string
 		json.Unmarshal(req.Params[0], &raw)

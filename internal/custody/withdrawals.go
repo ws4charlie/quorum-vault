@@ -553,6 +553,13 @@ func (s *Service) VoidWithdrawal(ctx context.Context, id, reason, feeTx string) 
 		if w.Status == WdConfirmed {
 			return fmt.Errorf("custody: withdrawal %s is already confirmed", id)
 		}
+		if feeTx != "" { // a cancel of ours confirmed: its transaction spent what the attempt had reserved, and its output is ours again
+			if st, ok := s.Chain.(chain.Settler); ok {
+				if err := st.Settle(ctx, tx, "withdrawal", id, feeTx); err != nil {
+					return err
+				}
+			}
+		}
 		open, err := s.ReservationOpen(ctx, tx, w.Owner())
 		if err != nil {
 			return err

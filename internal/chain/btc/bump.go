@@ -1,0 +1,170 @@
+package btc
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/ws4charlie/quorum-vault/internal/chain"
+)
+
+// Replacement rule. A replacement spends the same inputs and pays the same payment from less change, and Bitcoin Core accepts it (BIP125) only if
+// it signals replaceability (every input does), pays an absolute fee at least the old one's plus the relay cost of its own size at the incremental
+// relay fee (1 sat/vB), and a higher fee rate. This cell pays the largest of:
+//
+//	old fee + 15 percent                      (a step worth taking, like EVM's bump)
+//	old fee + vsize x 1 sat/vB                (BIP125 rules 3 and 4)
+//	the current fee rate x vsize              (what the node would ask for now)
+//
+// and refuses (chain.ErrCannotBump) when that is above the fee cap or the fee rate ceiling, or leaves the change at or under dust, or when the
+// attempt has no change output to pay it from.
+const (
+	bumpPercent     = 15
+	incrementalRate = 1 // sat/vB, the incremental relay fee
+)
+
+// nextFee is the fee of a replacement of an attempt that paid oldFee, for a transaction of vs virtual bytes.
+func (a *Adapter) nextFee(ctx context.Context, oldFee, vs uint64) uint64 {
+	step := (oldFee*(100+bumpPercent) + 99) / 100
+	return max(step, oldFee+vs*incrementalRate, a.feeRate(ctx)*vs)
+}
+
+func (a *Adapter) checkFee(fee, vs uint64) error {
+	if fee > a.cfg.MaxTxFeeSats {
+		return fmt.Errorf("%w: %d sats would be above the fee cap %d", chain.ErrCannotBump, fee, a.cfg.MaxTxFeeSats)
+	}
+	if fee > a.cfg.MaxFeeRate*vs {
+		return fmt.Errorf("%w: %d sats over %d vbytes would be above %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.MaxFeeRate)
+	}
+	return nil
+}
+
+// lastSend is the owner's newest send attempt (broadcast or not), locked.
+func (a *Adapter) lastSend(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (Payload, uint64, error) {
+	var raw []byte
+	var fee int64
+	err := tx.QueryRow(ctx, `SELECT payload, fee FROM btc_attempts WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND kind='send' ORDER BY created_at DESC, txid LIMIT 1 FOR UPDATE`,
+		a.cfg.Chain, ownerKind, ownerID).Scan(&raw, &fee)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Payload{}, 0, fmt.Errorf("btc: %s %s has no attempt", ownerKind, ownerID)
+	}
+	if err != nil {
+		return Payload{}, 0, err
+	}
+	p, err := DecodePayload(raw)
+	return p, uint64(fee), err
+}
+
+func (a *Adapter) record(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, kind string, p Payload, fee uint64) (*Unsigned, []byte, error) {
+	built, err := BuildUnsigned(p, a.acct)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO btc_attempts (chain, txid, owner_kind, owner_id, kind, payload, fee) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)`,
+		a.cfg.Chain, built.TxID, ownerKind, ownerID, kind, string(raw), int64(fee)); err != nil {
+		return nil, nil, fmt.Errorf("btc: record attempt: %w", err)
+	}
+	return built, raw, nil
+}
+
+func unsignedOf(chainName string, built *Unsigned, raw []byte, ref chain.KeyRef) chain.UnsignedTx {
+	u := chain.UnsignedTx{Chain: chainName, Digest: built.Digests[0], Payload: raw, KeyRef: ref}
+	for _, d := range built.Digests[1:] {
+		u.More = append(u.More, chain.SigInput{Digest: d, KeyRef: ref})
+	}
+	return u
+}
+
+// BuildReplacement builds the fee bump of the owner's newest attempt: the same inputs and the same payment, less change, a higher fee (see the rule
+// above). Without a change output, or when the change would fall to dust, it returns chain.ErrCannotBump: the attempt cannot be bumped.
+func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	if ownerKind != "withdrawal" {
+		return chain.UnsignedTx{}, errLater
+	}
+	p, oldFee, err := a.lastSend(ctx, tx, ownerKind, ownerID)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	sh, ok := a.byAddr[p.Outputs[len(p.Outputs)-1].Address]
+	if len(p.Outputs) < 2 || !ok {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: the transaction has no change output to pay a higher fee from", chain.ErrCannotBump)
+	}
+	built, err := BuildUnsigned(p, a.acct)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	vs := uint64(EstimateVSize(built.Tx))
+	fee := a.nextFee(ctx, oldFee, vs)
+	if err := a.checkFee(fee, vs); err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	change := &p.Outputs[len(p.Outputs)-1]
+	delta := fee - oldFee
+	if change.Value < delta || change.Value-delta < DustLimit(KindP2WPKH) {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats of change cannot pay %d more", chain.ErrCannotBump, change.Value, delta)
+	}
+	change.Value -= delta
+	b2, raw, err := a.record(ctx, tx, ownerKind, ownerID, "send", p, fee)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	return unsignedOf(a.cfg.Chain, b2, raw, chain.KeyRef{PartitionID: sh.partition, Path: PathString(sh.path)}), nil
+}
+
+// BuildCancel builds the cancel of the owner's attempts: a transaction that spends exactly the inputs of the attempt (the signing zone's strict rule)
+// back to the partition's own shard, one output, for a fee above the highest fee any attempt of the owner paid (so it replaces whichever is pending).
+// Once it confirms, no other transaction can spend those inputs, so a half-signed one can never confirm. It returns chain.ErrNotSupported when
+// nothing was built, and chain.ErrCannotBump when the inputs cannot pay for it.
+func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	if ownerKind != "withdrawal" {
+		return chain.UnsignedTx{}, errLater
+	}
+	var n int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM btc_attempts WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND kind='send'`, a.cfg.Chain, ownerKind, ownerID).Scan(&n); err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	if n == 0 {
+		return chain.UnsignedTx{}, errLater
+	}
+	p, _, err := a.lastSend(ctx, tx, ownerKind, ownerID)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	var top int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(fee),0) FROM btc_attempts WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3`, a.cfg.Chain, ownerKind, ownerID).Scan(&top); err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	var part string
+	if err := tx.QueryRow(ctx, `SELECT partition_id FROM btc_utxos WHERE chain=$1 AND txid=$2 AND vout=$3`, a.cfg.Chain, p.Inputs[0].TxID, p.Inputs[0].Vout).Scan(&part); err != nil {
+		return chain.UnsignedTx{}, fmt.Errorf("btc: partition of the attempt's inputs: %w", err)
+	}
+	sh, err := a.shardOf(part)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	var sum uint64
+	for _, in := range p.Inputs {
+		sum += in.Value
+	}
+	vs := vsize(len(p.Inputs), sh.script)
+	fee := a.nextFee(ctx, uint64(top), vs)
+	if err := a.checkFee(fee, vs); err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	if sum < fee+DustLimit(KindP2WPKH) {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: the inputs hold %d sats, a cancel needs %d fee and an output", chain.ErrCannotBump, sum, fee)
+	}
+	c := Payload{Version: PayloadVersion, Inputs: p.Inputs, Outputs: []PayloadOutput{{Address: sh.address, Value: sum - fee}}}
+	built, raw, err := a.record(ctx, tx, ownerKind, ownerID, "cancel", c, fee)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	return unsignedOf(a.cfg.Chain, built, raw, chain.KeyRef{PartitionID: sh.partition, Path: PathString(sh.path)}), nil
+}
