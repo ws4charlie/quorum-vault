@@ -27,6 +27,8 @@ import (
 const (
 	btcChain     = "btc-test"
 	btcPartition = "qv-us/btc-test/BTC/hot/omnibus/0"
+	btcPart1     = "qv-us/btc-test/BTC/hot/omnibus/1"         // another shard of the same pool
+	btcPartSeg   = "qv-us/btc-test/BTC/hot/segregated:acme/0" // a segregated client's shard
 )
 
 // softTree is a signer for a key tree held in software, standing in for mpc-party's derive-on-demand signer in tests.
@@ -79,9 +81,11 @@ type btcH struct {
 	gw    *Gateway
 	tree  *softTree
 	acct  *btc.Account
-	hot0  string
-	hot1  string
+	hot0  string // partition btcPartition, [1,0]
+	hot1  string // btcPart1, [1,1]
+	hotS  string // btcPartSeg, [1,2]
 	cold  string
+	coldS string
 	other string // a regtest P2WPKH nobody pinned
 	dep   string // [0,5]
 	seq   int
@@ -114,15 +118,17 @@ func newBTCHarness(t *testing.T) *btcH {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &btcH{harness: h, tree: &softTree{acct: acctPriv}, acct: acct, cold: foreignAddr(9), other: foreignAddr(10)}
+	b := &btcH{harness: h, tree: &softTree{acct: acctPriv}, acct: acct, cold: foreignAddr(9), coldS: foreignAddr(11), other: foreignAddr(10)}
 	b.hot0, _ = acct.Address([]uint32{1, 0})
 	b.hot1, _ = acct.Address([]uint32{1, 1})
+	b.hotS, _ = acct.Address([]uint32{1, 2})
 	b.dep, _ = acct.Address([]uint32{0, 5})
 
 	cf := ChainFile{Family: "btc", WithdrawalsPerHour: 1000, SweepsPerHour: 1000, CancelsPerHour: 1000, ToColdPerHour: 1000, RebalancePerHour: 1000,
 		BTC: &BTCFile{Network: "regtest", AccountXpub: xpub.String(), MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
-			HotShards:     map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 0}}, "p-btc-1": {Address: b.hot1, Path: []uint32{1, 1}}},
-			ColdAddresses: map[string]string{"omnibus/native": b.cold}},
+			HotShards: map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 0}}, btcPart1: {Address: b.hot1, Path: []uint32{1, 1}},
+				btcPartSeg: {Address: b.hotS, Path: []uint32{1, 2}}},
+			ColdAddresses: map[string]string{"omnibus/native": b.cold, "segregated:acme/native": b.coldS}},
 		Assets: map[string]AssetFile{"BTC": {AnyDestination: true, PerTxCap: "100000000", DailyCap: "1000000000", Tiers: []TierFile{{"0", 1}},
 			ToColdDailyCap: "1000000000", RebalanceDailyCap: "1000000000"}}}
 	cc, err := cf.build(btcChain, 4)
@@ -133,6 +139,8 @@ func newBTCHarness(t *testing.T) *btcH {
 	for _, q := range []string{
 		`INSERT INTO assets (chain, symbol, decimals) VALUES ('` + btcChain + `','BTC',8)`,
 		`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('` + btcPartition + `','qv-us','` + btcChain + `','BTC','hot','omnibus',0)`,
+		`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('` + btcPart1 + `','qv-us','` + btcChain + `','BTC','hot','omnibus',1)`,
+		`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('` + btcPartSeg + `','qv-us','` + btcChain + `','BTC','hot','segregated:acme',0)`,
 	} {
 		if _, err := h.biz.Exec(ctx, q); err != nil {
 			t.Fatal(err)
@@ -142,7 +150,7 @@ func newBTCHarness(t *testing.T) *btcH {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gw, err := New(h.cfg, codecs, map[string]signer.Signer{btcPartition: b.tree}, h.guard, h.biz, Options{WorkerID: "btc-w", Lease: time.Minute, Now: h.clock})
+	gw, err := New(h.cfg, codecs, map[string]signer.Signer{btcPartition: b.tree, btcPart1: b.tree, btcPartSeg: b.tree}, h.guard, h.biz, Options{WorkerID: "btc-w", Lease: time.Minute, Now: h.clock})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,9 +224,9 @@ func wdIntent(id, to string, amount uint64) signjob.Intent {
 	return signjob.Intent{Kind: "withdrawal", ID: id, Asset: "BTC", To: to, Amount: fmt.Sprint(amount)}
 }
 
-// twoInputs is the transaction every guard test builds on: two hot inputs of 150_000 sats, paying 100_000 to dest and 100_000 change.
+// twoInputs is the transaction every guard test builds on: two inputs of the partition's own shard, of 150_000 sats, paying 100_000 to dest and 100_000 change.
 func (b *btcH) twoInputs(valueA, valueB uint64, dest string, change uint64) btc.Payload {
-	return btc.Payload{Version: 2, Inputs: []btc.PayloadInput{btcIn(1, 0, valueA, 1, 0), btcIn(2, 0, valueB, 1, 1)},
+	return btc.Payload{Version: 2, Inputs: []btc.PayloadInput{btcIn(1, 0, valueA, 1, 0), btcIn(2, 0, valueB, 1, 0)},
 		Outputs: []btc.PayloadOutput{{Address: dest, Value: 100_000}, {Address: b.hot0, Value: change}}}
 }
 
@@ -282,21 +290,23 @@ func TestBTCCombinedSignatureFeeAttack(t *testing.T) {
 	})
 }
 
-// The transaction identity alone: same txid, same values, but another payload (the key the first input is under, so another digest and another payload
-// hash). It is not a replacement, because a replacement is a new transaction.
+// The transaction identity alone: same txid, same values, but another payload (the first input claimed under another of our keys, so another
+// digest and another payload hash). Only a cancel may name inputs under any path, so the attempt is a cancel. It is not a replacement, because
+// a replacement is a new transaction.
 func TestBTCSameTxidOtherPayloadIsRefused(t *testing.T) {
 	b := newBTCHarness(t)
 	p := b.twoInputs(150_000, 150_000, b.other, 180_000)
-	in := wdIntent("wa", b.other, 100_000)
-	js := b.jobs("a", in, p, "auto")
-	if d := b.run(js[0]); d.Outcome != OutcomeSigned {
+	win := wdIntent("w1", b.other, 100_000)
+	b.mustSignAll(b.jobs("w1", win, p, "auto"))
+	cancel := btc.Payload{Version: 2, Inputs: p.Inputs, Outputs: []btc.PayloadOutput{{Address: b.hot0, Value: 280_000}}}
+	cin := signjob.Intent{Kind: "cancel", ID: "cancel-w1", PartitionID: btcPartition, Chain: btcChain, Asset: "BTC", To: b.hot0, Amount: "0"}
+	if d := b.run(b.jobs("c1", cin, cancel)[0]); d.Outcome != OutcomeSigned {
 		t.Fatalf("%s %s", d.Outcome, d.Reason)
 	}
-	q := p
-	q.Inputs = append([]btc.PayloadInput{}, p.Inputs...)
-	q.Inputs[0].Path = []uint32{1, 3} // the same outpoint, claimed under another of our keys
-	jq := b.jobs("b", in, q, "auto")
-	b.mustRefuse(jq[1], ReasonIdentity)
+	q := cancel
+	q.Inputs = append([]btc.PayloadInput{}, cancel.Inputs...)
+	q.Inputs[0].Path = []uint32{0, 5} // the same outpoint, claimed under another key
+	b.mustRefuse(b.jobs("c2", cin, q)[1], ReasonIdentity)
 }
 
 // Outpoints are exclusive across intents, and an intent has only one transaction unless a replacement spends exactly the same inputs for more fee.
@@ -314,7 +324,7 @@ func TestBTCClaimsAndReplacements(t *testing.T) {
 	// A replacement of intent w1 with different inputs, with one input fewer, with a lower or equal fee.
 	other := p
 	other.Inputs = append([]btc.PayloadInput{}, p.Inputs...)
-	other.Inputs[1] = btcIn(9, 0, 150_000, 1, 1)
+	other.Inputs[1] = btcIn(9, 0, 150_000, 1, 0)
 	other.Outputs = []btc.PayloadOutput{p.Outputs[0], {Address: b.hot0, Value: 170_000}}
 	b.mustRefuse(b.jobs("r1", in, other, "auto")[0], ReasonNonceChanged)
 	fewer := btc.Payload{Version: 2, Inputs: p.Inputs[:1], Outputs: []btc.PayloadOutput{p.Outputs[0], {Address: b.hot0, Value: 40_000}}}
@@ -348,8 +358,8 @@ func TestBTCCancelTakesTheClaims(t *testing.T) {
 	if d := b.run(js[0]); d.Outcome != OutcomeSigned { // input 0 signed, input 1 never was
 		t.Fatalf("%s %s", d.Outcome, d.Reason)
 	}
-	cancel := btc.Payload{Version: 2, Inputs: p.Inputs, Outputs: []btc.PayloadOutput{{Address: b.hot1, Value: 280_000}}}
-	cin := signjob.Intent{Kind: "cancel", ID: "cancel-w1", PartitionID: btcPartition, Chain: btcChain, Asset: "BTC", To: b.hot1, Amount: "0"}
+	cancel := btc.Payload{Version: 2, Inputs: p.Inputs, Outputs: []btc.PayloadOutput{{Address: b.hot0, Value: 280_000}}}
+	cin := signjob.Intent{Kind: "cancel", ID: "cancel-w1", PartitionID: btcPartition, Chain: btcChain, Asset: "BTC", To: b.hot0, Amount: "0"}
 	b.mustSignAll(b.jobs("c1", cin, cancel))
 	// The half-signed withdrawal can no longer be finished.
 	b.mustRefuse(js[1], ReasonNonceCancel)
@@ -357,8 +367,8 @@ func TestBTCCancelTakesTheClaims(t *testing.T) {
 	bad := cancel
 	bad.Inputs = append([]btc.PayloadInput{}, p.Inputs...)
 	bad.Inputs[1].Value = 100_000
-	bad.Outputs = []btc.PayloadOutput{{Address: b.hot1, Value: 230_000}}
-	b.mustRefuse(b.jobs("c2", signjob.Intent{Kind: "cancel", ID: "cancel-2", PartitionID: btcPartition, Chain: btcChain, Asset: "BTC", To: b.hot1, Amount: "0"}, bad)[1], ReasonPinChanged)
+	bad.Outputs = []btc.PayloadOutput{{Address: b.hot0, Value: 230_000}}
+	b.mustRefuse(b.jobs("c2", signjob.Intent{Kind: "cancel", ID: "cancel-2", PartitionID: btcPartition, Chain: btcChain, Asset: "BTC", To: b.hot0, Amount: "0"}, bad)[1], ReasonPinChanged)
 }
 
 // The signer for a job is the derived key of the input it names; a key that is not the input's is refused before anything signs.
@@ -393,10 +403,10 @@ func TestBTCGatewayConfigRefusals(t *testing.T) {
 	good := b.gw.cfg.Chains[btcChain].BTC
 	mk := func(mut func(c *ChainFile)) error {
 		cf := ChainFile{Family: "btc", WithdrawalsPerHour: 10, BTC: &BTCFile{Network: "regtest", AccountXpub: good.AccountXpub, MaxTxFeeSats: 1, MaxFeeRate: 1, MaxInputs: 1,
-			HotShards: map[string]HotShardFile{"p": {Address: b.hot0, Path: []uint32{1, 0}}}},
+			HotShards: map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 0}}}},
 			Assets: map[string]AssetFile{"BTC": {AnyDestination: true, PerTxCap: "10", DailyCap: "10", Tiers: []TierFile{{"0", 1}}}}}
 		mut(&cf)
-		_, err := cf.build("c", 4)
+		_, err := cf.build(btcChain, 4)
 		return err
 	}
 	if err := mk(func(*ChainFile) {}); err != nil {
@@ -413,7 +423,7 @@ func TestBTCGatewayConfigRefusals(t *testing.T) {
 		},
 		"missing fee cap": func(c *ChainFile) { c.BTC.MaxTxFeeSats = 0 },
 		"hot shard off path": func(c *ChainFile) {
-			c.BTC.HotShards = map[string]HotShardFile{"p": {Address: b.hot0, Path: []uint32{1, 1}}}
+			c.BTC.HotShards = map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 1}}}
 		},
 		"no btc section":    func(c *ChainFile) { c.BTC = nil },
 		"an unknown family": func(c *ChainFile) { c.Family = "doge" },
@@ -424,9 +434,9 @@ func TestBTCGatewayConfigRefusals(t *testing.T) {
 	}
 	// The allowlist holds canonical strings: upper-case bech32 means the same address.
 	cf := ChainFile{Family: "btc", WithdrawalsPerHour: 10, BTC: &BTCFile{Network: "regtest", AccountXpub: good.AccountXpub, MaxTxFeeSats: 1, MaxFeeRate: 1, MaxInputs: 1,
-		HotShards: map[string]HotShardFile{"p": {Address: b.hot0, Path: []uint32{1, 0}}}},
+		HotShards: map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 0}}}},
 		Assets: map[string]AssetFile{"BTC": {WithdrawalDestinations: []string{strings.ToUpper(b.other)}, PerTxCap: "10", DailyCap: "10", Tiers: []TierFile{{"0", 1}}}}}
-	cc, err := cf.build("c", 4)
+	cc, err := cf.build(btcChain, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,20 +454,107 @@ func TestBTCCheckSigners(t *testing.T) {
 	b := newBTCHarness(t)
 	cfg := *b.cfg
 	cfg.Chains = map[string]*ChainConfig{btcChain: b.cfg.Chains[btcChain]}
-	cfg.Signers = map[string]SignerFile{btcPartition: {Backend: "mpc", KeysetID: "k", HardenedPath: []uint32{84, 1, 0}}, "p-btc-1": {Backend: "mpc", KeysetID: "k", HardenedPath: []uint32{84, 1, 0}}}
-	both := map[string]signer.Signer{btcPartition: b.tree, "p-btc-1": b.tree}
-	if err := CheckSigners(&cfg, both); err != nil {
+	good := SignerFile{Backend: "mpc", KeysetID: "k", HardenedPath: []uint32{84, 1, 0}}
+	cfg.Signers = map[string]SignerFile{btcPartition: good, btcPart1: good, btcPartSeg: good}
+	all := map[string]signer.Signer{btcPartition: b.tree, btcPart1: b.tree, btcPartSeg: b.tree}
+	if err := CheckSigners(&cfg, all); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckSigners(&cfg, map[string]signer.Signer{btcPartition: b.tree}); err == nil {
+	if err := CheckSigners(&cfg, map[string]signer.Signer{btcPartition: b.tree, btcPart1: b.tree}); err == nil {
 		t.Fatal("a hot partition without a signer was accepted")
 	}
 	one, _ := b.tree.At(context.Background(), []uint32{1, 0})
-	if err := CheckSigners(&cfg, map[string]signer.Signer{btcPartition: b.tree, "p-btc-1": one}); err == nil {
+	if err := CheckSigners(&cfg, map[string]signer.Signer{btcPartition: b.tree, btcPart1: b.tree, btcPartSeg: one}); err == nil {
 		t.Fatal("a single-key signer for a Bitcoin partition was accepted")
 	}
-	cfg.Signers = map[string]SignerFile{btcPartition: {HardenedPath: []uint32{84, 0, 0}}, "p-btc-1": {HardenedPath: []uint32{84, 1, 0}}}
-	if err := CheckSigners(&cfg, both); err == nil {
+	bad := good
+	bad.HardenedPath = []uint32{84, 0, 0}
+	cfg.Signers = map[string]SignerFile{btcPartition: bad, btcPart1: good, btcPartSeg: good}
+	if err := CheckSigners(&cfg, all); err == nil {
 		t.Fatal("the mainnet account path on regtest was accepted")
 	}
+}
+
+// Every kind is bound to its partition at the gateway too: a compromised business zone cannot move a segregated client's funds with an
+// intent of the omnibus pool, nor the other way round.
+func TestBTCIntentsAreBoundToTheirPartition(t *testing.T) {
+	b := newBTCHarness(t)
+	seg := func(n int) btc.PayloadInput { return btcIn(n, 0, 150_000, 1, 2) } // the segregated shard's key
+	mk := func(kind, to string, amount uint64) (btc.Payload, signjob.Intent) {
+		p := b.twoInputs(150_000, 150_000, to, 180_000)
+		in := signjob.Intent{Kind: kind, ID: "x-" + kind, Asset: "BTC", To: to, Amount: fmt.Sprint(amount)}
+		return p, in
+	}
+	// 1. Spending the segregated shard under an omnibus intent.
+	for n, kind := range []string{"withdrawal", "to-cold", "rebalance"} {
+		to := map[string]string{"withdrawal": b.other, "to-cold": b.cold, "rebalance": b.hot1}[kind]
+		p, in := mk(kind, to, 100_000)
+		p.Inputs = []btc.PayloadInput{seg(10 + n*2), seg(11 + n*2)}
+		in.ID = fmt.Sprintf("seg-%d", n)
+		b.mustRefuse(b.jobs(fmt.Sprintf("j%d", n), in, p, "auto")[0], ReasonTx)
+	}
+	// 2. Change to another shard.
+	for n, other := range []string{b.hot1, b.hotS} {
+		p, in := mk("withdrawal", b.other, 100_000)
+		p.Outputs[1].Address = other
+		in.ID = fmt.Sprintf("chg-%d", n)
+		b.mustRefuse(b.jobs(fmt.Sprintf("chg%d", n), in, p, "auto")[0], ReasonTx)
+	}
+	// 3. To-cold to another pool's cold address; rebalance into another pool.
+	p, in := mk("to-cold", b.coldS, 100_000)
+	b.mustRefuse(b.jobs("tc", in, p)[0], ReasonTx)
+	p, in = mk("rebalance", b.hotS, 100_000)
+	b.mustRefuse(b.jobs("rb", in, p)[0], ReasonTx)
+	// 4. Sweep and cancel to another partition's shard.
+	sw := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{btcIn(30, 0, 50_000, 0, 5)}, Outputs: []btc.PayloadOutput{{Address: b.hot1, Value: 49_000}}}
+	b.mustRefuse(b.jobs("sw", signjob.Intent{Kind: "sweep", ID: "sw1", From: b.dep, To: b.hot1, Amount: "50000"}, sw)[0], ReasonTx)
+	cp := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{btcIn(31, 0, 50_000, 1, 0)}, Outputs: []btc.PayloadOutput{{Address: b.hot1, Value: 49_000}}}
+	b.mustRefuse(b.jobs("cx", signjob.Intent{Kind: "cancel", ID: "cx1", To: b.hot1, Amount: "0"}, cp)[0], ReasonTx)
+	// And the right ones pass, each under its own partition: a segregated to-cold goes to the segregated pool's cold address.
+	ps := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{seg(40), seg(41)}, Outputs: []btc.PayloadOutput{{Address: b.coldS, Value: 100_000}, {Address: b.hotS, Value: 180_000}}}
+	b.mustSignAll(b.jobs("ok", signjob.Intent{Kind: "to-cold", ID: "tc-seg", PartitionID: btcPartSeg, To: b.coldS, Amount: "100000"}, ps))
+}
+
+// A cancel needs no approval, so it may only spend what an attempt claimed: every input already claimed with the same pin, all by one
+// signed intent of the cancel's partition, and all of that intent's inputs. Anything else would let it spend any input, a deposit
+// output included, under no intent.
+func TestBTCCancelMayOnlySpendWhatIsClaimed(t *testing.T) {
+	b := newBTCHarness(t)
+	fee := uint64(10_000)
+	cancelTo := func(part, to string, inputs []btc.PayloadInput, id string) []signjob.Job {
+		var sum uint64
+		for _, in := range inputs {
+			sum += in.Value
+		}
+		p := btc.Payload{Version: 2, Inputs: inputs, Outputs: []btc.PayloadOutput{{Address: to, Value: sum - fee}}}
+		return b.jobs(id, signjob.Intent{Kind: "cancel", ID: "cancel-" + id, PartitionID: part, To: to, Amount: "0"}, p)
+	}
+	// Nothing was ever claimed: a cancel of any input, a deposit one included, is refused.
+	b.mustRefuse(cancelTo(btcPartition, b.hot0, []btc.PayloadInput{btcIn(50, 0, 80_000, 0, 5)}, "k1")[0], ReasonCancelClaims)
+	b.mustRefuse(cancelTo(btcPartition, b.hot0, []btc.PayloadInput{btcIn(51, 0, 80_000, 1, 0)}, "k2")[0], ReasonCancelClaims)
+
+	// Two attempts, each claiming two inputs.
+	pa := b.twoInputs(150_000, 150_000, b.other, 180_000) // inputs 1 and 2
+	b.mustSignAll(b.jobs("wa", wdIntent("wa", b.other, 100_000), pa, "auto"))
+	pb := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{btcIn(3, 0, 150_000, 1, 0), btcIn(4, 0, 150_000, 1, 0)},
+		Outputs: []btc.PayloadOutput{{Address: b.other, Value: 100_000}, {Address: b.hot0, Value: 180_000}}}
+	b.mustSignAll(b.jobs("wb", wdIntent("wb", b.other, 100_000), pb, "auto"))
+
+	// Claims of two intents in one cancel.
+	b.mustRefuse(cancelTo(btcPartition, b.hot0, []btc.PayloadInput{pa.Inputs[0], pb.Inputs[0]}, "k3")[0], ReasonCancelClaims)
+	// One input of the attempt left out.
+	b.mustRefuse(cancelTo(btcPartition, b.hot0, pa.Inputs[:1], "k4")[0], ReasonCancelClaims)
+	// One claimed input and one that nobody claimed.
+	b.mustRefuse(cancelTo(btcPartition, b.hot0, []btc.PayloadInput{pa.Inputs[0], btcIn(52, 0, 150_000, 1, 0)}, "k5")[0], ReasonCancelClaims)
+	// A changed pin is refused as a pin conflict, before anything else.
+	pin := []btc.PayloadInput{pa.Inputs[0], pa.Inputs[1]}
+	pin[1].Value = 100_000
+	b.mustRefuse(cancelTo(btcPartition, b.hot0, pin, "k6")[1], ReasonPinChanged)
+	// The claims of an attempt of another partition (here the cancel is for the other omnibus shard, to its own shard).
+	b.mustRefuse(cancelTo(btcPart1, b.hot1, pa.Inputs, "k7")[0], ReasonCancelClaims)
+	// And the right cancel passes: exactly the attempt's inputs, to the partition's own shard.
+	b.mustSignAll(cancelTo(btcPartition, b.hot0, pa.Inputs, "k8"))
+	// It cannot be done twice by another intent: the claims are the cancel's now.
+	fee = 12_000
+	b.mustRefuse(cancelTo(btcPartition, b.hot0, pa.Inputs, "k9")[0], ReasonNonceCancel)
 }

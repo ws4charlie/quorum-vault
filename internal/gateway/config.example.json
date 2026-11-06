@@ -57,8 +57,8 @@
         "network": "regtest",
         "account_xpub": "tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV",
         "hot_shards": {
-          "PLACEHOLDER-btc-partition-0": { "address": "bcrt1q6rg3k5k4g5xm3ghxkj94eflf2fckh5uch9wxdk", "path": [1, 0] },
-          "PLACEHOLDER-btc-partition-1": { "address": "bcrt1qz7z4ppgy3gusv5zcmasx4a2wpq2qk0d4el496t", "path": [1, 1] }
+          "qv-us/btc-example/BTC/hot/omnibus/0": { "address": "bcrt1q6rg3k5k4g5xm3ghxkj94eflf2fckh5uch9wxdk", "path": [1, 0] },
+          "qv-us/btc-example/BTC/hot/omnibus/1": { "address": "bcrt1qz7z4ppgy3gusv5zcmasx4a2wpq2qk0d4el496t", "path": [1, 1] }
         },
         "cold_addresses": { "omnibus/native": "bcrt1qgn33jvqejtek6shugcz27eq322m2g95uxj6943" },
         "max_tx_fee_sats": 50000,

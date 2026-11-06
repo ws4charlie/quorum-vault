@@ -86,6 +86,13 @@ func NewCodec(cc *ChainConfig) (ChainCodec, error) {
 	return nil, fmt.Errorf("gateway: chain %q: unknown chain family %q", cc.Name, cc.Family)
 }
 
+// StrictCancelCodec is implemented by codecs for chains where a cancel can only free what was claimed (Bitcoin: it spends the very inputs of a
+// signed attempt back to a hot shard, so every one of its claims must already exist, with the same pin, under one signed intent of its partition,
+// and be all of that intent's claims). EVM does not have it: a cancel may free a reserved nonce that nothing was ever signed at.
+type StrictCancelCodec interface {
+	StrictCancel() bool
+}
+
 // KeyPathCodec is implemented by codecs whose jobs name the key to sign with by a derivation path in KeyRef (Bitcoin). The gateway asks a
 // signer.Deriver for that key before it decides.
 type KeyPathCodec interface {

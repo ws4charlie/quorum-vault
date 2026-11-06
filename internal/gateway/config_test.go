@@ -104,7 +104,7 @@ func TestExampleBTCChain(t *testing.T) {
 	for name, b := range map[string][]byte{
 		"mainnet network, regtest key": mutate(func(c map[string]any) { c["network"] = "mainnet" }),
 		"hot shard off its path": mutate(func(c map[string]any) {
-			c["hot_shards"].(map[string]any)["PLACEHOLDER-btc-partition-0"].(map[string]any)["path"] = []any{1, 5}
+			c["hot_shards"].(map[string]any)["qv-us/btc-example/BTC/hot/omnibus/0"].(map[string]any)["path"] = []any{1, 5}
 		}),
 		"no fee cap":   mutate(func(c map[string]any) { delete(c, "max_tx_fee_sats") }),
 		"no input cap": mutate(func(c map[string]any) { delete(c, "max_inputs") }),

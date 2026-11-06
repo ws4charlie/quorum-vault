@@ -18,15 +18,22 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
-const vChain = "btc-v"
+const (
+	vChain = "btc-v"
+	pOmni0 = "qv-us/btc-v/BTC/hot/omnibus/0"
+	pOmni1 = "qv-us/btc-v/BTC/hot/omnibus/1"
+	pSeg0  = "qv-us/btc-v/BTC/hot/segregated:acme/0"
+)
 
 type fixture struct {
 	t     *testing.T
 	acct  *Account
 	v     *Verifier
-	hot0  string // [1,0]
-	hot1  string // [1,1]
-	cold  string
+	hot0  string // [1,0]: partition pOmni0
+	hot1  string // [1,1]: partition pOmni1
+	hotS  string // [1,2]: partition pSeg0, another pool
+	cold  string // the omnibus pool's cold address
+	coldS string // the segregated pool's
 	other string // a P2WPKH of another network's key tree, valid on regtest, not pinned
 	dep   string // [0,5]
 }
@@ -37,6 +44,7 @@ func newFixture(t *testing.T) *fixture {
 	f := &fixture{t: t, acct: acct}
 	f.hot0, _ = acct.Address([]uint32{1, 0})
 	f.hot1, _ = acct.Address([]uint32{1, 1})
+	f.hotS, _ = acct.Address([]uint32{1, 2})
 	f.dep, _ = acct.Address([]uint32{0, 5})
 	foreign := func(seed byte) string {
 		m, _ := hdkeychain.NewMaster(bytes.Repeat([]byte{seed}, 32), &chaincfg.RegressionNetParams)
@@ -45,11 +53,11 @@ func newFixture(t *testing.T) *fixture {
 		s, _ := a.Address([]uint32{0, 0})
 		return s
 	}
-	f.cold, f.other = foreign(9), foreign(10)
+	f.cold, f.coldS, f.other = foreign(9), foreign(11), foreign(10)
 	xpub := acctXpub(acct)
 	v, err := NewVerifier(SigningConfig{Chain: vChain, Network: "regtest", AccountXpub: xpub,
-		HotShards:     map[string]HotShard{"p0": {Address: f.hot0, Path: []uint32{1, 0}}, "p1": {Address: f.hot1, Path: []uint32{1, 1}}},
-		ColdAddresses: map[string]string{"omnibus/native": f.cold}, MaxTxFeeSats: 50_000, MaxFeeRate: 100, MaxInputs: 4})
+		HotShards:     map[string]HotShard{pOmni0: {Address: f.hot0, Path: []uint32{1, 0}}, pOmni1: {Address: f.hot1, Path: []uint32{1, 1}}, pSeg0: {Address: f.hotS, Path: []uint32{1, 2}}},
+		ColdAddresses: map[string]string{"omnibus/native": f.cold, "segregated:acme/native": f.coldS}, MaxTxFeeSats: 50_000, MaxFeeRate: 100, MaxInputs: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,22 +77,24 @@ func in(n int, value uint64, path ...uint32) PayloadInput {
 	return PayloadInput{TxID: txid(n), Vout: 0, Value: value, Path: path, Sequence: SequenceRBF}
 }
 
-// job returns the job of input i of p, as the business zone would build it.
-func (f *fixture) job(p Payload, i int) chain.UnsignedTx {
+// job returns the job of input i of p, as the business zone would build it, for partition pOmni0.
+func (f *fixture) job(p Payload, i int) chain.UnsignedTx { return f.jobFor(pOmni0, p, i) }
+
+func (f *fixture) jobFor(part string, p Payload, i int) chain.UnsignedTx {
 	f.t.Helper()
 	raw, _ := json.Marshal(p)
 	u, err := BuildUnsigned(p, f.acct)
 	if err != nil {
 		// A payload BuildUnsigned refuses has no digest: use garbage so Verify's own refusal is what the test sees.
-		return chain.UnsignedTx{Chain: vChain, Payload: raw, Digest: make([]byte, 32), KeyRef: chain.KeyRef{Path: PathString(p.Inputs[i].Path)}}
+		return chain.UnsignedTx{Chain: vChain, Payload: raw, Digest: make([]byte, 32), KeyRef: chain.KeyRef{PartitionID: part, Path: PathString(p.Inputs[i].Path)}}
 	}
-	return chain.UnsignedTx{Chain: vChain, Payload: raw, Digest: u.Digests[i], KeyRef: chain.KeyRef{Path: PathString(p.Inputs[i].Path)}}
+	return chain.UnsignedTx{Chain: vChain, Payload: raw, Digest: u.Digests[i], KeyRef: chain.KeyRef{PartitionID: part, Path: PathString(p.Inputs[i].Path)}}
 }
 
 func (f *fixture) withdrawal(to string, amount uint64) (Payload, signjob.Intent) {
-	p := Payload{Version: 2, Inputs: []PayloadInput{in(1, 300_000, 1, 0), in(2, 200_000, 1, 1)},
+	p := Payload{Version: 2, Inputs: []PayloadInput{in(1, 300_000, 1, 0), in(2, 200_000, 1, 0)},
 		Outputs: []PayloadOutput{{to, amount}, {f.hot0, 500_000 - amount - 1_000}}}
-	return p, signjob.Intent{Kind: "withdrawal", ID: "w1", PartitionID: "p0", Chain: vChain, Asset: "BTC", To: to, Amount: fmt.Sprint(amount)}
+	return p, signjob.Intent{Kind: "withdrawal", ID: "w1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", To: to, Amount: fmt.Sprint(amount)}
 }
 
 func (f *fixture) mustPass(p Payload, i signjob.Intent) {
@@ -124,10 +134,10 @@ func TestVerifyAcceptsTheRightTransactions(t *testing.T) {
 	f.mustPass(pr, ir)
 	ps := Payload{Version: 2, Inputs: []PayloadInput{in(3, 50_000, 0, 5), {TxID: txid(4), Vout: 1, Value: 30_000, Path: []uint32{0, 5}, Sequence: SequenceRBF}},
 		Outputs: []PayloadOutput{{f.hot0, 79_000}}}
-	is := signjob.Intent{Kind: "sweep", ID: "s1", PartitionID: "p0", Chain: vChain, Asset: "BTC", From: f.dep, To: f.hot0, Amount: "80000"}
+	is := signjob.Intent{Kind: "sweep", ID: "s1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", From: f.dep, To: f.hot0, Amount: "80000"}
 	f.mustPass(ps, is)
-	pk := Payload{Version: 2, Inputs: []PayloadInput{in(1, 300_000, 1, 0), in(3, 50_000, 0, 5)}, Outputs: []PayloadOutput{{f.hot1, 349_000}}}
-	ik := signjob.Intent{Kind: "cancel", ID: "c1", PartitionID: "p0", Chain: vChain, Asset: "BTC", To: f.hot1, Amount: "0"}
+	pk := Payload{Version: 2, Inputs: []PayloadInput{in(1, 300_000, 1, 0), in(3, 50_000, 0, 5)}, Outputs: []PayloadOutput{{f.hot0, 349_000}}}
+	ik := signjob.Intent{Kind: "cancel", ID: "c1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", To: f.hot0, Amount: "0"}
 	f.mustPass(pk, ik)
 }
 
@@ -137,13 +147,13 @@ func TestVerifyRefusesTheOutputAttacks(t *testing.T) {
 
 	bad := p
 	bad.Outputs = []PayloadOutput{p.Outputs[0], {f.other, 399_000}}
-	f.mustRefuse("change to an unpinned address", bad, i, "not a pinned hot shard")
+	f.mustRefuse("change to an unpinned address", bad, i, "not the partition's own shard")
 
 	bad = p
 	bad.Outputs = []PayloadOutput{p.Outputs[0], {f.hot0, 200_000}, {f.hot1, 198_000}}
 	f.mustRefuse("a third output", bad, i, "at most the payment and one change")
 
-	f.mustRefuse("destination changed", p, signjob.Intent{Kind: "withdrawal", ID: "w1", PartitionID: "p0", Chain: vChain, Asset: "BTC", To: f.cold, Amount: "100000"}, "the first output pays")
+	f.mustRefuse("destination changed", p, signjob.Intent{Kind: "withdrawal", ID: "w1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", To: f.cold, Amount: "100000"}, "the first output pays")
 	for _, amt := range []string{"99999", "100001"} {
 		j := i
 		j.Amount = amt
@@ -193,14 +203,17 @@ func TestVerifyRefusesTheInputAttacks(t *testing.T) {
 	bad := p
 	bad.Inputs = append([]PayloadInput{}, p.Inputs...)
 	bad.Inputs[1].Path = []uint32{0, 5} // a deposit address in a withdrawal
-	f.mustRefuse("deposit input in a withdrawal", bad, i, "not on branch 1")
+	f.mustRefuse("deposit input in a withdrawal", bad, i, "not the partition's own shard")
 
 	// The digest of another input, or of nothing.
-	u := f.job(p, 0)
-	u.Digest = f.job(p, 1).Digest
-	if err := f.v.Verify(u, i); err == nil || !strings.Contains(err.Error(), "which is signed under key path 1/1") {
+	mixed := p
+	mixed.Inputs = []PayloadInput{in(1, 300_000, 1, 0), in(2, 200_000, 0, 5)} // two keys: the digest of one under the other's key reference
+	u := f.job(mixed, 0)
+	u.Digest = f.job(mixed, 1).Digest
+	if err := f.v.Verify(u, i); err == nil || !strings.Contains(err.Error(), "which is signed under key path 0/5") {
 		t.Fatalf("the digest of input 1 under input 0's key: %v", err)
 	}
+	u = f.job(p, 0)
 	u.Digest = bytes.Repeat([]byte{1}, 32)
 	if err := f.v.Verify(u, i); err == nil || !strings.Contains(err.Error(), "none of the 2 inputs") {
 		t.Fatalf("an unrelated digest: %v", err)
@@ -286,7 +299,7 @@ func TestVerifyRefusesTheLimitAttacks(t *testing.T) {
 func TestVerifyRefusesSweepsAndCancelsThatDoNotMatch(t *testing.T) {
 	f := newFixture(t)
 	ps := Payload{Version: 2, Inputs: []PayloadInput{in(3, 50_000, 0, 5)}, Outputs: []PayloadOutput{{f.hot0, 49_000}}}
-	is := signjob.Intent{Kind: "sweep", ID: "s1", PartitionID: "p0", Chain: vChain, Asset: "BTC", From: f.dep, To: f.hot0, Amount: "50000"}
+	is := signjob.Intent{Kind: "sweep", ID: "s1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", From: f.dep, To: f.hot0, Amount: "50000"}
 	f.mustPass(ps, is)
 
 	bad := ps
@@ -305,29 +318,28 @@ func TestVerifyRefusesSweepsAndCancelsThatDoNotMatch(t *testing.T) {
 	bad.Outputs = []PayloadOutput{{f.other, 49_000}}
 	j = is
 	j.To = f.other
-	f.mustRefuse("a sweep to an unpinned address", bad, j, "pinned hot shard")
+	f.mustRefuse("a sweep to an unpinned address", bad, j, "own shard")
 	j = is
 	j.Amount = "49000" // the fee is not part of what leaves the address
 	f.mustRefuse("sweep amount that is not the sum of the inputs", ps, j, "not the sum of the inputs")
 
-	pk := Payload{Version: 2, Inputs: []PayloadInput{in(1, 300_000, 1, 0), in(3, 50_000, 0, 5)}, Outputs: []PayloadOutput{{f.hot1, 349_000}}}
-	ik := signjob.Intent{Kind: "cancel", ID: "c1", PartitionID: "p0", Chain: vChain, Asset: "BTC", To: f.hot1, Amount: "0"}
+	pk := Payload{Version: 2, Inputs: []PayloadInput{in(1, 300_000, 1, 0), in(3, 50_000, 0, 5)}, Outputs: []PayloadOutput{{f.hot0, 349_000}}}
+	ik := signjob.Intent{Kind: "cancel", ID: "c1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", To: f.hot0, Amount: "0"}
 	f.mustPass(pk, ik)
 	bad = pk
-	bad.Outputs = []PayloadOutput{{f.hot1, 300_000}, {f.hot0, 49_000}}
+	bad.Outputs = []PayloadOutput{{f.hot0, 300_000}, {f.hot0, 49_000}}
 	f.mustRefuse("a cancel with an extra output", bad, ik, "one output")
 	bad = pk
 	bad.Outputs = []PayloadOutput{{f.other, 349_000}}
 	j = ik
 	j.To = f.other
-	f.mustRefuse("a cancel to an address that is not pinned", bad, j, "pinned hot shard")
+	f.mustRefuse("a cancel to an address that is not pinned", bad, j, "own shard")
 	pc, ic := f.withdrawal(f.other, 100_000)
 	ic.Kind = "to-cold"
-	f.mustRefuse("to-cold to an unpinned address", pc, ic, "not a pinned cold address")
+	f.mustRefuse("to-cold to an unpinned address", pc, ic, "not the cold address of pool")
 	pr, ir := f.withdrawal(f.hot0, 100_000)
 	ir.Kind = "rebalance"
-	pr.Inputs = []PayloadInput{in(1, 300_000, 1, 0), in(2, 200_000, 1, 1)}
-	f.mustRefuse("a rebalance to the source's own address", pr, ir, "own address")
+	f.mustRefuse("a rebalance to the source's own address", pr, ir, "another shard")
 }
 
 func TestCanonicalRejectsAnotherNetwork(t *testing.T) {
@@ -344,7 +356,7 @@ func TestCanonicalRejectsAnotherNetwork(t *testing.T) {
 
 func TestVerifierConfigRefusals(t *testing.T) {
 	f := newFixture(t)
-	base := SigningConfig{Chain: vChain, Network: "regtest", AccountXpub: acctXpub(f.acct), HotShards: map[string]HotShard{"p0": {Address: f.hot0, Path: []uint32{1, 0}}},
+	base := SigningConfig{Chain: vChain, Network: "regtest", AccountXpub: acctXpub(f.acct), HotShards: map[string]HotShard{pOmni0: {Address: f.hot0, Path: []uint32{1, 0}}},
 		MaxTxFeeSats: 1, MaxFeeRate: 1, MaxInputs: 1}
 	if _, err := NewVerifier(base); err != nil {
 		t.Fatal(err)
@@ -352,13 +364,13 @@ func TestVerifierConfigRefusals(t *testing.T) {
 	for name, mut := range map[string]func(c *SigningConfig){
 		"wrong network": func(c *SigningConfig) { c.Network = "mainnet" },
 		"hot shard off its path": func(c *SigningConfig) {
-			c.HotShards = map[string]HotShard{"p0": {Address: f.hot0, Path: []uint32{1, 1}}}
+			c.HotShards = map[string]HotShard{pOmni0: {Address: f.hot0, Path: []uint32{1, 1}}}
 		},
 		"hot shard on the deposit branch": func(c *SigningConfig) {
-			c.HotShards = map[string]HotShard{"p0": {Address: f.dep, Path: []uint32{0, 5}}}
+			c.HotShards = map[string]HotShard{pOmni0: {Address: f.dep, Path: []uint32{0, 5}}}
 		},
 		"hot shard from another key": func(c *SigningConfig) {
-			c.HotShards = map[string]HotShard{"p0": {Address: f.other, Path: []uint32{1, 0}}}
+			c.HotShards = map[string]HotShard{pOmni0: {Address: f.other, Path: []uint32{1, 0}}}
 		},
 		"mainnet cold address": func(c *SigningConfig) {
 			c.ColdAddresses = map[string]string{"x": "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"}
@@ -392,3 +404,77 @@ func calcWith(f *fixture, p Payload, built *Unsigned, i int, ht txscript.SigHash
 	}
 	return txscript.CalcWitnessSigHash(sc, txscript.NewTxSigHashes(built.Tx, txscript.NewMultiPrevOutFetcher(fetch)), ht, built.Tx, i, int64(p.Inputs[i].Value))
 }
+
+// Every kind is bound to the partition it names: its own shard, its own pool's cold address, another shard of its own pool.
+func TestVerifyBindsEveryKindToItsPartition(t *testing.T) {
+	f := newFixture(t)
+	// The key partition and the intent partition are the same.
+	p, i := f.withdrawal(f.other, 100_000)
+	u := f.jobFor(pOmni1, p, 0)
+	if err := f.v.Verify(u, i); err == nil || !strings.Contains(err.Error(), "key partition") {
+		t.Fatalf("key partition differs from the intent's: %v", err)
+	}
+	// A partition that has no pinned shard.
+	j := i
+	j.PartitionID = "qv-us/btc-v/BTC/hot/omnibus/9"
+	if err := f.v.Verify(f.jobFor(j.PartitionID, p, 0), j); err == nil || !strings.Contains(err.Error(), "no pinned hot shard") {
+		t.Fatalf("a partition without a shard: %v", err)
+	}
+
+	// Withdrawal, to-cold and rebalance from another partition's shard (the segregated client's funds).
+	for _, kind := range []string{"withdrawal", "to-cold", "rebalance"} {
+		to := f.other
+		switch kind {
+		case "to-cold":
+			to = f.cold
+		case "rebalance":
+			to = f.hot1
+		}
+		bad, in := f.withdrawal(to, 100_000)
+		in.Kind = kind
+		bad.Inputs = []PayloadInput{inp(1, 300_000, 1, 2), inp(2, 200_000, 1, 2)} // the segregated shard's key, under an omnibus intent
+		f.mustRefuse(kind+" from another partition's shard", bad, in, "not the partition's own shard")
+	}
+	// Change to another shard, whether omnibus or segregated.
+	for _, other := range []string{f.hot1, f.hotS} {
+		bad, in := f.withdrawal(f.other, 100_000)
+		bad.Outputs[1].Address = other
+		f.mustRefuse("change to another shard", bad, in, "not the partition's own shard")
+	}
+	// To-cold: the cold address of the partition's pool only.
+	pc, ic := f.withdrawal(f.coldS, 100_000)
+	ic.Kind = "to-cold"
+	f.mustRefuse("to-cold to another pool's cold address", pc, ic, "not the cold address of pool")
+	ps, is := f.withdrawal(f.coldS, 100_000)
+	is.Kind, is.PartitionID = "to-cold", pSeg0
+	ps.Inputs = []PayloadInput{inp(1, 300_000, 1, 2), inp(2, 200_000, 1, 2)}
+	ps.Outputs[1].Address = f.hotS
+	for n := range ps.Inputs {
+		if err := f.v.Verify(f.jobFor(pSeg0, ps, n), is); err != nil {
+			t.Fatalf("a segregated to-cold to its own pool's cold address: %v", err)
+		}
+	}
+	ps.Outputs[0].Address = f.cold
+	is.To = f.cold
+	if err := f.v.Verify(f.jobFor(pSeg0, ps, 0), is); err == nil || !strings.Contains(err.Error(), "not the cold address of pool") {
+		t.Fatalf("a segregated to-cold to the omnibus cold address: %v", err)
+	}
+	// Rebalance: another shard of the same pool, never another pool's.
+	pr, ir := f.withdrawal(f.hotS, 100_000)
+	ir.Kind = "rebalance"
+	f.mustRefuse("rebalance into another pool", pr, ir, "another shard")
+	pr, ir = f.withdrawal(f.hot1, 100_000)
+	ir.Kind = "rebalance"
+	f.mustPass(pr, ir)
+	// Sweep and cancel: the partition's own shard, not any hot shard.
+	sw := Payload{Version: 2, Inputs: []PayloadInput{inp(3, 50_000, 0, 5)}, Outputs: []PayloadOutput{{f.hot1, 49_000}}}
+	si := signjob.Intent{Kind: "sweep", ID: "s1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", From: f.dep, To: f.hot1, Amount: "50000"}
+	f.mustRefuse("sweep to another partition's shard", sw, si, "own shard")
+	sw.Outputs[0].Address, si.To = f.hotS, f.hotS
+	f.mustRefuse("sweep to another pool's shard", sw, si, "own shard")
+	cp := Payload{Version: 2, Inputs: []PayloadInput{inp(1, 300_000, 1, 0)}, Outputs: []PayloadOutput{{f.hot1, 299_000}}}
+	ci := signjob.Intent{Kind: "cancel", ID: "c1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", To: f.hot1, Amount: "0"}
+	f.mustRefuse("cancel to another partition's shard", cp, ci, "own shard")
+}
+
+func inp(n int, value uint64, path ...uint32) PayloadInput { return in(n, value, path...) }

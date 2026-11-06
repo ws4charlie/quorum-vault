@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS exclusive_claims (
 -- A claim carries a pin: an opaque string the codec sets (Bitcoin: the value of the input the claim names; EVM: none, the empty
 -- string). A different pin on a claim that exists is refused. tx_identity is the codec's identity of the transaction a digest
 -- belongs to (Bitcoin: the txid, which does not commit to input values); one identity has one payload hash.
+ALTER TABLE signed_intents ADD COLUMN IF NOT EXISTS partition_id text;
 ALTER TABLE exclusive_claims ADD COLUMN IF NOT EXISTS pin text NOT NULL DEFAULT '';
 ALTER TABLE signed_digests ADD COLUMN IF NOT EXISTS tx_identity text;
 CREATE INDEX IF NOT EXISTS signed_digests_identity ON signed_digests (tx_identity) WHERE tx_identity IS NOT NULL;

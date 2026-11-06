@@ -33,10 +33,15 @@ type btcEnv struct {
 	acct  *btc.Account
 	priv  *hdkeychain.ExtendedKey
 	appr  ed25519.PrivateKey
-	hot0  string
-	hot1  string
+	hot0  string // partition part, [1,0]
+	hot1  string // partition part1, [1,1]
+	hotS  string // partition partS, [1,2]: a segregated client
+	cold  string
+	coldS string
 	other string
 	part  string
+	part1 string
+	partS string
 }
 
 func newBTCEnv(t *testing.T) *btcEnv {
@@ -51,20 +56,24 @@ func newBTCEnv(t *testing.T) *btcEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &btcEnv{t: t, acct: acct, priv: k, part: "qv-us/btc-cos/BTC/hot/omnibus/0"}
+	e := &btcEnv{t: t, acct: acct, priv: k, part: "qv-us/btc-cos/BTC/hot/omnibus/0", part1: "qv-us/btc-cos/BTC/hot/omnibus/1", partS: "qv-us/btc-cos/BTC/hot/segregated:acme/0"}
 	e.hot0, _ = acct.Address([]uint32{1, 0})
 	e.hot1, _ = acct.Address([]uint32{1, 1})
+	e.hotS, _ = acct.Address([]uint32{1, 2})
 	o, _ := hdkeychain.NewMaster(bytes.Repeat([]byte{6}, 32), &chaincfg.RegressionNetParams)
 	op, _ := o.Neuter()
 	oa, _ := btc.NewAccount("regtest", op.String())
 	e.other, _ = oa.Address([]uint32{0, 0})
+	e.cold, _ = oa.Address([]uint32{0, 1})
+	e.coldS, _ = oa.Address([]uint32{0, 2})
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	e.appr = priv
 	f := gateway.File{
 		Approvers: map[string]gateway.ApproverFile{"alice": {PublicKey: hex.EncodeToString(pub), Enabled: true}},
 		Chains: map[string]gateway.ChainFile{btcChain: {Family: "btc", WithdrawalsPerHour: 100, SweepsPerHour: 100, CancelsPerHour: 100,
 			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: xpub.String(), MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
-				HotShards: map[string]gateway.HotShardFile{e.part: {Address: e.hot0, Path: []uint32{1, 0}}, "p1": {Address: e.hot1, Path: []uint32{1, 1}}}},
+				HotShards:     map[string]gateway.HotShardFile{e.part: {Address: e.hot0, Path: []uint32{1, 0}}, e.part1: {Address: e.hot1, Path: []uint32{1, 1}}, e.partS: {Address: e.hotS, Path: []uint32{1, 2}}},
+				ColdAddresses: map[string]string{"omnibus/native": e.cold, "segregated:acme/native": e.coldS}},
 			Assets: map[string]gateway.AssetFile{"BTC": {AnyDestination: true, PerTxCap: "100000000", DailyCap: "1000000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}}}}},
 	}
 	raw, _ := json.Marshal(f)
@@ -99,14 +108,17 @@ func bin(n int, value uint64, path ...uint32) btc.PayloadInput {
 }
 
 func (e *btcEnv) pay(a, b uint64, to string, change uint64) btc.Payload {
-	return btc.Payload{Version: 2, Inputs: []btc.PayloadInput{bin(1, a, 1, 0), bin(2, b, 1, 1)},
+	return btc.Payload{Version: 2, Inputs: []btc.PayloadInput{bin(1, a, 1, 0), bin(2, b, 1, 0)},
 		Outputs: []btc.PayloadOutput{{Address: to, Value: 100_000}, {Address: e.hot0, Value: change}}}
 }
 
 // request is what a rogue gateway sends party B for input i of p: the job, and the public key it says will sign.
 func (e *btcEnv) request(id string, in signjob.Intent, p btc.Payload, i int, key []byte) wire.Request {
 	e.t.Helper()
-	in.Chain, in.PartitionID, in.Asset = btcChain, e.part, "BTC"
+	if in.PartitionID == "" {
+		in.PartitionID = e.part
+	}
+	in.Chain, in.Asset = btcChain, "BTC"
 	if in.Kind == "withdrawal" {
 		in.NotAfter = time.Now().Add(time.Hour).Unix()
 	}
@@ -120,7 +132,7 @@ func (e *btcEnv) request(id string, in signjob.Intent, p btc.Payload, i int, key
 	if i > 0 {
 		jid = fmt.Sprintf("%s.%d", id, i)
 	}
-	j := signjob.Job{ID: jid, PartitionID: e.part, KeyRef: btc.PathString(p.Inputs[i].Path), Chain: btcChain, Intent: mustJSON(in), Digest: u.Digests[i], Payload: raw,
+	j := signjob.Job{ID: jid, PartitionID: in.PartitionID, KeyRef: btc.PathString(p.Inputs[i].Path), Chain: btcChain, Intent: mustJSON(in), Digest: u.Digests[i], Payload: raw,
 		Approvals: []signjob.Approval{{Actor: "alice", Signature: ed25519.Sign(e.appr, h[:])}}}
 	pkg, err := gateway.EncodePackage(j)
 	if err != nil {
@@ -153,8 +165,8 @@ func wd(id, to string) signjob.Intent {
 	return signjob.Intent{Kind: "withdrawal", ID: id, To: to, Amount: "100000"}
 }
 
-// A correct two-input transaction, each input with its own key, passes party B's own checks.
-func TestCosignerBTCTwoInputsUnderTwoKeys(t *testing.T) {
+// A correct two-input transaction passes party B's own checks.
+func TestCosignerBTCTwoInputs(t *testing.T) {
 	e := newBTCEnv(t)
 	p := e.pay(150_000, 150_000, e.other, 180_000)
 	e.allow(e.request("w1", wd("wi1", e.other), p, 0, nil))
@@ -214,4 +226,55 @@ func TestCosignerBTCRefusesRoguePayloads(t *testing.T) {
 	dep := good
 	dep.Inputs = []btc.PayloadInput{bin(1, 150_000, 1, 0), bin(2, 150_000, 0, 5)}
 	e.refuse(e.request("x4", in, dep, 0, nil), gateway.ReasonTx)
+}
+
+// Party B binds every intent kind to its partition from its own config, whatever the gateway says.
+func TestCosignerBTCBindsIntentsToTheirPartition(t *testing.T) {
+	e := newBTCEnv(t)
+	seg := []btc.PayloadInput{bin(1, 150_000, 1, 2), bin(2, 150_000, 1, 2)} // the segregated client's key
+	for n, kind := range []string{"withdrawal", "to-cold", "rebalance"} {
+		to := map[string]string{"withdrawal": e.other, "to-cold": e.cold, "rebalance": e.hot1}[kind]
+		p := e.pay(150_000, 150_000, to, 180_000)
+		p.Inputs = seg
+		in := signjob.Intent{Kind: kind, ID: fmt.Sprintf("b%d", n), To: to, Amount: "100000"}
+		e.refuse(e.request(fmt.Sprintf("seg%d", n), in, p, 0, nil), gateway.ReasonTx)
+	}
+	p := e.pay(150_000, 150_000, e.coldS, 180_000)
+	e.refuse(e.request("tc", signjob.Intent{Kind: "to-cold", ID: "tc1", To: e.coldS, Amount: "100000"}, p, 0, nil), gateway.ReasonTx) // another pool's cold address
+	p = e.pay(150_000, 150_000, e.hotS, 180_000)
+	e.refuse(e.request("rb", signjob.Intent{Kind: "rebalance", ID: "rb1", To: e.hotS, Amount: "100000"}, p, 0, nil), gateway.ReasonTx) // into another pool
+	p = e.pay(150_000, 150_000, e.other, 180_000)
+	p.Outputs[1].Address = e.hot1 // change to another shard
+	e.refuse(e.request("chg", wd("chg1", e.other), p, 0, nil), gateway.ReasonTx)
+	sw := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{bin(30, 50_000, 0, 5)}, Outputs: []btc.PayloadOutput{{Address: e.hot1, Value: 49_000}}}
+	dep, _ := e.acct.Address([]uint32{0, 5})
+	e.refuse(e.request("sw", signjob.Intent{Kind: "sweep", ID: "sw1", From: dep, To: e.hot1, Amount: "50000"}, sw, 0, nil), gateway.ReasonTx)
+	cp := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{bin(31, 50_000, 1, 0)}, Outputs: []btc.PayloadOutput{{Address: e.hot1, Value: 49_000}}}
+	e.refuse(e.request("cx", signjob.Intent{Kind: "cancel", ID: "cx1", To: e.hot1, Amount: "0"}, cp, 0, nil), gateway.ReasonTx)
+}
+
+// A cancel needs no approval, so party B refuses one that spends anything an attempt did not claim.
+func TestCosignerBTCCancelMayOnlySpendWhatIsClaimed(t *testing.T) {
+	e := newBTCEnv(t)
+	cancel := func(inputs []btc.PayloadInput, id string, key []byte) wire.Request {
+		var sum uint64
+		for _, in := range inputs {
+			sum += in.Value
+		}
+		p := btc.Payload{Version: 2, Inputs: inputs, Outputs: []btc.PayloadOutput{{Address: e.hot0, Value: sum - 10_000}}}
+		return e.request(id, signjob.Intent{Kind: "cancel", ID: "cancel-" + id, To: e.hot0, Amount: "0"}, p, 0, key)
+	}
+	e.refuse(cancel([]btc.PayloadInput{bin(50, 80_000, 0, 5)}, "k1", nil), gateway.ReasonCancelClaims) // a deposit output nobody claimed
+	pa := e.pay(150_000, 150_000, e.other, 180_000)
+	e.allow(e.request("wa", wd("wa", e.other), pa, 0, nil))
+	e.allow(e.request("wa", wd("wa", e.other), pa, 1, nil))
+	pb := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{bin(3, 150_000, 1, 0), bin(4, 150_000, 1, 0)}, Outputs: []btc.PayloadOutput{{Address: e.other, Value: 100_000}, {Address: e.hot0, Value: 180_000}}}
+	e.allow(e.request("wb", wd("wb", e.other), pb, 0, nil))
+	e.refuse(cancel([]btc.PayloadInput{pa.Inputs[0], pb.Inputs[0]}, "k2", nil), gateway.ReasonCancelClaims) // claims of two intents
+	e.refuse(cancel(pa.Inputs[:1], "k3", nil), gateway.ReasonCancelClaims)                                  // one input left out
+	e.refuse(cancel([]btc.PayloadInput{pa.Inputs[0], bin(52, 150_000, 1, 0)}, "k4", nil), gateway.ReasonCancelClaims)
+	pin := []btc.PayloadInput{pa.Inputs[0], pa.Inputs[1]}
+	pin[1].Value = 100_000
+	e.refuse(cancel(pin, "k5", nil), gateway.ReasonPinChanged)
+	e.allow(cancel(pa.Inputs, "k6", nil)) // exactly the attempt's inputs, to the partition's own shard
 }

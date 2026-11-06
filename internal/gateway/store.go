@@ -51,6 +51,8 @@ type IntentRecord struct {
 	Hash   []byte
 	Kind   string
 	Sender string
+	// PartitionID is the partition the intent was signed for (empty on rows from before it was recorded).
+	PartitionID string
 	// Claims is what the intent's transaction consumes, as the codec named it (EVM: one claim, sender plus nonce).
 	Claims []string
 }
@@ -113,8 +115,8 @@ func parseBig(s string) *big.Int {
 // Intent returns the record of an intent ID, or nil.
 func (t *GuardTx) Intent(ctx context.Context, id string) (*IntentRecord, error) {
 	var r IntentRecord
-	err := t.tx.QueryRow(ctx, `SELECT intent_id, intent_hash, kind, sender, COALESCE(claims, '{}') FROM signed_intents WHERE intent_id=$1`, id).
-		Scan(&r.ID, &r.Hash, &r.Kind, &r.Sender, &r.Claims)
+	err := t.tx.QueryRow(ctx, `SELECT intent_id, intent_hash, kind, sender, COALESCE(partition_id, ''), COALESCE(claims, '{}') FROM signed_intents WHERE intent_id=$1`, id).
+		Scan(&r.ID, &r.Hash, &r.Kind, &r.Sender, &r.PartitionID, &r.Claims)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -204,6 +206,7 @@ type Release struct {
 	Asset       string
 	Amount      *big.Int
 	Sender      string
+	PartitionID string
 	Claims      []string // what the transaction consumes
 	Pins        []string // one per claim, or none (EVM); the codec's pin of each claim
 	Identity    string   // the codec's identity of the transaction; empty when the chain has none
@@ -243,9 +246,9 @@ func (t *GuardTx) IdentityConflict(ctx context.Context, identity string, payload
 // claim make a double release fail even if the lock were bypassed.
 func (t *GuardTx) Record(ctx context.Context, r Release) error {
 	if r.NewIntent {
-		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9)`,
-			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.At); err != nil {
+		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10)`,
+			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.PartitionID, r.At); err != nil {
 			return fmt.Errorf("record intent: %w", err)
 		}
 	}

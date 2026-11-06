@@ -59,3 +59,6 @@ func (c *BTCCodec) FeesRaised(prev, next []*big.Int) bool {
 
 // KeyPath implements KeyPathCodec: the key reference of a job is the derivation path "<branch>/<index>".
 func (c *BTCCodec) KeyPath(keyRef string) ([]uint32, error) { return btc.ParsePath(keyRef) }
+
+// StrictCancel implements StrictCancelCodec: a Bitcoin cancel spends exactly what an attempt claimed.
+func (c *BTCCodec) StrictCancel() bool { return true }

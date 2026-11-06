@@ -41,6 +41,7 @@ const (
 	ReasonNonceTaken    = "replay_nonce_taken"     // 5 another intent already signed at this nonce
 	ReasonNonceCancel   = "replay_nonce_cancelled" // 5 a cancel consumed this nonce
 	ReasonPinChanged    = "replay_pin_changed"     // 5 a claim that exists is named again with another pin (Bitcoin: another input value)
+	ReasonCancelClaims  = "replay_cancel_claims"   // 5 a cancel on a chain that requires it names inputs that are not exactly the claims of one signed intent of its partition
 	ReasonIdentity      = "replay_identity_reused" // 5 the transaction identity was signed under another payload (Bitcoin: same txid, other values)
 	ReasonSignerRefused = "signer_refused"         // 6 the signer's other party (cb-mpc party B) refused; nothing was signed
 )

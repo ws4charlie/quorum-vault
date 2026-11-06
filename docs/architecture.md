@@ -206,9 +206,10 @@ decides (see [learn/p7-2-btc-deposits.md](learn/p7-2-btc-deposits.md)). A coinba
 The signing zone can decide, with no chain access, whether to sign one input of a Bitcoin transaction. A sign job carries the whole
 transaction (every input with its outpoint, value and derivation path; every output) and the digest of one input. The zone rebuilds the
 BIP143 digest of every input itself, from its own copy of the account xpub, and requires the job's digest to be that of exactly one input,
-signed under the key derived for that input; the key that would sign must be that derived key. Outputs must match the intent: the payment and
-at most one change to a pinned hot shard (withdrawal, hot to cold, rebalance), one pinned hot shard (sweep), or the same inputs back to a
-pinned hot shard (cancel). Fees, fee rate, input count, dust, version, locktime and RBF are checked. Bitcoin signs every input under
+signed under the key derived for that input; the key that would sign must be that derived key. Every intent is bound to its own partition: a withdrawal, hot to cold or rebalance spends only that
+partition's shard, with any change back to it, hot to cold pays the cold address of the partition's pool, a rebalance another shard of the same
+pool, a sweep or cancel the partition's own shard. A cancel needs no approval, so the guard lets it spend only inputs that one signed intent of its
+partition claimed, all of them. Fees, fee rate, input count, dust, version, locktime and RBF are checked. Bitcoin signs every input under
 its own derived key, so a partition's signer is a key tree: the gateway asks party A to derive the key of the job's path.
 
 The guard claims outpoints, each with a pin: the value of the input. A claim named again with another pin is refused, and a transaction

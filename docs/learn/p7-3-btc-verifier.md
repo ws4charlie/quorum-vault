@@ -28,15 +28,19 @@ a different number, no input's digest, and the verifier refuses it (tested). The
    output is an address, a script field is refused as an unknown field).
 4. Fee = inputs minus outputs, at most `max_tx_fee_sats`, and at most `max_fee_rate` satoshis per virtual byte of the transaction with
    P2WPKH witnesses (the estimate is never below the real size).
-5. By intent kind:
+5. **Every kind is bound to the partition it names**, as the EVM verifier binds the sender: the job's key partition equals the intent's, and the
+   partition must have a pinned shard in the zone's config (its ID parsed with `partition.Parse`: entity/chain/BTC/hot/pool/shard). By intent kind:
 
 | Kind | Inputs | Outputs |
 |---|---|---|
-| withdrawal | branch 1 | first output: exactly the amount to the intent's destination; at most one more, change to a pinned hot shard |
-| to-cold | branch 1 | as withdrawal; the destination must be a pinned cold address |
-| rebalance | branch 1 | as withdrawal; the destination must be a pinned hot shard other than any input's own address |
-| sweep | branch 0, every input is the intent's `From` | one output, to the intent's destination, a pinned hot shard |
-| cancel | any | one output to a pinned hot shard, the intent's destination. Nothing else |
+| withdrawal | every input at the partition's own shard path | first output: exactly the amount to the intent's destination; at most one more, change to **that same shard** only |
+| to-cold | as withdrawal | as withdrawal; the destination is the cold address of the partition's **pool** (`<pool>/native`), not any cold address |
+| rebalance | as withdrawal | as withdrawal; the destination is the pinned hot address of **another shard of the same pool** (entity, chain, asset, tier and pool all equal), never another pool's |
+| sweep | branch 0, every input is the intent's `From` | one output, to the partition's own shard |
+| cancel | any (the guard binds them, see below) | one output to the partition's own shard. Nothing else |
+
+Because a withdrawal, to-cold or rebalance spends only the partition's own shard key and a sweep or cancel only one address, one transaction
+has one key (and several outpoints, each a claim with its own pin).
 
 **Sweep amount.** The intent's amount is the sum of the inputs: what leaves the deposit address, before the fee. The output is that amount minus
 the fee, so the ledger moves the amount and books the difference to the fee account.
@@ -69,6 +73,12 @@ rewritten, and the P7-1 upgrade test still passes.
 A later attempt of an intent spends exactly the same inputs with the same pins, keeps destination and amount (the intent hash is part of the check),
 and pays more: the guard's same-claims rule and `FeesRaised` give that, so at most one transaction of an intent can confirm.
 
+**A cancel may only spend what is claimed.** A cancel needs no approval, and the verifier has no database, so it cannot tell a claimed input from a
+stranger's. The guard does, through the codec (`StrictCancelCodec`, true for Bitcoin, not for EVM, where a cancel may free a reserved nonce nothing
+was signed at): every claim of the cancel must already exist (with the same pin, checked before), all under one signed intent, of the cancel's own
+partition (the guard records the partition of each intent), and together they are all of that intent's claims. Otherwise `replay_cancel_claims`.
+Without it a cancel could spend any input, a deposit output included, under no intent.
+
 A refused attempt can leave signatures behind (input 0 signed, input 1 refused; "signing failed twice"). Bitcoin has a cancel for that: a
 transaction that spends the same inputs back to a pinned hot shard, taking over the claims as on EVM (the pins must be the same). Once it is
 signed, the half-signed transaction can never be finished at the guard (`replay_nonce_cancelled`) and can never confirm. This task verifies it;
@@ -87,7 +97,7 @@ on the account path of the network. Party B's cosigner needs nothing: it checks 
 |---|---|
 | Combined-signature fee attack, one intent or two, either order | `replay_pin_changed` (guard, and again at the cosigner) |
 | Same txid, same values, another payload (an input under another key) | `replay_identity_reused` |
-| Change to an unpinned address | `tx_mismatch`: not a pinned hot shard |
+| Change to an unpinned address | `tx_mismatch`: not the partition's own shard |
 | A third output | `tx_mismatch`: at most the payment and one change |
 | Destination changed; amount off by one satoshi; payment hidden as the second output | `tx_mismatch`: the first output pays ... the intent is ... |
 | Input key outside the xpub (the key named is not the derived one) | `ErrSigner` at the gateway, `signer_key_mismatch` at the cosigner |
@@ -108,4 +118,4 @@ on the account path of the network. Party B's cosigner needs nothing: it checks 
 
 Tests: [btc/verify_test.go](../../internal/chain/btc/verify_test.go) (the verifier alone), [gateway/btc_test.go](../../internal/gateway/btc_test.go) (guard, replacements,
 cancel, config), [cosigner/btc_test.go](../../internal/cosigner/btc_test.go) (a rogue gateway), and `e2e/btc/sign_test.go` (a two-input transaction
-under two MPC-derived keys through the gateway and the cosigner on real mpc-party, validated by `txscript`).
+under two different MPC-derived keys, a withdrawal under the hot shard's key and a sweep under a deposit address's key, through the gateway and the cosigner on real mpc-party, validated by `txscript`).

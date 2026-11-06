@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+	"strings"
 
 	"github.com/btcsuite/btcd/chaincfg"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -27,9 +29,10 @@ type SigningConfig struct {
 	Chain       string
 	Network     string
 	AccountXpub string
-	// HotShards maps a partition ID to its pinned hot address. Each must derive from AccountXpub at its stated path.
+	// HotShards maps a partition ID (entity/chain/BTC/hot/pool/shard) to its pinned hot address. Each must derive from AccountXpub at its
+	// stated path. Every intent is bound to its own partition's shard.
 	HotShards map[string]HotShard
-	// ColdAddresses are the only addresses a hot-to-cold move may pay: "<pool>/native" -> address.
+	// ColdAddresses are the only addresses a hot-to-cold move may pay, by the pool of the partition: "<pool>/native" -> address.
 	ColdAddresses map[string]string
 	MaxTxFeeSats  uint64 // the most a transaction may pay in fee
 	MaxFeeRate    uint64 // the most it may pay per virtual byte, in satoshis
@@ -41,8 +44,14 @@ type Verifier struct {
 	cfg    SigningConfig
 	params *chaincfg.Params
 	acct   *Account
-	hot    map[string]bool // canonical addresses of the hot shards
-	cold   map[string]bool
+	shard  map[string]shardInfo // partition ID -> its own shard
+	cold   map[string]string    // pool -> canonical cold address
+}
+
+type shardInfo struct {
+	addr string // canonical
+	path []uint32
+	key  partition.Key
 }
 
 var _ chain.TxVerifier = (*Verifier)(nil)
@@ -54,7 +63,7 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := &Verifier{cfg: cfg, params: acct.Params, acct: acct, hot: map[string]bool{}, cold: map[string]bool{}}
+	v := &Verifier{cfg: cfg, params: acct.Params, acct: acct, shard: map[string]shardInfo{}, cold: map[string]string{}}
 	if cfg.MaxTxFeeSats == 0 || cfg.MaxFeeRate == 0 || cfg.MaxInputs <= 0 {
 		return nil, errors.New("btc: max_tx_fee_sats, max_fee_rate and max_inputs are required and must be positive")
 	}
@@ -64,6 +73,10 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 	for part, h := range cfg.HotShards {
 		if len(h.Path) != 2 || h.Path[0] != BranchHot {
 			return nil, fmt.Errorf("btc: hot shard of %q: path %v is not on the hot branch [%d, index]", part, h.Path, BranchHot)
+		}
+		k, err := partition.Parse(part)
+		if err != nil || k.Tier != partition.TierHot || k.Chain != cfg.Chain || k.Asset != Native {
+			return nil, fmt.Errorf("btc: hot shard key %q is not a hot %s partition of chain %q (%v)", part, Native, cfg.Chain, err)
 		}
 		d, err := DecodeAddress(h.Address, v.params)
 		if err != nil {
@@ -76,14 +89,18 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 		if d.Canonical != want {
 			return nil, fmt.Errorf("btc: hot shard of %q: address %s is not the key at path %s of the account (that is %s)", part, h.Address, PathString(h.Path), want)
 		}
-		v.hot[d.Canonical] = true
+		v.shard[part] = shardInfo{addr: d.Canonical, path: h.Path, key: k}
 	}
 	for k, a := range cfg.ColdAddresses {
+		pool, ok := strings.CutSuffix(k, "/native")
+		if !ok || pool == "" {
+			return nil, fmt.Errorf("btc: cold address key %q is not <pool>/native", k)
+		}
 		d, err := DecodeAddress(a, v.params)
 		if err != nil {
 			return nil, fmt.Errorf("btc: cold address %q: %w", k, err)
 		}
-		v.cold[d.Canonical] = true
+		v.cold[pool] = d.Canonical
 	}
 	return v, nil
 }
@@ -203,34 +220,46 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		}
 		return nil
 	}
+	// Every kind is bound to the partition the intent names: its own shard, its own pool.
+	if u.KeyRef.PartitionID != i.PartitionID {
+		return reject("key partition %q, intent partition %q", u.KeyRef.PartitionID, i.PartitionID)
+	}
+	own, ok := v.shard[i.PartitionID]
+	if !ok {
+		return reject("partition %q has no pinned hot shard", i.PartitionID)
+	}
+	ownInputs := func(what string) error {
+		for n, in := range p.Inputs {
+			if PathString(in.Path) != PathString(own.path) {
+				return reject("%s: input %d is at path %s, not the partition's own shard %s", what, n, PathString(in.Path), PathString(own.path))
+			}
+		}
+		return nil
+	}
 	switch i.Kind {
 	case "withdrawal", "to-cold", "rebalance":
-		if err := branch(BranchHot, i.Kind); err != nil {
+		if err := ownInputs(i.Kind); err != nil {
 			return err
 		}
 		if len(p.Outputs) > 2 {
 			return reject("%s has %d outputs, at most the payment and one change", i.Kind, len(p.Outputs))
 		}
-		// The payment is the first output, exactly as intended; the optional second is change to a pinned hot shard.
+		// The payment is the first output, exactly as intended; the optional second is change, to this partition's own shard only.
 		if pr.outs[0].Canonical != to.Canonical || p.Outputs[0].Value != amount.Uint64() {
 			return reject("the first output pays %d to %s, the intent is %s to %s", p.Outputs[0].Value, pr.outs[0].Canonical, i.Amount, to.Canonical)
 		}
-		if len(p.Outputs) == 2 && !v.hot[pr.outs[1].Canonical] {
-			return reject("change goes to %s, which is not a pinned hot shard", pr.outs[1].Canonical)
+		if len(p.Outputs) == 2 && pr.outs[1].Canonical != own.addr {
+			return reject("change goes to %s, not the partition's own shard %s", pr.outs[1].Canonical, own.addr)
 		}
 		switch i.Kind {
 		case "to-cold":
-			if !v.cold[to.Canonical] {
-				return reject("%s is not a pinned cold address", to.Canonical)
+			pool := own.key.Pool
+			if cold, ok := v.cold[pool]; !ok || cold != to.Canonical {
+				return reject("%s is not the cold address of pool %q", to.Canonical, pool)
 			}
 		case "rebalance":
-			if !v.hot[to.Canonical] {
-				return reject("%s is not a pinned hot shard", to.Canonical)
-			}
-			for n, in := range p.Inputs {
-				if a, _ := v.acct.Address(in.Path); a == to.Canonical {
-					return reject("rebalance pays input %d's own address", n)
-				}
+			if !v.siblingShard(own.key, to.Canonical) {
+				return reject("%s is not the hot address of another shard of %s", to.Canonical, i.PartitionID)
 			}
 		}
 	case "sweep":
@@ -251,24 +280,36 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		if len(p.Outputs) != 1 {
 			return reject("a sweep has one output, not %d", len(p.Outputs))
 		}
-		if !v.hot[to.Canonical] || pr.outs[0].Canonical != to.Canonical {
-			return reject("a sweep pays one pinned hot shard, the intent's %s; the output is %s", to.Canonical, pr.outs[0].Canonical)
+		if to.Canonical != own.addr || pr.outs[0].Canonical != own.addr {
+			return reject("a sweep pays the partition's own shard %s; the intent says %s and the output is %s", own.addr, to.Canonical, pr.outs[0].Canonical)
 		}
 		if pr.Sum != amount.Uint64() {
 			return reject("sweep amount %s is not the sum of the inputs, %d", i.Amount, pr.Sum)
 		}
 	case "cancel":
-		// Every input as it was claimed, back to a pinned hot shard. Nothing else.
+		// Every input as it was claimed (the guard checks that), back to the partition's own shard. Nothing else.
 		if len(p.Outputs) != 1 {
 			return reject("a cancel has one output, not %d", len(p.Outputs))
 		}
-		if !v.hot[to.Canonical] || pr.outs[0].Canonical != to.Canonical {
-			return reject("a cancel pays a pinned hot shard, the intent's %s; the output is %s", to.Canonical, pr.outs[0].Canonical)
+		if to.Canonical != own.addr || pr.outs[0].Canonical != own.addr {
+			return reject("a cancel pays the partition's own shard %s; the intent says %s and the output is %s", own.addr, to.Canonical, pr.outs[0].Canonical)
 		}
 	default:
 		return reject("intent kind %q", i.Kind)
 	}
 	return nil
+}
+
+// siblingShard reports whether addr is the pinned hot address of ANOTHER shard of the same pool, asset, tier, entity and chain as src.
+// The partition IDs are parsed, so a partition of another pool is not "another shard" however its ID is spelled.
+func (v *Verifier) siblingShard(src partition.Key, addr string) bool {
+	for _, sh := range v.shard {
+		k := sh.key
+		if sh.addr == addr && k.Entity == src.Entity && k.Chain == src.Chain && k.Asset == src.Asset && k.Tier == src.Tier && k.Pool == src.Pool && k.Shard != src.Shard {
+			return true
+		}
+	}
+	return false
 }
 
 // Info is what the gateway's guard reads from a verified job.
