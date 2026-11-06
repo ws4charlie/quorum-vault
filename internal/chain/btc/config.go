@@ -52,8 +52,14 @@ type Config struct {
 	MaxFeeRate      uint64
 	// MaxTxFeeSats is the most a transaction may pay in fee (default 100000, below the signing zone's cap).
 	MaxTxFeeSats uint64
-	// StuckAfterBlocks is how many blocks a broadcast transaction may stay unconfirmed before the workflow tries to bump it (later task).
-	StuckAfterBlocks uint64
+	// SweepMaxFeeRate is the most a routine sweep pays per virtual byte (default MaxFeeRate; it must not be above it). Above it routine sweeps wait.
+	// SweepUrgentValue, in satoshis, is the amount from which a sweep goes regardless of that ceiling, up to MaxFeeRate (0: no such exception).
+	SweepMaxFeeRate  uint64
+	SweepUrgentValue uint64
+	// SweepK and MinSweep are the sweep rule (value >= max(MinSweep, SweepK x fee)); the adapter needs them to refuse a fee bump that would break it.
+	// SweepK 0 and MinSweep 0 mean no rule.
+	SweepK   uint64
+	MinSweep uint64
 }
 
 // HotShardConfig is one hot shard: the partition it serves, its address and the path of its key below the account.
@@ -111,6 +117,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxTxFeeSats == 0 {
 		c.MaxTxFeeSats = 100_000
+	}
+	if c.SweepMaxFeeRate == 0 {
+		c.SweepMaxFeeRate = c.MaxFeeRate
 	}
 	return c
 }
@@ -177,6 +186,9 @@ func (c Config) validated() (*validatedConfig, error) {
 	}
 	if c.MaxInputs < 1 || c.SpendConfirmations < 1 {
 		return nil, errors.New("btc: config: max_inputs and spend_confirmations must be positive")
+	}
+	if c.SweepMaxFeeRate > c.MaxFeeRate {
+		return nil, errors.New("btc: config: sweep_max_fee_rate is above max_fee_rate")
 	}
 	if c.FallbackFeeRate > c.MaxFeeRate {
 		return nil, errors.New("btc: config: fallback_fee_rate is above max_fee_rate")

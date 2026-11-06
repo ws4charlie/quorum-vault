@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
@@ -179,6 +180,11 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 		if open {
 			continue
 		}
+		if backoff, err := s.sweepBackoff(ctx, addr, asset); err != nil {
+			return created, err
+		} else if backoff {
+			continue
+		}
 		fee, err := s.Chain.EstimateSweepFee(ctx, chain.SweepIntent{ID: "estimate", Asset: asset, From: addr, ToPartition: c.SinkPartition(asset), Amount: amt})
 		if errors.Is(err, evm.ErrSweepFrozen) {
 			if oerr := s.observeFactory(ctx, true); oerr != nil {
@@ -223,6 +229,45 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 		}
 	}
 	return created, nil
+}
+
+// sweepBackoff reports whether the address is being left alone after failed sweeps: a sweep the gateway refuses every time (its rate limit, say) would
+// otherwise be planned, refused and released again at every pass. The wait starts at retry_after and doubles for each failure in a row, up to an
+// hour; one that confirmed ends it. Only for chains that plan from their own candidates (Bitcoin): the evm planner replans at once, as before.
+func (s *Service) sweepBackoff(ctx context.Context, addr, asset string) (bool, error) {
+	if _, ok := s.Chain.(chain.SweepSource); !ok {
+		return false, nil
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT status, EXTRACT(EPOCH FROM (now() - updated_at)) FROM sweeps WHERE chain=$1 AND from_address=$2 AND asset=$3
+		ORDER BY created_at DESC LIMIT 12`, s.Cfg.Chain, addr, asset)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	n := 0
+	var age float64
+	for rows.Next() {
+		var st string
+		var a float64
+		if err := rows.Scan(&st, &a); err != nil {
+			return false, err
+		}
+		if st != "failed" {
+			break
+		}
+		if n == 0 {
+			age = a
+		}
+		n++
+	}
+	if n == 0 {
+		return false, rows.Err()
+	}
+	wait := s.Cfg.SweepRetryAfter
+	for i := 1; i < n && wait < time.Hour; i++ {
+		wait *= 2
+	}
+	return time.Duration(age*float64(time.Second)) < min(wait, time.Hour), rows.Err()
 }
 
 func sortPairs(p [][2]string) {
@@ -455,8 +500,8 @@ func (s *Service) SettleSweep(ctx context.Context, id, txHash string, status cha
 			final, evt, reason = "failed", "sweep.failed", "transaction reverted"
 		}
 		if _, err := tx.Exec(ctx, `UPDATE sweeps SET status=$2, moved=$3::numeric, fee=$4::numeric, settled_height=$5, trueup_done=$6,
-			failure_reason=NULLIF($7,''), updated_at=now() WHERE id=$1`,
-			id, final, movedMain.String(), fee.String(), int64(height), !trueup, reason); err != nil {
+			failure_reason=NULLIF($7,''), tx_hash=$8, updated_at=now() WHERE id=$1`,
+			id, final, movedMain.String(), fee.String(), int64(height), !trueup, reason, txHash); err != nil {
 			return err
 		}
 		ev := map[string]any{"chain": c.Chain, "asset": sw.Asset, "address": sw.From, "expected": sw.Amount.String(), "moved": movedMain.String(),

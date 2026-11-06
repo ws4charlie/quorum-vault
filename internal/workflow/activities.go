@@ -44,6 +44,7 @@ const (
 	errNonceOpen  = "nonce_open"
 	errBadRequest = "bad_request"
 	errCannotBump = "cannot_bump" // no replacement or cancel can be built
+	errSweepFee   = "sweep_fee"   // the fee rate does not allow this sweep now
 	errNoOutputs  = "no_outputs"  // too few available outputs: retryable by waiting
 )
 
@@ -86,6 +87,8 @@ func nonRetry(err error) error {
 		typ = errNonceOpen
 	case errors.Is(err, chain.ErrCannotBump):
 		typ = errCannotBump
+	case errors.Is(err, chain.ErrSweepFeePolicy):
+		typ = errSweepFee
 	case errors.Is(err, chain.ErrNotEnoughOutputs):
 		typ = errNoOutputs
 	case errors.Is(err, custody.ErrInvalid), errors.Is(err, ledger.ErrInsufficientFunds), errors.Is(err, ledger.ErrIdempotencyConflict):
@@ -293,12 +296,16 @@ type SweepState struct {
 	Status string
 	Part   string
 	Parked bool
+	// SettlesCancel: a confirmed cancel of this sweep moved its coins like the sweep would have (Bitcoin: its output is the sweep's), so it settles
+	// as the sweep. False for chains where a cancel moves nothing (EVM); absent in histories recorded before, which is false.
+	SettlesCancel bool
 }
 
 // LoadSweep reads the sweep.
 func (a *Activities) LoadSweep(ctx context.Context, id string) (SweepState, error) {
 	sw, err := a.D.Svc.GetSweep(ctx, id)
-	return SweepState{Status: sw.Status, Part: sw.PartitionID, Parked: sw.Parked()}, err
+	_, settles := a.D.Svc.Chain.(chain.Settler)
+	return SweepState{Status: sw.Status, Part: sw.PartitionID, Parked: sw.Parked(), SettlesCancel: settles}, err
 }
 
 // BuildSweepJob builds the sweep and enqueues its sign job in one transaction.

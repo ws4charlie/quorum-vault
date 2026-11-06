@@ -226,7 +226,10 @@ var (
 	ErrInputsSpent = errors.New("chain: an input of the transaction is missing or spent")
 	// ErrCannotBump: no replacement or cancel can be built (no change to pay more from, change that would fall to dust, a fee ceiling). The
 	// workflow raises an ALERT and keeps waiting.
-	ErrCannotBump = errors.New("chain: the transaction cannot be bumped")
+	// ErrSweepFeePolicy: the fee rate does not allow this sweep now (above the sweep ceiling for a routine one, above the cap for any). Not
+	// retryable: the sweep ends and the planner decides again later.
+	ErrSweepFeePolicy = errors.New("chain: the fee rate does not allow this sweep now")
+	ErrCannotBump     = errors.New("chain: the transaction cannot be bumped")
 )
 
 // ErrNotEnoughOutputs is returned by BuildWithdrawal when the partition's available outputs cannot pay the amount and the fee now. It is

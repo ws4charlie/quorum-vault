@@ -606,7 +606,7 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 		if err != nil {
 			return err
 		}
-		if cr.Kind == txCancelled {
+		if cr.Kind == txCancelled && !(st.SettlesCancel && cr.Hash != "") {
 			return call(ctx, opts(ctx), nil, a.FailSweep, id, "gateway refused: "+r.Reason)
 		}
 		r = cr
@@ -617,7 +617,14 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 			return err
 		}
 	case txCancelled:
-		return call(ctx, opts(ctx), nil, a.FailSweep, id, "cancelled")
+		if !(st.SettlesCancel && r.Hash != "") {
+			return call(ctx, opts(ctx), nil, a.FailSweep, id, "cancelled")
+		}
+		// Bitcoin: the cancel spent the same inputs to the same shard, so the coins reached the hot shard anyway. It settles as the sweep would
+		// have, with the cancel's own fee.
+		if err := call(ctx, opts(ctx), nil, a.SettleSweep, id, r.Hash, false); err != nil {
+			return err
+		}
 	}
 	// Excess that no deposit explains goes to suspense once the scan is past it.
 	for i := 0; i < 600; i++ {

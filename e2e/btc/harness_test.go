@@ -299,6 +299,12 @@ type opts struct {
 	sweepK    int
 	maxInputs int
 	spendConf uint64
+	// sweepMaxRate and sweepUrgent are the sweep fee ceiling (sat/vB) and the amount (sats) from which a sweep ignores it; gwSweepsPerHour the gateway's
+	// limit (default: no practical limit); retryAfter how long the planner leaves an address after a failed sweep.
+	sweepMaxRate    uint64
+	sweepUrgent     uint64
+	gwSweepsPerHour int
+	retryAfter      string
 	// gwDest, when set, is the only list of destinations the gateway lets withdrawals pay (otherwise any).
 	gwDest []string
 }
@@ -444,6 +450,10 @@ func newSystem(t *testing.T, o opts) *system {
 			s.cf.Sweep.MinSweepWei = o.minSweep
 		}
 	}
+	if o.retryAfter != "" {
+		s.cf.Sweep.RetryAfter = o.retryAfter
+	}
+	s.cf.Chain.BTC.SweepMaxFeeRate, s.cf.Chain.BTC.SweepUrgentValue = o.sweepMaxRate, o.sweepUrgent
 	if o.maxInputs > 0 {
 		s.cf.Chain.BTC.MaxInputs = o.maxInputs
 	}

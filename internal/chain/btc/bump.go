@@ -74,10 +74,15 @@ func (a *Adapter) record(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, kin
 	return built, raw, nil
 }
 
-func unsignedOf(chainName string, built *Unsigned, raw []byte, ref chain.KeyRef) chain.UnsignedTx {
-	u := chain.UnsignedTx{Chain: chainName, Digest: built.Digests[0], Payload: raw, KeyRef: ref}
-	for _, d := range built.Digests[1:] {
-		u.More = append(u.More, chain.SigInput{Digest: d, KeyRef: ref})
+// unsignedOf wraps a built transaction: one signature request per input, each under the key of that input's own path (the shard's for a withdrawal,
+// the deposit address's for a sweep).
+func unsignedOf(chainName string, built *Unsigned, raw []byte, partition string, p Payload) chain.UnsignedTx {
+	ref := func(i int) chain.KeyRef {
+		return chain.KeyRef{PartitionID: partition, Path: PathString(p.Inputs[i].Path)}
+	}
+	u := chain.UnsignedTx{Chain: chainName, Digest: built.Digests[0], Payload: raw, KeyRef: ref(0)}
+	for i, d := range built.Digests[1:] {
+		u.More = append(u.More, chain.SigInput{Digest: d, KeyRef: ref(i + 1)})
 	}
 	return u
 }
@@ -85,8 +90,8 @@ func unsignedOf(chainName string, built *Unsigned, raw []byte, ref chain.KeyRef)
 // BuildReplacement builds the fee bump of the owner's newest attempt: the same inputs and the same payment, less change, a higher fee (see the rule
 // above). Without a change output, or when the change would fall to dust, it returns chain.ErrCannotBump: the attempt cannot be bumped.
 func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
-	if ownerKind == "sweep" { // a sweep has one output and no change: its bump is a later task, and until then it waits with an ALERT
-		return chain.UnsignedTx{}, fmt.Errorf("%w: fee bumps of a sweep are not built yet", chain.ErrCannotBump)
+	if ownerKind == "sweep" {
+		return a.buildSweepReplacement(ctx, tx, ownerID)
 	}
 	if ownerKind != "withdrawal" {
 		return chain.UnsignedTx{}, errLater
@@ -118,7 +123,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	return unsignedOf(a.cfg.Chain, b2, raw, chain.KeyRef{PartitionID: sh.partition, Path: PathString(sh.path)}), nil
+	return unsignedOf(a.cfg.Chain, b2, raw, sh.partition, p), nil
 }
 
 // BuildCancel builds the cancel of the owner's attempts: a transaction that spends exactly the inputs of the attempt (the signing zone's strict rule)
@@ -126,10 +131,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 // Once it confirms, no other transaction can spend those inputs, so a half-signed one can never confirm. It returns chain.ErrNotSupported when
 // nothing was built, and chain.ErrCannotBump when the inputs cannot pay for it.
 func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
-	if ownerKind == "sweep" { // as above: a sweep whose signature may exist parks with an ALERT and releases nothing
-		return chain.UnsignedTx{}, fmt.Errorf("%w: the cancel of a sweep is not built yet", chain.ErrCannotBump)
-	}
-	if ownerKind != "withdrawal" {
+	if ownerKind != "withdrawal" && ownerKind != "sweep" {
 		return chain.UnsignedTx{}, errLater
 	}
 	var n int
@@ -152,6 +154,9 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 		return chain.UnsignedTx{}, fmt.Errorf("btc: partition of the attempt's inputs: %w", err)
 	}
 	sh, err := a.shardOf(part)
+	if err != nil && ownerKind == "sweep" && len(a.shards) > 0 {
+		sh, err = a.sinkShard(), nil // a deposit-only cell recorded the output without a partition: the sweep pays the sink shard
+	}
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -172,5 +177,48 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	return unsignedOf(a.cfg.Chain, built, raw, chain.KeyRef{PartitionID: sh.partition, Path: PathString(sh.path)}), nil
+	return unsignedOf(a.cfg.Chain, built, raw, sh.partition, c), nil
+}
+
+// buildSweepReplacement bumps a sweep: the same inputs and the one output lower by the extra fee (a sweep has no change, so the output pays). The new
+// fee follows the replacement rule; it must also stay under the sweep ceiling (or, for a sweep of at least sweep_urgent_value, the fee rate cap),
+// under the fee cap, and the sweep must still be worth it at that fee (value >= max(min_sweep, k x fee)) and leave an output above dust. If not it
+// returns chain.ErrCannotBump: an ALERT, the sweep keeps waiting, nothing is voided.
+func (a *Adapter) buildSweepReplacement(ctx context.Context, tx pgx.Tx, ownerID string) (chain.UnsignedTx, error) {
+	p, oldFee, err := a.lastSend(ctx, tx, "sweep", ownerID)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	sh, ok := a.byAddr[p.Outputs[0].Address]
+	if len(p.Outputs) != 1 || !ok {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: a sweep has one output to a shard", chain.ErrCannotBump)
+	}
+	var sum uint64
+	for _, in := range p.Inputs {
+		sum += in.Value
+	}
+	built, err := BuildUnsigned(p, a.acct)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	vs := uint64(EstimateVSize(built.Tx))
+	fee := a.nextFee(ctx, oldFee, vs)
+	if err := a.checkFee(fee, vs); err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	if !a.urgent(sum) && fee > a.cfg.SweepMaxFeeRate*vs {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats over %d vbytes is above the sweep ceiling of %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.SweepMaxFeeRate)
+	}
+	if need := max(a.cfg.MinSweep, a.cfg.SweepK*fee); sum < need {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: at a fee of %d the sweep of %d sats would break the sweep rule (it needs %d)", chain.ErrCannotBump, fee, sum, need)
+	}
+	if sum < fee+DustLimit(KindP2WPKH) {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats cannot pay a fee of %d and leave an output", chain.ErrCannotBump, sum, fee)
+	}
+	p.Outputs[0].Value = sum - fee
+	b2, raw, err := a.record(ctx, tx, "sweep", ownerID, "send", p, fee)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	return unsignedOf(a.cfg.Chain, b2, raw, sh.partition, p), nil
 }

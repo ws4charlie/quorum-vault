@@ -449,6 +449,17 @@ func TestRecoveryOutsideSpendOfAReservedOutputParks(t *testing.T) {
 // outsideSpend signs a withdrawal of one output through a gateway of its own (own guard database, the same signing zone config and MPC keys, so the same
 // party B cosigner) and sends it to the node. It stands for a key that signed outside this system.
 func (s *system) outsideSpend(txid string, vout uint32, value uint64, to string) {
+	in := signjob.Intent{Kind: "withdrawal", ID: "outside-1", PartitionID: s.part, Chain: s.chain, Asset: "BTC", To: to, Amount: fmt.Sprint(value - 3000), NotAfter: time.Now().Add(time.Hour).Unix()}
+	s.outsideSign(txid, vout, value, to, []uint32{1, 0}, in, true)
+}
+
+// outsideSweepSpend does the same for a deposit output: a sweep intent of the deposit address at index idx into the hot shard, signed outside.
+func (s *system) outsideSweepSpend(txid string, vout uint32, value uint64, from string, idx uint32) {
+	in := signjob.Intent{Kind: "sweep", ID: "outside-sweep", PartitionID: s.part, Chain: s.chain, Asset: "BTC", From: from, To: s.hotAddr, Amount: fmt.Sprint(value)}
+	s.outsideSign(txid, vout, value, s.hotAddr, []uint32{0, idx}, in, false)
+}
+
+func (s *system) outsideSign(txid string, vout uint32, value uint64, to string, path []uint32, in signjob.Intent, approved bool) {
 	t := s.t
 	cfg, err := gateway.LoadConfig(s.gwPath)
 	if err != nil {
@@ -477,17 +488,18 @@ func (s *system) outsideSpend(txid string, vout uint32, value uint64, to string)
 			t.Fatal(err)
 		}
 	}
-	p := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{{TxID: txid, Vout: vout, Value: value, Path: []uint32{1, 0}, Sequence: btc.SequenceRBF}},
+	p := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{{TxID: txid, Vout: vout, Value: value, Path: path, Sequence: btc.SequenceRBF}},
 		Outputs: []btc.PayloadOutput{{Address: to, Value: value - 3000}}}
 	built, err := btc.BuildUnsigned(p, s.acct)
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := signjob.Intent{Kind: "withdrawal", ID: "outside-1", PartitionID: s.part, Chain: s.chain, Asset: "BTC", To: to, Amount: fmt.Sprint(value - 3000), NotAfter: time.Now().Add(time.Hour).Unix()}
 	h := in.Hash()
 	raw, _ := json.Marshal(p)
-	j := signjob.Job{ID: "outside:a1", PartitionID: s.part, KeyRef: "1/0", Chain: s.chain, Intent: mustJSON(in), Digest: built.Digests[0], Payload: raw,
-		Approvals: []signjob.Approval{{Actor: "alice", Signature: ed25519.Sign(s.approv["alice"], h[:])}}}
+	j := signjob.Job{ID: "outside:a1", PartitionID: s.part, KeyRef: btc.PathString(path), Chain: s.chain, Intent: mustJSON(in), Digest: built.Digests[0], Payload: raw}
+	if approved {
+		j.Approvals = []signjob.Approval{{Actor: "alice", Signature: ed25519.Sign(s.approv["alice"], h[:])}}
+	}
 	tx, err := biz.Begin(s.ctx)
 	if err != nil {
 		t.Fatal(err)
