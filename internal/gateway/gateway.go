@@ -95,16 +95,12 @@ type Gateway struct {
 }
 
 // New builds a Gateway. codecs has one entry per configured chain; New builds
-// the EVM codecs from cfg when codecs is nil.
+// them from cfg (NewCodecs) when codecs is nil.
 func New(cfg *Config, codecs map[string]ChainCodec, signers map[string]signer.Signer, guard *Guard, jobs *pgxpool.Pool, opt Options) (*Gateway, error) {
 	if codecs == nil {
-		codecs = map[string]ChainCodec{}
-		for name, cc := range cfg.Chains {
-			c, err := NewEVMCodec(cc.EVM)
-			if err != nil {
-				return nil, err
-			}
-			codecs[name] = c
+		var err error
+		if codecs, err = NewCodecs(cfg); err != nil {
+			return nil, err
 		}
 	}
 	for name := range cfg.Chains {

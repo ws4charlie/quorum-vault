@@ -388,7 +388,7 @@ func TestCosignerRefusesUnlistedDestinationAndHourLimit(t *testing.T) {
 	e := newEnv(t)
 	cc := e.h.Cfg.Chains[gatewaytest.Chain]
 	p := cc.Assets["ETH"]
-	p.AnyDestination, p.Destinations = false, map[common.Address]bool{gatewaytest.AddrUser: true}
+	p.AnyDestination, p.Destinations = false, map[string]bool{gatewaytest.AddrUser.Hex(): true}
 	cc.Assets["ETH"] = p
 	cc.WithdrawalsPerHour = 1
 	e.refuse(e.req(e.h.Withdrawal("rg1", gatewaytest.AddrEvil, 100, 0, "alice")), gateway.ReasonDestination)

@@ -322,13 +322,13 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 			return txResult{}, err
 		}
 		switch n.State {
-		case custody.NonceMined:
+		case custody.AttemptMined:
 			return txResult{Kind: txMined, Hash: n.Hash}, nil
-		case custody.NonceReverted:
+		case custody.AttemptReverted:
 			return txResult{Kind: txReverted, Hash: n.Hash}, nil
-		case custody.NonceCancelled:
+		case custody.AttemptCancelled:
 			return txResult{Kind: txCancelled, Hash: n.Hash}, nil
-		case custody.NonceConsumed:
+		case custody.AttemptConsumed:
 			// The chain's nonce is past ours and none of our attempts mined: a
 			// transaction we did not make used it, so the hot key signed something
 			// outside this system. Our transaction can never mine. Keep the hold,
@@ -369,13 +369,18 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 	}
 }
 
-// cancelNonce frees the owner's nonce with a cancel transaction and returns
-// what finally mined at it: the cancel (txCancelled), or the owner's own
+// cancelNonce frees what the owner reserved (EVM: its nonce) with a cancel transaction and returns
+// what finally mined: the cancel (txCancelled), or the owner's own
 // transaction after all (txMined / txReverted). Only then may money be released.
+// On a chain without cancel there is nothing to free: it returns txCancelled at once, with no hash.
 func cancelNonce(ctx workflow.Context, t Timings, o OwnerArg) (txResult, error) {
 	var cj string
 	if err := call(ctx, opts(ctx), &cj, a.EnqueueCancel, o); err != nil {
 		return txResult{}, err
+	}
+	if cj == "" {
+		// The chain has no cancel: a refusal leaves nothing reserved to free, so the money may be released.
+		return txResult{Kind: txCancelled}, nil
 	}
 	ow := custody.Owner{Kind: o.Kind, ID: o.ID, PartitionID: o.Part}
 	r, err := driveTx(ctx, t, o, custody.CancelTrack(ow), cj, false)

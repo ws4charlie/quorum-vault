@@ -51,22 +51,22 @@ type IntentRecord struct {
 	Hash   []byte
 	Kind   string
 	Sender string
-	Nonce  uint64
+	// Claims is what the intent's transaction consumes, as the codec named it (EVM: one claim, sender plus nonce).
+	Claims []string
 }
 
 // SigRecord is a signed_digests row.
 type SigRecord struct {
-	Digest    []byte
-	IntentID  string
-	Nonce     uint64
-	Tip       *big.Int
-	FeeCap    *big.Int
-	Signature []byte // nil while the digest is only reserved
-	Reserved  time.Time
+	Digest      []byte
+	IntentID    string
+	Fees        []*big.Int // the codec's fee components; a replacement must raise them
+	PayloadHash []byte     // the transaction the digest belongs to; the digests of one transaction share it
+	Signature   []byte     // nil while the digest is only reserved
+	Reserved    time.Time
 }
 
-// NonceClaim is a nonce_claims row.
-type NonceClaim struct {
+// Claim is an exclusive_claims row: who owns something a transaction consumes.
+type Claim struct {
 	IntentID string
 	Kind     string
 }
@@ -109,22 +109,17 @@ func parseBig(s string) *big.Int {
 	return n
 }
 
-// bigOf renders v as a decimal string; queries cast it with ::numeric.
-func bigOf(v uint64) string { return fmt.Sprint(v) }
-
 // Intent returns the record of an intent ID, or nil.
 func (t *GuardTx) Intent(ctx context.Context, id string) (*IntentRecord, error) {
 	var r IntentRecord
-	var nonce string
-	err := t.tx.QueryRow(ctx, `SELECT intent_id, intent_hash, kind, sender, nonce::text FROM signed_intents WHERE intent_id=$1`, id).
-		Scan(&r.ID, &r.Hash, &r.Kind, &r.Sender, &nonce)
+	err := t.tx.QueryRow(ctx, `SELECT intent_id, intent_hash, kind, sender, COALESCE(claims, '{}') FROM signed_intents WHERE intent_id=$1`, id).
+		Scan(&r.ID, &r.Hash, &r.Kind, &r.Sender, &r.Claims)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	r.Nonce = parseBig(nonce).Uint64()
 	return &r, nil
 }
 
@@ -135,29 +130,36 @@ func (t *GuardTx) Digest(ctx context.Context, digest []byte) (*SigRecord, error)
 
 // LatestSig returns the highest-fee record (reserved or signed) of an intent, or nil.
 func (t *GuardTx) LatestSig(ctx context.Context, intentID string) (*SigRecord, error) {
-	return t.sig(ctx, `WHERE intent_id=$1 ORDER BY fee_cap DESC, tip DESC, reserved_at DESC LIMIT 1`, intentID)
+	return t.sig(ctx, `WHERE intent_id=$1 ORDER BY fees DESC, reserved_at DESC LIMIT 1`, intentID)
 }
 
-func (t *GuardTx) sig(ctx context.Context, where string, arg any) (*SigRecord, error) {
+// SameTx returns a record of intentID whose digest belongs to the transaction with payloadHash (another signature of
+// the same transaction), or nil.
+func (t *GuardTx) SameTx(ctx context.Context, intentID string, payloadHash []byte) (*SigRecord, error) {
+	return t.sig(ctx, `WHERE intent_id=$1 AND payload_hash=$2 LIMIT 1`, intentID, payloadHash)
+}
+
+func (t *GuardTx) sig(ctx context.Context, where string, args ...any) (*SigRecord, error) {
 	var r SigRecord
-	var nonce, tip, feeCap string
-	err := t.tx.QueryRow(ctx, `SELECT digest, intent_id, nonce::text, tip::text, fee_cap::text, signature, reserved_at FROM signed_digests `+where, arg).
-		Scan(&r.Digest, &r.IntentID, &nonce, &tip, &feeCap, &r.Signature, &r.Reserved)
+	var fees []string
+	err := t.tx.QueryRow(ctx, `SELECT digest, intent_id, COALESCE(fees::text[], '{}'), payload_hash, signature, reserved_at FROM signed_digests `+where, args...).
+		Scan(&r.Digest, &r.IntentID, &fees, &r.PayloadHash, &r.Signature, &r.Reserved)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	r.Nonce, r.Tip, r.FeeCap = parseBig(nonce).Uint64(), parseBig(tip), parseBig(feeCap)
+	for _, f := range fees {
+		r.Fees = append(r.Fees, parseBig(f))
+	}
 	return &r, nil
 }
 
-// NonceClaim returns who owns (sender, nonce) on this chain, or nil.
-func (t *GuardTx) NonceClaim(ctx context.Context, sender string, nonce uint64) (*NonceClaim, error) {
-	var c NonceClaim
-	err := t.tx.QueryRow(ctx, `SELECT intent_id, kind FROM nonce_claims WHERE chain=$1 AND sender=$2 AND nonce=$3::numeric`,
-		t.chain, sender, bigOf(nonce)).Scan(&c.IntentID, &c.Kind)
+// Claim returns who owns claim on this chain, or nil.
+func (t *GuardTx) Claim(ctx context.Context, claim string) (*Claim, error) {
+	var c Claim
+	err := t.tx.QueryRow(ctx, `SELECT intent_id, kind FROM exclusive_claims WHERE chain=$1 AND claim=$2`, t.chain, claim).Scan(&c.IntentID, &c.Kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -195,46 +197,49 @@ func (t *GuardTx) CountSince(ctx context.Context, kind string, since time.Time) 
 // Release is everything recorded when a digest is reserved, before the signer
 // runs. Signature stays nil until Guard.Finish stores it.
 type Release struct {
-	IntentID   string
-	IntentHash []byte
-	Kind       string
-	Asset      string
-	Amount     *big.Int
-	Sender     string
-	Nonce      uint64
-	Digest     []byte
-	Tip        *big.Int
-	FeeCap     *big.Int
-	Signature  []byte    // nil: reservation
-	At         time.Time // reservation time
-	NewIntent  bool      // false: another signature for an intent already recorded
-	TakeNonce  bool      // a cancel replacing a different intent's claim
+	IntentID    string
+	IntentHash  []byte
+	Kind        string
+	Asset       string
+	Amount      *big.Int
+	Sender      string
+	Claims      []string // what the transaction consumes
+	Digest      []byte
+	Fees        []*big.Int
+	PayloadHash []byte
+	Signature   []byte    // nil: reservation
+	At          time.Time // reservation time
+	NewIntent   bool      // false: another signature for an intent already recorded
+	NewClaims   []string  // claims nobody holds yet, taken by this intent
+	TakeClaims  []string  // a cancel taking over the claims of a different intent
 }
 
 // Record stores the release. Unique keys on the intent ID, the digest and the
-// nonce claim make a double release fail even if the lock were bypassed.
+// claim make a double release fail even if the lock were bypassed.
 func (t *GuardTx) Record(ctx context.Context, r Release) error {
 	if r.NewIntent {
-		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, nonce, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8::numeric,$9)`,
-			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, bigOf(r.Nonce), r.At); err != nil {
+		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9)`,
+			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.At); err != nil {
 			return fmt.Errorf("record intent: %w", err)
 		}
 	}
-	if _, err := t.tx.Exec(ctx, `INSERT INTO signed_digests (digest, intent_id, nonce, tip, fee_cap, signature, reserved_at, signed_at)
-		VALUES ($1,$2,$3::numeric,$4::numeric,$5::numeric,$6,$7,NULL)`, r.Digest, r.IntentID, bigOf(r.Nonce), r.Tip.String(), r.FeeCap.String(), r.Signature, r.At); err != nil {
+	fees := make([]string, len(r.Fees))
+	for i, f := range r.Fees {
+		fees[i] = f.String()
+	}
+	if _, err := t.tx.Exec(ctx, `INSERT INTO signed_digests (digest, intent_id, fees, payload_hash, signature, reserved_at, signed_at)
+		VALUES ($1,$2,$3::numeric[],$4,$5,$6,NULL)`, r.Digest, r.IntentID, fees, r.PayloadHash, r.Signature, r.At); err != nil {
 		return fmt.Errorf("record digest: %w", err)
 	}
-	switch {
-	case r.TakeNonce:
-		if _, err := t.tx.Exec(ctx, `UPDATE nonce_claims SET intent_id=$4, kind=$5 WHERE chain=$1 AND sender=$2 AND nonce=$3::numeric`,
-			t.chain, r.Sender, bigOf(r.Nonce), r.IntentID, r.Kind); err != nil {
-			return fmt.Errorf("take nonce: %w", err)
+	for _, c := range r.TakeClaims {
+		if _, err := t.tx.Exec(ctx, `UPDATE exclusive_claims SET intent_id=$3, kind=$4 WHERE chain=$1 AND claim=$2`, t.chain, c, r.IntentID, r.Kind); err != nil {
+			return fmt.Errorf("take claim: %w", err)
 		}
-	case r.NewIntent:
-		if _, err := t.tx.Exec(ctx, `INSERT INTO nonce_claims (chain, sender, nonce, intent_id, kind) VALUES ($1,$2,$3::numeric,$4,$5)`,
-			t.chain, r.Sender, bigOf(r.Nonce), r.IntentID, r.Kind); err != nil {
-			return fmt.Errorf("claim nonce: %w", err)
+	}
+	for _, c := range r.NewClaims {
+		if _, err := t.tx.Exec(ctx, `INSERT INTO exclusive_claims (chain, claim, intent_id, kind) VALUES ($1,$2,$3,$4)`, t.chain, c, r.IntentID, r.Kind); err != nil {
+			return fmt.Errorf("claim: %w", err)
 		}
 	}
 	return nil

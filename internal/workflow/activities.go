@@ -26,9 +26,15 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 )
 
-// DefaultTaskQueue is the task queue of the business zone's worker unless a
-// deployment (or a test that shares one Temporal server) names another.
+// DefaultTaskQueue is the task queue of the business zone's worker when no chain is
+// named (tests that build a Deps without one). A running worker uses QueueFor.
 const DefaultTaskQueue = "qv-core"
+
+// QueueFor is the task queue of the worker of one chain cell. It carries the chain name, so two
+// workers for two chains on one Temporal server never pick up each other's workflows. (The long-running loop
+// workflows already carry it in their IDs, see ScanID; the IDs of withdrawal and sweep workflows are the row IDs, which
+// are unique in the business database the cells share.)
+func QueueFor(chain string) string { return DefaultTaskQueue + "-" + chain }
 
 // Error types the workflows branch on.
 const (
@@ -69,7 +75,7 @@ func nonRetry(err error) error {
 		typ = errExpired
 	case errors.Is(err, custody.ErrSweepFrozen):
 		typ = errFrozen
-	case errors.Is(err, custody.ErrNonceOpen):
+	case errors.Is(err, custody.ErrReservationOpen):
 		typ = errNonceOpen
 	case errors.Is(err, custody.ErrInvalid), errors.Is(err, ledger.ErrInsufficientFunds), errors.Is(err, ledger.ErrIdempotencyConflict):
 		typ = errBadRequest
@@ -610,21 +616,21 @@ type NonceResult struct {
 	Kind  string
 }
 
-// WaitNonce polls every attempt at the owner's nonce for up to wait and returns
+// WaitNonce polls every attempt of the owner for up to wait and returns
 // as soon as one is final. "Final" includes the withdrawal itself reverting,
 // and a cancel mining.
 func (a *Activities) WaitNonce(ctx context.Context, o OwnerArg, wait time.Duration) (NonceResult, error) {
 	deadline := time.Now().Add(wait)
 	for {
-		n, err := a.D.Svc.NonceState(ctx, o.owner())
+		n, err := a.D.Svc.AttemptState(ctx, o.owner())
 		if err != nil {
 			return NonceResult{}, err
 		}
 		switch n.State {
-		case custody.NonceMined, custody.NonceReverted, custody.NonceCancelled:
+		case custody.AttemptMined, custody.AttemptReverted, custody.AttemptCancelled:
 			Hit(o.Kind, "after_confirm")
 			return NonceResult{State: n.State, Hash: n.Hash, Kind: n.Kind}, nil
-		case custody.NonceConsumed:
+		case custody.AttemptConsumed:
 			return NonceResult{State: n.State}, nil
 		}
 		if time.Now().After(deadline) {
@@ -653,16 +659,13 @@ func (a *Activities) Park(ctx context.Context, o OwnerArg, reason string) error 
 	return a.D.Svc.ParkSweep(ctx, o.ID, reason)
 }
 
-// ConsumedInfo describes a nonce someone else used, for the alert.
+// ConsumedInfo describes what someone else used (EVM: a nonce), for the alert.
 func (a *Activities) ConsumedInfo(ctx context.Context, o OwnerArg) (string, error) {
-	var addr string
-	var nonce int64
-	err := a.D.Svc.Pool.QueryRow(ctx, `SELECT address, nonce FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 ORDER BY nonce DESC LIMIT 1`,
-		a.D.Svc.Cfg.Chain, o.Kind, o.ID).Scan(&addr, &nonce)
+	r, err := a.D.Svc.Chain.Reservation(ctx, a.D.Svc.Pool, o.Kind, o.ID)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("address %s nonce %d", addr, nonce), nil
+	return r.Detail, nil
 }
 
 // EnqueueReplacement builds and enqueues the n-th fee-bumped replacement on a track.
@@ -670,7 +673,9 @@ func (a *Activities) EnqueueReplacement(ctx context.Context, o OwnerArg, track s
 	return a.D.Svc.EnqueueReplacement(ctx, o.owner(), custody.Track(track), n)
 }
 
-// EnqueueCancel builds and enqueues the cancel that frees the owner's nonce.
+// EnqueueCancel builds and enqueues the cancel that frees what the owner reserved (EVM: its nonce). It returns "" on a
+// chain without cancel: there is nothing to free. (The activity names WaitNonce and EnqueueCancel are kept for
+// workflow histories already recorded.)
 func (a *Activities) EnqueueCancel(ctx context.Context, o OwnerArg) (string, error) {
 	return a.D.Svc.EnqueueCancel(ctx, o.owner())
 }

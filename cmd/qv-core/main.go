@@ -18,7 +18,7 @@ import (
 	"go.temporal.io/sdk/client"
 	sdklog "go.temporal.io/sdk/log"
 
-	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
+	"github.com/ws4charlie/quorum-vault/internal/chainfactory"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
@@ -38,7 +38,7 @@ func run(log *slog.Logger) error {
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "business database DSN (env DATABASE_URL)")
 	temporalAddr := flag.String("temporal", envOr("QV_TEMPORAL_ADDR", "127.0.0.1:7233"), "Temporal address (env QV_TEMPORAL_ADDR)")
 	namespace := flag.String("namespace", "default", "Temporal namespace")
-	queue := flag.String("task-queue", workflow.DefaultTaskQueue, "Temporal task queue")
+	queue := flag.String("task-queue", "", "Temporal task queue (default qv-core-<chain>, so one worker per chain cell never takes another's work)")
 	flag.Parse()
 	if *cfgPath == "" || *dsn == "" {
 		return errors.New("-config and -dsn (or DATABASE_URL) are required")
@@ -46,6 +46,9 @@ func run(log *slog.Logger) error {
 	cfg, err := custody.LoadConfig(*cfgPath)
 	if err != nil {
 		return err
+	}
+	if *queue == "" {
+		*queue = workflow.QueueFor(cfg.Chain)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -58,17 +61,12 @@ func run(log *slog.Logger) error {
 	if err := db.Migrate(ctx, pool); err != nil {
 		return err
 	}
-	adapter, err := evm.New(ctx, cfg.EVM, pool)
+	backend, err := chainfactory.Open(ctx, cfg, pool)
 	if err != nil {
 		return err
 	}
-	defer adapter.Close()
-	reader, err := custody.NewEVMReader(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-	svc := custody.New(pool, cfg, adapter, reader)
+	defer backend.Close()
+	svc := custody.New(pool, cfg, backend.Adapter, backend.Reader)
 	if err := svc.Bootstrap(ctx); err != nil {
 		return err
 	}

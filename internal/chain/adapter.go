@@ -13,7 +13,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
-// ErrNotSupported is returned by BuildReplacement on chains without replacement.
+// ErrNotSupported is returned by BuildReplacement and BuildCancel on chains without them.
 var ErrNotSupported = errors.New("chain: operation not supported")
 
 // Adapter is one chain cell: address derivation, deposit scanning, and
@@ -32,12 +32,15 @@ type Adapter interface {
 	// BuildReplacement builds a fee-bumped replacement of a stuck transaction
 	// owned by (ownerKind, ownerID). Chains without replacement return ErrNotSupported.
 	BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (UnsignedTx, error)
-	// BuildCancel builds a transaction that frees the sequence number (nonce)
-	// reserved for (ownerKind, ownerID) when its job was refused, so later
-	// transactions of the same sender can proceed. Chains without strictly
-	// sequential nonces return ErrNotSupported.
+	// BuildCancel builds a transaction that frees what was reserved for
+	// (ownerKind, ownerID) when its job was refused (EVM: the nonce, so later
+	// transactions of the same sender can proceed). It is optional: a chain
+	// that has nothing to free after a refusal returns ErrNotSupported, and the
+	// workflows then go on without a cancel.
 	BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (UnsignedTx, error)
-	Assemble(u UnsignedTx, sig Signature) (SignedTx, error)
+	// Assemble joins the payload of u with one signature per input of u, in the
+	// order of u.Inputs().
+	Assemble(u UnsignedTx, sigs []Signature) (SignedTx, error)
 	Broadcast(ctx context.Context, s SignedTx) (txHash string, err error)
 	Status(ctx context.Context, txHash string) (TxStatus, error)
 	EstimateSweepFee(ctx context.Context, s SweepIntent) (*big.Int, error)
@@ -51,6 +54,56 @@ type Adapter interface {
 	// can move more than it expected (a deposit landed meanwhile, or ETH rides
 	// along with a token sweep), so accounting uses this, not the intent.
 	MovedAssets(ctx context.Context, txHash string) ([]MovedAsset, error)
+	// Outcome decides what became of every attempt (the original transaction,
+	// its fee-bumped replacements and any cancel) that was ever broadcast for
+	// the owner. Any attempt may be the one that confirms, so it looks at all.
+	Outcome(ctx context.Context, ownerKind, ownerID string) (Outcome, error)
+	// Reservation reports what the owner's transaction still holds on the chain
+	// side (EVM: a nonce). While Open is true some signature for it may yet be
+	// broadcast, so the owner's funds must not be released.
+	Reservation(ctx context.Context, q Querier, ownerKind, ownerID string) (Reservation, error)
+}
+
+// Querier is the read side of a database handle (a pgx.Tx or a pool).
+type Querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// Attempt kinds of Outcome.Kind.
+const (
+	AttemptSend   = "send"   // the owner's own transaction or a fee-bumped replacement of it
+	AttemptCancel = "cancel" // a transaction that frees what the owner reserved
+)
+
+// OutcomeState says whether the attempts of an owner are decided.
+type OutcomeState string
+
+const (
+	// OutcomeOpen: nothing is decided; some attempt may still confirm (or none was ever broadcast).
+	OutcomeOpen OutcomeState = "open"
+	// OutcomeConfirmed: one attempt confirmed. Hash and Kind say which; Failed says it ran and failed.
+	OutcomeConfirmed OutcomeState = "confirmed"
+	// OutcomeConsumed: what the owner reserved was used by a transaction this system did not make, and none of the owner's attempts confirmed.
+	OutcomeConsumed OutcomeState = "consumed"
+)
+
+// Outcome is the combined state of an owner's attempts.
+type Outcome struct {
+	State    OutcomeState
+	Hash     string // the attempt that decided it (OutcomeConfirmed)
+	Kind     string // AttemptSend or AttemptCancel, of that attempt
+	Failed   bool   // the deciding attempt confirmed but failed (EVM: reverted); it still paid its fee
+	Attempts int    // how many attempts were ever broadcast
+	Detail   string // for OutcomeConsumed: what was used, for the operator's alert
+}
+
+// Reservation is what an owner's transaction holds on the chain side.
+type Reservation struct {
+	Open bool
+	// Account is the sender the reservation belongs to (EVM: the hot address whose nonce it is).
+	Account string
+	// Detail describes the reservation for an alert.
+	Detail string
 }
 
 // MovedAsset is an amount a sweep moved out of one deposit address.
@@ -124,15 +177,39 @@ type KeyRef struct {
 	Path        string
 }
 
-// UnsignedTx is a built transaction waiting for a signature.
-type UnsignedTx struct {
-	Chain   string
-	Digest  []byte // what the signer signs
-	Payload []byte // opaque, chain-specific; Assemble consumes it
-	KeyRef  KeyRef
+// SigInput is one digest to sign and the key that signs it.
+type SigInput struct {
+	Digest []byte
+	KeyRef KeyRef
 }
 
-// Signature is a raw signature over UnsignedTx.Digest.
+// UnsignedTx is a built transaction waiting for signatures. It needs one
+// signature per input: Digest and KeyRef are the first input, More the others
+// (Bitcoin: one per spent output, often under different keys; EVM: always
+// just the first). All inputs share Payload, which Assemble consumes and which
+// is opaque and chain-specific. Each input becomes one sign job.
+type UnsignedTx struct {
+	Chain   string
+	Digest  []byte // what the signer signs, for the first input
+	Payload []byte
+	KeyRef  KeyRef // the key that signs the first input
+	More    []SigInput
+}
+
+// Inputs lists every input to sign, first one first.
+func (u UnsignedTx) Inputs() []SigInput {
+	out := make([]SigInput, 0, 1+len(u.More))
+	out = append(out, SigInput{Digest: u.Digest, KeyRef: u.KeyRef})
+	return append(out, u.More...)
+}
+
+// Input is input i seen as a transaction of its own (what one sign job carries, and what TxVerifier checks).
+func (u UnsignedTx) Input(i int) UnsignedTx {
+	in := u.Inputs()[i]
+	return UnsignedTx{Chain: u.Chain, Digest: in.Digest, Payload: u.Payload, KeyRef: in.KeyRef}
+}
+
+// Signature is a raw signature over one input's digest.
 type Signature struct {
 	Bytes []byte
 }
@@ -153,8 +230,9 @@ const (
 	TxDropped   TxStatus = "dropped"
 )
 
-// TxVerifier checks a built transaction offline. It recomputes the digest from
-// Payload, compares it to u.Digest, decodes Payload, and returns an error
+// TxVerifier checks one input of a built transaction offline (u is one sign
+// job: Digest and KeyRef of that input, the shared Payload). It recomputes the
+// digest from Payload, compares it to u.Digest, decodes Payload, and returns an error
 // unless destination, asset and amount match the intent. The signing gateway
 // runs it in the signing zone, with no chain access.
 type TxVerifier interface {

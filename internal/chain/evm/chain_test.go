@@ -311,7 +311,7 @@ func payloadOf(t *testing.T, u chain.UnsignedTx) Payload {
 
 func (e *tenv) mustBroadcast(u chain.UnsignedTx) string {
 	e.t.Helper()
-	s, err := e.ad.Assemble(u, sign(e.t, u, e.hotKey))
+	s, err := e.ad.Assemble(u, []chain.Signature{sign(e.t, u, e.hotKey)})
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -710,7 +710,7 @@ func TestDestinationChangeMovesNoAddressAndNeedsMatchingConfig(t *testing.T) {
 	if err := vOld.Verify(u, signjob.Intent{Kind: "sweep", ID: "s-new", PartitionID: "hot-0", Chain: "evm-anvil", Asset: "ETH", From: addr.Hex(), To: newDest.Hex(), Amount: "100"}); err == nil {
 		t.Fatal("verifier with the old sweep destination accepted the new one")
 	}
-	s, _ := ad.Assemble(u, sign(t, u, e.hotKey))
+	s, _ := ad.Assemble(u, []chain.Signature{sign(t, u, e.hotKey)})
 	h, err := ad.Broadcast(e.ctx, s)
 	if err != nil {
 		t.Fatal(err)
@@ -772,7 +772,7 @@ func TestDeployedFrozenDepositsArriveThenAdminStartsSweeping(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = tx.Commit(e.ctx)
-	s, _ := ad.Assemble(u, sign(t, u, e.hotKey))
+	s, _ := ad.Assemble(u, []chain.Signature{sign(t, u, e.hotKey)})
 	h, err := ad.Broadcast(e.ctx, s)
 	if err != nil {
 		t.Fatal(err)
@@ -1262,7 +1262,7 @@ func TestBroadcastWithoutAllocationIsRefused(t *testing.T) {
 	if _, err := e.pool.Exec(e.ctx, `DELETE FROM evm_nonce_allocations`); err != nil {
 		t.Fatal(err)
 	}
-	s, err := e.ad.Assemble(u, sign(t, u, e.hotKey))
+	s, err := e.ad.Assemble(u, []chain.Signature{sign(t, u, e.hotKey)})
 	if err != nil {
 		t.Fatal(err)
 	}

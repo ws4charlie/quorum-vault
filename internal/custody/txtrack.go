@@ -3,6 +3,7 @@ package custody
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -15,17 +16,30 @@ import (
 )
 
 // Owner is the business object a transaction belongs to: a withdrawal or a
-// sweep. The EVM nonce manager keys its allocations by (Kind, ID).
+// sweep. The chain cell keys what it reserves for the owner (EVM: a nonce) by (Kind, ID).
 type Owner struct {
 	Kind        string // "withdrawal" | "sweep" | "to-cold" | "rebalance"
 	ID          string
 	PartitionID string // partition whose key signs
 }
 
-// Track is the sign jobs of one purpose for an owner. The first job of a track
-// is "<prefix>:a1"; a retry of a failed job is "<prefix>:a2"; fee-bumped
+// Track is the sign jobs of one purpose for an owner. The first attempt of a
+// track is "<prefix>:a1"; a retry of a failed attempt is "<prefix>:a2"; fee-bumped
 // replacements are "<prefix>:r1", "<prefix>:r2", ...
+//
+// An attempt is one transaction and has one sign job per signature it needs. The
+// ID of an attempt is the ID of its first job, and the ID of input i > 0 is
+// "<attempt>.<i>". A transaction with one signature (every EVM transaction)
+// has the job IDs it always had.
 type Track string
+
+// JobAt is the ID of the sign job of input i of the attempt with ID attempt.
+func JobAt(attempt string, i int) string {
+	if i == 0 {
+		return attempt
+	}
+	return attempt + "." + strconv.Itoa(i)
+}
 
 // OwnerTrack is the track of the owner's own transaction.
 func OwnerTrack(o Owner) Track {
@@ -60,17 +74,59 @@ const (
 	JobFailed   = signjob.StatusFailed
 )
 
-// JobStatus reads a sign job.
-func (s *Service) JobStatus(ctx context.Context, jobID string) (status, reason string, err error) {
-	j, err := signjob.Get(ctx, s.Pool, jobID)
+// jobGroup reads every sign job of an attempt, input 0 first. The jobs of one attempt are enqueued in one
+// transaction, so the group is complete as soon as the first job exists.
+func jobGroup(ctx context.Context, q signjob.Querier, attempt string) ([]signjob.Job, error) {
+	first, err := signjob.Get(ctx, q, attempt)
+	if err != nil {
+		return nil, err
+	}
+	out := []signjob.Job{first}
+	for i := 1; ; i++ {
+		j, err := signjob.Get(ctx, q, JobAt(attempt, i))
+		if errors.Is(err, signjob.ErrNotFound) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+}
+
+// JobStatus reads an attempt: the state of all its sign jobs together. A refusal of any job refuses the attempt, at
+// once, whatever the others do. Otherwise it is pending until every job is done, and failed if one failed (the
+// signatures of the others stay valid, and a retry asks for them again).
+func (s *Service) JobStatus(ctx context.Context, attempt string) (status, reason string, err error) {
+	jobs, err := jobGroup(ctx, s.Pool, attempt)
 	if err != nil {
 		return "", "", err
 	}
-	switch j.Status {
-	case signjob.StatusDone, signjob.StatusRejected, signjob.StatusFailed:
-		return j.Status, j.RejectReason, nil
+	return groupStatus(jobs)
+}
+
+func groupStatus(jobs []signjob.Job) (status, reason string, err error) {
+	pending, failed, failedReason := false, false, ""
+	for _, j := range jobs {
+		switch j.Status {
+		case signjob.StatusRejected:
+			return signjob.StatusRejected, j.RejectReason, nil
+		case signjob.StatusFailed:
+			if !failed {
+				failed, failedReason = true, j.RejectReason
+			}
+		case signjob.StatusDone:
+		default:
+			pending = true
+		}
 	}
-	return JobPending, "", nil
+	switch {
+	case pending:
+		return JobPending, "", nil
+	case failed:
+		return signjob.StatusFailed, failedReason, nil
+	}
+	return signjob.StatusDone, "", nil
 }
 
 // JobExists reports whether the job row exists.
@@ -84,62 +140,87 @@ func unsignedOf(j signjob.Job) chain.UnsignedTx {
 	return chain.UnsignedTx{Chain: j.Chain, Digest: j.Digest, Payload: j.Payload, KeyRef: chain.KeyRef{PartitionID: j.PartitionID, Path: j.KeyRef}}
 }
 
-// SubmitJob assembles a done job's signature into a transaction and broadcasts
+// EnqueueUnsigned enqueues one sign job per input of u, as attempt's input jobs (see JobAt), with the intent and
+// approvals the gateway checks. Every job carries the intent's partition, and the key of its own input in KeyRef.
+// All of them go in the caller's transaction, so the attempt exists whole or not at all.
+func EnqueueUnsigned(ctx context.Context, tx pgx.Tx, attempt, partitionID string, u chain.UnsignedTx, intent []byte, approvals []signjob.Approval) error {
+	for i, in := range u.Inputs() {
+		if err := signjob.Enqueue(ctx, tx, signjob.Job{ID: JobAt(attempt, i), PartitionID: partitionID, KeyRef: in.KeyRef.Path, Chain: u.Chain,
+			Intent: intent, Digest: in.Digest, Payload: u.Payload, Approvals: approvals}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SubmitJob assembles a done attempt's signatures into a transaction and broadcasts
 // it. Rebroadcasting a transaction the node already knows is not an error, so
 // this is safe to repeat after a crash. It returns "" and sends nothing when the
-// owner's nonce is already decided.
-func (s *Service) SubmitJob(ctx context.Context, jobID string, o Owner) (string, error) {
-	j, err := signjob.Get(ctx, s.Pool, jobID)
+// owner's attempts are already decided.
+func (s *Service) SubmitJob(ctx context.Context, attempt string, o Owner) (string, error) {
+	jobs, err := jobGroup(ctx, s.Pool, attempt)
 	if err != nil {
 		return "", err
 	}
-	if j.Status != signjob.StatusDone {
-		return "", fmt.Errorf("custody: job %s is %s, not done", jobID, j.Status)
+	sigs := make([]chain.Signature, len(jobs))
+	for i, j := range jobs {
+		if j.Status != signjob.StatusDone {
+			return "", fmt.Errorf("custody: job %s is %s, not done", j.ID, j.Status)
+		}
+		sigs[i] = chain.Signature{Bytes: j.Signature}
 	}
-	// A restarted workflow may submit an old job whose transaction was replaced
-	// and the replacement mined: sending it would fail with "nonce too low" for
-	// ever. If the nonce is already decided, send nothing; the wait loop reports it.
-	n, err := s.NonceState(ctx, o)
+	// A restarted workflow may submit an old attempt whose transaction was replaced
+	// and the replacement mined: sending it would fail for ever (EVM: "nonce too
+	// low"). If the outcome is already decided, send nothing; the wait loop reports it.
+	n, err := s.AttemptState(ctx, o)
 	if err != nil {
 		return "", err
 	}
 	switch n.State {
-	case NonceMined, NonceReverted, NonceCancelled, NonceConsumed:
+	case AttemptMined, AttemptReverted, AttemptCancelled, AttemptConsumed:
 		return "", nil
 	}
-	st, err := s.Chain.Assemble(unsignedOf(j), chain.Signature{Bytes: j.Signature})
+	u := unsignedOf(jobs[0])
+	for _, j := range jobs[1:] {
+		u.More = append(u.More, chain.SigInput{Digest: j.Digest, KeyRef: chain.KeyRef{PartitionID: j.PartitionID, Path: j.KeyRef}})
+	}
+	st, err := s.Chain.Assemble(u, sigs)
 	if err != nil {
-		return "", fmt.Errorf("custody: assemble %s: %w", jobID, err)
+		return "", fmt.Errorf("custody: assemble %s: %w", attempt, err)
 	}
 	return s.Chain.Broadcast(ctx, st)
 }
 
-// RequeueJob enqueues newID as an exact copy (intent, digest, payload,
-// approvals) of a failed job. The gateway keeps its reservation for the digest,
-// so the copy gets the same signature, not a second one.
+// RequeueJob enqueues the attempt newID as an exact copy (intent, digest, payload,
+// approvals) of a failed attempt, job by job. The gateway keeps its reservation for each digest,
+// so every copy gets the same signature, not a second one: signatures already made come back as replays.
 func (s *Service) RequeueJob(ctx context.Context, failedID, newID string) error {
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		j, err := signjob.Get(ctx, tx, failedID)
+		jobs, err := jobGroup(ctx, tx, failedID)
 		if err != nil {
 			return err
 		}
-		j.ID = newID
-		if err := signjob.Enqueue(ctx, tx, j); err != nil {
-			return err
+		for i, j := range jobs {
+			j.ID = JobAt(newID, i)
+			if err := signjob.Enqueue(ctx, tx, j); err != nil {
+				return err
+			}
+			// A restarted workflow (an operator cleared a parked row after fixing the cause, e.g. unfreezing a keyset) meets a
+			// retry job that already exists and already failed. Failed means the signer had an operational problem, not that
+			// the request was refused, and the gateway keeps its reservation for the digest, so signing it again can only give
+			// the same signature. Without this the second failure would be final and the row would park again at once.
+			if _, err := tx.Exec(ctx, `UPDATE sign_jobs SET status='pending', locked_by=NULL, locked_at=NULL, updated_at=now() WHERE id=$1 AND status='failed'`, j.ID); err != nil {
+				return err
+			}
 		}
-		// A restarted workflow (an operator cleared a parked row after fixing the cause, e.g. unfreezing a keyset) meets a
-		// retry job that already exists and already failed. Failed means the signer had an operational problem, not that
-		// the request was refused, and the gateway keeps its reservation for the digest, so signing it again can only give
-		// the same signature. Without this the second failure would be final and the row would park again at once.
-		_, err = tx.Exec(ctx, `UPDATE sign_jobs SET status='pending', locked_by=NULL, locked_at=NULL, updated_at=now() WHERE id=$1 AND status='failed'`, newID)
-		return err
+		return nil
 	})
 }
 
 // EnqueueReplacement builds a fee-bumped replacement of the owner's pending
-// transaction at the same nonce and enqueues it as the track's n-th
+// transaction (EVM: at the same nonce) and enqueues it as the track's n-th
 // replacement, with the intent and approvals of the track's first job. It does
-// nothing if that job already exists (a repeat after a crash).
+// nothing if that attempt already exists (a repeat after a crash).
 func (s *Service) EnqueueReplacement(ctx context.Context, o Owner, t Track, n int) (string, error) {
 	id := t.Replacement(n)
 	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -160,16 +241,15 @@ func (s *Service) EnqueueReplacement(ctx context.Context, o Owner, t Track, n in
 		}
 		// The adapter names the first partition that shares the hot address; the
 		// intent (what approvers signed) names the owner's own partition.
-		u.KeyRef.PartitionID = first.PartitionID
-		return signjob.Enqueue(ctx, tx, signjob.Job{ID: id, PartitionID: first.PartitionID, KeyRef: u.KeyRef.Path, Chain: u.Chain,
-			Intent: first.Intent, Digest: u.Digest, Payload: u.Payload, Approvals: first.Approvals})
+		return EnqueueUnsigned(ctx, tx, id, first.PartitionID, u, first.Intent, first.Approvals)
 	})
 	return id, err
 }
 
-// EnqueueCancel builds a cancel (a zero-value self-send at the owner's nonce)
-// and enqueues it as the first job of the cancel track. Repeating it returns
-// the same job.
+// EnqueueCancel builds a cancel (EVM: a zero-value self-send at the owner's nonce)
+// and enqueues it as the first attempt of the cancel track. Repeating it returns
+// the same job. A chain without cancel (chain.ErrNotSupported) has nothing to free
+// after a refusal: it returns "" and the caller goes on.
 func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 	t := CancelTrack(o)
 	id := t.FirstJob()
@@ -181,129 +261,80 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 		if have {
 			return nil
 		}
-		var addr string
-		err := tx.QueryRow(ctx, `SELECT address FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3
-			AND status IN ('allocated','broadcast') ORDER BY nonce DESC LIMIT 1`, s.Cfg.Chain, o.Kind, o.ID).Scan(&addr)
-		if err != nil {
-			return fmt.Errorf("custody: no open nonce for %s %s to cancel: %w", o.Kind, o.ID, err)
-		}
 		u, err := s.Chain.BuildCancel(ctx, tx, o.Kind, o.ID)
 		if err != nil {
 			return err
 		}
-		u.KeyRef.PartitionID = o.PartitionID
+		res, err := s.Chain.Reservation(ctx, tx, o.Kind, o.ID)
+		if err != nil {
+			return err
+		}
+		if !res.Open {
+			return fmt.Errorf("custody: nothing reserved for %s %s to cancel", o.Kind, o.ID)
+		}
 		intent := signjob.Intent{Kind: "cancel", ID: string(t), PartitionID: o.PartitionID, Chain: s.Cfg.Chain,
-			Asset: s.Cfg.Native, To: addr, Amount: "0"}
+			Asset: s.Cfg.Native, To: res.Account, Amount: "0"}
 		ib, err := json.Marshal(intent)
 		if err != nil {
 			return err
 		}
-		return signjob.Enqueue(ctx, tx, signjob.Job{ID: id, PartitionID: o.PartitionID, KeyRef: u.KeyRef.Path, Chain: u.Chain,
-			Intent: ib, Digest: u.Digest, Payload: u.Payload})
+		return EnqueueUnsigned(ctx, tx, id, o.PartitionID, u, ib, nil)
 	})
+	if errors.Is(err, chain.ErrNotSupported) {
+		return "", nil
+	}
 	return id, err
 }
 
-// Attempt is one broadcast transaction at the owner's nonce.
-type Attempt struct {
-	Hash string
-	Kind string // "send" | "cancel"
-}
-
-// Attempts lists every transaction ever broadcast at the nonce of the owner:
-// the original, its replacements and any cancel. Any of them may be the one
-// that mined, so every decision looks at all of them.
-func (s *Service) Attempts(ctx context.Context, o Owner) ([]Attempt, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT at.tx_hash, at.kind FROM evm_tx_attempts at
-		JOIN evm_nonce_allocations al ON al.chain=at.chain AND al.address=at.address AND al.nonce=at.nonce
-		WHERE al.chain=$1 AND al.owner_kind=$2 AND al.owner_id=$3 ORDER BY at.created_at`, s.Cfg.Chain, o.Kind, o.ID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Attempt
-	for rows.Next() {
-		var a Attempt
-		if err := rows.Scan(&a.Hash, &a.Kind); err != nil {
-			return nil, err
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
-}
-
-// Nonce states.
+// Attempt states, as the workflows see them. The values are recorded in workflow histories: never change them.
 const (
-	NonceNone      = "none"      // nothing was ever broadcast at this nonce
-	NoncePending   = "pending"   // at least one attempt may still mine
-	NonceMined     = "mined"     // the owner's own transaction mined and succeeded
-	NonceReverted  = "reverted"  // the owner's own transaction mined and reverted
-	NonceCancelled = "cancelled" // a cancel mined: the nonce is free and the owner's transaction never will
-	NonceConsumed  = "consumed"  // the chain's nonce passed ours but none of our attempts mined: someone else used it
+	AttemptNone      = "none"      // nothing was ever broadcast for the owner
+	AttemptPending   = "pending"   // at least one attempt may still confirm
+	AttemptMined     = "mined"     // the owner's own transaction confirmed and succeeded
+	AttemptReverted  = "reverted"  // the owner's own transaction confirmed and failed (it paid its fee)
+	AttemptCancelled = "cancelled" // a cancel confirmed: what the owner reserved is free and its own transaction never will
+	AttemptConsumed  = "consumed"  // what the owner reserved was used by something we did not make, and no attempt of ours confirmed
 )
 
-// NonceOutcome is the combined state of every attempt at an owner's nonce.
-type NonceOutcome struct {
+// AttemptOutcome is the combined state of every attempt of an owner.
+type AttemptOutcome struct {
 	State string
 	Hash  string // the attempt that decided it (mined, reverted, cancelled)
 	Kind  string
-	Fee   string // decimal wei of the deciding attempt; empty unless decided
+	// Detail says what was consumed, for the alert (consumed only).
+	Detail string
 }
 
-// NonceState looks at all attempts. A final mined transaction decides it, and
-// which one it was matters: the withdrawal itself, or the cancel.
-func (s *Service) NonceState(ctx context.Context, o Owner) (NonceOutcome, error) {
-	return s.nonceState(ctx, o)
-}
-
-func (s *Service) nonceState(ctx context.Context, o Owner) (NonceOutcome, error) {
-	atts, err := s.Attempts(ctx, o)
+// AttemptState looks at all attempts through the chain cell (chain.Adapter.Outcome) and names the result as the
+// workflows know it. A confirmed attempt decides it, and which one it was matters: the withdrawal itself, or the cancel.
+func (s *Service) AttemptState(ctx context.Context, o Owner) (AttemptOutcome, error) {
+	oc, err := s.Chain.Outcome(ctx, o.Kind, o.ID)
 	if err != nil {
-		return NonceOutcome{}, err
+		return AttemptOutcome{}, err
 	}
-	if len(atts) == 0 {
-		return NonceOutcome{State: NonceNone}, nil
-	}
-	dropped := 0
-	for _, a := range atts {
-		st, err := s.Chain.Status(ctx, a.Hash)
-		if err != nil {
-			return NonceOutcome{}, err
+	switch oc.State {
+	case chain.OutcomeConsumed:
+		return AttemptOutcome{State: AttemptConsumed, Detail: oc.Detail}, nil
+	case chain.OutcomeConfirmed:
+		switch {
+		case oc.Kind == chain.AttemptCancel:
+			return AttemptOutcome{State: AttemptCancelled, Hash: oc.Hash, Kind: "cancel"}, nil
+		case oc.Failed:
+			return AttemptOutcome{State: AttemptReverted, Hash: oc.Hash, Kind: "send"}, nil
 		}
-		switch st {
-		case chain.TxConfirmed:
-			if a.Kind == "cancel" {
-				return NonceOutcome{State: NonceCancelled, Hash: a.Hash, Kind: a.Kind}, nil
-			}
-			return NonceOutcome{State: NonceMined, Hash: a.Hash, Kind: a.Kind}, nil
-		case chain.TxFailed:
-			if a.Kind == "cancel" {
-				return NonceOutcome{State: NonceCancelled, Hash: a.Hash, Kind: a.Kind}, nil
-			}
-			return NonceOutcome{State: NonceReverted, Hash: a.Hash, Kind: a.Kind}, nil
-		case chain.TxDropped:
-			dropped++
-		}
+		return AttemptOutcome{State: AttemptMined, Hash: oc.Hash, Kind: "send"}, nil
 	}
-	if dropped == len(atts) {
-		// Status reports dropped only when the sender's nonce has already passed
-		// the attempt's and the attempt has no receipt: a transaction we did not
-		// make used our nonce. A merely forgotten transaction stays pending.
-		return NonceOutcome{State: NonceConsumed}, nil
+	if oc.Attempts == 0 {
+		return AttemptOutcome{State: AttemptNone}, nil
 	}
-	return NonceOutcome{State: NoncePending}, nil
+	return AttemptOutcome{State: AttemptPending}, nil
 }
 
-// NonceOpen reports whether the owner still has a nonce allocation that is not
-// final. While it is, some signature at that nonce may yet be broadcast by
-// someone, so the owner's funds must not be released.
-func (s *Service) NonceOpen(ctx context.Context, q interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}, o Owner) (bool, error) {
-	var n int
-	err := q.QueryRow(ctx, `SELECT count(*) FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3
-		AND status IN ('allocated','broadcast')`, s.Cfg.Chain, o.Kind, o.ID).Scan(&n)
-	return n > 0, err
+// ReservationOpen reports whether the owner still holds something on the chain side that is not final. While it
+// does, some signature for it may yet be broadcast by someone, so the owner's funds must not be released.
+func (s *Service) ReservationOpen(ctx context.Context, q chain.Querier, o Owner) (bool, error) {
+	r, err := s.Chain.Reservation(ctx, q, o.Kind, o.ID)
+	return r.Open, err
 }
 
 // WaitJob polls a job until it is no longer pending or max elapses, and returns

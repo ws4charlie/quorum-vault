@@ -252,7 +252,7 @@ func TestGuardUniqueKeysBackstopTheLock(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 	rel := Release{IntentID: "i1", IntentHash: []byte{1}, Kind: "withdrawal", Asset: "ETH", Amount: big.NewInt(1), Sender: "s",
-		Nonce: 3, Digest: []byte{9}, Tip: big.NewInt(1), FeeCap: big.NewInt(2), Signature: []byte{5}, At: time.Now(), NewIntent: true}
+		Claims: []string{"s#3"}, NewClaims: []string{"s#3"}, Digest: []byte{9}, Fees: []*big.Int{big.NewInt(2), big.NewInt(1)}, Signature: []byte{5}, At: time.Now(), NewIntent: true}
 	err := h.guard.Do(ctx, testChain, func(gt *GuardTx) error { return gt.Record(ctx, rel) })
 	if err != nil {
 		t.Fatal(err)

@@ -403,7 +403,11 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 // Assemble attaches sig (64 bytes r||s, or 65 bytes r||s||v with v in
 // {0,1,27,28}) to the payload's transaction. S is normalized to low-S and the
 // recovery id is chosen so that the signature recovers to the payload's sender.
-func (a *Adapter) Assemble(u chain.UnsignedTx, sig chain.Signature) (chain.SignedTx, error) {
+func (a *Adapter) Assemble(u chain.UnsignedTx, sigs []chain.Signature) (chain.SignedTx, error) {
+	if len(sigs) != 1 || len(u.More) != 0 {
+		return chain.SignedTx{}, fmt.Errorf("evm: a transaction has exactly one signature, got %d for %d inputs", len(sigs), 1+len(u.More))
+	}
+	sig := sigs[0]
 	pl, err := decodePayload(u.Payload)
 	if err != nil {
 		return chain.SignedTx{}, err

@@ -463,8 +463,7 @@ func (s *Service) BuildWithdrawalJob(ctx context.Context, id string) (string, er
 		if err != nil {
 			return err
 		}
-		if err := signjob.Enqueue(ctx, tx, signjob.Job{ID: jobID, PartitionID: w.PartitionID, KeyRef: u.KeyRef.Path, Chain: u.Chain,
-			Intent: ib, Digest: u.Digest, Payload: u.Payload, Approvals: w.Approvals}); err != nil {
+		if err := EnqueueUnsigned(ctx, tx, jobID, w.PartitionID, u, ib, w.Approvals); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE withdrawals SET status='signing', job_id=$2, updated_at=now() WHERE id=$1`, id, jobID); err != nil {
@@ -526,7 +525,7 @@ func (s *Service) SettleWithdrawal(ctx context.Context, id, txHash string) error
 }
 
 // VoidWithdrawal releases the hold and ends the withdrawal as failed. It
-// refuses (ErrNonceOpen) while the withdrawal's nonce is still live: a
+// refuses (ErrReservationOpen) while the transaction still holds a live reservation (EVM: its nonce): a
 // signature at that nonce might yet be broadcast, so releasing the money would
 // risk paying twice. feeTx, if set, is a transaction of ours that mined at the
 // nonce (a reverted withdrawal or a cancel) whose fee is recorded.
@@ -549,12 +548,12 @@ func (s *Service) VoidWithdrawal(ctx context.Context, id, reason, feeTx string) 
 		if w.Status == WdConfirmed {
 			return fmt.Errorf("custody: withdrawal %s is already confirmed", id)
 		}
-		open, err := s.NonceOpen(ctx, tx, w.Owner())
+		open, err := s.ReservationOpen(ctx, tx, w.Owner())
 		if err != nil {
 			return err
 		}
 		if open {
-			return ErrNonceOpen
+			return ErrReservationOpen
 		}
 		if err := s.Led.Void(ctx, tx, "wd-hold:"+id, "wd-void:"+id); err != nil {
 			return err

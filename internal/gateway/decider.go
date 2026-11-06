@@ -5,13 +5,12 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"time"
-
-	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
@@ -49,11 +48,11 @@ func NewDecider(cfg *Config, codecs map[string]ChainCodec, guard *Guard, mode Mo
 	return &Decider{cfg: cfg, codecs: codecs, guard: guard, mode: mode, now: now}
 }
 
-// NewCodecs builds the per-chain codecs of a config.
+// NewCodecs builds the per-chain codecs of a config, through NewCodec.
 func NewCodecs(cfg *Config) (map[string]ChainCodec, error) {
 	codecs := map[string]ChainCodec{}
 	for name, cc := range cfg.Chains {
-		c, err := NewEVMCodec(cc.EVM)
+		c, err := NewCodec(cc)
 		if err != nil {
 			return nil, err
 		}
@@ -134,7 +133,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 	approvers := d.validApprovers(hash[:], job.Approvals)
 	valid := len(approvers)
 	arec.intent = &intentFacts{ID: intent.ID, Kind: intent.Kind, Asset: intent.Asset, Amount: amount.String(), Sender: info.Sender,
-		Nonce: info.Nonce, IntentHash: hash[:]}
+		Claims: info.Claims, IntentHash: hash[:]}
 	arec.approvers = approvers
 	if intent.Kind == "withdrawal" && valid == 0 {
 		return nil, reject(ReasonApprovals, "no valid approval from a configured, enabled approver")
@@ -161,8 +160,8 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 
 		// 5. Replay guard.
 		rel := Release{IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
-			Sender: info.Sender, Nonce: info.Nonce, Digest: job.Digest, Tip: info.Tip, FeeCap: info.FeeCap, At: now}
-		prior, err := d.replay(ctx, gt, intent, rec, &rel)
+			Sender: info.Sender, Claims: info.Claims, Digest: job.Digest, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
+		prior, err := d.replay(ctx, gt, intent, rec, codec, &rel)
 		if err != nil {
 			return err
 		}
@@ -198,6 +197,17 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 		return nil, err
 	}
 	return v, nil
+}
+
+// payloadHash identifies the transaction a job belongs to: the jobs of one transaction (one per signature) share it.
+func payloadHash(payload []byte) []byte {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, payload); err != nil {
+		buf.Reset()
+		buf.Write(payload)
+	}
+	h := sha256.Sum256(buf.Bytes())
+	return h[:]
 }
 
 var errInProgress = errors.New("another worker is signing this digest")
@@ -273,8 +283,8 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 			return reject(ReasonPolicyAsset, "no policy for %s on %s", i.Asset, cc.Name)
 		}
 		// Where the money goes is read from the transaction, not from the intent: the intent is what the business zone claims.
-		dest := common.HexToAddress(info.Destination)
-		if !common.IsHexAddress(info.Destination) || !p.AllowsDestination(dest) {
+		dest, derr := codec.Canonical(info.Destination)
+		if derr != nil || !p.AllowsDestination(dest) {
 			return reject(ReasonDestination, "%s is not a configured %s withdrawal destination on %s", info.Destination, i.Asset, cc.Name)
 		}
 		if amount.Cmp(p.PerTxCap) > 0 {
@@ -384,11 +394,19 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 // replay applies the replay-guard rules. It returns the stored signature when
 // the record of a digest already reserved or signed for this intent (the
 // caller returns its signature, waits, or signs it again if the reservation is
-// stale), or nil with rel's NewIntent/TakeNonce set when a new digest may be reserved.
-func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec *IntentRecord, rel *Release) (*SigRecord, error) {
-	claim, err := gt.NonceClaim(ctx, rel.Sender, rel.Nonce)
-	if err != nil {
-		return nil, err
+// stale), or nil with rel's NewIntent/NewClaims/TakeClaims set when a new digest may be reserved.
+//
+// The rules are the same on every chain; the codec decides what a claim is and what raising the fees means.
+// A claim is held by one intent. A known intent may add another digest of the same transaction (another input to
+// sign), or one of a replacement that has the same claims and higher fees.
+func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec *IntentRecord, codec ChainCodec, rel *Release) (*SigRecord, error) {
+	claims := map[string]*Claim{}
+	for _, c := range rel.Claims {
+		cl, err := gt.Claim(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+		claims[c] = cl
 	}
 	if rec != nil {
 		if !bytes.Equal(rec.Hash, rel.IntentHash) {
@@ -401,23 +419,30 @@ func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec
 		if prior != nil && prior.IntentID != i.ID {
 			return nil, reject(ReasonIntentChanged, "digest was signed for intent %s", prior.IntentID)
 		}
-		if prior == nil && (rec.Nonce != rel.Nonce || rec.Sender != rel.Sender) {
-			// A new digest for a known intent is only a replacement at the same nonce.
-			return nil, reject(ReasonNonceChanged, "intent %s was signed at nonce %d of %s, not nonce %d", i.ID, rec.Nonce, rec.Sender, rel.Nonce)
+		if prior == nil && (!sameSet(rec.Claims, rel.Claims) || rec.Sender != rel.Sender) {
+			// A new digest for a known intent is only a replacement that consumes the same things.
+			return nil, reject(ReasonNonceChanged, "intent %s was signed against %v of %s, not %v", i.ID, rec.Claims, rec.Sender, rel.Claims)
 		}
-		if claim == nil || claim.IntentID != i.ID {
-			// The intent's nonce is gone: a cancel (or another intent) owns it.
-			return nil, reject(ReasonNonceCancel, "nonce %d of %s no longer belongs to intent %s", rel.Nonce, rel.Sender, i.ID)
+		for _, c := range rel.Claims {
+			if cl := claims[c]; cl == nil || cl.IntentID != i.ID {
+				// What the intent consumed is gone: a cancel (or another intent) owns it.
+				return nil, reject(ReasonNonceCancel, "%s of %s no longer belongs to intent %s", c, rel.Sender, i.ID)
+			}
 		}
 		if prior != nil {
 			return prior, nil
+		}
+		if same, err := gt.SameTx(ctx, i.ID, rel.PayloadHash); err != nil {
+			return nil, err
+		} else if same != nil {
+			return nil, nil // another signature of a transaction already being signed: no replacement, no fee check
 		}
 		last, err := gt.LatestSig(ctx, i.ID)
 		if err != nil {
 			return nil, err
 		}
-		if last != nil && !feesHigher(rel, last) {
-			return nil, reject(ReasonFeeNotHigher, "fees tip %s cap %s do not exceed the signed tip %s cap %s", rel.Tip, rel.FeeCap, last.Tip, last.FeeCap)
+		if last != nil && !codec.FeesRaised(last.Fees, rel.Fees) {
+			return nil, reject(ReasonFeeNotHigher, "fees %v do not exceed the signed fees %v", rel.Fees, last.Fees)
 		}
 		return nil, nil
 	}
@@ -427,22 +452,38 @@ func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec
 		return nil, reject(ReasonIntentChanged, "digest was signed for intent %s", prior.IntentID)
 	}
 	rel.NewIntent = true
-	if claim == nil {
-		return nil, nil
+	for _, c := range rel.Claims {
+		cl := claims[c]
+		switch {
+		case cl == nil:
+			rel.NewClaims = append(rel.NewClaims, c)
+		case cl.Kind == "cancel":
+			return nil, reject(ReasonNonceCancel, "%s of %s was consumed by cancel %s", c, rel.Sender, cl.IntentID)
+		case i.Kind == "cancel":
+			rel.TakeClaims = append(rel.TakeClaims, c) // a cancel may replace what is pending at the claim
+		default:
+			return nil, reject(ReasonNonceTaken, "%s of %s already signed for intent %s", c, rel.Sender, cl.IntentID)
+		}
 	}
-	switch {
-	case claim.Kind == "cancel":
-		return nil, reject(ReasonNonceCancel, "nonce %d of %s was consumed by cancel %s", rel.Nonce, rel.Sender, claim.IntentID)
-	case i.Kind == "cancel":
-		rel.TakeNonce = true // a cancel may replace what is pending at the nonce
-		return nil, nil
-	default:
-		return nil, reject(ReasonNonceTaken, "nonce %d of %s already signed for intent %s", rel.Nonce, rel.Sender, claim.IntentID)
-	}
+	return nil, nil
 }
 
-// feesHigher: neither fee drops and at least one rises.
-func feesHigher(r *Release, last *SigRecord) bool {
-	a, b := r.Tip.Cmp(last.Tip), r.FeeCap.Cmp(last.FeeCap)
-	return a >= 0 && b >= 0 && (a > 0 || b > 0)
+// sameSet reports whether a and b hold the same strings.
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := map[string]int{}
+	for _, x := range a {
+		m[x]++
+	}
+	for _, x := range b {
+		m[x]--
+	}
+	for _, n := range m {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }

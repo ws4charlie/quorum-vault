@@ -39,7 +39,7 @@ type auditRecord struct {
 
 type intentFacts struct {
 	ID, Kind, Asset, Amount, Sender string
-	Nonce                           uint64
+	Claims                          []string
 	IntentHash                      []byte
 }
 
@@ -53,7 +53,7 @@ func (m Mode) actor() string {
 func (r auditRecord) event(typ string) (domain.AuditEvent, error) {
 	p := map[string]any{"job": r.job.ID, "chain": r.job.Chain, "partition": r.job.PartitionID, "digest": hex.EncodeToString(r.job.Digest)}
 	if f := r.intent; f != nil {
-		p["intent"], p["kind"], p["asset"], p["amount"], p["sender"], p["nonce"] = f.ID, f.Kind, f.Asset, f.Amount, f.Sender, f.Nonce
+		p["intent"], p["kind"], p["asset"], p["amount"], p["sender"], p["claims"] = f.ID, f.Kind, f.Asset, f.Amount, f.Sender, f.Claims
 		p["intent_hash"] = hex.EncodeToString(f.IntentHash)
 	}
 	if r.approvers != nil {
