@@ -8,7 +8,7 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
+.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down test-e2e-btc-deposits setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
 
 setup: softhsm db-up chain-up
 
@@ -116,6 +116,18 @@ test-e2e-evm-tx-failures:
 # recovery keeps one crash boundary on pull requests: the worker dies right after the broadcast.
 test-e2e-evm-recovery:
 	$(E2E_EVM_ENV) QV_CRASH_BOUNDARIES=withdrawal.after_broadcast go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_RECOVERY)' ./e2e/custody/...
+
+# ---- Bitcoin cell (P7). All Bitcoin e2e runs on real mpc-party: HSM mode has no HD derivation. Jobs are named e2e-btc-<group>.
+# Needs `make btc-up infra-up softhsm mpc-build`, Postgres, and bitcoind regtest on QV_BTC_RPC (default http://127.0.0.1:18443).
+btc-up:
+	docker compose --profile btc up -d --wait bitcoind
+
+btc-down:
+	docker compose --profile btc rm -sfv bitcoind
+
+E2E_BTC_ENV := QV_REQUIRE_BTC=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1
+test-e2e-btc-deposits:
+	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v ./e2e/btc/...
 
 # cb-mpc signing path end to end (needs the C++ build once: `make mpc-build`; Postgres; anvil on 127.0.0.1:18545 with chain
 # id 11155111 for the mining test: docker run -d --name qv-anvil-p5b3 -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111").

@@ -2,6 +2,8 @@ package custody
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -27,11 +29,24 @@ func (s *Service) Cursor(ctx context.Context) (uint64, error) {
 // already inserted are skipped, so each is credited exactly once.
 // It returns the number of deposits newly credited (or sent to suspense).
 func (s *Service) ScanOnce(ctx context.Context) (int, error) {
+	if halted, reason, err := s.ScanHalted(ctx); err != nil {
+		return 0, err
+	} else if halted {
+		return 0, fmt.Errorf("%w: %s", ErrScanHalted, reason)
+	}
 	from, err := s.Cursor(ctx)
 	if err != nil {
 		return 0, err
 	}
 	res, err := s.Chain.Scan(ctx, from)
+	if errors.Is(err, chain.ErrReorgTooDeep) {
+		// The chain no longer holds blocks that were read and credited from. Nothing is reversed: scanning for this chain stops
+		// and an operator looks. The row is the stop; deleting it resumes.
+		if herr := s.haltScan(ctx, err.Error()); herr != nil {
+			return 0, herr
+		}
+		return 0, fmt.Errorf("%w: %s", ErrScanHalted, err.Error())
+	}
 	if err != nil {
 		return 0, fmt.Errorf("custody: scan: %w", err)
 	}
@@ -63,8 +78,62 @@ func (s *Service) ApplyScan(ctx context.Context, from uint64, res chain.ScanResu
 				n++
 			}
 		}
+		for _, b := range res.Blocks {
+			if _, err := tx.Exec(ctx, `INSERT INTO scanned_blocks (chain, height, hash) VALUES ($1,$2,$3)
+				ON CONFLICT (chain, height) DO UPDATE SET hash = EXCLUDED.hash, scanned_at = now()`, c.Chain, int64(b.Height), b.Hash); err != nil {
+				return err
+			}
+		}
+		for _, d := range res.Deferred {
+			raw, err := json.Marshal(d.Deposit)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO deferred_deposits (dedup_key, chain, release_at, deposit) VALUES ($1,$2,$3,$4::jsonb)
+				ON CONFLICT (dedup_key) DO NOTHING`, d.Deposit.DedupKey, c.Chain, int64(d.ReleaseAt), string(raw)); err != nil {
+				return err
+			}
+		}
+		covered := int64(from) - 1
 		if next := res.SafeHeadHeight + 1; next > from {
+			covered = int64(res.SafeHeadHeight)
 			if _, err := tx.Exec(ctx, `UPDATE chain_cursors SET next_height=$2, updated_at=now() WHERE chain=$1`, c.Chain, int64(next)); err != nil {
+				return err
+			}
+		}
+		// Deferred deposits whose release height the scan now covers are credited, once.
+		rows, err := tx.Query(ctx, `SELECT dedup_key, deposit FROM deferred_deposits WHERE chain=$1 AND release_at <= $2 ORDER BY release_at, dedup_key`, c.Chain, covered)
+		if err != nil {
+			return err
+		}
+		var due []chain.ObservedDeposit
+		for rows.Next() {
+			var key string
+			var raw []byte
+			if err := rows.Scan(&key, &raw); err != nil {
+				rows.Close()
+				return err
+			}
+			var d chain.ObservedDeposit
+			if err := json.Unmarshal(raw, &d); err != nil {
+				rows.Close()
+				return fmt.Errorf("custody: deferred deposit %s: %w", key, err)
+			}
+			due = append(due, d)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, d := range due {
+			credited, err := s.creditDeposit(ctx, tx, d)
+			if err != nil {
+				return err
+			}
+			if credited {
+				n++
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM deferred_deposits WHERE dedup_key=$1`, d.DedupKey); err != nil {
 				return err
 			}
 		}
@@ -122,4 +191,23 @@ func bigOrZero(s *string) *big.Int {
 		return new(big.Int)
 	}
 	return parseBig(*s)
+}
+
+// ErrScanHalted is returned while scanning of the chain is stopped by an operator-visible halt (see haltScan).
+var ErrScanHalted = errors.New("custody: scanning is halted")
+
+// ScanHalted reports whether scanning of this chain was stopped, and why.
+func (s *Service) ScanHalted(ctx context.Context) (bool, string, error) {
+	var reason string
+	err := s.Pool.QueryRow(ctx, `SELECT reason FROM scan_halts WHERE chain=$1`, s.Cfg.Chain).Scan(&reason)
+	if isNoRows(err) {
+		return false, "", nil
+	}
+	return err == nil, reason, err
+}
+
+// haltScan records that the chain was rewritten below the safe depth. Already credited deposits stay as they are.
+func (s *Service) haltScan(ctx context.Context, reason string) error {
+	_, err := s.Pool.Exec(ctx, `INSERT INTO scan_halts (chain, reason) VALUES ($1,$2) ON CONFLICT (chain) DO NOTHING`, s.Cfg.Chain, reason)
+	return err
 }

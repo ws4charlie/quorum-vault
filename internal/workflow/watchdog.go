@@ -51,6 +51,7 @@ type watchState struct {
 type Watchdog struct {
 	Engine     Engine
 	Chain      string
+	Family     string                                      // default evm: decides which loops are watched
 	OpenOwners func(ctx context.Context) ([]string, error) // ids of unfinished withdrawals and sweeps
 	Interval   time.Duration                               // how often to look; default 15 s
 	StallAfter time.Duration                               // no progress for this long is a stall; default 2 min
@@ -116,7 +117,7 @@ func (w *Watchdog) stalled(id string, p Progress) (stalled, firstTime bool) {
 
 // Check is one pass.
 func (w *Watchdog) Check(ctx context.Context) {
-	for _, l := range loopSpecs(w.Chain) {
+	for _, l := range loopSpecsFor(w.Family, w.Chain) {
 		p, err := w.Engine.Describe(ctx, l.id)
 		if err != nil {
 			w.log().Warn("watchdog: cannot describe loop", "workflow", l.id, "err", err)
@@ -166,10 +167,11 @@ func (w *Watchdog) Check(ctx context.Context) {
 // ---- Temporal-backed engine ----
 
 type temporalEngine struct {
-	c     client.Client
-	queue string
-	t     Timings
-	chain string
+	c      client.Client
+	queue  string
+	t      Timings
+	chain  string
+	family string
 }
 
 // NewEngine is the Engine on a Temporal client.
@@ -177,7 +179,7 @@ func NewEngine(c client.Client, queue string, cfg *custody.Config) Engine {
 	if queue == "" {
 		queue = DefaultTaskQueue
 	}
-	return &temporalEngine{c: c, queue: queue, t: DefaultTimings(cfg), chain: cfg.Chain}
+	return &temporalEngine{c: c, queue: queue, t: DefaultTimings(cfg), chain: cfg.Chain, family: cfg.Family}
 }
 
 func (e *temporalEngine) Describe(ctx context.Context, id string) (Progress, error) {
@@ -199,7 +201,7 @@ func (e *temporalEngine) Terminate(ctx context.Context, id, runID, reason string
 }
 
 func (e *temporalEngine) StartLoop(ctx context.Context, id string) error {
-	for _, l := range loopSpecs(e.chain) {
+	for _, l := range loopSpecsFor(e.family, e.chain) {
 		if l.id == id {
 			return startLoop(ctx, e.c, e.queue, e.t, l)
 		}

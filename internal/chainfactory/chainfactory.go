@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 )
@@ -43,6 +44,12 @@ func Open(ctx context.Context, cfg *custody.Config, pool *pgxpool.Pool) (*Backen
 			return nil, err
 		}
 		return &Backend{Adapter: adapter, Reader: reader, closers: []func(){adapter.Close, reader.Close}}, nil
+	case custody.FamilyBTC:
+		adapter, err := btc.New(ctx, cfg.BTC, pool)
+		if err != nil {
+			return nil, err
+		}
+		return &Backend{Adapter: adapter, Reader: adapter, closers: []func(){adapter.Close}}, nil
 	}
 	return nil, fmt.Errorf("chainfactory: chain %q: unknown chain family %q", cfg.Chain, cfg.Family)
 }

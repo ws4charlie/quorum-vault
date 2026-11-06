@@ -17,12 +17,16 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
-// FamilyEVM is the chain family of every chain cell so far.
-const FamilyEVM = "evm"
+// Chain families.
+const (
+	FamilyEVM = "evm"
+	FamilyBTC = "btc"
+)
 
 // File is the JSON form of Config. Amounts are canonical decimal strings,
 // durations are Go duration strings.
@@ -82,7 +86,9 @@ type HotLimits struct{ Low, High, Target *big.Int }
 type ChainFile struct {
 	// Family names the kind of chain: which adapter and reader a process opens for it (internal/chainfactory). Default
 	// "evm". An unknown family refuses to start. The fields below are those of the evm family.
-	Family           string               `json:"family,omitempty"`
+	Family string `json:"family,omitempty"`
+	// BTC is the section of the btc family; the evm fields below are not read for it.
+	BTC              *BTCFile             `json:"btc,omitempty"`
 	Name             string               `json:"name"`
 	ChainID          uint64               `json:"chain_id"`
 	RPCURL           string               `json:"rpc_url"`
@@ -147,8 +153,9 @@ type ScanFile struct {
 // Config is the validated form of File.
 type Config struct {
 	Entity string
-	Family string // FamilyEVM
+	Family string // FamilyEVM or FamilyBTC
 	EVM    evm.Config
+	BTC    btc.Config // the btc family
 	Chain  string
 	Native string
 
@@ -241,6 +248,51 @@ func amount(what, s string) (*big.Int, error) {
 	return n, nil
 }
 
+// BTCFile is the btc family's section of the business config. The core holds only the account's public key.
+type BTCFile struct {
+	Network       string   `json:"network"` // regtest, testnet3, signet or mainnet
+	RPCURL        string   `json:"rpc_url"`
+	RPCUser       string   `json:"rpc_user"`
+	RPCPassword   string   `json:"rpc_password"`
+	Confirmations uint64   `json:"confirmations"` // default 6
+	AccountXpub   string   `json:"account_xpub"`  // m/84'/coin'/0', from mpc-party Node
+	HotAddresses  []string `json:"hot_addresses"`
+	BatchBlocks   uint64   `json:"batch_blocks"` // blocks per scan call, default 100
+}
+
+// buildBTC reads the btc family's section and its assets (the native one only: bitcoin has no tokens here). It refuses a key or
+// address that belongs to another network than the config names.
+func (c *Config) buildBTC(cf ChainFile) error {
+	b := cf.BTC
+	if b == nil {
+		return errors.New("custody: config: family btc needs a chain.btc section")
+	}
+	c.BTC = btc.Config{Chain: cf.Name, Network: b.Network, RPCURL: b.RPCURL, RPCUser: b.RPCUser, RPCPass: b.RPCPassword,
+		Confirmations: b.Confirmations, AccountXpub: b.AccountXpub, HotAddresses: b.HotAddresses, BatchBlocks: b.BatchBlocks}
+	if err := c.BTC.Validate(); err != nil {
+		return fmt.Errorf("custody: config: %w", err)
+	}
+	c.SinkShard = -1
+	if len(cf.Assets) != 1 {
+		return fmt.Errorf("custody: config: family btc has exactly one asset, %s", btc.Native)
+	}
+	af, ok := cf.Assets[btc.Native]
+	if !ok || af.Address != "" || c.Native != btc.Native {
+		return fmt.Errorf("custody: config: family btc has exactly one asset, %s, with no address", btc.Native)
+	}
+	if af.Decimals != btc.Decimals {
+		return fmt.Errorf("custody: config: %s has %d decimals", btc.Native, btc.Decimals)
+	}
+	min, err := amount(btc.Native+" min_deposit", orZero(af.MinDeposit))
+	if err != nil {
+		return err
+	}
+	// PriceWei is the evm sweep rule's unit; bitcoin's sweep rule is a later task.
+	c.Assets[btc.Native] = Asset{Symbol: btc.Native, Decimals: btc.Decimals, MinDeposit: min, PriceWei: big.NewInt(1)}
+	c.AssetList = []string{btc.Native}
+	return nil
+}
+
 // Build validates f.
 func (f File) Build() (*Config, error) {
 	c := &Config{Entity: f.Entity, Chain: f.Chain.Name, Native: f.Chain.NativeAsset, Assets: map[string]Asset{}, Tiers: map[string][]Tier{}}
@@ -254,84 +306,27 @@ func (f File) Build() (*Config, error) {
 	switch cf.Family {
 	case "", FamilyEVM:
 		c.Family = FamilyEVM
+	case FamilyBTC:
+		c.Family = FamilyBTC
+		if f.Chain.NativeAsset == "" {
+			c.Native = btc.Native
+		}
 	default:
-		return nil, fmt.Errorf("custody: config: unknown chain family %q (known: %s)", cf.Family, FamilyEVM)
+		return nil, fmt.Errorf("custody: config: unknown chain family %q (known: %s, %s)", cf.Family, FamilyEVM, FamilyBTC)
 	}
 	if cf.Name == "" || strings.ContainsAny(cf.Name, ":/") {
 		return nil, errors.New("custody: config: chain name must be non-empty and contain no ':' or '/'")
 	}
-	if len(cf.HotShards) == 0 {
-		return nil, errors.New("custody: config: at least one hot shard")
+	var hot map[string]common.Address
+	var err error
+	switch c.Family {
+	case FamilyBTC:
+		err = c.buildBTC(cf)
+	default:
+		hot, err = c.buildEVM(cf)
 	}
-	for i, a := range cf.HotShards {
-		if !common.IsHexAddress(a) {
-			return nil, fmt.Errorf("custody: config: hot shard %d %q is not an address", i, a)
-		}
-		c.HotShards = append(c.HotShards, common.HexToAddress(a))
-	}
-	if !common.IsHexAddress(cf.Factory) || !common.IsHexAddress(cf.SweepDestination) {
-		return nil, errors.New("custody: config: factory and sweep_destination must be addresses")
-	}
-	dest := common.HexToAddress(cf.SweepDestination)
-	c.SinkShard = -1
-	for i, a := range c.HotShards {
-		if a == dest {
-			c.SinkShard = i
-			break
-		}
-	}
-	if c.SinkShard < 0 {
-		return nil, errors.New("custody: config: sweep_destination must be one of hot_shards (swept funds land on a hot wallet)")
-	}
-	fee, err := amount("max_tx_fee_wei", cf.MaxTxFeeWei)
 	if err != nil {
 		return nil, err
-	}
-	if len(f.Chain.Assets) == 0 {
-		return nil, errors.New("custody: config: no assets")
-	}
-	evmAssets := map[string]evm.Token{}
-	for sym, af := range cf.Assets {
-		if sym == "" || strings.ContainsAny(sym, ":/") {
-			return nil, fmt.Errorf("custody: config: bad asset symbol %q", sym)
-		}
-		a := Asset{Symbol: sym, Decimals: af.Decimals}
-		if af.Address != "" {
-			if !common.IsHexAddress(af.Address) {
-				return nil, fmt.Errorf("custody: config: asset %s address %q", sym, af.Address)
-			}
-			a.Address = common.HexToAddress(af.Address)
-			evmAssets[sym] = evm.Token{Address: a.Address, Decimals: uint8(af.Decimals)}
-		} else if sym != c.Native {
-			return nil, fmt.Errorf("custody: config: asset %s has no address and is not the native asset %s", sym, c.Native)
-		}
-		if a.MinDeposit, err = amount(sym+" min_deposit", orZero(af.MinDeposit)); err != nil {
-			return nil, err
-		}
-		if a.PriceWei, err = amount(sym+" price_wei", orZero(af.PriceWei)); err != nil {
-			return nil, err
-		}
-		if a.PriceWei.Sign() == 0 {
-			return nil, fmt.Errorf("custody: config: asset %s needs price_wei > 0", sym)
-		}
-		c.Assets[sym] = a
-		c.AssetList = append(c.AssetList, sym)
-	}
-	sort.Strings(c.AssetList)
-	if _, ok := c.Assets[c.Native]; !ok {
-		return nil, fmt.Errorf("custody: config: native asset %s is not configured", c.Native)
-	}
-	// Each (asset, shard) is a partition; the hot address is the shard's.
-	hot := map[string]common.Address{}
-	for _, sym := range c.AssetList {
-		for i, a := range c.HotShards {
-			hot[c.PartitionKey(sym, i).String()] = a
-		}
-	}
-	c.EVM = evm.Config{
-		Chain: cf.Name, ChainID: cf.ChainID, RPCURL: cf.RPCURL, Confirmations: cf.Confirmations,
-		Factory: common.HexToAddress(cf.Factory), SweepDestination: dest, HotAddresses: hot,
-		Assets: evmAssets, NativeAsset: c.Native, MaxTxFeeWei: fee, StuckAfterBlocks: cf.StuckAfterBlocks,
 	}
 
 	s := f.Sweep
@@ -410,6 +405,86 @@ func (f File) Build() (*Config, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// buildEVM reads the evm family's fields: hot shards, factory, sweep destination, assets (with their tokens). It returns the hot
+// address of every (asset, shard) partition.
+func (c *Config) buildEVM(cf ChainFile) (map[string]common.Address, error) {
+	if len(cf.HotShards) == 0 {
+		return nil, errors.New("custody: config: at least one hot shard")
+	}
+	for i, a := range cf.HotShards {
+		if !common.IsHexAddress(a) {
+			return nil, fmt.Errorf("custody: config: hot shard %d %q is not an address", i, a)
+		}
+		c.HotShards = append(c.HotShards, common.HexToAddress(a))
+	}
+	if !common.IsHexAddress(cf.Factory) || !common.IsHexAddress(cf.SweepDestination) {
+		return nil, errors.New("custody: config: factory and sweep_destination must be addresses")
+	}
+	dest := common.HexToAddress(cf.SweepDestination)
+	c.SinkShard = -1
+	for i, a := range c.HotShards {
+		if a == dest {
+			c.SinkShard = i
+			break
+		}
+	}
+	if c.SinkShard < 0 {
+		return nil, errors.New("custody: config: sweep_destination must be one of hot_shards (swept funds land on a hot wallet)")
+	}
+	var err error
+	fee, err := amount("max_tx_fee_wei", cf.MaxTxFeeWei)
+	if err != nil {
+		return nil, err
+	}
+	if len(cf.Assets) == 0 {
+		return nil, errors.New("custody: config: no assets")
+	}
+	evmAssets := map[string]evm.Token{}
+	for sym, af := range cf.Assets {
+		if sym == "" || strings.ContainsAny(sym, ":/") {
+			return nil, fmt.Errorf("custody: config: bad asset symbol %q", sym)
+		}
+		a := Asset{Symbol: sym, Decimals: af.Decimals}
+		if af.Address != "" {
+			if !common.IsHexAddress(af.Address) {
+				return nil, fmt.Errorf("custody: config: asset %s address %q", sym, af.Address)
+			}
+			a.Address = common.HexToAddress(af.Address)
+			evmAssets[sym] = evm.Token{Address: a.Address, Decimals: uint8(af.Decimals)}
+		} else if sym != c.Native {
+			return nil, fmt.Errorf("custody: config: asset %s has no address and is not the native asset %s", sym, c.Native)
+		}
+		if a.MinDeposit, err = amount(sym+" min_deposit", orZero(af.MinDeposit)); err != nil {
+			return nil, err
+		}
+		if a.PriceWei, err = amount(sym+" price_wei", orZero(af.PriceWei)); err != nil {
+			return nil, err
+		}
+		if a.PriceWei.Sign() == 0 {
+			return nil, fmt.Errorf("custody: config: asset %s needs price_wei > 0", sym)
+		}
+		c.Assets[sym] = a
+		c.AssetList = append(c.AssetList, sym)
+	}
+	sort.Strings(c.AssetList)
+	if _, ok := c.Assets[c.Native]; !ok {
+		return nil, fmt.Errorf("custody: config: native asset %s is not configured", c.Native)
+	}
+	// Each (asset, shard) is a partition; the hot address is the shard's.
+	hot := map[string]common.Address{}
+	for _, sym := range c.AssetList {
+		for i, a := range c.HotShards {
+			hot[c.PartitionKey(sym, i).String()] = a
+		}
+	}
+	c.EVM = evm.Config{
+		Chain: cf.Name, ChainID: cf.ChainID, RPCURL: cf.RPCURL, Confirmations: cf.Confirmations,
+		Factory: common.HexToAddress(cf.Factory), SweepDestination: dest, HotAddresses: hot,
+		Assets: evmAssets, NativeAsset: c.Native, MaxTxFeeWei: fee, StuckAfterBlocks: cf.StuckAfterBlocks,
+	}
+	return hot, nil
 }
 
 func orZero(s string) string {

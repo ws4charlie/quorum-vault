@@ -2,9 +2,11 @@ package custody
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 )
 
@@ -89,6 +91,10 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 				return rep, err
 			}
 			bal, err := s.Reader.Balance(ctx, addr.Hex(), sym, h)
+			if errors.Is(err, chain.ErrNotSupported) {
+				rep.add(Check{Name: "hot", Asset: sym, Subject: addr.Hex(), OK: true, Skipped: true, Detail: "this chain cell cannot read balances yet"})
+				continue
+			}
 			if err != nil {
 				return rep, err
 			}
@@ -148,12 +154,21 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 	rows.Close()
 	for _, sym := range c.AssetList {
 		sum := new(big.Int)
+		unsupported := false
 		for _, a := range addrs {
 			b, err := s.Reader.Balance(ctx, a, sym, h)
+			if errors.Is(err, chain.ErrNotSupported) {
+				unsupported = true
+				break
+			}
 			if err != nil {
 				return rep, err
 			}
 			sum.Add(sum, b)
+		}
+		if unsupported {
+			rep.add(Check{Name: "deposit_addresses", Asset: sym, OK: true, Skipped: true, Detail: "this chain cell cannot read balances yet"})
+			continue
 		}
 		posted, err := s.posted(ctx, depAcct(c.Chain, sym))
 		if err != nil {

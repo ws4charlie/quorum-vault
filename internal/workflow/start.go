@@ -63,7 +63,13 @@ type loopSpec struct {
 	wf any
 }
 
-func loopSpecs(chain string) []loopSpec {
+// loopSpecs are the loops of an evm chain cell. A family that does not sweep or withdraw yet runs only the scan (loopSpecsFor).
+func loopSpecs(chain string) []loopSpec { return loopSpecsFor(custody.FamilyEVM, chain) }
+
+func loopSpecsFor(family, chain string) []loopSpec {
+	if family == custody.FamilyBTC {
+		return []loopSpec{{ScanID(chain), ScanWorkflow}}
+	}
 	return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}, {ColdPlannerID(chain), ColdPlannerWorkflow}}
 }
 
@@ -85,7 +91,7 @@ func EnsureLoops(ctx context.Context, c client.Client, queue string, cfg *custod
 		queue = DefaultTaskQueue
 	}
 	t := DefaultTimings(cfg)
-	for _, l := range loopSpecs(cfg.Chain) {
+	for _, l := range loopSpecsFor(cfg.Family, cfg.Chain) {
 		if err := startLoop(ctx, c, queue, t, l); err != nil {
 			return err
 		}

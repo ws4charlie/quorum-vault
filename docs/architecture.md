@@ -185,6 +185,22 @@ Four things were EVM-shaped and are now neutral:
 - **Destinations.** The withdrawal allowlist holds canonical address strings; the codec defines the canonical form (EVM: checksum case,
   so case never matters).
 
+## Bitcoin deposits
+
+A second chain family, `btc`, serves deposits only; nothing leaves an address yet. One `qv-core` and one `qv-worker` run per chain, on
+the same database and ledger, each with its own queue. For `btc` the worker runs the scan loop and nothing else.
+
+The core holds the account's extended public key (m/84'/coin'/0'), obtained once from mpc-party `Node`. It derives each customer's
+native SegWit address offline, on the external branch, at the next unused index of the chain; it never asks MPC for an address.
+That the address equals the P2WPKH of the key mpc-party derives at the same path is tested end to end. A key or address of another
+network than the config names refuses to start.
+
+The scan reads whole blocks from bitcoind over JSON-RPC, up to the tip minus the confirmations plus one (default 6), a bounded batch
+at a time, and matches outputs to deposit addresses. Each output is one deposit, keyed `chain:txid:vout`, credited through the same
+path as EVM. The hash of every block read is stored with the cursor. If the chain no longer contains the block the last scan ended on,
+the reorganization is deeper than the safe depth: the worker logs an ALERT, scanning for the chain stops, credits stay, and an operator
+decides (see [learn/p7-2-btc-deposits.md](learn/p7-2-btc-deposits.md)). A coinbase output is credited only at 100 confirmations.
+
 ## Trust boundaries
 
 | Boundary | Protects | Does not protect |

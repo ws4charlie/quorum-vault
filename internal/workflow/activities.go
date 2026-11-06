@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -55,7 +56,11 @@ type Deps struct {
 }
 
 // Activities is the activity set. Register one instance with the worker.
-type Activities struct{ D Deps }
+type Activities struct {
+	D Deps
+	// haltAlerted: the "scan halted" ALERT was given by this process (one per process, not one per scan pass).
+	haltAlerted atomic.Bool
+}
 
 func (a *Activities) log() *slog.Logger {
 	if a.D.Log != nil {
@@ -104,6 +109,15 @@ func (a *Activities) ScanOnce(ctx context.Context) (ScanResult, error) {
 	n, err := a.D.Svc.ScanOnce(ctx)
 	if errors.Is(err, custody.ErrCursorMoved) {
 		return ScanResult{}, err // retried: re-reads the cursor
+	}
+	if errors.Is(err, custody.ErrScanHalted) {
+		// Stopped on purpose (the chain was rewritten below the safe depth): credits stay, nothing is retried or reversed, and
+		// the loop idles until an operator clears the halt.
+		if !a.haltAlerted.Swap(true) {
+			a.log().Error("ALERT: scanning is halted and credits are kept; an operator must look (see docs/learn/p7-2-btc-deposits.md)", "error", err.Error())
+		}
+		cur, cerr := a.D.Svc.Cursor(ctx)
+		return ScanResult{Cursor: cur}, cerr
 	}
 	if err != nil {
 		return ScanResult{}, err

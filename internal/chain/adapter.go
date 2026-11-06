@@ -145,9 +145,34 @@ type ObservedDeposit struct {
 // ScanResult is what Scan found, plus the highest height that is safe to
 // resume from (past the confirmation or finality depth).
 type ScanResult struct {
-	Deposits       []ObservedDeposit
+	Deposits []ObservedDeposit
+	// SafeHeadHeight is the highest height this result covers: the caller continues at SafeHeadHeight+1.
 	SafeHeadHeight uint64
+	// Blocks lists the blocks this result read, for chains that detect reorgs by comparing hashes (Bitcoin). The caller
+	// stores them in the same transaction as the deposits and the cursor, and gives the last one back as the check of
+	// the next scan (see ScanCheck).
+	Blocks []ScannedBlock
+	// Deferred are deposits seen in a block that is final but whose funds are not yet spendable (a Bitcoin coinbase
+	// output). The caller stores them and credits each when its ReleaseAt is covered by a later scan.
+	Deferred []DeferredDeposit
 }
+
+// ScannedBlock is the height and hash of a block a scan read.
+type ScannedBlock struct {
+	Height uint64
+	Hash   string
+}
+
+// DeferredDeposit is a deposit that is credited only once the scan has covered height ReleaseAt.
+type DeferredDeposit struct {
+	Deposit   ObservedDeposit
+	ReleaseAt uint64
+}
+
+// ErrReorgTooDeep is returned by Scan when the chain no longer contains a block the scanner already read and credited
+// from: a reorganization deeper than the safe depth. Credits are never reversed automatically; the caller stops scanning
+// and an operator decides.
+var ErrReorgTooDeep = errors.New("chain: reorganization deeper than the safe depth")
 
 // WithdrawalIntent asks for a transfer out of a partition's wallet.
 type WithdrawalIntent struct {
