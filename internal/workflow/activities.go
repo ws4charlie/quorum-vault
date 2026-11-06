@@ -659,6 +659,33 @@ func (a *Activities) Park(ctx context.Context, o OwnerArg, reason string) error 
 	return a.D.Svc.ParkSweep(ctx, o.ID, reason)
 }
 
+// FreeResult is the answer of NothingToFree.
+type FreeResult struct {
+	Free bool
+	Why  string
+}
+
+// NothingToFree asks the chain, for an owner whose refused attempt has no cancel, whether anything could still confirm:
+// an attempt that was ever broadcast, or a reservation that is still open. Free is true only when neither holds; Why says
+// what does otherwise. The workflow never releases money on a chain without cancel unless Free.
+func (a *Activities) NothingToFree(ctx context.Context, o OwnerArg) (FreeResult, error) {
+	oc, err := a.D.Svc.Chain.Outcome(ctx, o.Kind, o.ID)
+	if err != nil {
+		return FreeResult{}, err
+	}
+	if oc.Attempts > 0 || oc.State != chain.OutcomeOpen {
+		return FreeResult{Why: fmt.Sprintf("%d attempt(s) were broadcast (state %s)", oc.Attempts, oc.State)}, nil
+	}
+	r, err := a.D.Svc.Chain.Reservation(ctx, a.D.Svc.Pool, o.Kind, o.ID)
+	if err != nil {
+		return FreeResult{}, err
+	}
+	if r.Open {
+		return FreeResult{Why: "a reservation is still open: " + r.Detail}, nil
+	}
+	return FreeResult{Free: true}, nil
+}
+
 // ConsumedInfo describes what someone else used (EVM: a nonce), for the alert.
 func (a *Activities) ConsumedInfo(ctx context.Context, o OwnerArg) (string, error) {
 	r, err := a.D.Svc.Chain.Reservation(ctx, a.D.Svc.Pool, o.Kind, o.ID)

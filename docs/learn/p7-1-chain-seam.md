@@ -52,9 +52,11 @@ owner still holds something that a signature might yet use, and names the accoun
 lived in `custody` ([outcome.go](../../internal/chain/evm/outcome.go)). `custody.AttemptState` maps the answer to the state strings the
 workflows record in their histories (`mined`, `reverted`, `cancelled`, `consumed`; do not change them).
 
-`BuildCancel` stays optional. If it returns `chain.ErrNotSupported`, `EnqueueCancel` returns no job, and `cancelNonce` finishes at
-once as "cancelled": the withdrawal's hold is released. Such a chain must report `Reservation.Open == false` after a refusal, or
-the void will wait for it.
+`BuildCancel` stays optional. If it returns `chain.ErrNotSupported`, `EnqueueCancel` returns no job. `cancelNonce` then does not
+assume that the refusal left nothing behind: it asks the chain (activity `NothingToFree`: `Outcome` shows no attempt ever
+broadcast, `Reservation.Open` is false). Only then does it finish as "cancelled" and the hold is released. Otherwise it logs an
+ALERT, parks the row and fails with the same non-retryable error as a refused cancel; money is never released. EVM never reaches
+this branch, so its histories are unchanged.
 
 ## Destinations
 
@@ -105,7 +107,7 @@ P7-2 to P7-6 work from this list. "Row" means the line at the time of this task.
 - [activities.go:379-382](../../internal/workflow/activities.go): a refill broadcast error is recognized by the text "nonce too low".
 - Names and texts still say nonce: `WaitNonce`, `NonceResult` ([activities.go:612-622](../../internal/workflow/activities.go)), `cancelNonce` and the ALERT texts ([workflows.go:332-343,372-393](../../internal/workflow/workflows.go)),
   the Temporal error types `nonce_open` and `nonce_consumed` ([activities.go:43](../../internal/workflow/activities.go), [workflows.go:343](../../internal/workflow/workflows.go)). The activity names and error types are in recorded histories; rename them only with a versioned change.
-- The refusal path of `WithdrawalWorkflow`, `SweepWorkflow`, `ColdMoveWorkflow` and `RebalanceWorkflow` ([workflows.go:479-482,569,630,674](../../internal/workflow/workflows.go)) assumes that a refused attempt may hold a signature at a nonce and must be cancelled. On a chain without cancel it falls through (tested), but then `Reservation.Open` must be false.
+- The refusal path of `WithdrawalWorkflow`, `SweepWorkflow`, `ColdMoveWorkflow` and `RebalanceWorkflow` ([workflows.go:479-482,569,630,674](../../internal/workflow/workflows.go)) assumes that a refused attempt may hold a signature at a nonce and must be cancelled. On a chain without cancel it falls through (tested): it asks the chain first and parks if anything was broadcast or is still reserved.
 
 **Gateway and signing zone**
 

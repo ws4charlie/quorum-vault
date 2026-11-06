@@ -379,7 +379,21 @@ func cancelNonce(ctx workflow.Context, t Timings, o OwnerArg) (txResult, error) 
 		return txResult{}, err
 	}
 	if cj == "" {
-		// The chain has no cancel: a refusal leaves nothing reserved to free, so the money may be released.
+		// The chain has no cancel. A refusal should leave nothing behind, but that is checked, not assumed: only when the
+		// chain says no attempt was ever broadcast and no reservation is open may the money be released. (This activity
+		// is called only here, which EVM never reaches, so EVM histories do not change.)
+		var fr FreeResult
+		if err := call(ctx, opts(ctx), &fr, a.NothingToFree, o); err != nil {
+			return txResult{}, err
+		}
+		if !fr.Free {
+			workflow.GetLogger(ctx).Error("ALERT: the gateway refused a transaction on a chain without cancel, but something may still confirm; manual intervention needed",
+				"owner", o.ID, "why", fr.Why)
+			if err := call(ctx, opts(ctx), nil, a.Park, o, "refused, the chain has no cancel and is not clean: "+fr.Why); err != nil {
+				return txResult{}, err
+			}
+			return txResult{}, temporal.NewNonRetryableApplicationError("refused without cancel but not clean: "+fr.Why, "cancel_refused", nil)
+		}
 		return txResult{Kind: txCancelled}, nil
 	}
 	ow := custody.Owner{Kind: o.Kind, ID: o.ID, PartitionID: o.Part}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,16 +19,14 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 )
 
-// A chain without cancel goes through a refusal without trying to cancel: the activity that builds the cancel says there is
-// nothing to free (""), no job is waited for, and the hold is released at once.
-func TestRefusalOnAChainWithoutCancelVoidsAtOnce(t *testing.T) {
+// refusalOnNoCancelChain runs a withdrawal whose job the gateway refused, on a chain without cancel whose NothingToFree answer
+// is free/why. Every activity except the four named is unregistered: using Park, WaitNonce or BroadcastJob fails the workflow
+// unless the test registers it.
+func refusalOnNoCancelChain(t *testing.T, free bool, why string) (calls, voided, parked []string, werr error) {
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(WithdrawalWorkflow)
-
 	var mu sync.Mutex
-	var calls []string
-	var voided []string
 	rec := func(name string) { mu.Lock(); calls = append(calls, name); mu.Unlock() }
 	reg := func(name string, fn any) { env.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: name}) }
 	reg("LoadWithdrawal", func(context.Context, string) (WdState, error) {
@@ -40,7 +39,11 @@ func TestRefusalOnAChainWithoutCancelVoidsAtOnce(t *testing.T) {
 	})
 	reg("EnqueueCancel", func(_ context.Context, o OwnerArg) (string, error) {
 		rec("EnqueueCancel")
-		return "", nil // chain.ErrNotSupported inside: nothing reserved to free
+		return "", nil // chain.ErrNotSupported inside
+	})
+	reg("NothingToFree", func(_ context.Context, o OwnerArg) (FreeResult, error) {
+		rec("NothingToFree")
+		return FreeResult{Free: free, Why: why}, nil
 	})
 	reg("VoidWithdrawal", func(_ context.Context, id, reason, feeTx string) error {
 		rec("VoidWithdrawal")
@@ -49,21 +52,50 @@ func TestRefusalOnAChainWithoutCancelVoidsAtOnce(t *testing.T) {
 		mu.Unlock()
 		return nil
 	})
-	// Every other activity is unregistered: using one (Park, WaitNonce, BroadcastJob, ...) fails the workflow.
-
+	reg("Park", func(_ context.Context, o OwnerArg, reason string) error {
+		rec("Park")
+		mu.Lock()
+		parked = append(parked, o.ID+"|"+reason)
+		mu.Unlock()
+		return nil
+	})
 	env.ExecuteWorkflow(WithdrawalWorkflow, Input{ID: "w1", T: Timings{SignTimeout: time.Second, StuckAfter: time.Hour, MaxReplacements: 1}})
 	if !env.IsWorkflowCompleted() {
 		t.Fatal("workflow did not complete")
 	}
-	if err := env.GetWorkflowError(); err != nil {
+	return calls, voided, parked, env.GetWorkflowError()
+}
+
+// A chain without cancel goes through a refusal without trying to cancel: the activity that builds the cancel says there is
+// nothing to free (""), the chain confirms that nothing was broadcast and nothing is reserved, and the hold is released.
+func TestRefusalOnAChainWithoutCancelVoidsAtOnce(t *testing.T) {
+	calls, voided, parked, err := refusalOnNoCancelChain(t, true, "")
+	if err != nil {
 		t.Fatalf("workflow: %v (calls %v)", err, calls)
 	}
-	if len(voided) != 1 || voided[0] != "w1|gateway refused: policy_x: no|" {
-		t.Fatalf("voided %v", voided)
+	if len(voided) != 1 || voided[0] != "w1|gateway refused: policy_x: no|" || len(parked) != 0 {
+		t.Fatalf("voided %v parked %v", voided, parked)
 	}
-	want := []string{"LoadWithdrawal", "WaitJob " + custody.OwnerTrack(custody.Owner{Kind: "withdrawal", ID: "w1"}).FirstJob(), "EnqueueCancel", "VoidWithdrawal"}
+	want := []string{"LoadWithdrawal", "WaitJob " + custody.OwnerTrack(custody.Owner{Kind: "withdrawal", ID: "w1"}).FirstJob(), "EnqueueCancel", "NothingToFree", "VoidWithdrawal"}
 	if fmt.Sprint(calls) != fmt.Sprint(want) {
 		t.Fatalf("activities %v, want %v", calls, want)
+	}
+}
+
+// The refusal is not trusted to have left nothing behind: if the chain reports a broadcast attempt, or a reservation that is still
+// open, the row is parked and the money is never released.
+func TestRefusalOnAChainWithoutCancelParksWhenTheChainIsNotClean(t *testing.T) {
+	for _, why := range []string{"1 attempt(s) were broadcast (state open)", "a reservation is still open: utxo a:0"} {
+		calls, voided, parked, err := refusalOnNoCancelChain(t, false, why)
+		if err == nil {
+			t.Fatalf("%s: the workflow went on (calls %v)", why, calls)
+		}
+		if len(voided) != 0 {
+			t.Fatalf("%s: voided %v", why, voided)
+		}
+		if len(parked) != 1 || !strings.Contains(parked[0], why) {
+			t.Fatalf("%s: parked %v", why, parked)
+		}
 	}
 }
 
