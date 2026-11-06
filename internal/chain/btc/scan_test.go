@@ -19,6 +19,10 @@ type fakeNode struct {
 	mu     sync.Mutex
 	blocks []Block // index = height
 	srv    *httptest.Server
+	// transactions: txid -> confirmations (0: in the mempool); a txid not here is unknown to the node
+	txs     map[string]int64
+	sent    []string // raw transactions given to sendrawtransaction
+	sendErr *RPCError
 }
 
 type out struct {
@@ -27,7 +31,7 @@ type out struct {
 }
 
 func newNode(t *testing.T) *fakeNode {
-	n := &fakeNode{}
+	n := &fakeNode{txs: map[string]int64{}}
 	n.srv = httptest.NewServer(http.HandlerFunc(n.serve))
 	t.Cleanup(n.srv.Close)
 	n.mine(nil...) // genesis
@@ -46,6 +50,31 @@ func (n *fakeNode) serve(w http.ResponseWriter, r *http.Request) {
 	switch req.Method {
 	case "getblockchaininfo":
 		res = map[string]any{"chain": "regtest"}
+	case "estimatesmartfee":
+		res = map[string]any{"errors": []string{"Insufficient data or no feerate found"}}
+	case "getrawtransaction":
+		var id string
+		json.Unmarshal(req.Params[0], &id)
+		c, ok := n.txs[id]
+		if !ok {
+			json.NewEncoder(w).Encode(map[string]any{"result": nil, "error": map[string]any{"code": -5, "message": "No such mempool or blockchain transaction"}})
+			return
+		}
+		m := map[string]any{"txid": id}
+		if c > 0 {
+			m["confirmations"] = c
+			m["blockhash"] = "bh"
+		}
+		res = m
+	case "sendrawtransaction":
+		var raw string
+		json.Unmarshal(req.Params[0], &raw)
+		n.sent = append(n.sent, raw)
+		if n.sendErr != nil {
+			json.NewEncoder(w).Encode(map[string]any{"result": nil, "error": n.sendErr})
+			return
+		}
+		res = "sent"
 	case "getblockcount":
 		res = len(n.blocks) - 1
 	case "getblockhash":
@@ -275,4 +304,17 @@ func TestShallowReorgDoesNotCreditTheReplacedDeposit(t *testing.T) {
 	if err != nil || len(res.Deposits) != 1 || res.Deposits[0].Address != addrs[1] {
 		t.Fatalf("%+v %v", res, err)
 	}
+}
+
+func jsonNumber(s string) json.Number { return json.Number(s) }
+
+// mineTx appends a block holding exactly the given transactions.
+func (n *fakeNode) mineTx(txs ...Tx) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	nonce++
+	b := Block{Height: uint64(len(n.blocks)), Hash: fmt.Sprintf("hash-%d-%d", len(n.blocks), nonce)}
+	b.Previous = n.blocks[len(n.blocks)-1].Hash
+	b.Tx = txs
+	n.blocks = append(n.blocks, b)
 }

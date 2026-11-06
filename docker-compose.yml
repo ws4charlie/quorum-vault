@@ -137,7 +137,7 @@ services:
 
   # ---- Bitcoin (profile "btc"; `make btc-up`) ----
   # bitcoind in regtest, RPC on 18443. Dev only: the RPC password is a throwaway for a node that exists on this machine for
-  # the tests. Pinned: bitcoin/bitcoin 29.0 (the official image, Bitcoin Core 29.0).
+  # the tests. -txindex=1: the cell reads its own confirmed transactions with getrawtransaction. Pinned: bitcoin/bitcoin 29.0 (the official image, Bitcoin Core 29.0).
   bitcoind:
     profiles: ["btc"]
     image: bitcoin/bitcoin:29.0
@@ -150,7 +150,7 @@ services:
       - -rpcuser=qv
       - -rpcpassword=qv-regtest-only
       - -fallbackfee=0.0002
-      - -txindex=0
+      - -txindex=1
     ports:
       - "127.0.0.1:18443:18443"
     healthcheck:

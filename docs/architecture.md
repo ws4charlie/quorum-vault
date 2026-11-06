@@ -217,6 +217,21 @@ id signed under a second payload is refused. This closes the segwit v0 fee attac
 each other's inputs are combined into one transaction with a fee neither payload showed. Details and the list of refusals:
 [learn/p7-3-btc-verifier.md](learn/p7-3-btc-verifier.md).
 
+## Bitcoin withdrawals
+
+A Bitcoin withdrawal is requested, approved (the automated key for the lowest tier), built, signed by MPC, broadcast, confirmed and settled, by the
+same workflow as EVM. The hot wallet is a table of outputs (`btc_utxos`) of the partition's shard. The build runs in one database transaction: it
+picks the shard's oldest available outputs one at a time with `FOR UPDATE SKIP LOCKED`, reserves each at once, and makes a transaction with the payment
+first and change second, to the shard's own address; change at or under the dust limit goes to the fee. If the available outputs cannot pay, the withdrawal
+waits instead of failing: outputs free up when an earlier withdrawal settles and returns its change. The gateway and the cosigner check the transaction
+as described above; the core derives the same shard address from its xpub at start or refuses.
+
+A withdrawal settles at `spend_confirmations` (default 2), not at the deposit depth: our own transactions spend only our own outputs, so a
+reorganization can only delay them. Settlement books the payment and the fee actually paid, marks the inputs spent and records the change as available.
+Operator funding of a hot address is found by the scan at safe depth, recorded once and booked through the operator funding account; the change of our own
+transactions is never booked as funding. A refusal where nothing was signed gives the outputs back; a refusal after a signature may exist parks the
+withdrawal with an alert and releases nothing (fee bumps and cancel come next). See [learn/p7-4a-btc-withdrawals.md](learn/p7-4a-btc-withdrawals.md).
+
 ## Trust boundaries
 
 | Boundary | Protects | Does not protect |

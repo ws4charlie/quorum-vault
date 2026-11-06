@@ -43,6 +43,7 @@ const (
 	errFrozen     = "sweep_frozen"
 	errNonceOpen  = "nonce_open"
 	errBadRequest = "bad_request"
+	errNoOutputs  = "no_outputs" // too few available outputs: retryable by waiting
 )
 
 // Deps are what activities need.
@@ -82,6 +83,8 @@ func nonRetry(err error) error {
 		typ = errFrozen
 	case errors.Is(err, custody.ErrReservationOpen):
 		typ = errNonceOpen
+	case errors.Is(err, chain.ErrNotEnoughOutputs):
+		typ = errNoOutputs
 	case errors.Is(err, custody.ErrInvalid), errors.Is(err, ledger.ErrInsufficientFunds), errors.Is(err, ledger.ErrIdempotencyConflict):
 		typ = errBadRequest
 	default:
@@ -683,6 +686,11 @@ type FreeResult struct {
 // an attempt that was ever broadcast, or a reservation that is still open. Free is true only when neither holds; Why says
 // what does otherwise. The workflow never releases money on a chain without cancel unless Free.
 func (a *Activities) NothingToFree(ctx context.Context, o OwnerArg) (FreeResult, error) {
+	// A refusal that left no signature: give back what the attempt reserved (Bitcoin's outputs). If a signature may exist this does nothing and the
+	// reservation below keeps the row parked.
+	if _, err := a.D.Svc.ReleaseIfUnsigned(ctx, o.owner()); err != nil {
+		return FreeResult{}, err
+	}
 	oc, err := a.D.Svc.Chain.Outcome(ctx, o.Kind, o.ID)
 	if err != nil {
 		return FreeResult{}, err

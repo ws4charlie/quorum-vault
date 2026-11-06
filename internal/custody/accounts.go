@@ -102,7 +102,7 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 					return err
 				}
 			}
-			for i := range c.HotShards {
+			for i := 0; i < c.shardCount(); i++ {
 				k := c.PartitionKey(sym, i)
 				if _, err := tx.Exec(ctx, `INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ($1,$2,$3,$4,$5,$6,$7)
 					ON CONFLICT (id) DO NOTHING`, k.String(), k.Entity, k.Chain, k.Asset, k.Tier, k.Pool, k.Shard); err != nil {

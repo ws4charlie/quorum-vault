@@ -201,7 +201,7 @@ func (s *Service) recordFee(ctx context.Context, tx pgx.Tx, txHash string, shard
 
 // nativePartitionOf maps any partition of a shard to the same shard's native-asset partition.
 func (s *Service) nativePartitionOf(partitionID string) (string, error) {
-	_, shard, err := s.Cfg.ShardAddress(partitionID)
+	shard, err := s.Cfg.ShardIndex(partitionID)
 	if err != nil {
 		return "", err
 	}

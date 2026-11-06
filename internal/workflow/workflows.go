@@ -472,10 +472,24 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 		}
 
 		// 4. Build and enqueue, in one transaction.
-		var job string
-		if err := call(ctx, buildOpts(ctx), &job, a.BuildWithdrawalJob, id); err != nil {
+		for {
+			var job string
+			err := call(ctx, buildOpts(ctx), &job, a.BuildWithdrawalJob, id)
+			if err == nil {
+				break
+			}
 			if isType(err, errExpired) {
 				return void("approval window passed before signing", "")
+			}
+			// A chain whose funds are separate outputs (Bitcoin) may have too few available now: they free up or arrive, so wait, as for hot liquidity.
+			if isType(err, errNoOutputs) {
+				if !workflow.Now(ctx).Before(deadline) {
+					return void("not enough available outputs in time: "+err.Error(), "")
+				}
+				if err := workflow.Sleep(ctx, t.HotPoll); err != nil {
+					return err
+				}
+				continue
 			}
 			// Nothing was allocated (the build rolled back), so the hold can go.
 			workflow.GetLogger(ctx).Error("ALERT: could not build the withdrawal transaction; voiding", "withdrawal", id, "error", err.Error())

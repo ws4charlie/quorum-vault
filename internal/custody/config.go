@@ -258,6 +258,23 @@ type BTCFile struct {
 	AccountXpub   string   `json:"account_xpub"`  // m/84'/coin'/0', from mpc-party Node
 	HotAddresses  []string `json:"hot_addresses"`
 	BatchBlocks   uint64   `json:"batch_blocks"` // blocks per scan call, default 100
+	// HotShards are the hot addresses in shard order with the path of each key below the account (shard i serves the partition of shard i). The
+	// core derives each address from the xpub at start and refuses one that does not match.
+	HotShards []BTCShardFile `json:"hot_shards"`
+	// SpendConfirmations is the depth at which a withdrawal settles (default 2). MaxInputs, FallbackFeeRate, MaxFeeRate (sat/vB) and
+	// MaxTxFeeSats bound what the builder makes, and must stay below the signing zone's own caps.
+	SpendConfirmations uint64 `json:"spend_confirmations"`
+	MaxInputs          int    `json:"max_inputs"`
+	FallbackFeeRate    uint64 `json:"fallback_fee_rate"`
+	MaxFeeRate         uint64 `json:"max_fee_rate"`
+	MaxTxFeeSats       uint64 `json:"max_tx_fee_sats"`
+	StuckAfterBlocks   uint64 `json:"stuck_after_blocks"`
+}
+
+// BTCShardFile is one hot shard of the btc family.
+type BTCShardFile struct {
+	Address string   `json:"address"`
+	Path    []uint32 `json:"path"` // [1, index]
 }
 
 // buildBTC reads the btc family's section and its assets (the native one only: bitcoin has no tokens here). It refuses a key or
@@ -268,7 +285,12 @@ func (c *Config) buildBTC(cf ChainFile) error {
 		return errors.New("custody: config: family btc needs a chain.btc section")
 	}
 	c.BTC = btc.Config{Chain: cf.Name, Network: b.Network, RPCURL: b.RPCURL, RPCUser: b.RPCUser, RPCPass: b.RPCPassword,
-		Confirmations: b.Confirmations, AccountXpub: b.AccountXpub, HotAddresses: b.HotAddresses, BatchBlocks: b.BatchBlocks}
+		Confirmations: b.Confirmations, AccountXpub: b.AccountXpub, HotAddresses: b.HotAddresses, BatchBlocks: b.BatchBlocks,
+		SpendConfirmations: b.SpendConfirmations, MaxInputs: b.MaxInputs, FallbackFeeRate: b.FallbackFeeRate, MaxFeeRate: b.MaxFeeRate,
+		MaxTxFeeSats: b.MaxTxFeeSats, StuckAfterBlocks: b.StuckAfterBlocks}
+	for i, h := range b.HotShards {
+		c.BTC.HotShards = append(c.BTC.HotShards, btc.HotShardConfig{PartitionID: c.PartitionKey(btc.Native, i).String(), Address: h.Address, Path: h.Path})
+	}
 	if err := c.BTC.Validate(); err != nil {
 		return fmt.Errorf("custody: config: %w", err)
 	}
@@ -601,7 +623,24 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 	return nil
 }
 
-func (c *Config) shardCount() int { return len(c.HotShards) }
+func (c *Config) shardCount() int {
+	if c.Family == FamilyBTC {
+		return len(c.BTC.HotShards)
+	}
+	return len(c.HotShards)
+}
+
+// ShardIndex is the shard of a partition ID of this chain, for any family.
+func (c *Config) ShardIndex(partitionID string) (int, error) {
+	k, err := partition.Parse(partitionID)
+	if err != nil {
+		return 0, err
+	}
+	if k.Chain != c.Chain || k.Shard >= c.shardCount() {
+		return 0, fmt.Errorf("custody: unknown partition %q", partitionID)
+	}
+	return k.Shard, nil
+}
 
 // buildRebalance validates the targets. Every shard of an asset needs one (a partial list would starve the shards left out), there
 // must be a second shard to move to, and with cold limits the target must lie in low <= target <= cold target, which is what keeps

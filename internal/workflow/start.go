@@ -68,7 +68,7 @@ func loopSpecs(chain string) []loopSpec { return loopSpecsFor(custody.FamilyEVM,
 
 func loopSpecsFor(family, chain string) []loopSpec {
 	if family == custody.FamilyBTC {
-		return []loopSpec{{ScanID(chain), ScanWorkflow}}
+		return []loopSpec{{ScanID(chain), ScanWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}}
 	}
 	return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}, {ColdPlannerID(chain), ColdPlannerWorkflow}}
 }
