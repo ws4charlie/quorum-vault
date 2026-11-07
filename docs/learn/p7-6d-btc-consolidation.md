@@ -9,7 +9,9 @@ value and still fail a withdrawal, because no `max_inputs` outputs can carry it.
 
 A planner round (the cold planner's loop, every `cold.plan_interval`) looks at each hot partition and starts a consolidation when all of this holds:
 
-- the partition has more than `consolidate_above` available outputs (not reserved, not deposit outputs, not cold outputs);
+- the partition has more than `consolidate_above` available outputs that are **worth spending** at the current rate (not reserved, not deposit outputs, not
+  cold outputs, and worth more than 68 virtual bytes at the current rate). Dust does not count and stays where it is, so it can neither start a round nor
+  keep rounds going; what counts changes with the fee rate;
 - the fee rate is at or below `consolidate_max_fee_rate`; otherwise it waits, and the log says so once per change ("btc consolidation waits");
 - no consolidation and no hot-to-cold move is open on the partition (a move is already spending those outputs);
 - scanning is not halted (after a reorganization below the safe depth the books are not trusted until an operator looks);

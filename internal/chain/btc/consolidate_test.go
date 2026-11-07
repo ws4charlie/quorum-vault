@@ -3,6 +3,7 @@ package btc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -131,18 +132,21 @@ func TestPlanConsolidationConditions(t *testing.T) {
 		t.Fatal("a refused build reserved outputs")
 	}
 
-	// Dust stays: at 10 sat/vB an input costs 680 sats; outputs of 600 are not worth spending. Eight of them and one worthwhile: fewer than two.
+	// Dust stays and does not count: at 10 sat/vB an input costs 680 sats, so outputs of 600 are not worth spending. Eight of them and one good output are
+	// not a reason to consolidate; neither are six good ones (the threshold); seven are.
 	d := newCEnv(t)
 	for i := 0; i < 8; i++ {
 		d.fund(600)
 	}
-	d.fund(50_000)
+	for i := 0; i < 6; i++ {
+		d.fund(50_000)
+	}
 	if c := d.plan(); c.Amount.Sign() != 0 {
-		t.Fatalf("dust and one worthwhile output: %+v", c)
+		t.Fatalf("dust and six good outputs: %+v", c)
 	}
 	d.fund(60_000)
-	if c := d.plan(); c.Inputs != 2 || c.Amount.Int64() != 110_000 {
-		t.Fatalf("two worthwhile outputs among dust: %+v", c)
+	if c := d.plan(); c.Inputs != 5 || c.Amount.Int64() != 250_000 {
+		t.Fatalf("seven good outputs among dust: %+v", c)
 	}
 }
 
@@ -289,5 +293,83 @@ func TestConsolidationBumpRefusals(t *testing.T) {
 	})
 	if !errors.Is(err, chain.ErrCannotBump) {
 		t.Fatalf("a bump above the ceiling: %v", err)
+	}
+}
+
+// Dust does not count: a shard of many dust outputs and few good ones is not consolidated, and rounds stop once the good outputs are down to the
+// threshold, so the largest are never inputs.
+func TestConsolidationCountsOnlyOutputsWorthSpending(t *testing.T) {
+	e := newCEnv(t) // threshold 6, max_inputs 5, rate 10 sat/vB: an output must carry more than 680 sats
+	for i := 0; i < 30; i++ {
+		e.fund(600) // dust at this rate
+	}
+	var good []int64
+	for _, v := range []int64{10_000, 11_000, 12_000, 13_000, 14_000, 500_000} {
+		e.fund(v)
+		good = append(good, v)
+	}
+	if c := e.plan(); c.Amount.Sign() != 0 {
+		t.Fatalf("thirty dust outputs and six good ones (the threshold): %+v", c)
+	}
+	e.fund(15_000) // seven good outputs
+	c := e.plan()
+	if c.Inputs != 5 || c.Amount.Int64() != 10_000+11_000+12_000+13_000+14_000 {
+		t.Fatalf("seven good outputs: %+v", c)
+	}
+	// Run the rounds as the planner would: build, settle, plan again.
+	for round := 0; round < 5; round++ {
+		c := e.plan()
+		if c.Amount.Sign() == 0 {
+			break
+		}
+		u, err := e.consolidate(fmt.Sprintf("c%d", round), c.Amount.Int64())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, in := range e.payload(u).Inputs {
+			if in.Value == 500_000 {
+				t.Fatalf("round %d spent the largest output", round)
+			}
+			if in.Value <= 680 {
+				t.Fatalf("round %d spent dust", round)
+			}
+		}
+		id := payloadTxID(t, e, e.payload(u))
+		if err := e.commit(func(tx pgx.Tx) error {
+			return e.a.Settle(context.Background(), tx, OwnerKindConsolidate, fmt.Sprintf("c%d", round), id)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var worth int
+	e.a.pool.QueryRow(context.Background(), `SELECT count(*) FROM btc_utxos WHERE chain='btc-t' AND status='available' AND value > 680`).Scan(&worth)
+	if worth > 6 || e.count("available") < 30 {
+		t.Fatalf("%d good outputs left, %d available: rounds must stop at the threshold and leave the dust", worth, e.count("available"))
+	}
+	if c := e.plan(); c.Amount.Sign() != 0 {
+		t.Fatalf("still planning at the threshold: %+v", c)
+	}
+}
+
+// What counts depends on the rate: outputs worthwhile at a low rate are dust at a high one.
+func TestConsolidationCountChangesWithTheRate(t *testing.T) {
+	e := newCEnv(t) // ceiling 20
+	for i := 0; i < 8; i++ {
+		e.fund(1_000) // worth spending below 14 sat/vB (68 x 14 = 952 < 1000), dust above 14
+	}
+	if c := e.plan(); c.Inputs != 5 { // the fallback rate is 10
+		t.Fatalf("at 10 sat/vB: %+v", c)
+	}
+	e.node.mu.Lock()
+	e.node.estimate = 16 // still under the ceiling, but 1,000 is now dust
+	e.node.mu.Unlock()
+	if c := e.plan(); c.Amount.Sign() != 0 || c.Wait != "" {
+		t.Fatalf("at 16 sat/vB the outputs are dust and do not count: %+v", c)
+	}
+	for i := 0; i < 8; i++ {
+		e.fund(5_000)
+	}
+	if c := e.plan(); c.Inputs != 5 || c.Amount.Int64() != 25_000 {
+		t.Fatalf("at 16 sat/vB with eight good outputs: %+v", c)
 	}
 }

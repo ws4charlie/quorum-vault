@@ -36,10 +36,14 @@ func (a *Adapter) noteConsolidateWait(why string) {
 	slog.Warn("btc consolidation waits", "why", why)
 }
 
+// worthSpendingSQL is the one filter for what a consolidation counts, plans and builds from: the partition's available hot outputs that are worth spending
+// at the rate ($3 is inputVSize x rate; an output at or below it costs more to spend than it carries). Dust does not count and stays where it is.
+const worthSpendingSQL = `chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND NOT cold AND value > $3`
+
 // smallestWorthSpending reads the partition's available hot outputs that are worth spending at the rate (more than one input costs to add), smallest
 // first, at most limit of them.
 func (a *Adapter) smallestWorthSpending(ctx context.Context, partitionID string, rate uint64, limit int) ([]uint64, error) {
-	rows, err := a.pool.Query(ctx, `SELECT value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND NOT cold AND value > $3
+	rows, err := a.pool.Query(ctx, `SELECT value FROM btc_utxos WHERE `+worthSpendingSQL+`
 		ORDER BY value, created_at, txid, vout LIMIT $4`, a.cfg.Chain, partitionID, int64(inputVSize*rate), limit)
 	if err != nil {
 		return nil, err
@@ -58,7 +62,7 @@ func (a *Adapter) smallestWorthSpending(ctx context.Context, partitionID string,
 
 // PlanConsolidation says what a consolidation of the partition's shard would take now. It takes the smallest available outputs that are worth spending
 // at the current rate (an output that costs more to spend than it carries stays where it is), at most max_inputs of them, and only when the shard holds
-// more than consolidate_above available outputs, the rate is at or below consolidate_max_fee_rate, at least two outputs are worth spending and what
+// more than consolidate_above outputs that are worth spending at the current rate (dust does not count), the rate is at or below consolidate_max_fee_rate, at least two outputs are worth spending and what
 // they leave after the fee is above dust. The largest outputs stay free for withdrawals.
 func (a *Adapter) PlanConsolidation(ctx context.Context, partitionID string) (chain.Consolidation, error) {
 	none := chain.Consolidation{Amount: new(big.Int)}
@@ -69,15 +73,15 @@ func (a *Adapter) PlanConsolidation(ctx context.Context, partitionID string) (ch
 	if err != nil {
 		return none, err
 	}
-	var held int
-	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND NOT cold`,
-		a.cfg.Chain, partitionID).Scan(&held); err != nil {
+	// The rate is read first: which outputs are dust depends on it. Only outputs worth spending are counted, with the filter that selects them.
+	rate := a.rawFeeRate(ctx)
+	var worth int
+	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM btc_utxos WHERE `+worthSpendingSQL, a.cfg.Chain, partitionID, int64(inputVSize*rate)).Scan(&worth); err != nil {
 		return none, err
 	}
-	if held <= a.cfg.ConsolidateAbove {
+	if worth <= a.cfg.ConsolidateAbove {
 		return none, nil
 	}
-	rate := a.rawFeeRate(ctx)
 	if rate > a.cfg.ConsolidateMaxFeeRate {
 		a.noteConsolidateWait(waitConsolidateAboveRate)
 		return chain.Consolidation{Amount: new(big.Int), Wait: waitConsolidateAboveRate}, nil
@@ -128,7 +132,7 @@ func (a *Adapter) BuildConsolidation(ctx context.Context, tx pgx.Tx, c chain.Con
 		}
 		var u utxo
 		var v int64
-		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND NOT cold AND value > $3
+		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE `+worthSpendingSQL+`
 			ORDER BY value, created_at, txid, vout LIMIT 1 FOR UPDATE SKIP LOCKED`, a.cfg.Chain, c.PartitionID, int64(inputVSize*rate)).Scan(&u.txid, &u.vout, &v)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chain.UnsignedTx{}, fmt.Errorf("%w: %d of %d sats in %s", chain.ErrNotEnoughOutputs, sum, want, c.PartitionID)

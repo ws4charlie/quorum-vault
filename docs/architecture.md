@@ -276,7 +276,7 @@ carry, so a shard of many small outputs is emptied in rounds. See [learn/p7-6-bt
 ## Bitcoin: consolidation
 
 A hot shard fed by many small outputs can hold enough value and still fail a withdrawal, because one transaction takes at most `max_inputs` outputs.
-When a shard holds more than `consolidate_above` available outputs, the cold planner starts a consolidation: one transaction that spends the shard's
+When a shard holds more than `consolidate_above` available outputs that are worth spending at the current fee rate (dust does not count), the cold planner starts a consolidation: one transaction that spends the shard's
 smallest outputs that are worth spending at the current fee rate (at most `max_inputs`, at least two) and pays one output back to the same shard. The
 largest outputs stay free for withdrawals. It waits while the fee rate is above `consolidate_max_fee_rate` (logged once per change), while a
 consolidation or a hot-to-cold move is open on the partition, and while scanning is halted. It is off when `consolidate_above` is 0.
