@@ -2,7 +2,6 @@ package custody
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -33,10 +32,11 @@ type Report struct {
 	ScanCursor uint64 `json:"scan_cursor"` // next height Scan will read
 	// ChainHeight is the tip a chain-read balance was taken at (Bitcoin reads the node's UTXO set at its tip); 0 if the chain is read at Height.
 	ChainHeight uint64 `json:"chain_height,omitempty"`
-	// SkippedChainChecks counts chain comparisons that could not be made (a block kept arriving during the read, or the cell cannot produce the
-	// view). A report with any is not Clean: it must not show green when the control did not run.
+	// SkippedChainChecks counts chain comparisons that could not be made (a block or a change in the books kept arriving during the read, or the
+	// cell or its reader cannot produce what the comparison needs). A report with any is not Clean: it must not show green when the control did
+	// not run. It is so on every chain family.
 	SkippedChainChecks int     `json:"skipped_chain_checks"`
-	InFlight           int     `json:"in_flight"` // open sweeps and withdrawals
+	InFlight           int     `json:"in_flight"` // open sweeps, withdrawals, moves, rebalances and refills: explained, not skipped
 	Checks             []Check `json:"checks"`
 	Clean              bool    `json:"clean"`
 }
@@ -62,22 +62,29 @@ func (s *Service) posted(ctx context.Context, acct string) (*big.Int, error) {
 	return parseBig(p), nil
 }
 
-// Reconcile compares the books with the chain at a pinned safe height:
+// Reconcile compares the books with the chain at a pinned safe height, in flight or not:
 //
-//   - for every hot shard and asset, minus the hot account equals the on-chain
-//     balance of the shard's address (fees make ETH exact);
+//   - for every hot shard and asset, minus the hot account equals the on-chain balance of the shard's address (fees make ETH exact);
 //   - minus dep equals the sum of on-chain balances of all deposit addresses;
-//   - ledger.CheckInvariants passes;
 //   - for every cold address, minus the cold accounts of the partitions that use it equals its on-chain balance;
-//   - sweep, wd, tocold and rebal residuals are zero when nothing is in flight (otherwise
-//     they are skipped and counted in InFlight);
-//   - the scan has caught up to the pinned height (otherwise deposits the
-//     chain has but the books do not yet would show as differences).
+//   - every clearing account holds exactly what the broadcast bookings of the transactions not mined yet say;
+//   - ledger.CheckInvariants passes;
+//   - the scan has caught up to the pinned height (otherwise deposits the chain has but the books do not yet would show as differences).
 //
-// It reports and never repairs.
+// What a transaction of ours changed on the chain and the books have not booked yet (or the books booked and the chain has not yet), is
+// explained from the cell's own records instead of skipping the check: reconcileEVM and reconcileBTC. A comparison that cannot be made is
+// counted in SkippedChainChecks, and the report is then not Clean. It reports and never repairs.
 func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 	c := s.Cfg
 	rep := Report{Chain: c.Chain}
+	if c.Family != FamilyBTC {
+		// One consistent read of the books and the chain at one height: it takes its own height and scan cursor.
+		if err := s.reconcileEVM(ctx, &rep); err != nil {
+			return rep, err
+		}
+		s.finishReconcile(ctx, &rep)
+		return rep, nil
+	}
 	h, err := s.Reader.SafeHead(ctx)
 	if err != nil {
 		return rep, err
@@ -91,119 +98,12 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 	rep.add(Check{Name: "scan_caught_up", Ledger: fmt.Sprint(cur), Chain: fmt.Sprint(h + 1), OK: cur > h,
 		Detail: "the scan cursor must be past the pinned height"})
 
-	if c.Family == FamilyBTC {
-		if err := s.reconcileBTC(ctx, &rep); err != nil {
-			return rep, err
-		}
-	}
-
-	// Hot wallets.
-	for _, sym := range c.AssetList {
-		for i, addr := range c.HotShards {
-			p := c.PartitionKey(sym, i).String()
-			posted, err := s.posted(ctx, hotAcct(p))
-			if err != nil {
-				return rep, err
-			}
-			bal, err := s.Reader.Balance(ctx, addr.Hex(), sym, h)
-			if errors.Is(err, chain.ErrNotSupported) {
-				rep.add(Check{Name: "hot", Asset: sym, Subject: addr.Hex(), OK: true, Skipped: true, Detail: "this chain cell cannot read balances yet"})
-				continue
-			}
-			if err != nil {
-				return rep, err
-			}
-			want := new(big.Int).Neg(posted)
-			rep.add(Check{Name: "hot", Asset: sym, Subject: addr.Hex(), Ledger: want.String(), Chain: bal.String(), OK: want.Cmp(bal) == 0})
-		}
-	}
-
-	// Cold addresses: what hot-to-cold moves delivered, per cold address and asset, against the chain. Several hot partitions
-	// (shards) may share one cold address, so their cold accounts are summed.
-	if len(c.EVM.ColdAddresses) > 0 {
-		type coldKey struct{ addr, asset string }
-		sums := map[coldKey]*big.Int{}
-		var keys []coldKey
-		for _, sym := range c.AssetList {
-			for i := range c.HotShards {
-				p := c.PartitionKey(sym, i).String()
-				ca, err := c.EVM.ColdAddress(p, sym)
-				if err != nil {
-					continue // no cold address configured for this pool and asset class
-				}
-				posted, err := s.posted(ctx, coldAcct(p))
-				if err != nil {
-					return rep, err
-				}
-				k := coldKey{ca.Hex(), sym}
-				if sums[k] == nil {
-					sums[k] = new(big.Int)
-					keys = append(keys, k)
-				}
-				sums[k].Sub(sums[k], posted)
-			}
-		}
-		for _, k := range keys {
-			bal, err := s.Reader.Balance(ctx, k.addr, k.asset, h)
-			if err != nil {
-				return rep, err
-			}
-			rep.add(Check{Name: "cold", Asset: k.asset, Subject: k.addr, Ledger: sums[k].String(), Chain: bal.String(), OK: sums[k].Cmp(bal) == 0})
-		}
-	}
-
-	// Deposit addresses.
-	rows, err := s.Pool.Query(ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 ORDER BY address`, c.Chain)
-	if err != nil {
+	if err := s.reconcileBTC(ctx, &rep); err != nil {
 		return rep, err
 	}
-	var addrs []string
-	for rows.Next() {
-		var a string
-		if err := rows.Scan(&a); err != nil {
-			rows.Close()
-			return rep, err
-		}
-		addrs = append(addrs, a)
-	}
-	rows.Close()
-	for _, sym := range c.AssetList {
-		if c.Family == FamilyBTC {
-			break // reconcileBTC compared the deposit addresses
-		}
-		sum := new(big.Int)
-		unsupported := false
-		for _, a := range addrs {
-			b, err := s.Reader.Balance(ctx, a, sym, h)
-			if errors.Is(err, chain.ErrNotSupported) {
-				unsupported = true
-				break
-			}
-			if err != nil {
-				return rep, err
-			}
-			sum.Add(sum, b)
-		}
-		if unsupported {
-			rep.add(Check{Name: "deposit_addresses", Asset: sym, OK: true, Skipped: true, Detail: "this chain cell cannot read balances yet"})
-			continue
-		}
-		posted, err := s.posted(ctx, depAcct(c.Chain, sym))
-		if err != nil {
-			return rep, err
-		}
-		want := new(big.Int).Neg(posted)
-		rep.add(Check{Name: "deposit_addresses", Asset: sym, Ledger: want.String(), Chain: sum.String(), OK: want.Cmp(sum) == 0})
-	}
+	s.ledgerInvariants(ctx, &rep)
 
-	// Ledger invariants.
-	if err := ledger.CheckInvariants(ctx, s.Pool); err != nil {
-		rep.add(Check{Name: "ledger_invariants", OK: false, Detail: err.Error()})
-	} else {
-		rep.add(Check{Name: "ledger_invariants", OK: true})
-	}
-
-	// Clearing residuals.
+	// Clearing residuals: Bitcoin books a sweep and a move at broadcast, so the clearing accounts hold exactly what is broadcast and not settled.
 	var open int
 	if err := s.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
@@ -220,25 +120,36 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 			if err != nil {
 				return rep, err
 			}
-			ck := Check{Name: "clearing_residual", Asset: sym, Subject: id, Ledger: p.String(), Chain: "0", OK: p.Sign() == 0}
-			if c.Family == FamilyBTC {
-				// Bitcoin books a sweep and a move at broadcast, so the clearing accounts hold exactly what is broadcast and not settled.
-				want, err := s.btcClearing(ctx, id)
-				if err != nil {
-					return rep, err
-				}
-				ck.Chain, ck.OK = want.String(), p.Cmp(want) == 0
-			} else if open > 0 {
-				ck.Skipped, ck.Detail = true, fmt.Sprintf("%d sweeps or withdrawals in flight", open)
+			want, err := s.btcClearing(ctx, id)
+			if err != nil {
+				return rep, err
 			}
-			rep.add(ck)
+			rep.add(Check{Name: "clearing_residual", Asset: sym, Subject: id, Ledger: p.String(), Chain: want.String(), OK: p.Cmp(want) == 0})
 		}
+	}
+	s.finishReconcile(ctx, &rep)
+	return rep, nil
+}
+
+// ledgerInvariants adds the ledger's own consistency check.
+func (s *Service) ledgerInvariants(ctx context.Context, rep *Report) {
+	if err := ledger.CheckInvariants(ctx, s.Pool); err != nil {
+		rep.add(Check{Name: "ledger_invariants", OK: false, Detail: err.Error()})
+	} else {
+		rep.add(Check{Name: "ledger_invariants", OK: true})
+	}
+}
+
+// finishReconcile (EVM: after the comparison) adds the ledger check, decides Clean and raises the ALERT for each real difference.
+func (s *Service) finishReconcile(ctx context.Context, rep *Report) {
+	c := s.Cfg
+	if c.Family != FamilyBTC {
+		s.ledgerInvariants(ctx, rep)
 	}
 	rep.Clean = len(rep.Failures()) == 0 && rep.SkippedChainChecks == 0
 	for _, f := range rep.Failures() {
 		slog.Error("ALERT: the books and the chain disagree", "chain", c.Chain, "check", f.Name, "subject", f.Subject, "ledger", f.Ledger, "on_chain", f.Chain, "height", rep.Height, "chain_height", rep.ChainHeight, "detail", f.Detail)
 	}
-	return rep, nil
 }
 
 // btcClearing is what a clearing account must hold on Bitcoin: a sweep is booked at broadcast (sweep -> dep) and a move to cold too (tocold -> hot), and

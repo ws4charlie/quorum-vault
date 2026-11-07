@@ -65,7 +65,7 @@ reverted    hot(source) -> rebal   the broadcast booking is undone; only the fee
 fee         fee -> hot(source)     the source pays
 ```
 
-`Reconcile` knows the new clearing account (`rebal:<chain>:<asset>`; zero when nothing is in flight) and counts open rebalances as in-flight
+`Reconcile` knows the new clearing account (`rebal:<chain>:<asset>`; zero once the broadcast booking of a rebalance not mined yet is taken out and a mined one is settled for the comparison) and counts open rebalances as in-flight
 work. The hot-address checks need no change: each shard's ledger balance still equals its chain balance.
 
 ## The workflow
