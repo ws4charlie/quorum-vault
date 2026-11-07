@@ -570,7 +570,74 @@ func (a *Adapter) AdoptRefill(ctx context.Context, tx pgx.Tx, id string, req col
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO btc_attempts (chain, txid, owner_kind, owner_id, kind, payload, fee) VALUES ($1,$2,'refill',$3,'send',$4::jsonb,$5) ON CONFLICT DO NOTHING`,
-		a.cfg.Chain, wtx.TxHash().String(), id, string(b), int64(fee))
+	_, err = tx.Exec(ctx, `INSERT INTO btc_attempts (chain, txid, owner_kind, owner_id, kind, payload, fee, raw) VALUES ($1,$2,'refill',$3,'send',$4::jsonb,$5,$6) ON CONFLICT DO NOTHING`,
+		a.cfg.Chain, wtx.TxHash().String(), id, string(b), int64(fee), raw)
+	return err
+}
+
+// ReplaceRefill is the next revision of a request, with a higher fee over the same inputs and payment.
+func (a *Adapter) ReplaceRefill(ctx context.Context, prev coldsign.BTCRequest, id string, revision int) (coldsign.BTCRequest, error) {
+	if len(prev.Outputs) < 2 {
+		return coldsign.BTCRequest{}, fmt.Errorf("%w: the transaction has no change output to pay a higher fee from", chain.ErrCannotBump)
+	}
+	for _, in := range prev.Inputs {
+		var status, owner string
+		var value int64
+		err := a.pool.QueryRow(ctx, `SELECT status, COALESCE(owner_id,''), value FROM btc_utxos WHERE chain=$1 AND txid=$2 AND vout=$3 AND cold AND address=$4`,
+			a.cfg.Chain, in.TxID, in.Vout, prev.From).Scan(&status, &owner, &value)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return coldsign.BTCRequest{}, fmt.Errorf("%w: input %s:%d is no longer a cold output of this cell", chain.ErrNotEnoughOutputs, in.TxID, in.Vout)
+		}
+		if err != nil {
+			return coldsign.BTCRequest{}, err
+		}
+		if uint64(value) != in.Value || (status != "available" && !(status == "reserved" && owner == id)) {
+			return coldsign.BTCRequest{}, fmt.Errorf("%w: input %s:%d is %s or has another value", chain.ErrNotEnoughOutputs, in.TxID, in.Vout, status)
+		}
+	}
+	oldFee, err := prev.Fee()
+	if err != nil {
+		return coldsign.BTCRequest{}, err
+	}
+	vs := uint64(btcVSize(len(prev.Inputs), 2))
+	fee := a.nextFee(ctx, oldFee, vs)
+	if err := a.checkFee(fee, vs); err != nil {
+		return coldsign.BTCRequest{}, err
+	}
+	change := prev.Outputs[1].Value
+	delta := fee - oldFee
+	if change < delta || change-delta < DustLimit(KindP2WPKH) {
+		return coldsign.BTCRequest{}, fmt.Errorf("%w: %d sats of change cannot pay %d more", chain.ErrCannotBump, change, delta)
+	}
+	r := prev
+	r.ID, r.Revision = id, revision
+	r.Inputs = append([]coldsign.BTCInput(nil), prev.Inputs...)
+	r.Outputs = []coldsign.BTCOutput{prev.Outputs[0], {Address: prev.Outputs[1].Address, Value: change - delta}}
+	return r, nil
+}
+
+func btcVSize(nIn, nOut int) int {
+	// P2WPKH inputs and outputs: the same estimate the builder uses.
+	scripts := make([][]byte, nOut)
+	for i := range scripts {
+		scripts[i] = make([]byte, 22)
+	}
+	return int(vsize(nIn, scripts...))
+}
+
+// UnsentAttempt returns the raw signed transaction of the refill's newest attempt that was never broadcast.
+func (a *Adapter) UnsentAttempt(ctx context.Context, id string) ([]byte, bool, error) {
+	var raw []byte
+	err := a.pool.QueryRow(ctx, `SELECT raw FROM btc_attempts WHERE chain=$1 AND owner_kind='refill' AND owner_id=$2 AND broadcast_at IS NULL AND raw IS NOT NULL ORDER BY created_at DESC LIMIT 1`,
+		a.cfg.Chain, id).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	return raw, err == nil, err
+}
+
+// DropUnsentAttempt forgets the refill's attempts that were never broadcast.
+func (a *Adapter) DropUnsentAttempt(ctx context.Context, id string) error {
+	_, err := a.pool.Exec(ctx, `DELETE FROM btc_attempts WHERE chain=$1 AND owner_kind='refill' AND owner_id=$2 AND broadcast_at IS NULL`, a.cfg.Chain, id)
 	return err
 }

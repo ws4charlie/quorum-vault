@@ -21,15 +21,23 @@ func refillSystem(t *testing.T, o opts) *system {
 // It returns the refill the planner opened.
 func lowShard(t *testing.T, o opts, coldSats int64) (*system, rfRow) {
 	t.Helper()
+	return lowShardN(t, o, coldSats)
+}
+
+// lowShardN is lowShard with the cold address funded by one output of each of the given values.
+func lowShardN(t *testing.T, o opts, coldSats ...int64) (*system, rfRow) {
+	t.Helper()
 	if o.coldLow == "" {
 		o.coldLow, o.coldHigh, o.coldTarget = "12000000", "40000000", "20000000"
 	}
 	s := refillSystem(t, o)
 	s.fundHot(20_000_000)
 	s.deposit("c1", 20_000_000)
-	s.node.pay(map[string]string{s.coldAddr: btcAmount(coldSats)})
+	for _, v := range coldSats {
+		s.node.pay(map[string]string{s.coldAddr: btcAmount(v)})
+	}
 	s.node.mine(6, "")
-	s.waitFor(60*time.Second, "the cold output is recorded", func() bool { return s.coldRows("available") == 1 })
+	s.waitFor(60*time.Second, "the cold outputs are recorded", func() bool { return s.coldRows("available") == len(coldSats) })
 	w := s.withdraw("ini", "k1", "c1", s.node.fresh(), 10_000_000)
 	s.settle(w.ID)
 	return s, s.refillIn("requested", 60*time.Second)

@@ -444,6 +444,25 @@ func (s *Service) SettleRefill(ctx context.Context, id string, reverted bool) er
 				return err
 			}
 		}
+		if s.Cfg.Family == FamilyBTC && !reverted {
+			// The attempt that confirmed may be a replacement: its transaction, its fee, its change.
+			oc, err := s.Chain.Outcome(ctx, "refill", id)
+			if err != nil {
+				return err
+			}
+			if oc.State != chain.OutcomeConfirmed {
+				return fmt.Errorf("custody: refill %s has no confirmed attempt yet", id)
+			}
+			if !strings.EqualFold(oc.Hash, r.TxHash) {
+				if _, err := tx.Exec(ctx, `UPDATE refills SET tx_hash=$2 WHERE id=$1`, id, oc.Hash); err != nil {
+					return err
+				}
+				r.TxHash = oc.Hash
+			}
+			if fee, err = s.Chain.TxFee(ctx, oc.Hash); err != nil {
+				return err
+			}
+		}
 		if st, ok := s.Chain.(chain.Settler); ok && !reverted { // the cell's own books: the cold inputs spent, the hot output and the cold change recorded
 			if err := st.Settle(ctx, tx, "refill", id, r.TxHash); err != nil {
 				return err
@@ -687,12 +706,26 @@ func (s *Service) ExportBTCRefill(ctx context.Context, id string) (coldsign.BTCR
 		if err != nil {
 			return err
 		}
-		if cur.Status != RefillRequested || cur.Kind != RefillKind {
-			return fmt.Errorf("%w: refill %s is %s; only a request that has not been signed can be exported again", ErrInvalid, id, cur.Status)
+		if (cur.Status != RefillRequested && cur.Status != RefillBroadcast) || cur.Kind != RefillKind {
+			return fmt.Errorf("%w: refill %s is %s; only a request not yet signed, or a broadcast refill that is stuck, can be exported", ErrInvalid, id, cur.Status)
 		}
-		req, err := rf.BuildRefill(ctx, chain.RefillBuild{ID: id, PartitionID: cur.PartitionID, Need: cur.Amount, Revision: cur.Revision + 1})
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		var req coldsign.BTCRequest
+		switch {
+		case cur.Status == RefillBroadcast:
+			// A stuck refill: the next revision over the same inputs and payment with a higher fee, taken from the change. Without a change output it
+			// cannot be bumped, and the refill keeps waiting (it can still confirm).
+			if cur.BTC == nil {
+				return fmt.Errorf("%w: refill %s has no request", ErrInvalid, id)
+			}
+			req, err = rf.ReplaceRefill(ctx, *cur.BTC, id, cur.Revision+1)
+			if err != nil {
+				return fmt.Errorf("%w: the refill cannot be fee-bumped and keeps waiting: %v", ErrInvalid, err)
+			}
+		default:
+			req, err = s.requestForExport(ctx, tx, rf, cur)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalid, err)
+			}
 		}
 		out = req.File()
 		b, _ := json.Marshal(req)
@@ -704,6 +737,36 @@ func (s *Service) ExportBTCRefill(ctx context.Context, id string) (coldsign.BTCR
 		return auditEvent(ctx, tx, id, "refill.exported", map[string]any{"kind": cur.Kind, "revision": req.Revision, "request_hash": out.RequestHash, "amount": pay.String()})
 	})
 	return out, err
+}
+
+// requestForExport is the request of a refill that has not been signed. If an earlier export of this refill exists, or an earlier refill of the same
+// cold address ended "not imported" (a request that may have been signed offline whose file was lost or late), the new request keeps THAT intent: the same
+// inputs and payment with a higher fee, which the offline record accepts as a replacement. A fresh request over the same outpoints with another amount
+// would be refused offline, and the old signed file, broadcast by hand, could pay twice; with the same inputs the two can only replace each other.
+// Only if those inputs are gone (or have no change to pay a higher fee) is a fresh request built.
+func (s *Service) requestForExport(ctx context.Context, tx pgx.Tx, rf chain.ColdRefiller, cur Refill) (coldsign.BTCRequest, error) {
+	prev := cur.BTC
+	if prev == nil {
+		var raw []byte
+		err := tx.QueryRow(ctx, `SELECT request FROM refills WHERE chain=$1 AND kind='refill' AND cold_address=$2 AND status='failed' AND request IS NOT NULL
+			AND (failure_reason LIKE 'not imported%' OR failure_reason LIKE 'closed by%') ORDER BY updated_at DESC LIMIT 1`, s.Cfg.Chain, cur.ColdAddress).Scan(&raw)
+		if err == nil {
+			var q coldsign.BTCRequest
+			if json.Unmarshal(raw, &q) == nil && q.Version == coldsign.BTCRequestVersion {
+				prev = &q
+			}
+		} else if !isNoRows(err) {
+			return coldsign.BTCRequest{}, err
+		}
+	}
+	if prev != nil {
+		if req, err := rf.ReplaceRefill(ctx, *prev, cur.ID, cur.Revision+1); err == nil {
+			return req, nil
+		} else if !errors.Is(err, chain.ErrCannotBump) && !errors.Is(err, chain.ErrNotEnoughOutputs) {
+			return coldsign.BTCRequest{}, err
+		}
+	}
+	return rf.BuildRefill(ctx, chain.RefillBuild{ID: cur.ID, PartitionID: cur.PartitionID, Need: cur.Amount, Revision: cur.Revision + 1})
 }
 
 // ImportBTCRefill takes the signed file that came back from the ceremony. It must answer the CURRENT export, and the transaction inside must be exactly
@@ -727,10 +790,10 @@ func (s *Service) ImportBTCRefill(ctx context.Context, id string, signed coldsig
 		if signed.RequestID != "" && signed.RequestID != id {
 			return fmt.Errorf("%w: the signed file is for request %s, not %s", ErrInvalid, signed.RequestID, id)
 		}
-		if r.Status != RefillRequested {
-			if r.TxHash != "" && strings.EqualFold(r.TxHash, signed.TxID) {
-				return nil // the same file again
-			}
+		if r.TxHash != "" && strings.EqualFold(r.TxHash, signed.TxID) && r.Status != RefillRequested {
+			return nil // the same file again
+		}
+		if r.Status != RefillRequested && r.Status != RefillBroadcast {
 			return fmt.Errorf("%w: refill %s is already %s with another transaction", ErrInvalid, id, r.Status)
 		}
 		if r.BTC == nil {
@@ -742,6 +805,12 @@ func (s *Service) ImportBTCRefill(ctx context.Context, id string, signed coldsig
 		}
 		if err := rf.AdoptRefill(ctx, tx, id, *r.BTC, raw); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		if r.Status == RefillBroadcast {
+			// A replacement of a refill that is on its way: another attempt of the same refill, sent by the workflow; the refill stays broadcast and
+			// settles with whichever attempt confirms.
+			out.RawTx = hex.EncodeToString(raw)
+			return emit(ctx, tx, outbox.TopicColdMoves, id, "refill.replacement_signed", map[string]any{"tx": signed.TxID, "revision": r.Revision})
 		}
 		if _, err := tx.Exec(ctx, `UPDATE refills SET status='signed', raw_tx=$2, tx_hash=$3, updated_at=now() WHERE id=$1`, id, hex.EncodeToString(raw), signed.TxID); err != nil {
 			return err
@@ -795,4 +864,50 @@ func (s *Service) btcRefillState(ctx context.Context, id string) (string, error)
 		return "consumed", nil
 	}
 	return "pending", nil
+}
+
+// HasUnsentReplacement reports whether an imported replacement of a Bitcoin refill is waiting to be broadcast.
+func (s *Service) HasUnsentReplacement(ctx context.Context, id string) (bool, error) {
+	rf, ok := s.Chain.(chain.ColdRefiller)
+	if !ok {
+		return false, nil
+	}
+	_, has, err := rf.UnsentAttempt(ctx, id)
+	return has, err
+}
+
+// BroadcastRefillReplacement sends the imported replacement. A replacement the node will not take is forgotten (the earlier attempt may still confirm;
+// the operator can export again with a higher fee) and an ALERT is raised; an input the chain no longer has is for the outcome check to decide.
+func (s *Service) BroadcastRefillReplacement(ctx context.Context, id string) (bool, error) {
+	rf, ok := s.Chain.(chain.ColdRefiller)
+	if !ok {
+		return false, nil
+	}
+	raw, has, err := rf.UnsentAttempt(ctx, id)
+	if err != nil || !has {
+		return false, err
+	}
+	_, err = s.Chain.Broadcast(ctx, chain.SignedTx{Chain: s.Cfg.Chain, Raw: raw})
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, chain.ErrBroadcastStuck) || errors.Is(err, chain.ErrInputsSpent):
+		if derr := rf.DropUnsentAttempt(ctx, id); derr != nil {
+			return false, derr
+		}
+		return false, err
+	}
+	return false, err
+}
+
+// StuckHint says what an operator can do about a Bitcoin refill that was broadcast and has not confirmed.
+func (s *Service) StuckHint(ctx context.Context, id string) string {
+	r, err := s.GetRefill(ctx, id)
+	if err != nil || r.BTC == nil {
+		return ""
+	}
+	if len(r.BTC.Outputs) < 2 {
+		return "the refill has no change output, so it cannot be fee-bumped; it keeps waiting and can still confirm"
+	}
+	return "export a new revision (POST /v2/refills/" + id + "/export) for a higher fee over the same inputs, run the ceremony, and import it; at most one of the two can confirm"
 }

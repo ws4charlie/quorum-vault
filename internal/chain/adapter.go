@@ -253,6 +253,14 @@ type ColdRefiller interface {
 	BuildRefill(ctx context.Context, b RefillBuild) (coldsign.BTCRequest, error)
 	AdoptRefill(ctx context.Context, tx pgx.Tx, id string, req coldsign.BTCRequest, raw []byte) error
 	ColdAvailable(ctx context.Context, coldAddress string) (*big.Int, error)
+	// ReplaceRefill builds the next revision of a request: the same inputs, the same payment, a higher fee taken from the change (the rule of a withdrawal's
+	// bump, under the core's caps), so that the offline signer accepts it as a replacement of what it may already have signed. Every input must still be an
+	// available cold output, or one reserved by this refill. Without a change output, or when the change would fall to dust, it returns ErrCannotBump.
+	ReplaceRefill(ctx context.Context, prev coldsign.BTCRequest, id string, revision int) (coldsign.BTCRequest, error)
+	// UnsentAttempt is the signed transaction of the refill that was imported and not broadcast yet (a replacement), if any; DropUnsentAttempt forgets it
+	// (the node would not take it; the earlier attempt may still confirm).
+	UnsentAttempt(ctx context.Context, id string) (raw []byte, ok bool, err error)
+	DropUnsentAttempt(ctx context.Context, id string) error
 }
 
 // Settler is implemented by a chain cell that must update its own books when a transaction of an owner settles, in the settlement's database

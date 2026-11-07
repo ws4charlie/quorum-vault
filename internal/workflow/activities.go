@@ -385,6 +385,8 @@ type RefillView struct {
 	AgeSeconds int64 // since the row last changed (for a broadcast refill: since it was broadcast)
 	// Expired: a Bitcoin refill request that was not imported within its time. Absent (false) in histories recorded before.
 	Expired bool
+	// Replacement: a signed replacement of a Bitcoin refill is waiting to be broadcast. Absent (false) in histories recorded before.
+	Replacement bool
 }
 
 // LoadRefill reads the refill.
@@ -398,7 +400,11 @@ func (a *Activities) LoadRefill(ctx context.Context, id string) (RefillView, err
 		return RefillView{}, err
 	}
 	exp := a.D.Svc.Cfg.Family == custody.FamilyBTC && r.Status == custody.RefillRequested && time.Duration(age)*time.Second > a.D.Svc.Cfg.RefillRequestTTL
-	return RefillView{Status: r.Status, Parked: r.Parked(), Stuck: r.Stuck, AgeSeconds: age, Expired: exp}, nil
+	repl := false
+	if r.Status == custody.RefillBroadcast {
+		repl, _ = a.D.Svc.HasUnsentReplacement(ctx, id)
+	}
+	return RefillView{Status: r.Status, Parked: r.Parked(), Stuck: r.Stuck, AgeSeconds: age, Expired: exp, Replacement: repl}, nil
 }
 
 // BroadcastRefill sends the imported, signed transaction and books it as on its way. A nonce that another transaction used
@@ -456,6 +462,18 @@ func (a *Activities) SettleRefill(ctx context.Context, id string, reverted bool)
 	return nil
 }
 
+// BroadcastRefillReplacement sends an imported replacement of a Bitcoin refill. A replacement the node refuses is forgotten with an ALERT; the refill
+// goes on waiting for whichever attempt confirms.
+func (a *Activities) BroadcastRefillReplacement(ctx context.Context, id string) error {
+	_, err := a.D.Svc.BroadcastRefillReplacement(ctx, id)
+	if errors.Is(err, chain.ErrBroadcastStuck) || errors.Is(err, chain.ErrInputsSpent) {
+		a.log().Error("ALERT: the node did not take the fee-bumped replacement of a cold refill; it is forgotten and the earlier attempt may still confirm. Export again with a higher fee",
+			"refill", id, "error", err.Error())
+		return nil
+	}
+	return err
+}
+
 // ExpireRefill ends a Bitcoin refill request that was never imported in time.
 func (a *Activities) ExpireRefill(ctx context.Context, id string) error {
 	a.log().Warn("a refill request was not imported in time; it ends and nothing moved", "refill", id)
@@ -471,6 +489,10 @@ func (a *Activities) ParkRefillConsumed(ctx context.Context, id string) error {
 // AlertRefillStuck logs the ALERT for a refill that was broadcast and has not confirmed, once.
 func (a *Activities) AlertRefillStuck(ctx context.Context, id string) error {
 	first, err := a.D.Svc.MarkRefillStuck(ctx, id)
+	if err == nil && first && a.D.Svc.Cfg.Family == custody.FamilyBTC {
+		a.log().Error("ALERT: a cold refill was broadcast and has not confirmed. "+a.D.Svc.StuckHint(ctx, id), "refill", id)
+		return nil
+	}
 	if err == nil && first {
 		a.log().Error("ALERT: a cold refill was broadcast and has not confirmed. It is never retried with a new nonce: look at the transaction, "+
 			"and if it was dropped, re-export and run a new ceremony only after the old one can no longer mine", "refill", id)
