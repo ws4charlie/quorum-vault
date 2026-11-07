@@ -264,6 +264,16 @@ with the cancel's fee, so the customer's credit and the sweep account stay right
 planner leaves the address alone for a growing while; an outside spend parks the sweep, and withdrawals go on. See
 [learn/p7-5-btc-sweeps.md](learn/p7-5-btc-sweeps.md).
 
+## EVM: reconciliation in flight
+
+`Reconcile` compares the books with the chain at a pinned safe height, and does so while transactions are in flight. The differences are explained from the
+cell's own rows: a transaction of ours that mined at or below the pinned height and is not settled yet (the chain is ahead), a transaction booked at
+broadcast that has not mined yet (the books are ahead), and a revert settled before it was final. The books are put in the terms of the chain by taking
+out the broadcast bookings of the items not mined and adding the legs their settlement will book, including the gas of reverted transactions and cancels;
+every clearing account is then exactly zero, and what is left raises the ALERT. The books are read from one database snapshot, so a busy cell answers; a difference is
+checked again from a new snapshot and reported only if both reads show it. A comparison that
+cannot be made is counted and makes the report not Clean. See [learn/p3b-closed-loop.md](learn/p3b-closed-loop.md).
+
 ## Bitcoin: reconciliation and cold
 
 Reconcile compares the ledger, the output table and the chain. The chain is read with `scantxoutset` at the node's tip (batched, never on a request

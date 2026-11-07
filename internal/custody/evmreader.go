@@ -2,12 +2,14 @@ package custody
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"strings"
 )
@@ -80,4 +82,22 @@ func (r *EVMReader) Balance(ctx context.Context, address, asset string, height u
 		return nil, fmt.Errorf("custody: balanceOf %s: %w", asset, err)
 	}
 	return new(big.Int).SetBytes(out), nil
+}
+
+var _ ReceiptReader = (*EVMReader)(nil)
+
+// Receipt reads the receipt of a transaction: its block, whether it succeeded and what it paid in gas. found is false while the node has none.
+func (r *EVMReader) Receipt(ctx context.Context, txHash string) (Receipt, bool, error) {
+	rc, err := r.ec.TransactionReceipt(ctx, common.HexToHash(txHash))
+	if errors.Is(err, ethereum.NotFound) {
+		return Receipt{}, false, nil
+	}
+	if err != nil {
+		return Receipt{}, false, fmt.Errorf("custody: receipt %s: %w", txHash, err)
+	}
+	out := Receipt{Block: rc.BlockNumber.Uint64(), Success: rc.Status == types.ReceiptStatusSuccessful}
+	if rc.EffectiveGasPrice != nil {
+		out.Fee = new(big.Int).Mul(new(big.Int).SetUint64(rc.GasUsed), rc.EffectiveGasPrice)
+	}
+	return out, true, nil
 }

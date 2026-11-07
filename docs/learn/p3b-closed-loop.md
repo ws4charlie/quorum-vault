@@ -116,12 +116,33 @@ Also tested: kill the **gateway** with a job waiting (the job stays queued; rest
 
 ## 6. Reconciliation
 
-`custody.Reconcile` checks at a pinned safe height and fixes nothing:
+`custody.Reconcile` checks at a pinned safe height and fixes nothing, whether or not anything is in flight:
 - `-hot:<partition>` equals the on-chain balance of the hot address, per asset (fees make ETH exact);
 - `-dep` equals the sum of on-chain balances of all deposit addresses;
+- for every cold address, minus the cold accounts that deliver to it equals its on-chain balance;
+- every clearing account (`sweep`, `wd`, `tocold`, `rebal`, `refill`) is zero;
 - `ledger.CheckInvariants` passes;
-- `sweep` and `wd` are zero when nothing is in flight;
 - the scan has caught up to the pinned height (else the chain has deposits the books have not seen).
+
+A live system is never quiet, so the books and the chain differ at almost any moment, and `reconcileEVM` explains the difference from the rows
+the cell holds instead of skipping the check. Three things make them differ:
+
+- a transaction of ours mined at or below the pinned height and not settled yet: the chain has its effect, the books get it at settlement;
+- a transaction the books booked at broadcast (a sweep, a move, a rebalance, a refill) that has not mined yet: the books have its effect, the chain
+  does not;
+- a revert that was settled as soon as it was mined, before its block was final: the books have its fee, the chain at the pinned height does not.
+
+For every open item the cell's records (`evm_tx_attempts` through `evm_nonce_allocations`, and the refill's own hash) say which attempt has a receipt at or
+below the pinned height; only one attempt per nonce can mine, so a replacement or a cancel is found the same way. Then the books are put in the terms
+of the chain: the broadcast bookings of the items that have not mined are taken out, and the ledger legs that each mined item's settlement will book
+(what a sweep moved, the excess or shortfall, a move's arrival or its undoing, the gas of a reverted transaction or a cancel) are added. What is left is
+a real difference and raises the ALERT. `TestReconcileEVMSweepMinedAndUnsettled` settles with the real code after the explanation and checks that the
+report stays clean, so the two cannot drift apart.
+
+The books are read from one database snapshot (a read-only `REPEATABLE READ` transaction, started before the safe height is read), so a busy cell
+still gets an answer: entries posted meanwhile are simply not seen. A transaction of ours sent after the snapshot may already be mined at or below the
+height; when the first read shows a difference, the comparison is made again from a new snapshot (`rechecked` in the report), and only a difference both
+reads show, by the same amount, is reported. A comparison the reader cannot make is counted in `skipped_chain_checks` and the report is **not Clean**.
 
 ## 7. Deviations and limits worth knowing
 
