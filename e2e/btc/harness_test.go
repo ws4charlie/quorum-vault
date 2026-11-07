@@ -97,13 +97,70 @@ func nodeURL() string {
 	return "http://127.0.0.1:18443"
 }
 
-// node is bitcoind with a wallet of its own for the test: it mines and pays.
+// node is bitcoind with a wallet of its own for the test: it pays. It does not mine for itself: the node has one faucet wallet that holds the block
+// rewards, and each test wallet is funded from it by an ordinary payment, so no test spends the (halving) reward on 101 blocks of its own.
 type node struct {
 	t          *testing.T
 	root       *btc.RPC
 	w          *btc.RPC
-	miner      string // the wallet's address, which receives the block rewards
+	miner      string // where the blocks a test mines for confirmations are paid: an address of the faucet wallet, never of the test's wallet
 	walletName string
+}
+
+const (
+	faucetWallet   = "faucet"
+	faucetBTC      = 5   // what a test wallet is funded with, in BTC
+	faucetLowBTC   = 500 // below this the faucet mines again
+	faucetTopUpBlk = 250 // blocks mined to the faucet while the reward is high
+)
+
+// faucet returns the node's faucet wallet, creating and funding it if it is not there: idempotent across tests and across test binaries (it is loaded if
+// it exists). It is funded once by mining about 250 blocks to it while the reward is high, so it holds thousands of BTC, and again only if it runs short.
+func faucet(t *testing.T) (*btc.RPC, string) {
+	t.Helper()
+	ctx := context.Background()
+	root := btc.NewRPC(nodeURL(), rpcUser, rpcPass)
+	var loaded []string
+	if err := root.Call(ctx, &loaded, "listwallets"); err != nil {
+		t.Fatal(err)
+	}
+	have := false
+	for _, w := range loaded {
+		have = have || w == faucetWallet
+	}
+	if !have {
+		if err := root.Call(ctx, nil, "loadwallet", faucetWallet); err != nil {
+			if err := root.Call(ctx, nil, "createwallet", faucetWallet); err != nil {
+				t.Fatalf("the faucet wallet: %v", err)
+			}
+		}
+	}
+	f := btc.NewRPC(nodeURL()+"/wallet/"+faucetWallet, rpcUser, rpcPass)
+	var bal float64
+	if err := f.Call(ctx, &bal, "getbalance"); err != nil {
+		t.Fatal(err)
+	}
+	if bal < faucetLowBTC {
+		var addr string
+		if err := f.Call(ctx, &addr, "getnewaddress"); err != nil {
+			t.Fatal(err)
+		}
+		var hashes []string
+		if err := root.Call(ctx, &hashes, "generatetoaddress", faucetTopUpBlk, addr); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Call(ctx, &bal, "getbalance"); err != nil {
+			t.Fatal(err)
+		}
+		if bal < 10*faucetBTC {
+			t.Fatalf("the faucet holds %v BTC after %d more blocks: the regtest block reward is spent (a node that mined for years); recreate the node once", bal, faucetTopUpBlk)
+		}
+	}
+	var miner string
+	if err := f.Call(ctx, &miner, "getnewaddress", "miner"); err != nil {
+		t.Fatal(err)
+	}
+	return f, miner
 }
 
 func newNode(t *testing.T) *node {
@@ -117,31 +174,23 @@ func newNode(t *testing.T) *node {
 	if info.Chain != "regtest" {
 		t.Fatalf("refusing to run on bitcoind chain %q", info.Chain)
 	}
+	f, miner := faucet(t)
 	name := "e2e-" + uuid.NewString()[:8]
 	if err := n.root.Call(ctx, nil, "createwallet", name); err != nil {
 		t.Fatal(err)
 	}
 	n.walletName = name
 	n.w = btc.NewRPC(nodeURL()+"/wallet/"+name, rpcUser, rpcPass)
-	if err := n.w.Call(ctx, &n.miner, "getnewaddress"); err != nil {
+	var addr string
+	if err := n.w.Call(ctx, &addr, "getnewaddress"); err != nil {
 		t.Fatal(err)
 	}
-	n.mine(101, "") // the first reward is spendable
-	// Regtest halves the block reward every 150 blocks, so a node that has run many tests pays little: mine until the wallet (1.5 BTC) can
-	// pay the tests, and say so when the node is spent (the reward reaches zero near height 9600).
-	for mined := 0; ; mined += 50 {
-		var bal float64
-		if err := n.w.Call(ctx, &bal, "getbalance"); err != nil {
-			t.Fatal(err)
-		}
-		if bal >= 1.5 {
-			break
-		}
-		if mined >= 1500 {
-			t.Fatalf("the wallet has %v BTC after %d more blocks: the regtest block reward is spent; recreate the node (make btc-down btc-up)", bal, mined)
-		}
-		n.mine(50, "")
+	var txid string
+	if err := f.Call(ctx, &txid, "sendtoaddress", addr, faucetBTC); err != nil {
+		t.Fatalf("the faucet cannot fund the test wallet: %v", err)
 	}
+	n.miner = miner
+	n.mine(1, "") // the payment is confirmed: no block is mined for maturity
 	return n
 }
 
