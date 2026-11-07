@@ -178,15 +178,8 @@ func TestTwoInputWithdrawal(t *testing.T) {
 }
 
 // feeOf is the fee the builder pays at the fallback rate (5 sat/vB) for a transaction with one P2WPKH input and the given number of P2WPKH outputs
-// (the payment, and change if any). It needs the node to have no fee estimate, which a fresh regtest node has.
+// (the payment, and change if any). The system must be started with noEstimate, so that the fallback rate is the rate.
 func feeOf(s *system, outputs int) int64 {
-	var est struct {
-		FeeRate float64  `json:"feerate"`
-		Errors  []string `json:"errors"`
-	}
-	if err := s.node.root.Call(s.ctx, &est, "estimatesmartfee", 2); err == nil && est.FeeRate > 0 && len(est.Errors) == 0 {
-		s.t.Skip("the node has a fee estimate: the exact-amount cases assume the fallback rate")
-	}
 	script, _ := btc.OutputScript(s.hotAddr, s.acct.Params)
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{})
@@ -198,7 +191,7 @@ func feeOf(s *system, outputs int) int64 {
 
 // An exact amount leaves nothing for change: one output. Change at dust goes to the fee, and the fee actually paid is booked.
 func TestExactAmountAndChangeAtDust(t *testing.T) {
-	s := newSystem(t, opts{withdraw: true})
+	s := newSystem(t, opts{withdraw: true, noEstimate: true})
 	s.cf.Withdrawal.HotWait = "3m"
 	fee1, fee2 := feeOf(s, 1), feeOf(s, 2)
 	s.fundHot(10_000_000 + fee1) // exactly the payment and the fee of a one-output transaction
