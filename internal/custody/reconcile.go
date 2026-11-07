@@ -251,6 +251,8 @@ func (s *Service) btcClearing(ctx context.Context, acct string) (*big.Int, error
 		q = `SELECT COALESCE(SUM(amount),0)::text FROM sweeps WHERE chain=$1 AND status='broadcast'`
 	case toColdAcct(c.Chain, btc.Native):
 		q = `SELECT COALESCE(SUM(amount),0)::text FROM cold_moves WHERE chain=$1 AND status='broadcast'`
+	case refillAcct(c.Chain, btc.Native):
+		q = `SELECT COALESCE(SUM(amount),0)::text FROM refills WHERE chain=$1 AND kind='refill' AND status='broadcast'`
 	default:
 		return new(big.Int), nil
 	}
@@ -267,7 +269,7 @@ func (s *Service) reconcileStamp(ctx context.Context) (string, error) {
 	var st string
 	err := s.Pool.QueryRow(ctx, `SELECT concat_ws('|',
 		(SELECT max(updated_at)::text FROM btc_utxos WHERE chain=$1), (SELECT max(updated_at)::text FROM sweeps WHERE chain=$1),
-		(SELECT max(updated_at)::text FROM withdrawals WHERE chain=$1), (SELECT max(updated_at)::text FROM cold_moves WHERE chain=$1),
+		(SELECT max(updated_at)::text FROM withdrawals WHERE chain=$1), (SELECT max(updated_at)::text FROM cold_moves WHERE chain=$1), (SELECT max(updated_at)::text FROM refills WHERE chain=$1),
 		(SELECT count(*)::text FROM deposits WHERE chain=$1), (SELECT count(*)::text FROM btc_attempts WHERE chain=$1 AND broadcast_at IS NOT NULL),
 		(SELECT next_height::text FROM chain_cursors WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
 	return st, err
@@ -433,6 +435,21 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 			Detail: "the output table against the ledger"})
 	}
 
+	// What a refill booked at broadcast (refill -> cold) is undone for the comparison, per partition, as a move's is on the hot side.
+	refilling := map[string]*big.Int{}
+	rrows, err := s.Pool.Query(ctx, `SELECT partition_id, SUM(amount)::text FROM refills WHERE chain=$1 AND kind='refill' AND status='broadcast' GROUP BY partition_id`, c.Chain)
+	if err != nil {
+		return nil, err
+	}
+	for rrows.Next() {
+		var p, amt string
+		if err := rrows.Scan(&p, &amt); err != nil {
+			rrows.Close()
+			return nil, err
+		}
+		refilling[p] = parseBig(amt)
+	}
+	rrows.Close()
 	sums := map[string]*big.Int{}
 	var keys []string
 	for i := 0; i < c.shardCount(); i++ {
@@ -450,11 +467,22 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 			keys = append(keys, ca)
 		}
 		sums[ca].Sub(sums[ca], posted)
+		if m := refilling[p]; m != nil {
+			sums[ca].Add(sums[ca], m)
+		}
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		out = append(out, Check{Name: "cold", Asset: btc.Native, Subject: k, Ledger: sums[k].String(), Chain: bal(k).String(), OK: sums[k].Cmp(bal(k)) == 0,
-			Detail: fmt.Sprintf("read at chain height %d", v.Height)})
+		want := new(big.Int).Sub(sums[k], spent(k))
+		out = append(out, Check{Name: "cold", Asset: btc.Native, Subject: k, Ledger: want.String(), Chain: bal(k).String(), OK: want.Cmp(bal(k)) == 0,
+			Detail: note(fmt.Sprintf("read at chain height %d", v.Height), spent(k))})
+		var rows string
+		if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(SUM(value),0)::text FROM btc_utxos WHERE chain=$1 AND cold AND address=$2 AND status IN ('available','reserved')`,
+			c.Chain, canon(k)).Scan(&rows); err != nil {
+			return nil, err
+		}
+		out = append(out, Check{Name: "cold_outputs", Asset: btc.Native, Subject: k, Ledger: sums[k].String(), Chain: rows, OK: sums[k].Cmp(parseBig(rows)) == 0,
+			Detail: "the cold outputs in the table against the ledger"})
 	}
 
 	dep, err := s.posted(ctx, depAcct(c.Chain, btc.Native))

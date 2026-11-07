@@ -1,14 +1,21 @@
 package btc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
 	"strings"
 
+	"github.com/btcsuite/btcd/wire"
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/coldsign"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
 // MaxMove is the most a hot-to-cold move from the partition can carry now: the oldest available hot outputs, at most max_inputs of them, minus the
@@ -217,9 +224,10 @@ func (a *Adapter) ChainView(ctx context.Context, addrs []string) (chain.ChainVie
 		value   int64
 		status  string
 		deposit bool
+		cold    bool
 		address string
 	}
-	rows, err := a.pool.Query(ctx, `SELECT txid, vout, value, status, deposit, COALESCE(address,''), partition_id FROM btc_utxos WHERE chain=$1 AND status IN ('available','reserved')`, a.cfg.Chain)
+	rows, err := a.pool.Query(ctx, `SELECT txid, vout, value, status, deposit, cold, COALESCE(address,''), partition_id FROM btc_utxos WHERE chain=$1 AND status IN ('available','reserved')`, a.cfg.Chain)
 	if err != nil {
 		return chain.ChainView{}, err
 	}
@@ -227,11 +235,11 @@ func (a *Adapter) ChainView(ctx context.Context, addrs []string) (chain.ChainVie
 	for rows.Next() {
 		var r row
 		var part string
-		if err := rows.Scan(&r.txid, &r.vout, &r.value, &r.status, &r.deposit, &r.address, &part); err != nil {
+		if err := rows.Scan(&r.txid, &r.vout, &r.value, &r.status, &r.deposit, &r.cold, &r.address, &part); err != nil {
 			rows.Close()
 			return chain.ChainView{}, err
 		}
-		if !r.deposit {
+		if !r.deposit && !r.cold {
 			sh, err := a.shardOf(part)
 			if err != nil {
 				rows.Close()
@@ -393,4 +401,176 @@ func (a *Adapter) spentByConfirmedAttempt(ctx context.Context, txid string, vout
 var (
 	_ chain.MoveCapacity = (*Adapter)(nil)
 	_ chain.ChainViewer  = (*Adapter)(nil)
+	_ chain.ColdRefiller = (*Adapter)(nil)
 )
+
+// ---- refills (cold to hot) ----
+
+// coldPartition is the hot partition whose cold account the books use for a pool's cold address: the pool's first shard.
+func (a *Adapter) coldPartition(pool string) string {
+	for _, sh := range a.shards {
+		if k, err := partition.Parse(sh.partition); err == nil && k.Pool == pool {
+			return sh.partition
+		}
+	}
+	if len(a.shards) > 0 {
+		return a.shards[0].partition
+	}
+	return ""
+}
+
+// ColdAvailable is what the available cold outputs of the address hold.
+func (a *Adapter) ColdAvailable(ctx context.Context, coldAddress string) (*big.Int, error) {
+	c, err := a.NormalizeAddress(coldAddress)
+	if err != nil {
+		return nil, err
+	}
+	var sum string
+	if err := a.pool.QueryRow(ctx, `SELECT COALESCE(SUM(value),0)::text FROM btc_utxos WHERE chain=$1 AND cold AND address=$2 AND status='available'`, a.cfg.Chain, c).Scan(&sum); err != nil {
+		return nil, err
+	}
+	n, _ := new(big.Int).SetString(sum, 10)
+	return n, nil
+}
+
+// BuildRefill builds the request of a refill of the partition's shard: the oldest available outputs of the pool's cold address, at most max_inputs of them,
+// the payment to the shard and the change back to the cold address (or, when the change would be dust, to the fee). The fee is the node's rate with the
+// fallback, under the core's caps (max_tx_fee_sats, max_fee_rate), which must be set below the offline signer's, so that a request the signer would
+// refuse is never exported. When the outputs one transaction can carry hold less than the need, the payment is what they hold less the fee, and the
+// refill is done in rounds. It reserves nothing.
+func (a *Adapter) BuildRefill(ctx context.Context, b chain.RefillBuild) (coldsign.BTCRequest, error) {
+	sh, err := a.shardOf(b.PartitionID)
+	if err != nil {
+		return coldsign.BTCRequest{}, err
+	}
+	k, err := partition.Parse(b.PartitionID)
+	if err != nil {
+		return coldsign.BTCRequest{}, err
+	}
+	cold, ok := a.coldBy[k.Pool]
+	if !ok {
+		return coldsign.BTCRequest{}, fmt.Errorf("btc: pool %q has no cold address", k.Pool)
+	}
+	if b.Need == nil || !b.Need.IsUint64() || b.Need.Sign() <= 0 {
+		return coldsign.BTCRequest{}, fmt.Errorf("btc: refill amount %v out of range", b.Need)
+	}
+	need := b.Need.Uint64()
+	rate := a.feeRate(ctx)
+	hotScript, coldScript := sh.script, scriptOrDummy(cold, a)
+	rows, err := a.pool.Query(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND cold AND address=$2 AND status='available' ORDER BY created_at, txid, vout LIMIT $3`,
+		a.cfg.Chain, cold, a.cfg.MaxInputs)
+	if err != nil {
+		return coldsign.BTCRequest{}, err
+	}
+	var picked []utxo
+	var sum uint64
+	for rows.Next() {
+		var u utxo
+		var v int64
+		if err := rows.Scan(&u.txid, &u.vout, &v); err != nil {
+			rows.Close()
+			return coldsign.BTCRequest{}, err
+		}
+		u.value = uint64(v)
+		picked = append(picked, u)
+		sum += u.value
+		// Enough with change? Stop at the fewest oldest outputs that cover the need.
+		if sum >= need+vsize(len(picked), hotScript, coldScript)*rate+DustLimit(KindP2WPKH) {
+			break
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return coldsign.BTCRequest{}, err
+	}
+	if len(picked) == 0 {
+		return coldsign.BTCRequest{}, fmt.Errorf("%w: no available cold output at %s", chain.ErrNotEnoughOutputs, cold)
+	}
+	feeChange := vsize(len(picked), hotScript, coldScript) * rate
+	feeNoChange := vsize(len(picked), hotScript) * rate
+	var pay, change, fee uint64
+	switch {
+	case sum >= need+feeChange+DustLimit(KindP2WPKH):
+		pay, fee = need, feeChange
+		change = sum - pay - fee
+	case sum >= need+feeNoChange:
+		pay, fee = need, sum-need // what is left is too small to be change: it goes to the fee
+	default: // the outputs one transaction can carry hold less than the need: pay what they hold
+		if sum <= feeNoChange+DustLimit(KindP2WPKH) {
+			return coldsign.BTCRequest{}, fmt.Errorf("%w: the available cold outputs (%d sats) cannot pay the fee and a payment", chain.ErrNotEnoughOutputs, sum)
+		}
+		fee = feeNoChange
+		pay = sum - fee
+	}
+	vs := vsize(len(picked), hotScript, coldScript)
+	if change == 0 {
+		vs = vsize(len(picked), hotScript)
+	}
+	if fee > a.cfg.MaxTxFeeSats || fee > a.cfg.MaxFeeRate*vs {
+		return coldsign.BTCRequest{}, fmt.Errorf("%w: a fee of %d sats is above the core's caps (%d sats, %d sat/vB)", ErrFeeTooHigh, fee, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate)
+	}
+	r := coldsign.BTCRequest{Version: coldsign.BTCRequestVersion, ID: b.ID, Revision: b.Revision, Network: a.cfg.Network, Chain: a.cfg.Chain, Pool: k.Pool, From: cold}
+	for _, u := range picked {
+		r.Inputs = append(r.Inputs, coldsign.BTCInput{TxID: u.txid, Vout: u.vout, Value: u.value, Address: cold})
+	}
+	r.Outputs = []coldsign.BTCOutput{{Address: sh.address, Value: pay}}
+	if change > 0 {
+		r.Outputs = append(r.Outputs, coldsign.BTCOutput{Address: cold, Value: change})
+	}
+	return r, nil
+}
+
+func scriptOrDummy(addr string, a *Adapter) []byte {
+	s, err := OutputScript(addr, a.cfg.params)
+	if err != nil {
+		return make([]byte, 22)
+	}
+	return s
+}
+
+// AdoptRefill records the imported, signed transaction of a refill as an attempt of the owner "refill" and reserves its inputs, in the importing
+// transaction. Every input must still be an available cold output of the request's address with the value the request names.
+func (a *Adapter) AdoptRefill(ctx context.Context, tx pgx.Tx, id string, req coldsign.BTCRequest, raw []byte) error {
+	var wtx wire.MsgTx
+	if err := wtx.Deserialize(bytes.NewReader(raw)); err != nil {
+		return fmt.Errorf("btc: signed refill: %w", err)
+	}
+	p := Payload{Version: PayloadVersion}
+	for _, in := range req.Inputs {
+		var status, owner string
+		var value int64
+		err := tx.QueryRow(ctx, `SELECT status, COALESCE(owner_id,''), value FROM btc_utxos WHERE chain=$1 AND txid=$2 AND vout=$3 AND cold AND address=$4 FOR UPDATE`,
+			a.cfg.Chain, in.TxID, in.Vout, req.From).Scan(&status, &owner, &value)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: input %s:%d is not a cold output of this cell", chain.ErrNotEnoughOutputs, in.TxID, in.Vout)
+		}
+		if err != nil {
+			return err
+		}
+		if uint64(value) != in.Value {
+			return fmt.Errorf("btc: input %s:%d holds %d sats, the request says %d", in.TxID, in.Vout, value, in.Value)
+		}
+		if status != "available" && !(status == "reserved" && owner == id) {
+			return fmt.Errorf("%w: input %s:%d is %s", chain.ErrNotEnoughOutputs, in.TxID, in.Vout, status)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE btc_utxos SET status='reserved', owner_kind='refill', owner_id=$4, updated_at=now() WHERE chain=$1 AND txid=$2 AND vout=$3`,
+			a.cfg.Chain, in.TxID, in.Vout, id); err != nil {
+			return err
+		}
+		p.Inputs = append(p.Inputs, PayloadInput{TxID: in.TxID, Vout: in.Vout, Value: in.Value, Path: []uint32{}, Sequence: SequenceRBF})
+	}
+	fee, err := req.Fee()
+	if err != nil {
+		return err
+	}
+	for _, o := range req.Outputs {
+		p.Outputs = append(p.Outputs, PayloadOutput{Address: o.Address, Value: o.Value})
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO btc_attempts (chain, txid, owner_kind, owner_id, kind, payload, fee) VALUES ($1,$2,'refill',$3,'send',$4::jsonb,$5) ON CONFLICT DO NOTHING`,
+		a.cfg.Chain, wtx.TxHash().String(), id, string(b), int64(fee))
+	return err
+}

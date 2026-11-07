@@ -90,8 +90,20 @@ func (s *Service) ApplyScan(ctx context.Context, from uint64, res chain.ScanResu
 			if !inserted {
 				continue // seen before: booked before
 			}
-			// The operator put its own money on a hot address: the hot mirror falls by the amount, the operator's account rises.
 			key := fmt.Sprintf("%s:%s:%d", f.Chain, f.TxHash, f.Vout)
+			if f.Cold {
+				// The operator put its own money on a cold address: the cold account falls by the amount (cold holds minus its balance).
+				if err := s.transfer(ctx, tx, "cold-fund:"+key, coldAcct(f.PartitionID), opFundAcct(c.Chain, f.Asset), f.Amount, map[string]any{"tx": f.TxHash, "vout": f.Vout, "kind": "cold_funding"}); err != nil {
+					return err
+				}
+				if err := emit(ctx, tx, outbox.TopicDeposits, "cold-fund:"+key, "cold.funded", map[string]any{"chain": f.Chain, "asset": f.Asset, "partition": f.PartitionID,
+					"address": f.Address, "amount": f.Amount.String(), "tx": f.TxHash, "vout": f.Vout, "height": f.BlockHeight}); err != nil {
+					return err
+				}
+				n++
+				continue
+			}
+			// The operator put its own money on a hot address: the hot mirror falls by the amount, the operator's account rises.
 			if err := s.transfer(ctx, tx, "hot-fund:"+key, hotAcct(f.PartitionID), opFundAcct(c.Chain, f.Asset), f.Amount, map[string]any{"tx": f.TxHash, "vout": f.Vout, "kind": "hot_funding"}); err != nil {
 				return err
 			}

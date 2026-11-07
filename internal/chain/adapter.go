@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -170,6 +171,8 @@ type FundingOutput struct {
 	Vout        uint32
 	Amount      *big.Int
 	BlockHeight uint64
+	// Cold: the output pays a cold address (PartitionID is then the first hot partition of its pool, whose cold account the books use).
+	Cold bool
 }
 
 // FundingRecorder is implemented by a chain cell that keeps its own outputs (Bitcoin's UTXO table). RecordFunding stores the output once
@@ -231,6 +234,25 @@ type ChainView struct {
 // keeps the node busy: callers batch and run it on their own cadence, never on a request path.
 type ChainViewer interface {
 	ChainView(ctx context.Context, addrs []string) (ChainView, error)
+}
+
+// RefillBuild asks a chain cell for the request of a refill: Need is what the hot partition should receive.
+type RefillBuild struct {
+	ID          string
+	PartitionID string
+	Need        *big.Int
+	Revision    int
+}
+
+// ColdRefiller is implemented by a chain cell that builds refill requests from its own outputs (Bitcoin). BuildRefill picks the cold address's oldest
+// available outputs (at most max_inputs) and returns the request; it reserves nothing, so a request that is never signed leaves nothing behind. The
+// payment may be less than Need when the inputs a transaction can carry are fewer than the need: the caller books what the request pays. AdoptRefill
+// runs in the transaction that imports the signed file: it checks the request's inputs are still available cold outputs, reserves them and records
+// the transaction as an attempt of the refill, so that broadcast, outcome and settlement are the ordinary attempt code.
+type ColdRefiller interface {
+	BuildRefill(ctx context.Context, b RefillBuild) (coldsign.BTCRequest, error)
+	AdoptRefill(ctx context.Context, tx pgx.Tx, id string, req coldsign.BTCRequest, raw []byte) error
+	ColdAvailable(ctx context.Context, coldAddress string) (*big.Int, error)
 }
 
 // Settler is implemented by a chain cell that must update its own books when a transaction of an owner settles, in the settlement's database

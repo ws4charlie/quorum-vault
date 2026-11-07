@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
@@ -63,6 +64,7 @@ type Refill struct {
 	Revision    int
 	RequestHash string
 	Request     *coldsign.Request
+	BTC         *coldsign.BTCRequest // the request of a Bitcoin refill (Request is for the evm family)
 	RawTx       string
 	TxHash      string
 	Reason      string
@@ -84,11 +86,19 @@ func scanRefill(row pgx.Row) (Refill, error) {
 	}
 	r.Amount = parseBig(amt)
 	if len(req) > 0 {
-		var q coldsign.Request
-		if err := json.Unmarshal(req, &q); err != nil {
-			return r, err
+		if coldsign.IsBTCRequest([]byte(`{"request":` + string(req) + `}`)) {
+			var q coldsign.BTCRequest
+			if err := json.Unmarshal(req, &q); err != nil {
+				return r, err
+			}
+			r.BTC = &q
+		} else {
+			var q coldsign.Request
+			if err := json.Unmarshal(req, &q); err != nil {
+				return r, err
+			}
+			r.Request = &q
 		}
-		r.Request = &q
 	}
 	return r, nil
 }
@@ -171,17 +181,40 @@ func (s *Service) openRefillFor(ctx context.Context, q interface {
 // openRefill opens a refill request for a partition that is below its low mark, unless one is open for the same cold address
 // (it has one nonce, so one refill at a time). need is the amount that brings the partition to its target.
 func (s *Service) openRefill(ctx context.Context, tx pgx.Tx, partitionID, asset string, need *big.Int) (id string, opened bool, err error) {
-	cold, err := s.Cfg.EVM.ColdAddress(partitionID, asset)
-	if err != nil {
-		return "", false, err
+	coldHex, hotHex := "", ""
+	if s.Cfg.Family == FamilyBTC {
+		coldHex, err = s.Cfg.ColdAddressOf(partitionID, asset)
+		if err != nil {
+			return "", false, err
+		}
+		i, err := s.Cfg.ShardIndex(partitionID)
+		if err != nil {
+			return "", false, err
+		}
+		hotHex = s.Cfg.BTC.HotShards[i].Address
+	} else {
+		cold, err := s.Cfg.EVM.ColdAddress(partitionID, asset)
+		if err != nil {
+			return "", false, err
+		}
+		coldHex, hotHex = cold.Hex(), s.Cfg.EVM.HotAddresses[partitionID].Hex()
 	}
-	if id, open, err := s.openRefillFor(ctx, tx, cold.Hex()); err != nil || open {
+	if id, open, err := s.openRefillFor(ctx, tx, coldHex); err != nil || open {
 		return id, false, err
 	}
-	hot := s.Cfg.EVM.HotAddresses[partitionID]
+	if rf, ok := s.Chain.(chain.ColdRefiller); ok {
+		// Bitcoin: a refill is only worth asking for when the cold address has outputs to give.
+		avail, err := rf.ColdAvailable(ctx, coldHex)
+		if err != nil {
+			return "", false, err
+		}
+		if avail.Sign() == 0 {
+			return "", false, nil
+		}
+	}
 	id = "rf-" + uuid.NewString()
 	tag, err := tx.Exec(ctx, `INSERT INTO refills (id, chain, asset, partition_id, cold_address, to_address, amount, status)
-		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,'requested') ON CONFLICT DO NOTHING`, id, s.Cfg.Chain, asset, partitionID, cold.Hex(), hot.Hex(), need.String())
+		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,'requested') ON CONFLICT DO NOTHING`, id, s.Cfg.Chain, asset, partitionID, coldHex, hotHex, need.String())
 	if err != nil {
 		return "", false, fmt.Errorf("custody: insert refill: %w", err)
 	}
@@ -189,13 +222,16 @@ func (s *Service) openRefill(ctx context.Context, tx pgx.Tx, partitionID, asset 
 		return "", false, nil
 	}
 	return id, true, emit(ctx, tx, outbox.TopicColdMoves, id, "refill.requested",
-		map[string]any{"chain": s.Cfg.Chain, "asset": asset, "partition": partitionID, "from": cold.Hex(), "to": hot.Hex(), "amount": need.String()})
+		map[string]any{"chain": s.Cfg.Chain, "asset": asset, "partition": partitionID, "from": coldHex, "to": hotHex, "amount": need.String()})
 }
 
 // ExportRefill reads the nonce and fees from the node and returns the request file for the ceremony. It can be called again
 // (the fees may be stale by the time the ceremony finishes, or the cold nonce moved): each export is a new revision with a new
 // hash, so a signed file made for an older export can no longer be imported. Only a request that has not been signed can be exported.
 func (s *Service) ExportRefill(ctx context.Context, id string) (coldsign.RequestFile, error) {
+	if s.Cfg.Family == FamilyBTC {
+		return coldsign.RequestFile{}, fmt.Errorf("%w: a Bitcoin refill is exported with ExportBTCRefill", ErrInvalid)
+	}
 	rc, err := s.refillChain()
 	if err != nil {
 		return coldsign.RequestFile{}, err
@@ -296,10 +332,6 @@ func (s *Service) ImportRefill(ctx context.Context, id string, signed coldsign.S
 // BroadcastRefill sends the imported transaction and books it as on its way (refill -> cold). It repeats harmlessly: a
 // transaction the node already has is fine, and once booked nothing is booked twice. It returns the transaction hash.
 func (s *Service) BroadcastRefill(ctx context.Context, id string, afterSend func()) (string, error) {
-	rc, err := s.refillChain()
-	if err != nil {
-		return "", err
-	}
 	r, err := s.GetRefill(ctx, id)
 	if err != nil {
 		return "", err
@@ -309,6 +341,13 @@ func (s *Service) BroadcastRefill(ctx context.Context, id string, afterSend func
 	}
 	if r.Status != RefillSigned {
 		return "", fmt.Errorf("custody: refill %s is %s, nothing to broadcast", id, r.Status)
+	}
+	if s.Cfg.Family == FamilyBTC {
+		return s.broadcastBTCRefill(ctx, r, afterSend)
+	}
+	rc, err := s.refillChain()
+	if err != nil {
+		return "", err
 	}
 	raw, err := hex.DecodeString(r.RawTx)
 	if err != nil {
@@ -349,6 +388,10 @@ func (s *Service) bookRefillBroadcast(ctx context.Context, tx pgx.Tx, r Refill, 
 
 // RefillState reports where the refill's transaction is.
 func (s *Service) RefillTxState(ctx context.Context, id string) (evm.RefillState, error) {
+	if s.Cfg.Family == FamilyBTC {
+		st, err := s.btcRefillState(ctx, id)
+		return evm.RefillState(st), err
+	}
 	rc, err := s.refillChain()
 	if err != nil {
 		return "", err
@@ -370,17 +413,23 @@ func (s *Service) MarkRefillStuck(ctx context.Context, id string) (bool, error) 
 // SettleRefill books a mined refill. Confirmed: hot -> refill (the hot wallet has the funds). Reverted: cold -> refill undoes the
 // broadcast booking. Either way the network fee, which the cold address paid, comes out of cold: fee -> cold (native).
 func (s *Service) SettleRefill(ctx context.Context, id string, reverted bool) error {
-	rc, err := s.refillChain()
-	if err != nil {
-		return err
-	}
 	r, err := s.GetRefill(ctx, id)
 	if err != nil {
 		return err
 	}
-	_, fee, err := rc.RefillTxState(ctx, r.TxHash)
-	if err != nil {
-		return err
+	var fee *big.Int
+	if s.Cfg.Family == FamilyBTC {
+		if fee, err = s.Chain.TxFee(ctx, r.TxHash); err != nil {
+			return err
+		}
+	} else {
+		rc, err := s.refillChain()
+		if err != nil {
+			return err
+		}
+		if _, fee, err = rc.RefillTxState(ctx, r.TxHash); err != nil {
+			return err
+		}
 	}
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		r, err := scanRefill(tx.QueryRow(ctx, `SELECT `+refillCols+` FROM refills WHERE id=$1 FOR UPDATE`, id))
@@ -392,6 +441,11 @@ func (s *Service) SettleRefill(ctx context.Context, id string, reverted bool) er
 		}
 		if r.Status == RefillSigned { // a crash between the broadcast and its record
 			if err := s.bookRefillBroadcast(ctx, tx, r, r.TxHash); err != nil {
+				return err
+			}
+		}
+		if st, ok := s.Chain.(chain.Settler); ok && !reverted { // the cell's own books: the cold inputs spent, the hot output and the cold change recorded
+			if err := st.Settle(ctx, tx, "refill", id, r.TxHash); err != nil {
 				return err
 			}
 		}
@@ -457,6 +511,10 @@ func partitionPool(partitionID string) (string, error) {
 // out of cold (fee -> cold), which keeps Reconcile's cold check exact. When it is some other key (the new admin accepting the role
 // from its own address) that address is not tracked by the books, so the fee is booked as an operator expense (fee -> opfund).
 func (s *Service) bookColdSignerFee(ctx context.Context, tx pgx.Tx, r Refill, fee *big.Int) error {
+	if s.Cfg.Family == FamilyBTC { // the cold address paid it: it comes out of cold
+		return s.transfer(ctx, tx, "rf-fee:"+r.TxHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), coldAcct(r.PartitionID), fee,
+			map[string]any{"refill": r.ID, "kind": "cold_network_fee", "signer": r.ColdAddress})
+	}
 	nativePart, err := s.nativePartitionOf(r.PartitionID)
 	if err != nil {
 		return err
@@ -596,6 +654,10 @@ func (s *Service) CloseRefill(ctx context.Context, id, actor, reason string) err
 		if err != nil {
 			return err
 		}
+		if s.Cfg.Family == FamilyBTC && r.Status == RefillSigned {
+			// A signature exists: releasing its inputs would let the signed transaction and a new one race. It is resolved on the chain first.
+			return fmt.Errorf("%w: %s is signed; its inputs stay reserved until the transaction is resolved on the chain", ErrInvalid, id)
+		}
 		if !r.Parked() || (r.Status != RefillRequested && r.Status != RefillSigned) {
 			return fmt.Errorf("%w: %s is %s%s: only a parked request that was never broadcast can be closed", ErrInvalid, id, r.Status, map[bool]string{true: ", parked", false: ", not parked"}[r.Parked()])
 		}
@@ -604,4 +666,133 @@ func (s *Service) CloseRefill(ctx context.Context, id, actor, reason string) err
 		}
 		return emit(ctx, tx, outbox.TopicColdMoves, id, "refill.closed", map[string]any{"by": actor, "reason": reason, "was_parked": r.Reason})
 	})
+}
+
+// ---- Bitcoin refills ----
+
+// ExportBTCRefill builds the request file of a Bitcoin refill from the cold address's oldest available outputs (see chain.ColdRefiller) and returns it.
+// Each export is a new revision with a new hash; only a refill that has not been signed can be exported. The payment may be less than the need when one
+// transaction cannot carry enough inputs: the refill then books what it pays, and the planner asks again.
+func (s *Service) ExportBTCRefill(ctx context.Context, id string) (coldsign.BTCRequestFile, error) {
+	rf, ok := s.Chain.(chain.ColdRefiller)
+	if !ok {
+		return coldsign.BTCRequestFile{}, fmt.Errorf("%w: this chain cell cannot do refills", ErrInvalid)
+	}
+	var out coldsign.BTCRequestFile
+	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		cur, err := scanRefill(tx.QueryRow(ctx, `SELECT `+refillCols+` FROM refills WHERE id=$1 FOR UPDATE`, id))
+		if isNoRows(err) {
+			return fmt.Errorf("%w: refill %s", ErrNotFound, id)
+		}
+		if err != nil {
+			return err
+		}
+		if cur.Status != RefillRequested || cur.Kind != RefillKind {
+			return fmt.Errorf("%w: refill %s is %s; only a request that has not been signed can be exported again", ErrInvalid, id, cur.Status)
+		}
+		req, err := rf.BuildRefill(ctx, chain.RefillBuild{ID: id, PartitionID: cur.PartitionID, Need: cur.Amount, Revision: cur.Revision + 1})
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		out = req.File()
+		b, _ := json.Marshal(req)
+		pay := new(big.Int).SetUint64(req.Outputs[0].Value)
+		if _, err = tx.Exec(ctx, `UPDATE refills SET revision=$2, request=$3::jsonb, request_hash=$4, amount=$5::numeric, updated_at=now() WHERE id=$1`,
+			id, req.Revision, string(b), out.RequestHash, pay.String()); err != nil {
+			return err
+		}
+		return auditEvent(ctx, tx, id, "refill.exported", map[string]any{"kind": cur.Kind, "revision": req.Revision, "request_hash": out.RequestHash, "amount": pay.String()})
+	})
+	return out, err
+}
+
+// ImportBTCRefill takes the signed file that came back from the ceremony. It must answer the CURRENT export, and the transaction inside must be exactly
+// what the request describes, every input signed by the cold key over the request's values. The request's inputs are reserved in the same transaction;
+// until then nothing is, so a request that is never signed leaves nothing behind. Importing the same file again changes nothing.
+func (s *Service) ImportBTCRefill(ctx context.Context, id string, signed coldsign.BTCSigned) (Refill, error) {
+	rf, ok := s.Chain.(chain.ColdRefiller)
+	if !ok {
+		return Refill{}, fmt.Errorf("%w: this chain cell cannot do refills", ErrInvalid)
+	}
+	var out Refill
+	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		r, err := scanRefill(tx.QueryRow(ctx, `SELECT `+refillCols+` FROM refills WHERE id=$1 FOR UPDATE`, id))
+		if isNoRows(err) {
+			return fmt.Errorf("%w: refill %s", ErrNotFound, id)
+		}
+		if err != nil {
+			return err
+		}
+		out = r
+		if signed.RequestID != "" && signed.RequestID != id {
+			return fmt.Errorf("%w: the signed file is for request %s, not %s", ErrInvalid, signed.RequestID, id)
+		}
+		if r.Status != RefillRequested {
+			if r.TxHash != "" && strings.EqualFold(r.TxHash, signed.TxID) {
+				return nil // the same file again
+			}
+			return fmt.Errorf("%w: refill %s is already %s with another transaction", ErrInvalid, id, r.Status)
+		}
+		if r.BTC == nil {
+			return fmt.Errorf("%w: refill %s was never exported", ErrInvalid, id)
+		}
+		raw, err := coldsign.VerifyBTCSignedMatches(*r.BTC, r.RequestHash, signed)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		if err := rf.AdoptRefill(ctx, tx, id, *r.BTC, raw); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE refills SET status='signed', raw_tx=$2, tx_hash=$3, updated_at=now() WHERE id=$1`, id, hex.EncodeToString(raw), signed.TxID); err != nil {
+			return err
+		}
+		out.Status, out.RawTx, out.TxHash = RefillSigned, hex.EncodeToString(raw), signed.TxID
+		return emit(ctx, tx, outbox.TopicColdMoves, id, "refill.signed", map[string]any{"tx": signed.TxID})
+	})
+	return out, err
+}
+
+// ExpireRefill ends a Bitcoin refill request that was not imported within refill.request_ttl (it was never signed, or the offline side refused it):
+// it fails, nothing was reserved and nothing moved, and the planner may open another if the shard is still low.
+func (s *Service) ExpireRefill(ctx context.Context, id string) error {
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE refills SET status='failed', failure_reason=$2, updated_at=now() WHERE id=$1 AND status='requested'`, id,
+			"not imported within "+s.Cfg.RefillRequestTTL.String()+": never signed, or refused offline; nothing was reserved and nothing moved")
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		return emit(ctx, tx, outbox.TopicColdMoves, id, "refill.expired", map[string]any{"after": s.Cfg.RefillRequestTTL.String()})
+	})
+}
+
+// broadcastBTCRefill sends the imported transaction through the ordinary attempt code and books it as on its way.
+func (s *Service) broadcastBTCRefill(ctx context.Context, r Refill, afterSend func()) (string, error) {
+	raw, err := hex.DecodeString(r.RawTx)
+	if err != nil {
+		return "", err
+	}
+	h, err := s.Chain.Broadcast(ctx, chain.SignedTx{Chain: s.Cfg.Chain, Raw: raw})
+	if err != nil {
+		return "", err
+	}
+	if afterSend != nil {
+		afterSend()
+	}
+	return h, s.recordRefillBroadcast(ctx, r.ID, h)
+}
+
+// btcRefillState maps the attempt code's outcome for the refill to the states the workflow knows, plus "consumed": an input was spent by something that
+// is not our transaction.
+func (s *Service) btcRefillState(ctx context.Context, id string) (string, error) {
+	oc, err := s.Chain.Outcome(ctx, "refill", id)
+	if err != nil {
+		return "", err
+	}
+	switch oc.State {
+	case chain.OutcomeConfirmed:
+		return "confirmed", nil
+	case chain.OutcomeConsumed:
+		return "consumed", nil
+	}
+	return "pending", nil
 }

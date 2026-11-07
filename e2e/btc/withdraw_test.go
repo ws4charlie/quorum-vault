@@ -133,7 +133,7 @@ func TestWithdrawalWithChangeThenTheChangeIsSpent(t *testing.T) {
 	if got := s.posted("opfund:" + s.chain + ":BTC").Int64(); got != 100_000_000 {
 		t.Fatalf("operator funding %d after the scan saw our change", got)
 	}
-	if n := s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit`, s.chain); n != 2 {
+	if n := s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold`, s.chain); n != 2 {
 		t.Fatalf("%d outputs: our change was recorded twice or as funding", n)
 	}
 	if got := s.hotPosted().Int64(); got != -100_000_000+10_000_000+fee {

@@ -2,13 +2,17 @@ package btc
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 )
 
 func (e *wEnv) buildCold(id string, amount int64) (chain.UnsignedTx, error) {
@@ -92,4 +96,108 @@ func TestToColdBuildBumpAndCancel(t *testing.T) {
 	if _, err := e.buildCold("m2", 10_000_000); !errors.Is(err, chain.ErrNotEnoughOutputs) {
 		t.Fatalf("a move larger than the shard: %v", err)
 	}
+}
+
+// ---- refills ----
+
+// coldRow inserts an available cold output of the pool's cold address.
+func (e *wEnv) coldRow(cold string, value int64) string {
+	e.t.Helper()
+	e.n++
+	var h [32]byte
+	h[0], h[31] = byte(e.n), 0xC1
+	id := hex.EncodeToString(h[:])
+	if _, err := e.a.pool.Exec(context.Background(), `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path, cold, address, created_at) VALUES ('btc-t',$1,0,$2,'','',true,$3, now() + $4::interval)`,
+		id, value, cold, fmt.Sprintf("%d seconds", e.n)); err != nil {
+		e.t.Fatal(err)
+	}
+	return id
+}
+
+func (e *wEnv) withCold(t *testing.T) string {
+	t.Helper()
+	k, _ := btcec.NewPrivateKey()
+	cold, err := coldsign.BTCAddressOf("regtest", hex.EncodeToString(k.PubKey().SerializeCompressed()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.a.coldBy["omnibus"], e.a.cold[cold] = cold, "omnibus"
+	return cold
+}
+
+// BuildRefill takes the oldest cold outputs, pays the shard, returns the change to the cold address; with an exact fit there is no change; when one
+// transaction cannot carry the need (max_inputs), the payment is what the inputs hold less the fee.
+func TestBuildRefillChangeNoChangeAndTheInputCap(t *testing.T) {
+	e := newWEnv(t) // max_inputs 5, rate 10
+	cold := e.withCold(t)
+	a, b, c := e.coldRow(cold, 10_000_000), e.coldRow(cold, 10_000_000), e.coldRow(cold, 10_000_000)
+	r, err := e.a.BuildRefill(context.Background(), chain.RefillBuild{ID: "rf-1", PartitionID: wPart, Need: big.NewInt(15_000_000), Revision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Inputs) != 2 || r.Inputs[0].TxID != a || r.Inputs[1].TxID != b || r.Outputs[0].Address != e.hot || r.Outputs[0].Value != 15_000_000 || len(r.Outputs) != 2 || r.Outputs[1].Address != cold {
+		t.Fatalf("request %+v", r)
+	}
+	fee, _ := r.Fee()
+	if want := vsize(2, e.a.shards[0].script, scriptOrDummy(cold, e.a)) * 10; fee != want || r.From != cold || r.Pool != "omnibus" || r.Network != "regtest" {
+		t.Fatalf("fee %d want %d, %+v", fee, want, r)
+	}
+	// The offline signer would take it: the same rules, checked in coldsign's tests; here the core's own caps hold.
+	_ = c
+	// An exact fit: the leftover is under dust plus the fee of a change output, so it is all fee.
+	e2 := newWEnv(t)
+	cold2 := e2.withCold(t)
+	feeNC := vsize(1, e2.a.shards[0].script) * 10
+	e2.coldRow(cold2, int64(5_000_000+feeNC+100))
+	r2, err := e2.a.BuildRefill(context.Background(), chain.RefillBuild{ID: "rf-2", PartitionID: wPart, Need: big.NewInt(5_000_000), Revision: 1})
+	if err != nil || len(r2.Outputs) != 1 || r2.Outputs[0].Value != 5_000_000 {
+		t.Fatalf("no change: %+v %v", r2, err)
+	}
+	// More need than max_inputs of 1M outputs can carry: the payment is what five hold less the fee.
+	e3 := newWEnv(t)
+	cold3 := e3.withCold(t)
+	for i := 0; i < 8; i++ {
+		e3.coldRow(cold3, 1_000_000)
+	}
+	r3, err := e3.a.BuildRefill(context.Background(), chain.RefillBuild{ID: "rf-3", PartitionID: wPart, Need: big.NewInt(7_000_000), Revision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fee3 := vsize(5, e3.a.shards[0].script) * 10
+	if len(r3.Inputs) != 5 || len(r3.Outputs) != 1 || r3.Outputs[0].Value != 5_000_000-fee3 {
+		t.Fatalf("capped: %d inputs, %+v (fee %d)", len(r3.Inputs), r3.Outputs, fee3)
+	}
+	// Nothing to give.
+	e4 := newWEnv(t)
+	e4.withCold(t)
+	if _, err := e4.a.BuildRefill(context.Background(), chain.RefillBuild{ID: "rf-4", PartitionID: wPart, Need: big.NewInt(1), Revision: 1}); !errors.Is(err, chain.ErrNotEnoughOutputs) {
+		t.Fatalf("an empty cold address: %v", err)
+	}
+}
+
+// Cold outputs are never picked by a withdrawal, a sweep or a move to cold, and a refill never picks a hot or deposit output.
+func TestColdOutputsStayApartFromHotAndDepositOutputs(t *testing.T) {
+	e := newWEnv(t)
+	cold := e.withCold(t)
+	e.coldRow(cold, 9_000_000)
+	if _, err := e.build("w1", 10_000, false); !errors.Is(err, chain.ErrNotEnoughOutputs) {
+		t.Fatalf("a withdrawal over a cold output: %v", err)
+	}
+	if m, err := e.a.MaxMove(context.Background(), wPart); err != nil || m.Sign() != 0 {
+		t.Fatalf("a move to cold sees a cold output: %v %v", m, err)
+	}
+	addr := e.depositAddr(1)
+	if c, _ := e.a.SweepCandidates(context.Background()); len(c) != 0 {
+		t.Fatalf("a sweep candidate from a cold output: %v", c)
+	}
+	_ = addr
+	// And the reverse: hot and deposit outputs are not refill inputs.
+	e2 := newWEnv(t)
+	cold2 := e2.withCold(t)
+	e2.fund(5_000_000)
+	e2.recordDeposit(e2.depositAddr(2), 5_000_000)
+	if _, err := e2.a.BuildRefill(context.Background(), chain.RefillBuild{ID: "rf", PartitionID: wPart, Need: big.NewInt(1_000_000), Revision: 1}); !errors.Is(err, chain.ErrNotEnoughOutputs) {
+		t.Fatalf("a refill over hot and deposit outputs: %v", err)
+	}
+	_ = cold2
 }

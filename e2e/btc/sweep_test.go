@@ -107,7 +107,7 @@ func TestSweepFullLoopThenAWithdrawalSpendsTheSweptOutput(t *testing.T) {
 	}
 	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND deposit AND status='spent'`, s.chain) != 1 ||
 		s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND deposit AND status<>'spent'`, s.chain) != 0 ||
-		s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND status='available' AND value=$2`, s.chain, 30_000_000-fee) != 1 {
+		s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold AND status='available' AND value=$2`, s.chain, 30_000_000-fee) != 1 {
 		t.Fatalf("outputs: deposit spent %d, hot available %d", s.utxoCount("spent"), s.utxoCount("available"))
 	}
 	// Ledger: the full amount moved, the fee is booked to the fee account, the sweep account is empty, the hot mirror is minus what the chain holds.
@@ -160,7 +160,7 @@ func TestSweepFullLoopThenAWithdrawalSpendsTheSweptOutput(t *testing.T) {
 // Several outputs of one address go in one sweep, and a hot output is never one of its inputs.
 func TestSweepSeveralOutputsGoInOneSweepAndNeverTakeAHotOutput(t *testing.T) {
 	s := sweepSystem(t, opts{}, 20_000_000)
-	hotOut := s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit`, s.chain)
+	hotOut := s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold`, s.chain)
 	addr := s.newCustomer("c1")
 	for _, v := range []int64{1_000_000, 2_000_000, 3_000_000} {
 		s.node.pay(map[string]string{addr: btcAmount(v)})
@@ -172,7 +172,7 @@ func TestSweepSeveralOutputsGoInOneSweepAndNeverTakeAHotOutput(t *testing.T) {
 	if len(sw) != 1 || sw[0].Inputs != 3 || sw[0].Amount != 6_000_000 {
 		t.Fatalf("sweeps %+v", sw)
 	}
-	if hotOut != 1 || s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND status='spent'`, s.chain) != 0 {
+	if hotOut != 1 || s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold AND status='spent'`, s.chain) != 0 {
 		t.Fatalf("the funded hot output was touched (hot outputs before %d)", hotOut)
 	}
 	if got := s.hotPosted().Int64(); got != -20_000_000-(6_000_000-sw[0].Fee) {

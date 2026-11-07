@@ -139,20 +139,17 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 			case withIncoming.Cmp(lim.Low) < 0:
 				// Ask for a refill (one open at a time per cold address), and say so in the ALERT, once per outage.
 				need := new(big.Int).Sub(lim.Target, withIncoming)
-				rid, opened := "", false
-				if c.Family != FamilyBTC { // a Bitcoin refill is a later task (an offline ceremony): until then the ALERT is all there is
-					var err error
-					if rid, opened, err = s.openRefill(ctx, tx, p, asset, need); err != nil {
-						return err
-					}
+				rid, opened, err := s.openRefill(ctx, tx, p, asset, need)
+				if err != nil {
+					return err
 				}
 				if !alerted {
 					if _, err := tx.Exec(ctx, `INSERT INTO hot_low_alerts (partition_id) VALUES ($1) ON CONFLICT DO NOTHING`, p); err != nil {
 						return err
 					}
 					note := "refill request opened"
-					if c.Family == FamilyBTC {
-						note = "no refill is opened for this chain yet"
+					if rid == "" {
+						note = "the cold address holds no available output to refill from"
 					} else if !opened {
 						note = "a refill is already open for this cold address and must finish first"
 					}
