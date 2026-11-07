@@ -39,8 +39,8 @@ type Report struct {
 	InFlight           int     `json:"in_flight"` // open sweeps, withdrawals, moves, rebalances and refills: explained, not skipped
 	Checks             []Check `json:"checks"`
 	Clean              bool    `json:"clean"`
-	// Rechecked: the first read showed a difference and the comparison was made again from a new snapshot; only a difference both reads show, by the
-	// same amount, is reported (EVM).
+	// Rechecked: the first read showed a difference and the comparison was made again from a new snapshot; only a difference both reads show on the same check is
+	// reported, with the newer amounts (EVM).
 	Rechecked bool `json:"rechecked,omitempty"`
 }
 

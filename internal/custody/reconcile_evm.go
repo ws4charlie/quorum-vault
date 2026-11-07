@@ -47,7 +47,7 @@ const recentRevert = "24 hours"
 //
 // The books are read from one database snapshot (REPEATABLE READ, read only), taken before the height is read, so a busy cell answers. A
 // transaction of ours sent after the snapshot may already be mined at or below the height; when the first read shows a difference the
-// comparison is made again from a new snapshot, and only a difference both reads show by the same amount is reported: a real one persists, a
+// comparison is made again from a new snapshot, and only a difference both reads show on the same check is reported, with the newer amounts: a real one persists (and may grow), a
 // race does not. A comparison the reader cannot make is counted in SkippedChainChecks and the report is not Clean.
 func (s *Service) reconcileEVM(ctx context.Context, rep *Report) error {
 	rr, ok := s.Reader.(ReceiptReader)
@@ -77,10 +77,14 @@ func (s *Service) reconcileEVM(ctx context.Context, rep *Report) error {
 			if c.OK || c.Skipped {
 				continue
 			}
-			if d, seen := first[checkKey(c)]; !seen || d.Cmp(checkDiff(c)) != 0 {
+			d, seen := first[checkKey(c)]
+			if !seen { // only the second read shows it: the next run decides
 				r2.checks[i].OK = true
-				r2.checks[i].Detail = strings.TrimSpace(c.Detail + " (not shown by the first read; gone from the rechecked one, so not a difference)")
+				r2.checks[i].Detail = strings.TrimSpace(c.Detail + " (the first read did not show it; not reported, the next run decides)")
+				continue
 			}
+			// Both reads show it: a real difference, whatever its amount (a theft in several transactions grows). The newer state is kept.
+			r2.checks[i].Detail = strings.TrimSpace(fmt.Sprintf("%s (differs by %s in the first read and by %s in the second)", c.Detail, d, checkDiff(c)))
 		}
 		final = r2
 	}

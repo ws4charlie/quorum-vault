@@ -23,6 +23,7 @@ type evmModel struct {
 	rc        map[string]Receipt
 	onBalance func() // called before every balance read
 	reads     int
+	heads     int // SafeHead calls: one per read of the comparison
 	noBalance bool
 }
 
@@ -44,7 +45,12 @@ func (m *evmModel) add(addr, asset string, d int64) {
 	m.bal[k].Add(m.bal[k], big.NewInt(d))
 }
 
-func (m *evmModel) SafeHead(context.Context) (uint64, error)        { return m.head, nil }
+func (m *evmModel) SafeHead(context.Context) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.heads++
+	return m.head, nil
+}
 func (m *evmModel) TxBlock(context.Context, string) (uint64, error) { return m.head, nil }
 func (m *evmModel) Balance(_ context.Context, addr, asset string, _ uint64) (*big.Int, error) {
 	if m.noBalance {
@@ -331,4 +337,33 @@ func TestReconcileEVMSkipsMakeTheReportNotClean(t *testing.T) {
 			t.Fatalf("clean=%v skipped=%d", rep.Clean, rep.SkippedChainChecks)
 		}
 	})
+}
+
+// A real difference that grows between the two reads (a theft in several transactions) is reported, with both amounts, once.
+func TestReconcileEVMReportsADifferenceThatGrows(t *testing.T) {
+	s, _, m := evmWorld(t)
+	hot := s.Cfg.HotShards[0].Hex()
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	m.add(hot, "ETH", -5) // someone took 5 wei
+	grown := false
+	m.onBalance = func() {
+		m.mu.Lock()
+		second := m.heads == 2
+		m.mu.Unlock()
+		if second && !grown {
+			grown = true
+			m.add(hot, "ETH", -3) // and 3 more between the two reads
+		}
+	}
+	rep := mustReconcile(t, s)
+	f := rep.Failures()
+	if rep.Clean || !rep.Rechecked || !grown || len(f) != 1 || f[0].Name != "hot" || strings.Count(logs.String(), "ALERT") != 1 {
+		t.Fatalf("clean=%v rechecked=%v grown=%v failures=%+v alerts=%d", rep.Clean, rep.Rechecked, grown, f, strings.Count(logs.String(), "ALERT"))
+	}
+	if !strings.Contains(f[0].Detail, "-5 in the first read and by -8 in the second") {
+		t.Fatalf("detail %q", f[0].Detail)
+	}
 }
