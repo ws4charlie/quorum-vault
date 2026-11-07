@@ -80,6 +80,8 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// requireBTC is the one place a Bitcoin e2e test may skip: when the suite was not asked to run (QV_REQUIRE_BTC unset). Every CI job and make target sets it,
+// and then a missing service fails the test instead.
 func requireBTC(t *testing.T) {
 	t.Helper()
 	if os.Getenv("QV_REQUIRE_BTC") != "1" {
@@ -333,6 +335,9 @@ type system struct {
 }
 
 type opts struct {
+	// noEstimate puts a proxy between the core and bitcoind that answers estimatesmartfee as a node without data does, for tests that assume the
+	// fallback fee rate whatever ran on the node before.
+	noEstimate bool
 	minDeposit string // default 1000 sats
 	conf       uint64 // default 6
 	// withdraw starts the whole withdrawal path: the signing gateway and party B's cosigner, one hot shard, approvers and the automated key.
@@ -489,10 +494,14 @@ func newSystem(t *testing.T, o opts) *system {
 	s.mpc = newMPC(t, s.dir)
 	s.xpub = accountXpub(t, s.mpc, "regtest")
 	s.start = s.node.height() + 1
+	rpcURL := nodeURL()
+	if o.noEstimate {
+		rpcURL = noEstimateProxy(t)
+	}
 	s.cf = custody.File{
 		Entity: "qv-us",
 		Chain: custody.ChainFile{Family: "btc", Name: s.chain,
-			BTC:    &custody.BTCFile{Network: "regtest", RPCURL: nodeURL(), RPCUser: rpcUser, RPCPassword: rpcPass, Confirmations: o.conf, AccountXpub: s.xpub},
+			BTC:    &custody.BTCFile{Network: "regtest", RPCURL: rpcURL, RPCUser: rpcUser, RPCPassword: rpcPass, Confirmations: o.conf, AccountXpub: s.xpub},
 			Assets: map[string]custody.AssetFile{"BTC": {Decimals: 8, MinDeposit: o.minDeposit}}},
 		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: "20s", ActivityTimeout: "5s"},
 		Scan:       custody.ScanFile{Interval: "300ms", StartHeight: uint64(s.start)},

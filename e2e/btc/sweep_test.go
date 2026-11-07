@@ -291,8 +291,7 @@ func (s *system) setFallback(rate uint64) {
 // Above the sweep ceiling a routine sweep waits (one log line for the state, not one per pass) and an urgent one goes; when the fee falls the routine
 // one runs.
 func TestSweepFeeAboveTheCeilingWaitsAndRunsWhenTheFeeFalls(t *testing.T) {
-	s := sweepSystem(t, opts{fallbackRate: 30, sweepMaxRate: 10, sweepUrgent: 3_000_000}, 0)
-	s.requireNoEstimate()
+	s := sweepSystem(t, opts{noEstimate: true, fallbackRate: 30, sweepMaxRate: 10, sweepUrgent: 3_000_000}, 0)
 	s.deposit("c1", 1_000_000)
 	s.deposit("c2", 4_000_000) // at least sweep_urgent_value: goes at the market rate
 	s.untilSweepsConfirmed(1, 90*time.Second)

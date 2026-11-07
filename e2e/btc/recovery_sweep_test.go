@@ -64,8 +64,7 @@ func (s *system) settledSweep() swp {
 // A sweep that sticks at a low fee is replaced by one that pays more (same inputs, a lower output). Both can end the race; the fee booked is that of
 // the transaction that confirmed.
 func TestRecoverySweepStuckIsBumpedAndTheReplacementConfirms(t *testing.T) {
-	s := sweepSystem(t, opts{fallbackRate: 1, stuckAfter: "6s"}, 0)
-	s.requireNoEstimate()
+	s := sweepSystem(t, opts{noEstimate: true, fallbackRate: 1, stuckAfter: "6s"}, 0)
 	s.deposit("c1", 30_000_000)
 	s.waitSweeps("broadcast", 1, 60*time.Second)
 	orig, _ := s.firstAttempt("send")
@@ -94,8 +93,7 @@ func TestRecoverySweepStuckIsBumpedAndTheReplacementConfirms(t *testing.T) {
 }
 
 func TestRecoverySweepStuckAndTheOriginalConfirms(t *testing.T) {
-	s := sweepSystem(t, opts{fallbackRate: 1, stuckAfter: "6s"}, 0)
-	s.requireNoEstimate()
+	s := sweepSystem(t, opts{noEstimate: true, fallbackRate: 1, stuckAfter: "6s"}, 0)
 	s.deposit("c1", 30_000_000)
 	s.waitSweeps("broadcast", 1, 60*time.Second)
 	orig, rawOrig := s.firstAttempt("send")
@@ -125,8 +123,7 @@ func TestRecoverySweepStuckAndTheOriginalConfirms(t *testing.T) {
 // A bump that would break the sweep rule is not made: an ALERT, the sweep keeps waiting, it is not voided, and it settles when mined.
 func TestRecoverySweepBumpThatBreaksTheRuleAlertsAndWaits(t *testing.T) {
 	// At 1 sat/vB a one-input sweep pays about 110 sats: 1.5M passes k = 10000 (1.1M needed) but the first bump (about 220 sats) would need 2.2M.
-	s := sweepSystem(t, opts{fallbackRate: 1, stuckAfter: "5s", sweepK: 10000}, 0)
-	s.requireNoEstimate()
+	s := sweepSystem(t, opts{noEstimate: true, fallbackRate: 1, stuckAfter: "5s", sweepK: 10000}, 0)
 	s.deposit("c1", 1_500_000)
 	s.waitSweeps("broadcast", 1, 60*time.Second)
 	s.waitFor(60*time.Second, "the ALERT that it cannot be replaced", func() bool { return s.workerLogHas("cannot be replaced") })

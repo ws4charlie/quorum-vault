@@ -48,17 +48,6 @@ func feeAt(s *system, outputs int, rate int64) int64 {
 	return btc.EstimateVSize(tx) * rate
 }
 
-// requireNoEstimate skips the test when the node has a fee estimate: these cases assume the builder's fallback rate.
-func (s *system) requireNoEstimate() {
-	var est struct {
-		FeeRate float64  `json:"feerate"`
-		Errors  []string `json:"errors"`
-	}
-	if err := s.node.root.Call(s.ctx, &est, "estimatesmartfee", 2); err == nil && est.FeeRate > 0 && len(est.Errors) == 0 {
-		s.t.Skip("the node has a fee estimate: this case assumes the fallback rate")
-	}
-}
-
 // breakSecondJob makes the business database give the second job of every withdrawal attempt a key reference that is not its input's: the gateway
 // refuses that job and signs the first, which is "one input refused after another was signed". Cancel jobs are not touched.
 func (s *system) breakSecondJob() {
@@ -98,8 +87,7 @@ func (s *system) lastAttempt(kind string) (txid string) {
 // A transaction that sticks at a low fee is replaced by one that pays more (RBF): same inputs, same payment, less change. Both can end the race:
 // the replacement confirms, or the original does. The fee booked is the one of the transaction that confirmed.
 func TestRecoveryStuckAtALowFeeIsBumpedAndTheReplacementConfirms(t *testing.T) {
-	s := newSystem(t, opts{withdraw: true, fallbackRate: 1, stuckAfter: "6s"})
-	s.requireNoEstimate()
+	s := newSystem(t, opts{withdraw: true, noEstimate: true, fallbackRate: 1, stuckAfter: "6s"})
 	s.fundHot(100_000_000)
 	s.deposit("c1", 30_000_000)
 	dest := s.node.fresh()
@@ -138,8 +126,7 @@ func TestRecoveryStuckAtALowFeeIsBumpedAndTheReplacementConfirms(t *testing.T) {
 }
 
 func TestRecoveryStuckAtALowFeeAndTheOriginalConfirms(t *testing.T) {
-	s := newSystem(t, opts{withdraw: true, fallbackRate: 1, stuckAfter: "6s"})
-	s.requireNoEstimate()
+	s := newSystem(t, opts{withdraw: true, noEstimate: true, fallbackRate: 1, stuckAfter: "6s"})
 	s.fundHot(100_000_000)
 	s.deposit("c1", 30_000_000)
 	dest := s.node.fresh()
@@ -181,8 +168,7 @@ func TestRecoveryStuckAtALowFeeAndTheOriginalConfirms(t *testing.T) {
 // No change, no bump: an exact payment has nothing to pay a higher fee from. The workflow raises an ALERT, keeps waiting, never voids, and the
 // withdrawal settles when the transaction is mined.
 func TestRecoveryStuckWithNoChangeAlertsAndWaits(t *testing.T) {
-	s := newSystem(t, opts{withdraw: true, fallbackRate: 1, stuckAfter: "5s"})
-	s.requireNoEstimate()
+	s := newSystem(t, opts{withdraw: true, noEstimate: true, fallbackRate: 1, stuckAfter: "5s"})
 	s.fundHot(10_000_000 + feeAt(s, 1, 1)) // exactly the payment and the fee of a one-output transaction
 	s.deposit("c1", 30_000_000)
 	dest := s.node.fresh()
