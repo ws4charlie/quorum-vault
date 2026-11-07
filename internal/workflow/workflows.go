@@ -766,6 +766,11 @@ func RefillWorkflow(ctx workflow.Context, in Input) error {
 				return err
 			}
 		case "broadcast":
+			if st.Replacement {
+				if err := call(ctx, opts(ctx), nil, a.BroadcastRefillReplacement, id); err != nil {
+					return err
+				}
+			}
 			var state string
 			if err := call(ctx, longOpts(ctx, 10*time.Second), &state, a.WaitRefillTx, id, 10*time.Second); err != nil {
 				return err

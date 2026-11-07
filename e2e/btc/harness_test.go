@@ -318,6 +318,8 @@ type opts struct {
 	refill     bool
 	refillTTL  string
 	refillPoll string
+	// refillStuck is when a broadcast refill that has not confirmed raises its ALERT (default 10m).
+	refillStuck string
 	// gwDest, when set, is the only list of destinations the gateway lets withdrawals pay (otherwise any).
 	gwDest []string
 }

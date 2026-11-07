@@ -116,3 +116,30 @@ the chain side, and checks the cold outputs in the table against the ledger.
 **A request that is never imported** ends when `cold.refill.request_ttl` (default 24 hours) is up: it fails, "not imported", nothing was reserved, no coin moved,
 and the planner may open another. A request the offline side refused is the same thing. A signed refill cannot be closed by hand: its inputs stay reserved until
 the transaction is resolved on the chain.
+
+## Stuck refills (P7-6b-3)
+
+**A refill that was broadcast and does not confirm.** The stuck ALERT (`cold.refill.stuck_after`) says what to do. If the transaction has a change output:
+
+1. `POST /v2/refills/{id}/export` again. The core builds the next revision over the same inputs and the same payment, with a higher fee taken from the change
+   (the rule of a withdrawal's bump: the largest of +15 percent, +1 sat/vB of the new size, and the current rate, under the core's caps).
+2. Carry the file over, approve it on `qv-cold`, sign, carry the signed file back and `POST /v2/refills/{id}/import`. `qv-cold` accepts it as a replacement
+   (same inputs, destination and amount, a fee higher than any it signed for those outpoints); anything else is refused.
+3. The workflow sends it as a second attempt of the same refill. At most one of the two can confirm; whichever does is settled: its fee is booked, its cold
+   change recorded, the other is forgotten. A replacement the node refuses is dropped with an ALERT and the earlier attempt keeps waiting; export again.
+
+Without a change output nothing can pay a higher fee: the ALERT says so, the export is refused, and the refill keeps waiting (it is never failed while it can
+still confirm). No CPFP.
+
+**A request signed offline whose file never came back.** The online request expires after `request_ttl`, but `qv-cold`'s record still pins its outpoints to that
+intent. The smallest answer: **a request made after an earlier one keeps its intent.** The first export of the next refill for the same cold address (and every
+re-export) is built from the earlier request when its inputs are still available cold outputs: the same inputs, the same payment, a higher fee. The record
+accepts it, so the planner's next refill is never refused for it, and the lost file, if it is broadcast by hand later, spends the same inputs, so the two can
+only replace each other: it can never pay in addition. Only when the inputs are gone, or no change is left to raise the fee, is a fresh request built; if
+`qv-cold` then refuses it ("only a replacement of that same transaction"), the operator sees the refusal in its output and the refill ends "not imported".
+What clears it: after making sure the old signed file is destroyed (or its transaction confirmed), remove the entries of those outpoints from `qv-cold`'s
+record directory (`<record_dir>/btc/outpoints/<txid>-<vout>.json`).
+
+**If the lost file is broadcast by hand before anything replaces it.** The coins go from cold to the hot shard, which is what the refill was for, so nothing is lost
+and the hot shard simply has more than it asked. The books do not know the transaction: the scan books the payment to the hot address as operator funding, and
+Reconcile names the cold output that was spent behind our back (`outputs_on_chain`, `cold`). An operator books the cold side with the spend-cold call.

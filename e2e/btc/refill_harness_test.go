@@ -65,7 +65,11 @@ func (s *system) newColdKit(o opts) string {
 	if poll == "" {
 		poll = "1s"
 	}
-	s.cf.Cold.Refill = custody.RefillFile{Poll: poll, RequestTTL: ttl, StuckAfter: "10m"}
+	stuck := o.refillStuck
+	if stuck == "" {
+		stuck = "10m"
+	}
+	s.cf.Cold.Refill = custody.RefillFile{Poll: poll, RequestTTL: ttl, StuckAfter: stuck}
 	return k.addr
 }
 
