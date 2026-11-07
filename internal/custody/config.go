@@ -287,6 +287,11 @@ type BTCFile struct {
 	// goes regardless, up to max_fee_rate. Both are checked at start.
 	SweepMaxFeeRate  uint64 `json:"sweep_max_fee_rate"`
 	SweepUrgentValue uint64 `json:"sweep_urgent_value"`
+	// ConsolidateAbove is how many available outputs a hot shard may hold before its small ones are merged into one; 0 turns consolidation off.
+	// When on it must exceed max_inputs. ConsolidateMaxFeeRate (sat/vB) is the most a consolidation pays: above it the merge waits; it must be
+	// positive and not above sweep_max_fee_rate.
+	ConsolidateAbove      int    `json:"consolidate_above"`
+	ConsolidateMaxFeeRate uint64 `json:"consolidate_max_fee_rate"`
 }
 
 // BTCShardFile is one hot shard of the btc family.
@@ -305,7 +310,8 @@ func (c *Config) buildBTC(cf ChainFile) error {
 	c.BTC = btc.Config{Chain: cf.Name, Network: b.Network, RPCURL: b.RPCURL, RPCUser: b.RPCUser, RPCPass: b.RPCPassword,
 		Confirmations: b.Confirmations, AccountXpub: b.AccountXpub, HotAddresses: b.HotAddresses, BatchBlocks: b.BatchBlocks,
 		SpendConfirmations: b.SpendConfirmations, MaxInputs: b.MaxInputs, FallbackFeeRate: b.FallbackFeeRate, MaxFeeRate: b.MaxFeeRate,
-		MaxTxFeeSats: b.MaxTxFeeSats, SweepMaxFeeRate: b.SweepMaxFeeRate, SweepUrgentValue: b.SweepUrgentValue}
+		MaxTxFeeSats: b.MaxTxFeeSats, SweepMaxFeeRate: b.SweepMaxFeeRate, SweepUrgentValue: b.SweepUrgentValue,
+		ConsolidateAbove: b.ConsolidateAbove, ConsolidateMaxFeeRate: b.ConsolidateMaxFeeRate}
 	for i, h := range b.HotShards {
 		c.BTC.HotShards = append(c.BTC.HotShards, btc.HotShardConfig{PartitionID: c.PartitionKey(btc.Native, i).String(), Address: h.Address, Path: h.Path})
 	}
@@ -567,6 +573,16 @@ func (c *Config) ColdAddressOf(partitionID, asset string) (string, error) {
 	}
 	a, err := c.EVM.ColdAddress(partitionID, asset)
 	return a.Hex(), err
+}
+
+// BTCShardAddress is the canonical address of the hot shard that serves a partition of the btc family.
+func (c *Config) BTCShardAddress(partitionID string) (string, error) {
+	for _, h := range c.BTC.HotShards {
+		if h.PartitionID == partitionID {
+			return btc.CanonicalAddress(c.BTC.Network, h.Address)
+		}
+	}
+	return "", fmt.Errorf("custody: partition %q has no hot shard", partitionID)
 }
 
 // SinkPartition is where swept funds of asset land.

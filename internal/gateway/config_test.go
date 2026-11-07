@@ -138,3 +138,37 @@ func TestBTCConfigRefusesTwoHotShardsInOnePool(t *testing.T) {
 		t.Fatalf("one shard in each of two pools: %v", err)
 	}
 }
+
+// consolidations_per_hour: the example sets it, a negative value refuses to load, and a Bitcoin chain that leaves it out refuses every consolidation (0).
+func TestBTCConfigConsolidationsPerHour(t *testing.T) {
+	good, _ := os.ReadFile("config.example.json")
+	build := func(v any) []byte {
+		var m map[string]any
+		json.Unmarshal(good, &m)
+		chainCfg := m["chains"].(map[string]any)["btc-example"].(map[string]any)
+		if v == nil {
+			delete(chainCfg, "consolidations_per_hour")
+		} else {
+			chainCfg["consolidations_per_hour"] = v
+		}
+		b, _ := json.Marshal(m)
+		return b
+	}
+	cfg, err := ParseConfig(build(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Chains["btc-example"].ConsolidationsPerHour; got != 3 {
+		t.Fatalf("consolidations_per_hour = %d", got)
+	}
+	cfg, err = ParseConfig(build(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Chains["btc-example"].ConsolidationsPerHour; got != 0 {
+		t.Fatalf("left out: %d, want 0 (refuse them all)", got)
+	}
+	if _, err := ParseConfig(build(-1)); err == nil || !strings.Contains(err.Error(), "rate limits must be >= 0") {
+		t.Fatalf("a negative limit: %v", err)
+	}
+}

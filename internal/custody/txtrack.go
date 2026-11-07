@@ -18,7 +18,7 @@ import (
 // Owner is the business object a transaction belongs to: a withdrawal or a
 // sweep. The chain cell keys what it reserves for the owner (EVM: a nonce) by (Kind, ID).
 type Owner struct {
-	Kind        string // "withdrawal" | "sweep" | "to-cold" | "rebalance"
+	Kind        string // "withdrawal" | "sweep" | "to-cold" | "rebalance" | "consolidate"
 	ID          string
 	PartitionID string // partition whose key signs
 }
@@ -50,6 +50,8 @@ func OwnerTrack(o Owner) Track {
 		return Track("tocold:" + o.ID)
 	case OwnerKindRebalance:
 		return Track("rebal:" + o.ID)
+	case OwnerKindConsolidate:
+		return Track("consol:" + o.ID)
 	}
 	return Track("sweep:" + o.ID)
 }

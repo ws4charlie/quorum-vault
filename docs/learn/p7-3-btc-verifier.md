@@ -35,8 +35,12 @@ a different number, no input's digest, and the verifier refuses it (tested). The
 |---|---|---|
 | withdrawal | every input at the partition's own shard path | first output: exactly the amount to the intent's destination; at most one more, change to **that same shard** only |
 | to-cold | as withdrawal | as withdrawal; the destination is the cold address of the partition's **pool** (`<pool>/native`), not any cold address |
+| consolidate | at least two, every input at the partition's own shard path | one output, to the partition's own shard; the intent's destination is that shard and its amount is the sum of the inputs |
 | sweep | branch 0, every input is the intent's `From` | one output, to the partition's own shard |
 | cancel | any (the guard binds them, see below) | one output to the partition's own shard. Nothing else |
+
+A consolidation moves no value, so a compromised core can cost only fee with it: at most `consolidations_per_hour` times `max_tx_fee_sats` an hour (see
+[p7-6d-btc-consolidation.md](p7-6d-btc-consolidation.md)).
 
 There is no rebalance on Bitcoin: the kind falls to the default refusal, and a config with two hot shards in one pool does not start. Because a withdrawal or to-cold spends only the partition's own shard key and a sweep or cancel only one address, one transaction
 has one key (and several outpoints, each a claim with its own pin).

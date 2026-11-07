@@ -183,6 +183,7 @@ func TestVerifyRejects(t *testing.T) {
 		}},
 		{"unknown asset", withdrawNative(func(_ *chain.UnsignedTx, i *signjob.Intent) { i.Asset = "DOGE" })},
 		{"unknown kind", withdrawNative(func(_ *chain.UnsignedTx, i *signjob.Intent) { i.Kind = "refund" })},
+		{"consolidate is a Bitcoin kind", withdrawNative(func(_ *chain.UnsignedTx, i *signjob.Intent) { i.Kind = "consolidate" })},
 		{"withdrawal with source", withdrawNative(func(_ *chain.UnsignedTx, i *signjob.Intent) { i.From = tUser.Hex() })},
 		{"native amount differs", withdrawNative(func(_ *chain.UnsignedTx, i *signjob.Intent) { i.Amount = "1501" })},
 		{"native destination differs", withdrawNative(func(_ *chain.UnsignedTx, i *signjob.Intent) { i.To = other.Hex() })},

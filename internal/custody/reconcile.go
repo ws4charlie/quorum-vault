@@ -208,6 +208,7 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 	if err := s.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM cold_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
+		+ (SELECT count(*) FROM consolidations WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM rebalance_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM refills WHERE chain=$1 AND status IN ('signed','broadcast'))`, c.Chain).Scan(&open); err != nil {
 		return rep, err
@@ -269,7 +270,7 @@ func (s *Service) reconcileStamp(ctx context.Context) (string, error) {
 	var st string
 	err := s.Pool.QueryRow(ctx, `SELECT concat_ws('|',
 		(SELECT max(updated_at)::text FROM btc_utxos WHERE chain=$1), (SELECT max(updated_at)::text FROM sweeps WHERE chain=$1),
-		(SELECT max(updated_at)::text FROM withdrawals WHERE chain=$1), (SELECT max(updated_at)::text FROM cold_moves WHERE chain=$1), (SELECT max(updated_at)::text FROM refills WHERE chain=$1),
+		(SELECT max(updated_at)::text FROM withdrawals WHERE chain=$1), (SELECT max(updated_at)::text FROM cold_moves WHERE chain=$1), (SELECT max(updated_at)::text FROM consolidations WHERE chain=$1), (SELECT max(updated_at)::text FROM refills WHERE chain=$1),
 		(SELECT count(*)::text FROM deposits WHERE chain=$1), (SELECT count(*)::text FROM btc_attempts WHERE chain=$1 AND broadcast_at IS NOT NULL),
 		(SELECT next_height::text FROM chain_cursors WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
 	return st, err

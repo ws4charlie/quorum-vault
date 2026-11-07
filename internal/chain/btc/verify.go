@@ -308,6 +308,25 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		if pr.Sum != amount.Uint64() {
 			return reject("sweep amount %s is not the sum of the inputs, %d", i.Amount, pr.Sum)
 		}
+	case OwnerKindConsolidate:
+		// The money stays where it is: at least two outputs of this partition's own shard (nothing from a deposit address, a cold address or another
+		// partition) go back to the same shard in one output. The intent's amount is the sum of the inputs, as for a sweep, so the only thing a compromised
+		// business zone can change is the fee, which the caps bound.
+		if err := ownInputs("consolidate"); err != nil {
+			return err
+		}
+		if len(p.Inputs) < 2 {
+			return reject("a consolidation spends at least two outputs, not %d", len(p.Inputs))
+		}
+		if len(p.Outputs) != 1 {
+			return reject("a consolidation has one output, not %d", len(p.Outputs))
+		}
+		if to.Canonical != own.addr || pr.outs[0].Canonical != own.addr {
+			return reject("a consolidation pays the partition's own shard %s; the intent says %s and the output is %s", own.addr, to.Canonical, pr.outs[0].Canonical)
+		}
+		if pr.Sum != amount.Uint64() {
+			return reject("consolidation amount %s is not the sum of the inputs, %d", i.Amount, pr.Sum)
+		}
 	case "cancel":
 		// Every input as it was claimed (the guard checks that), back to the partition's own shard. Nothing else.
 		if len(p.Outputs) != 1 {

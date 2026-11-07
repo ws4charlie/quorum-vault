@@ -211,7 +211,7 @@ transaction (every input with its outpoint, value and derivation path; every out
 BIP143 digest of every input itself, from its own copy of the account xpub, and requires the job's digest to be that of exactly one input,
 signed under the key derived for that input; the key that would sign must be that derived key. Every intent is bound to its own partition: a withdrawal, hot to cold or rebalance spends only that
 partition's shard, with any change back to it, hot to cold pays the cold address of the partition's pool, a rebalance another shard of the same
-pool, a sweep or cancel the partition's own shard. A cancel needs no approval, so the guard lets it spend only inputs that one signed intent of its
+pool, a consolidation, sweep or cancel the partition's own shard. A cancel needs no approval, so the guard lets it spend only inputs that one signed intent of its
 partition claimed, all of them. Fees, fee rate, input count, dust, version, locktime and RBF are checked. Bitcoin signs every input under
 its own derived key, so a partition's signer is a key tree: the gateway asks party A to derive the key of the job's path.
 
@@ -224,7 +224,8 @@ each other's inputs are combined into one transaction with a fee neither payload
 
 A Bitcoin withdrawal is requested, approved (the automated key for the lowest tier), built, signed by MPC, broadcast, confirmed and settled, by the
 same workflow as EVM. The hot wallet is a table of outputs (`btc_utxos`) of the partition's shard. The build runs in one database transaction: it
-picks the shard's oldest available outputs one at a time with `FOR UPDATE SKIP LOCKED`, reserves each at once, and makes a transaction with the payment
+picks the shard's oldest available outputs one at a time with `FOR UPDATE SKIP LOCKED` (the largest ones instead, when the oldest `max_inputs` cannot
+carry the payment), reserves each at once, and makes a transaction with the payment
 first and change second, to the shard's own address; change at or under the dust limit goes to the fee. If the available outputs cannot pay, the withdrawal
 waits instead of failing: outputs free up when an earlier withdrawal settles and returns its change. The gateway and the cosigner check the transaction
 as described above; the core derives the same shard address from its xpub at start or refuses.
@@ -271,6 +272,20 @@ nothing. Hot shards, cold addresses and deposit addresses (suspense included) ar
 row. What is in flight is computed, not skipped: the cell's own records of the transactions it sent explain the differences between the books and the chain (spent but not settled, outputs not settled yet, payments not yet deep enough to credit), and what remains is a real difference. A read that a block keeps interrupting is skipped after three tries; the report is then not clean, and a long run of skips raises an ALERT. Hot-to-cold uses the EVM planner and workflow: a move is a withdrawal of the shard's
 own outputs to the pool's cold address, with change back to the shard; its size is capped at what `max_inputs` of the oldest available outputs can
 carry, so a shard of many small outputs is emptied in rounds. See [learn/p7-6-btc-cold.md](learn/p7-6-btc-cold.md).
+
+## Bitcoin: consolidation
+
+A hot shard fed by many small outputs can hold enough value and still fail a withdrawal, because one transaction takes at most `max_inputs` outputs.
+When a shard holds more than `consolidate_above` available outputs, the cold planner starts a consolidation: one transaction that spends the shard's
+smallest outputs that are worth spending at the current fee rate (at most `max_inputs`, at least two) and pays one output back to the same shard. The
+largest outputs stay free for withdrawals. It waits while the fee rate is above `consolidate_max_fee_rate` (logged once per change), while a
+consolidation or a hot-to-cold move is open on the partition, and while scanning is halted. It is off when `consolidate_above` is 0.
+
+No value moves, so the ledger books only the network fee, at settlement. The gateway and the cosigner sign it with no approval after checking the
+shape (the partition's own shard in and out, at least two inputs, one output, the amount equal to the sum of the inputs) and count it against
+`consolidations_per_hour`. A compromised core can therefore lose only fee with it: at most that limit times `max_tx_fee_sats` an hour. A bump keeps the
+inputs and lowers the one output; a cancel has the same shape and settles as the consolidation. See
+[learn/p7-6d-btc-consolidation.md](learn/p7-6d-btc-consolidation.md).
 
 ## Bitcoin: the offline cold signer
 

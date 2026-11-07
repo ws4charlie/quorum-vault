@@ -26,6 +26,8 @@ type Adapter struct {
 
 	waitMu   sync.Mutex
 	sweepWhy string // why sweeps are waiting now ("" when they are not), to log a change once
+	// consolidateWhy is the same for consolidation.
+	consolidateWhy string
 }
 
 // shard is one hot shard of the cell.

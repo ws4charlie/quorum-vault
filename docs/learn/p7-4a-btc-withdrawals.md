@@ -21,6 +21,10 @@ Outputs get into the table in two ways:
 [`BuildWithdrawal`](../../internal/chain/btc/withdraw.go), in the caller's transaction:
 - Selects the partition's own shard outputs, oldest first, **one at a time** with `FOR UPDATE SKIP LOCKED`, and sets each `reserved` at once. A concurrent
   build sees only outputs nobody has locked or reserved, so two builds never pick one, and a build that rolls back reserves nothing.
+- The order is decided before anything is reserved. If the oldest `max_inputs` available outputs cannot carry the payment and the fee, and the shard holds
+  more outputs than that, the build takes the **largest** outputs instead, so a shard fed by many small outputs can still pay. `not enough outputs` is
+  left for when even the largest `max_inputs` cannot carry it (a consolidation, [p7-6d-btc-consolidation.md](p7-6d-btc-consolidation.md), makes room).
+  A hot-to-cold move keeps taking the oldest.
 - Fee rate: `estimatesmartfee`, else `fallback_fee_rate`, never above `max_fee_rate` (below the gateway's) and never below the relay minimum. Fee =
   rate x virtual size of the witnessed transaction.
 - The payment is the first output; change is the second, to the shard's own address, only when it is above the dust limit (294 sats). Otherwise the

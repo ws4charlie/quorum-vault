@@ -72,7 +72,7 @@ func newBTCEnv(t *testing.T) *btcEnv {
 	e.appr = priv
 	f := gateway.File{
 		Approvers: map[string]gateway.ApproverFile{"alice": {PublicKey: hex.EncodeToString(pub), Enabled: true}},
-		Chains: map[string]gateway.ChainFile{btcChain: {Family: "btc", WithdrawalsPerHour: 100, SweepsPerHour: 100, CancelsPerHour: 100,
+		Chains: map[string]gateway.ChainFile{btcChain: {Family: "btc", WithdrawalsPerHour: 100, SweepsPerHour: 100, CancelsPerHour: 100, ConsolidationsPerHour: 2,
 			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: xpub.String(), MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
 				HotShards:     map[string]gateway.HotShardFile{e.part: {Address: e.hot0, Path: []uint32{1, 0}}, e.part1: {Address: e.hot1, Path: []uint32{1, 1}}, e.partS: {Address: e.hotS, Path: []uint32{1, 2}}},
 				ColdAddresses: map[string]string{"omnibus/native": e.cold, "segregated:acme/native": e.coldS}},
@@ -302,4 +302,60 @@ func TestCosignerBTCCancelMayOnlySpendWhatIsClaimed(t *testing.T) {
 	pin[1].Value = 100_000
 	e.refuse(cancel(pin, "k5", nil), gateway.ReasonPinChanged)
 	e.allow(cancel(pa.Inputs, "k6", nil)) // exactly the attempt's inputs, to the partition's own shard
+}
+
+// consolidation is a consolidation of the omnibus shard: n inputs of 30,000 sats, one output back to the shard, a fee of 1,000 sats.
+func (e *btcEnv) consolidation(id string, base, n int) (btc.Payload, signjob.Intent) {
+	p := btc.Payload{Version: 2}
+	var sum uint64
+	for i := 0; i < n; i++ {
+		p.Inputs = append(p.Inputs, bin(base+i, 30_000, 1, 0))
+		sum += 30_000
+	}
+	p.Outputs = []btc.PayloadOutput{{Address: e.hot0, Value: sum - 1_000}}
+	return p, signjob.Intent{Kind: "consolidate", ID: id, To: e.hot0, Amount: fmt.Sprint(sum)}
+}
+
+// Party B checks a consolidation from its own config and store: the shard's own outputs back to the shard, the amount the sum of the inputs, at most
+// consolidations_per_hour new ones in an hour, whatever the gateway says.
+func TestCosignerBTCConsolidation(t *testing.T) {
+	e := newBTCEnv(t)
+	p, in := e.consolidation("co1", 60, 3)
+	for i := range p.Inputs {
+		e.allow(e.request("co1", in, p, i, nil))
+	}
+
+	n := 0
+	attack := func(name string, change func(p *btc.Payload, in *signjob.Intent)) {
+		t.Helper()
+		n++
+		bp, bin := e.consolidation(fmt.Sprintf("x%d", n), 100+n*10, 3)
+		change(&bp, &bin)
+		e.refuse(e.request(fmt.Sprintf("x%d", n), bin, bp, 0, nil), gateway.ReasonTx)
+		_ = name
+	}
+	attack("output to any other address", func(p *btc.Payload, _ *signjob.Intent) { p.Outputs[0].Address = e.other })
+	attack("output to the cold address", func(p *btc.Payload, _ *signjob.Intent) { p.Outputs[0].Address = e.cold })
+	attack("output to another partition's shard", func(p *btc.Payload, _ *signjob.Intent) { p.Outputs[0].Address = e.hot1 })
+	attack("the intent names another address", func(_ *btc.Payload, in *signjob.Intent) { in.To = e.other })
+	attack("a second output", func(p *btc.Payload, _ *signjob.Intent) {
+		p.Outputs = []btc.PayloadOutput{{Address: e.hot0, Value: 40_000}, {Address: e.other, Value: 49_000}}
+	})
+	attack("one input", func(p *btc.Payload, in *signjob.Intent) {
+		p.Inputs, p.Outputs, in.Amount = p.Inputs[:1], []btc.PayloadOutput{{Address: e.hot0, Value: 29_000}}, "30000"
+	})
+	attack("an input from another partition", func(p *btc.Payload, _ *signjob.Intent) { p.Inputs[1] = bin(1, 30_000, 1, 1) })
+	attack("an input from a deposit address", func(p *btc.Payload, _ *signjob.Intent) { p.Inputs[1] = bin(2, 30_000, 0, 5) })
+	attack("an input at a hot key that no shard pins", func(p *btc.Payload, _ *signjob.Intent) { p.Inputs[1].Path = []uint32{1, 7} })
+	attack("an amount that is not the sum", func(_ *btc.Payload, in *signjob.Intent) { in.Amount = "89999" })
+	attack("a fee above the cap", func(p *btc.Payload, _ *signjob.Intent) { p.Outputs[0].Value = 90_000 - 60_000 })
+
+	// The hourly limit is the cosigner's own (2): the first one above, a second, then a third is refused; a fee bump of the first is not counted again.
+	p2, i2 := e.consolidation("co2", 200, 2)
+	e.allow(e.request("co2", i2, p2, 0, nil))
+	p3, i3 := e.consolidation("co3", 210, 2)
+	e.refuse(e.request("co3", i3, p3, 0, nil), gateway.ReasonConsolidateRate)
+	bump := p
+	bump.Outputs = []btc.PayloadOutput{{Address: e.hot0, Value: p.Outputs[0].Value - 500}}
+	e.allow(e.request("co1b", in, bump, 0, nil))
 }

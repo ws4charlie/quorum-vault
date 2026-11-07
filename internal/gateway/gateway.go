@@ -18,32 +18,33 @@ import (
 // Rejection codes, one per check, in decision order. A job's reject_reason is
 // "<code>: <detail>".
 const (
-	ReasonIntent        = "intent_invalid"         // 1 unparseable intent, or chain/partition differ from the job's
-	ReasonExpired       = "intent_expired"         // 4 first-time withdrawal with not_after zero, past, or too far ahead
-	ReasonTx            = "tx_mismatch"            // 2 TxVerifier refused the transaction
-	ReasonApprovals     = "approval_invalid"       // 3 no valid approval from a configured, enabled approver
-	ReasonPolicyAsset   = "policy_unknown_asset"   // 4 no policy for the chain or asset
-	ReasonPerTxCap      = "policy_per_tx_cap"      // 4
-	ReasonDailyCap      = "policy_daily_cap"       // 4
-	ReasonTier          = "policy_approvals"       // 4 fewer distinct approvers than the amount requires
-	ReasonDestination   = "policy_destination"     // 4 withdrawal pays an address that is not on the asset's list
-	ReasonWithdrawRate  = "policy_withdrawal_rate" // 4 too many withdrawals in the last hour
-	ReasonSweepRate     = "policy_sweep_rate"      // 4
-	ReasonCancelRate    = "policy_cancel_rate"     // 4
-	ReasonCancelTarget  = "policy_cancel_target"   // 4 sender is not a hot address the gateway owns
-	ReasonToColdRate    = "policy_to_cold_rate"    // 4 too many hot-to-cold moves in the last hour
-	ReasonToColdCap     = "policy_to_cold_cap"     // 4 hot-to-cold moves of this asset would exceed the daily cap
-	ReasonRebalanceRate = "policy_rebalance_rate"  // 4 too many hot-shard rebalances in the last hour
-	ReasonRebalanceCap  = "policy_rebalance_cap"   // 4 rebalances of this asset would exceed the daily cap
-	ReasonIntentChanged = "replay_intent_conflict" // 5 same intent ID, different intent hash
-	ReasonNonceChanged  = "replay_nonce_changed"   // 5 same intent, new digest, different nonce
-	ReasonFeeNotHigher  = "replay_fee_not_higher"  // 5 same intent, new digest, fees not higher
-	ReasonNonceTaken    = "replay_nonce_taken"     // 5 another intent already signed at this nonce
-	ReasonNonceCancel   = "replay_nonce_cancelled" // 5 a cancel consumed this nonce
-	ReasonPinChanged    = "replay_pin_changed"     // 5 a claim that exists is named again with another pin (Bitcoin: another input value)
-	ReasonCancelClaims  = "replay_cancel_claims"   // 5 a cancel on a chain that requires it names inputs that are not exactly the claims of one signed intent of its partition
-	ReasonIdentity      = "replay_identity_reused" // 5 the transaction identity was signed under another payload (Bitcoin: same txid, other values)
-	ReasonSignerRefused = "signer_refused"         // 6 the signer's other party (cb-mpc party B) refused; nothing was signed
+	ReasonIntent          = "intent_invalid"          // 1 unparseable intent, or chain/partition differ from the job's
+	ReasonExpired         = "intent_expired"          // 4 first-time withdrawal with not_after zero, past, or too far ahead
+	ReasonTx              = "tx_mismatch"             // 2 TxVerifier refused the transaction
+	ReasonApprovals       = "approval_invalid"        // 3 no valid approval from a configured, enabled approver
+	ReasonPolicyAsset     = "policy_unknown_asset"    // 4 no policy for the chain or asset
+	ReasonPerTxCap        = "policy_per_tx_cap"       // 4
+	ReasonDailyCap        = "policy_daily_cap"        // 4
+	ReasonTier            = "policy_approvals"        // 4 fewer distinct approvers than the amount requires
+	ReasonDestination     = "policy_destination"      // 4 withdrawal pays an address that is not on the asset's list
+	ReasonWithdrawRate    = "policy_withdrawal_rate"  // 4 too many withdrawals in the last hour
+	ReasonSweepRate       = "policy_sweep_rate"       // 4
+	ReasonCancelRate      = "policy_cancel_rate"      // 4
+	ReasonCancelTarget    = "policy_cancel_target"    // 4 sender is not a hot address the gateway owns
+	ReasonToColdRate      = "policy_to_cold_rate"     // 4 too many hot-to-cold moves in the last hour
+	ReasonToColdCap       = "policy_to_cold_cap"      // 4 hot-to-cold moves of this asset would exceed the daily cap
+	ReasonConsolidateRate = "policy_consolidate_rate" // 4 too many consolidations in the last hour (zero allowed: none)
+	ReasonRebalanceRate   = "policy_rebalance_rate"   // 4 too many hot-shard rebalances in the last hour
+	ReasonRebalanceCap    = "policy_rebalance_cap"    // 4 rebalances of this asset would exceed the daily cap
+	ReasonIntentChanged   = "replay_intent_conflict"  // 5 same intent ID, different intent hash
+	ReasonNonceChanged    = "replay_nonce_changed"    // 5 same intent, new digest, different nonce
+	ReasonFeeNotHigher    = "replay_fee_not_higher"   // 5 same intent, new digest, fees not higher
+	ReasonNonceTaken      = "replay_nonce_taken"      // 5 another intent already signed at this nonce
+	ReasonNonceCancel     = "replay_nonce_cancelled"  // 5 a cancel consumed this nonce
+	ReasonPinChanged      = "replay_pin_changed"      // 5 a claim that exists is named again with another pin (Bitcoin: another input value)
+	ReasonCancelClaims    = "replay_cancel_claims"    // 5 a cancel on a chain that requires it names inputs that are not exactly the claims of one signed intent of its partition
+	ReasonIdentity        = "replay_identity_reused"  // 5 the transaction identity was signed under another payload (Bitcoin: same txid, other values)
+	ReasonSignerRefused   = "signer_refused"          // 6 the signer's other party (cb-mpc party B) refused; nothing was signed
 )
 
 // Outcomes of processing one job.

@@ -80,7 +80,8 @@
       "sweeps_per_hour": 60,
       "withdrawals_per_hour": 120,
       "cancels_per_hour": 5,
-      "to_cold_per_hour": 4
+      "to_cold_per_hour": 4,
+      "consolidations_per_hour": 2
     }
   }
 }
