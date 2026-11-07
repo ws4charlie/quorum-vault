@@ -385,3 +385,111 @@ func TestOutcomeNotConsumedWhenOurOwnBlockArrivesBetweenTheReads(t *testing.T) {
 		t.Fatalf("%+v %v", o, err)
 	}
 }
+
+// replacementRaw builds, signs and returns the next replacement of w1 (not sent).
+func (e *wEnv) replacementAttempt() (txid string, st chain.SignedTx) {
+	e.t.Helper()
+	u, err := e.replace()
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	st, err = e.a.Assemble(u, e.sign(u))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	built, _ := BuildUnsigned(e.payload(u), e.a.acct)
+	return built.TxID, st
+}
+
+func (e *wEnv) attemptRows() int {
+	var n int
+	e.a.pool.QueryRow(context.Background(), `SELECT count(*) FROM btc_attempts WHERE chain='btc-t'`).Scan(&n)
+	return n
+}
+
+// A replacement the node refuses leaves no trace: the row is gone, so it is not the newest attempt, and the original still settles. The owner's FIRST
+// attempt, refused, stays (it is stuck, not forgotten). A transport error is not a refusal: the row stays.
+func TestRefusedReplacementLeavesNoTraceAndTheOriginalSettles(t *testing.T) {
+	e := newWEnv(t)
+	e.fund(100_000)
+	orig, _ := e.broadcastOne("w1", 40_000)
+	repl, st := e.replacementAttempt()
+	e.node.sendErr = &RPCError{Code: -26, Message: "insufficient fee, rejecting replacement"}
+	if _, err := e.a.Broadcast(context.Background(), st); !errors.Is(err, chain.ErrBroadcastStuck) {
+		t.Fatalf("a refused replacement: %v", err)
+	}
+	if e.attemptRows() != 1 {
+		t.Fatalf("%d attempt rows after a refused replacement, want only the original", e.attemptRows())
+	}
+	var n int
+	e.a.pool.QueryRow(context.Background(), `SELECT count(*) FROM btc_attempts WHERE txid=$1`, repl).Scan(&n)
+	if n != 0 {
+		t.Fatal("the refused replacement is still recorded")
+	}
+	e.node.sendErr = nil
+	e.node.txs[orig] = 2
+	o, err := e.a.Outcome(context.Background(), "withdrawal", "w1")
+	if err != nil || o.State != chain.OutcomeConfirmed || o.Hash != orig {
+		t.Fatalf("the original settles: %+v %v", o, err)
+	}
+	if err := e.commit(func(tx pgx.Tx) error { return e.a.Settle(context.Background(), tx, "withdrawal", "w1", orig) }); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first attempt, refused, stays.
+	e2 := newWEnv(t)
+	e2.fund(100_000)
+	u, _ := e2.build("w1", 40_000, true)
+	st2, _ := e2.a.Assemble(u, e2.sign(u))
+	e2.node.sendErr = &RPCError{Code: -26, Message: "mempool min fee not met"}
+	if _, err := e2.a.Broadcast(context.Background(), st2); !errors.Is(err, chain.ErrBroadcastStuck) {
+		t.Fatalf("a refused first attempt: %v", err)
+	}
+	if e2.attemptRows() != 1 {
+		t.Fatal("the first attempt was forgotten though it is only stuck")
+	}
+
+	// A transport error is not a refusal: the row stays, and is sent again by the outcome check.
+	e3 := newWEnv(t)
+	e3.fund(100_000)
+	e3.broadcastOne("w1", 40_000)
+	_, st3 := e3.replacementAttempt()
+	e3.node.srv.Close()
+	if _, err := e3.a.Broadcast(context.Background(), st3); err == nil || errors.Is(err, chain.ErrBroadcastStuck) || errors.Is(err, chain.ErrInputsSpent) {
+		t.Fatalf("a transport error: %v", err)
+	}
+	if e3.attemptRows() != 2 {
+		t.Fatalf("%d attempt rows after a transport error, want both", e3.attemptRows())
+	}
+}
+
+// The node knows none of the attempts (it was restarted with an empty mempool): they are sent again newest first until the node takes one, and an
+// attempt the node refuses is passed over. The newest being refused must not hide the original.
+func TestOutcomeResendsOlderAttemptsWhenTheNewestIsRefused(t *testing.T) {
+	e := newWEnv(t)
+	e.fund(100_000)
+	orig, origRaw := e.broadcastOne("w1", 40_000)
+	_, st := e.replacementAttempt()
+	if _, err := e.a.Broadcast(context.Background(), st); err != nil { // accepted, so it stays
+		t.Fatal(err)
+	}
+	if e.attemptRows() != 2 {
+		t.Fatal("setup")
+	}
+	e.node.sent = nil
+	e.node.refuse = map[string]bool{fmt.Sprintf("%x", st.Raw): true} // after the restart the node will not take the newest
+	e.a.pool.Exec(context.Background(), `UPDATE btc_attempts SET last_sent_at = now() - interval '1 minute'`)
+	if _, err := e.a.Outcome(context.Background(), "withdrawal", "w1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.node.sent) != 2 || e.node.sent[1] != fmt.Sprintf("%x", origRaw) {
+		t.Fatalf("sent %d times, last %q: the original must be offered after the refused newest", len(e.node.sent), e.node.sent)
+	}
+	// Taken: the pass stops there; a second pass within resendEvery sends nothing more.
+	e.node.txs[orig] = 0
+	e.node.sent = nil
+	e.a.Outcome(context.Background(), "withdrawal", "w1")
+	if len(e.node.sent) != 0 {
+		t.Fatalf("sent %d more times though the node knows the original", len(e.node.sent))
+	}
+}

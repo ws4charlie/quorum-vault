@@ -126,7 +126,7 @@ the transaction is resolved on the chain.
 2. Carry the file over, approve it on `qv-cold`, sign, carry the signed file back and `POST /v2/refills/{id}/import`. `qv-cold` accepts it as a replacement
    (same inputs, destination and amount, a fee higher than any it signed for those outpoints); anything else is refused.
 3. The workflow sends it as a second attempt of the same refill. At most one of the two can confirm; whichever does is settled: its fee is booked, its cold
-   change recorded, the other is forgotten. A replacement the node refuses is dropped with an ALERT and the earlier attempt keeps waiting; export again.
+   change recorded, the other is forgotten. A replacement the node refuses is forgotten at once, with its row (it leaves no trace, so it is never the newest attempt), with an ALERT, and the earlier attempt keeps waiting; export again. If the node later forgets everything (a restart with an empty mempool), the attempts are sent again newest first until the node takes one, so a refused newest cannot hide the original.
 
 Without a change output nothing can pay a higher fee: the ALERT says so, the export is refused, and the refill keeps waiting (it is never failed while it can
 still confirm). No CPFP.

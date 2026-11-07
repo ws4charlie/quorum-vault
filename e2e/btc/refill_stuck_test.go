@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -335,4 +336,87 @@ func TestRefillTheLostSignedFileBroadcastByHandIsNamedByReconcile(t *testing.T) 
 	if r.Clean {
 		t.Fatal("Reconcile is clean though a cold output was spent behind our back")
 	}
+}
+
+// restartNode restarts the compose bitcoind (it runs with -persistmempool=0, so it comes back with an empty mempool) and waits for it.
+func (s *system) restartNode() {
+	s.t.Helper()
+	cmd := exec.Command("docker", "compose", "--profile", "btc", "restart", "bitcoind")
+	cmd.Dir = filepath.Join("..", "..")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		s.t.Fatalf("restart bitcoind: %v\n%s", err, out)
+	}
+	s.waitFor(90*time.Second, "bitcoind is back", func() bool { return s.node.root.Call(s.ctx, nil, "getblockcount") == nil })
+	_ = s.node.root.Call(s.ctx, nil, "loadwallet", s.node.walletName)
+}
+
+func (s *system) nodeKnows(txid string) bool {
+	var in struct{ Txid string }
+	return s.node.root.Call(s.ctx, &in, "getrawtransaction", txid, true) == nil
+}
+
+// The node refuses the fee-bumped replacement (the original was given a huge priority, so no replacement can beat it by the replacement rules). The
+// refused attempt is forgotten with an ALERT, the original is still the refill's only attempt, and when the node is restarted with an empty mempool it
+// is the original that is sent again and confirms.
+func TestRefillStuckReplacementRefusedByTheNodeThenTheNodeIsRestarted(t *testing.T) {
+	s, rf, orig := brokenRefill(t, opts{}, 15_000_000)
+	if err := s.node.root.Call(s.ctx, nil, "prioritisetransaction", orig, 0, 100_000_000); err != nil {
+		t.Fatal(err)
+	}
+	repl := s.replaceCeremony(rf.ID, "repl")
+	s.waitFor(150*time.Second, "the ALERT that the node refused the replacement", func() bool { return s.workerLogHas("did not take the fee-bumped replacement") })
+	if s.refillAttempts() != 1 || s.count(`SELECT count(*) FROM btc_attempts WHERE chain=$1 AND txid=$2`, s.chain, repl) != 0 {
+		t.Fatalf("%d attempts, the refused replacement is %s", s.refillAttempts(), map[bool]string{true: "still recorded", false: "forgotten"}[s.count(`SELECT count(*) FROM btc_attempts WHERE chain=$1 AND txid=$2`, s.chain, repl) != 0])
+	}
+	if s.refillRows()[0].Status != "broadcast" {
+		t.Fatalf("refill %+v", s.refillRows()[0])
+	}
+	s.worker.stop() // so that only the cell, after the restart, can send it
+	s.restartNode()
+	if s.nodeKnows(orig) {
+		t.Fatal("the node still knows the original: its mempool was not emptied")
+	}
+	s.startWorker()
+	s.waitFor(150*time.Second, "the original is sent again", func() bool { return s.nodeKnows(orig) })
+	s.node.mine(2, "")
+	done := s.refillIn("confirmed", 90*time.Second)
+	if done.Tx != orig || done.Fee != s.attemptFee(orig) {
+		t.Fatalf("refill %+v, the original %s", done, orig)
+	}
+	s.ledgerOK()
+}
+
+// The same for a withdrawal: its fee bump is refused by the node, the original is the only attempt, and after a restart with an empty mempool the original
+// is sent again and settles with its own fee.
+func TestRefillStuckWithdrawalBumpRefusedByTheNodeThenTheNodeIsRestarted(t *testing.T) {
+	s := newSystem(t, opts{withdraw: true, fallbackRate: 1, stuckAfter: "6s"})
+	s.requireNoEstimate()
+	s.fundHot(100_000_000)
+	s.deposit("c1", 30_000_000)
+	dest, err := s.acct.Address([]uint32{0, 900}) // not an address of the node's wallet: a wallet that sees a payment to it resubmits it itself
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := s.withdraw("ini", "k1", "c1", dest, 10_000_000)
+	b := s.waitWd(w.ID, "broadcast", 60*time.Second)
+	if err := s.node.root.Call(s.ctx, nil, "prioritisetransaction", b.Tx, 0, 100_000_000); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Second) // a few stuck intervals: each bump is built, signed and refused
+	if n := s.attempts("send"); n != 1 {
+		t.Fatalf("%d send attempts: a refused bump must leave no trace", n)
+	}
+	s.worker.stop()
+	s.restartNode()
+	if s.nodeKnows(b.Tx) {
+		t.Fatal("the node still knows the original")
+	}
+	s.startWorker()
+	s.waitFor(150*time.Second, "the original is sent again", func() bool { return s.nodeKnows(b.Tx) })
+	s.node.mine(2, "")
+	s.waitWd(w.ID, "confirmed", 90*time.Second)
+	if got := s.withdrawalFee(w.ID); got != s.attemptFee(b.Tx) {
+		t.Fatalf("booked fee %d, the original paid %d", got, s.attemptFee(b.Tx))
+	}
+	s.ledgerOK()
 }

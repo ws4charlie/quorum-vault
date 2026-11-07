@@ -23,6 +23,7 @@ type fakeNode struct {
 	txs         map[string]int64
 	sent        []string // raw transactions given to sendrawtransaction
 	sendErr     *RPCError
+	refuse      map[string]bool // raw transactions (hex) the node refuses as stuck, whatever sendErr says
 	spent       map[string]bool // "txid:vout" -> spent on chain (gettxout answers null)
 	estimate    float64         // sat/vB the node answers to estimatesmartfee; 0: no estimate
 	beforeTxOut func()          // called (unlocked state allowed) before gettxout answers, to change the chain between two reads
@@ -90,6 +91,10 @@ func (n *fakeNode) serve(w http.ResponseWriter, r *http.Request) {
 		var raw string
 		json.Unmarshal(req.Params[0], &raw)
 		n.sent = append(n.sent, raw)
+		if n.refuse[raw] {
+			json.NewEncoder(w).Encode(map[string]any{"result": nil, "error": map[string]any{"code": -26, "message": "insufficient fee, rejecting replacement"}})
+			return
+		}
 		if n.sendErr != nil {
 			json.NewEncoder(w).Encode(map[string]any{"result": nil, "error": n.sendErr})
 			return

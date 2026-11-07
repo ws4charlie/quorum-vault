@@ -82,7 +82,18 @@ func (a *Adapter) Broadcast(ctx context.Context, s chain.SignedTx) (string, erro
 	if tag.RowsAffected() != 1 {
 		return "", fmt.Errorf("btc: %s is not a transaction this cell built", txid)
 	}
-	return a.send(ctx, txid, s.Raw)
+	h, serr := a.send(ctx, txid, s.Raw)
+	if errors.Is(serr, chain.ErrBroadcastStuck) || errors.Is(serr, chain.ErrInputsSpent) {
+		// The node's own judgement, not a transport error. A refused replacement (an attempt after the owner's first) leaves no trace: it must not stay
+		// as the newest attempt, where it would hide the earlier ones from the rebroadcast and the outcome. The owner's first attempt stays: it is
+		// stuck, not forgotten, and the workflow bumps it.
+		if _, derr := a.pool.Exec(ctx, `DELETE FROM btc_attempts a WHERE a.chain=$1 AND a.txid=$2 AND EXISTS (
+			SELECT 1 FROM btc_attempts b WHERE b.chain=a.chain AND b.owner_kind=a.owner_kind AND b.owner_id=a.owner_id AND b.txid <> a.txid
+			AND b.broadcast_at IS NOT NULL AND b.created_at <= a.created_at)`, a.cfg.Chain, txid); derr != nil {
+			return h, derr
+		}
+	}
+	return h, serr
 }
 
 func (a *Adapter) send(ctx context.Context, txid string, raw []byte) (string, error) {
@@ -259,12 +270,29 @@ func (a *Adapter) Outcome(ctx context.Context, ownerKind, ownerID string) (chain
 			}
 		}
 	}
-	if latest.conf < 0 && len(latest.raw) > 0 && (latest.sent == nil || time.Since(*latest.sent) >= resendEvery) {
-		_, serr := a.send(ctx, latest.txid, latest.raw)
-		if _, err := a.pool.Exec(ctx, `UPDATE btc_attempts SET last_sent_at = now() WHERE chain=$1 AND txid=$2`, a.cfg.Chain, latest.txid); err != nil {
-			return chain.Outcome{}, err
+	// When the node knows none of the owner's attempts (a restart with an empty mempool, an eviction), send them again, newest first, until the node
+	// takes one, each at most every resendEvery. An attempt the node refuses is passed over in this pass: an older one may still be good.
+	allForgotten := true
+	for i := range atts {
+		if atts[i].conf >= 0 {
+			allForgotten = false
 		}
-		_ = serr // a refusal leaves it stuck: the workflow bumps it, or the outcome becomes consumed
+	}
+	if allForgotten {
+		for i := len(atts) - 1; i >= 0; i-- {
+			t := atts[i]
+			if len(t.raw) == 0 || (t.sent != nil && time.Since(*t.sent) < resendEvery) {
+				continue
+			}
+			_, serr := a.send(ctx, t.txid, t.raw)
+			if _, err := a.pool.Exec(ctx, `UPDATE btc_attempts SET last_sent_at = now() WHERE chain=$1 AND txid=$2`, a.cfg.Chain, t.txid); err != nil {
+				return chain.Outcome{}, err
+			}
+			if serr == nil {
+				break
+			}
+			// A refusal leaves it as it was; the next older attempt is offered.
+		}
 	}
 	return out, nil
 }
