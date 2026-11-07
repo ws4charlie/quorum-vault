@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -70,6 +71,14 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 	if len(cfg.HotShards) == 0 {
 		return nil, errors.New("btc: no hot shards")
 	}
+	parts := make([]string, 0, len(cfg.HotShards))
+	for part := range cfg.HotShards {
+		parts = append(parts, part)
+	}
+	sort.Strings(parts)
+	if err := OneShardPerPool(parts); err != nil {
+		return nil, err
+	}
 	for part, h := range cfg.HotShards {
 		if len(h.Path) != 2 || h.Path[0] != BranchHot {
 			return nil, fmt.Errorf("btc: hot shard of %q: path %v is not on the hot branch [%d, index]", part, h.Path, BranchHot)
@@ -103,6 +112,24 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 		v.cold[pool] = d.Canonical
 	}
 	return v, nil
+}
+
+// OneShardPerPool refuses a list of hot partition IDs in which two belong to the same pool (and asset, entity and chain): Bitcoin keeps
+// one hot shard per pool, since there is no move between shards. An ID that does not parse is not judged here; the callers check it.
+func OneShardPerPool(partitions []string) error {
+	seen := map[string]string{}
+	for _, part := range partitions {
+		k, err := partition.Parse(part)
+		if err != nil {
+			continue
+		}
+		id := strings.Join([]string{k.Entity, k.Chain, k.Asset, k.Tier, k.Pool}, "/")
+		if first, dup := seen[id]; dup {
+			return fmt.Errorf("btc: pool %q has two hot shards (%q and %q): Bitcoin keeps one hot shard per pool", k.Pool, first, part)
+		}
+		seen[id] = part
+	}
+	return nil
 }
 
 func reject(format string, args ...any) error {
@@ -237,7 +264,7 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		return nil
 	}
 	switch i.Kind {
-	case "withdrawal", "to-cold", "rebalance":
+	case "withdrawal", "to-cold":
 		if err := ownInputs(i.Kind); err != nil {
 			return err
 		}
@@ -251,15 +278,10 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		if len(p.Outputs) == 2 && pr.outs[1].Canonical != own.addr {
 			return reject("change goes to %s, not the partition's own shard %s", pr.outs[1].Canonical, own.addr)
 		}
-		switch i.Kind {
-		case "to-cold":
+		if i.Kind == "to-cold" {
 			pool := own.key.Pool
 			if cold, ok := v.cold[pool]; !ok || cold != to.Canonical {
 				return reject("%s is not the cold address of pool %q", to.Canonical, pool)
-			}
-		case "rebalance":
-			if !v.siblingShard(own.key, to.Canonical) {
-				return reject("%s is not the hot address of another shard of %s", to.Canonical, i.PartitionID)
 			}
 		}
 	case "sweep":
@@ -298,18 +320,6 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		return reject("intent kind %q", i.Kind)
 	}
 	return nil
-}
-
-// siblingShard reports whether addr is the pinned hot address of ANOTHER shard of the same pool, asset, tier, entity and chain as src.
-// The partition IDs are parsed, so a partition of another pool is not "another shard" however its ID is spelled.
-func (v *Verifier) siblingShard(src partition.Key, addr string) bool {
-	for _, sh := range v.shard {
-		k := sh.key
-		if sh.addr == addr && k.Entity == src.Entity && k.Chain == src.Chain && k.Asset == src.Asset && k.Tier == src.Tier && k.Pool == src.Pool && k.Shard != src.Shard {
-			return true
-		}
-	}
-	return false
 }
 
 // Info is what the gateway's guard reads from a verified job.

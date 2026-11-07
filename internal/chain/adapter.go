@@ -322,7 +322,7 @@ var ErrReorgTooDeep = errors.New("chain: reorganization deeper than the safe dep
 // WithdrawalIntent asks for a transfer out of a partition's wallet.
 type WithdrawalIntent struct {
 	// OwnerKind names the owner of the nonce this transfer takes: "withdrawal" (the default when empty), "to-cold" for a
-	// hot-to-cold move or "rebalance" for a move between hot shards. The kind decides how the transaction is found again for replacement and cancel.
+	// hot-to-cold move or "rebalance" for a move between hot shards (EVM only). The kind decides how the transaction is found again for replacement and cancel.
 	OwnerKind   string
 	ID          string // withdrawal ID (idempotency)
 	PartitionID string

@@ -53,7 +53,7 @@ func TestTwoInputTransactionsSignOnMPCAndValidate(t *testing.T) {
 		SignTimeout: "20s",
 		Chains: map[string]gateway.ChainFile{chainName: {Family: "btc", WithdrawalsPerHour: 100, SweepsPerHour: 100, CancelsPerHour: 100,
 			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: xpub, MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
-				HotShards: map[string]gateway.HotShardFile{part: {Address: hot0, Path: []uint32{1, 0}}, "qv-us/" + chainName + "/BTC/hot/omnibus/1": {Address: hot1, Path: []uint32{1, 1}}}},
+				HotShards: map[string]gateway.HotShardFile{part: {Address: hot0, Path: []uint32{1, 0}}, "qv-us/" + chainName + "/BTC/hot/segregated:beta/0": {Address: hot1, Path: []uint32{1, 1}}}},
 			Assets: map[string]gateway.AssetFile{"BTC": {AnyDestination: true, PerTxCap: "100000000", DailyCap: "1000000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}}}}},
 	}
 	gwPath := filepath.Join(dir, "gateway.json")

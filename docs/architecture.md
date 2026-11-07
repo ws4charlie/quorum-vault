@@ -40,7 +40,7 @@ flowchart LR
 | `qv-core` | HTTP API (`/v2`): customers, deposit addresses, withdrawals, approvals, balances, `Reconcile` | the business database |
 | `qv-worker` | Temporal workflows: scan, sweep planner, withdrawal reconciler, cold planner (long-running loops), one workflow per withdrawal, sweep and hot-to-cold move; a watchdog restarts a loop that stops making progress | the business database, the chain |
 | `qv-relay` | outbox to Redpanda, at least once | the business database |
-| `qv-gateway` | signing zone: claims `sign_jobs`, re-verifies the intent, the approver signatures and the policy (for a withdrawal: the destination must be on the asset's list in its config, and only so many may start per hour; for a hot-to-cold move: the pinned cold address, a rate and a daily cap; for a hot-shard rebalance: another hot shard of the pool, a rate and a daily cap), reserves the digest in its own replay-guard database, then asks a signer | **not** the business database: it only reads and updates `sign_jobs` as a restricted role |
+| `qv-gateway` | signing zone: claims `sign_jobs`, re-verifies the intent, the approver signatures and the policy (for a withdrawal: the destination must be on the asset's list in its config, and only so many may start per hour; for a hot-to-cold move: the pinned cold address, a rate and a daily cap; for an EVM hot-shard rebalance: another hot shard of the pool, a rate and a daily cap; Bitcoin has no rebalance and refuses the kind), reserves the digest in its own replay-guard database, then asks a signer | **not** the business database: it only reads and updates `sign_jobs` as a restricted role |
 | `mpc-party` A and B | two-party threshold ECDSA (cb-mpc): DKG, derive, sign, refresh; shares sealed by each party's own HSM token; durable two-phase refresh; backup and restore | each other only through pinned mTLS certificates |
 | `qv-cosigner` | party B's gate: repeats the gateway's checks from its own config and its own database before B takes part in a signature; fail closed | nothing from A or the gateway |
 
@@ -81,6 +81,9 @@ account (`rebal`), planned by the same loop *before* the move to cold. The signi
 pool and asset from its own `hot_addresses`, and rate-limits and caps it from its own store (gateway and cosigner both). Targets must lie
 between a shard's low mark and its cold target, so a rebalance and a move to cold cannot undo each other.
 Design and tests: [learn/p6-4-shard-rebalance.md](learn/p6-4-shard-rebalance.md).
+
+Bitcoin has no rebalance: it keeps **one hot shard per pool**. The core, the gateway and the cosigner refuse a config with two hot shards in one
+pool at start, naming the pool, and the Bitcoin verifier refuses the `rebalance` kind. To use more than one shard on Bitcoin, use more than one pool.
 
 ### Cold to hot: the refill
 

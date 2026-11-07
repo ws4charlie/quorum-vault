@@ -28,20 +28,21 @@ const btcChain = "btc-cos"
 
 // btcEnv is a cosigner for a Bitcoin chain, driven by a rogue gateway: the test sends it whatever it likes, with the signing key it names.
 type btcEnv struct {
-	t     *testing.T
-	c     *cosigner.Cosigner
-	acct  *btc.Account
-	priv  *hdkeychain.ExtendedKey
-	appr  ed25519.PrivateKey
-	hot0  string // partition part, [1,0]
-	hot1  string // partition part1, [1,1]
-	hotS  string // partition partS, [1,2]: a segregated client
-	cold  string
-	coldS string
-	other string
-	part  string
-	part1 string
-	partS string
+	t       *testing.T
+	c       *cosigner.Cosigner
+	acct    *btc.Account
+	priv    *hdkeychain.ExtendedKey
+	appr    ed25519.PrivateKey
+	hot0    string // partition part, [1,0]
+	hot1    string // partition part1, [1,1]
+	hotS    string // partition partS, [1,2]: a segregated client
+	cold    string
+	coldS   string
+	other   string
+	part    string
+	part1   string
+	partS   string
+	xpubStr string // the account xpub
 }
 
 func newBTCEnv(t *testing.T) *btcEnv {
@@ -56,7 +57,8 @@ func newBTCEnv(t *testing.T) *btcEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &btcEnv{t: t, acct: acct, priv: k, part: "qv-us/btc-cos/BTC/hot/omnibus/0", part1: "qv-us/btc-cos/BTC/hot/omnibus/1", partS: "qv-us/btc-cos/BTC/hot/segregated:acme/0"}
+	e := &btcEnv{t: t, acct: acct, priv: k, part: "qv-us/btc-cos/BTC/hot/omnibus/0", part1: "qv-us/btc-cos/BTC/hot/segregated:beta/0", partS: "qv-us/btc-cos/BTC/hot/segregated:acme/0"}
+	e.xpubStr = xpub.String()
 	e.hot0, _ = acct.Address([]uint32{1, 0})
 	e.hot1, _ = acct.Address([]uint32{1, 1})
 	e.hotS, _ = acct.Address([]uint32{1, 2})
@@ -232,8 +234,8 @@ func TestCosignerBTCRefusesRoguePayloads(t *testing.T) {
 func TestCosignerBTCBindsIntentsToTheirPartition(t *testing.T) {
 	e := newBTCEnv(t)
 	seg := []btc.PayloadInput{bin(1, 150_000, 1, 2), bin(2, 150_000, 1, 2)} // the segregated client's key
-	for n, kind := range []string{"withdrawal", "to-cold", "rebalance"} {
-		to := map[string]string{"withdrawal": e.other, "to-cold": e.cold, "rebalance": e.hot1}[kind]
+	for n, kind := range []string{"withdrawal", "to-cold"} {
+		to := map[string]string{"withdrawal": e.other, "to-cold": e.cold}[kind]
 		p := e.pay(150_000, 150_000, to, 180_000)
 		p.Inputs = seg
 		in := signjob.Intent{Kind: kind, ID: fmt.Sprintf("b%d", n), To: to, Amount: "100000"}
@@ -241,8 +243,6 @@ func TestCosignerBTCBindsIntentsToTheirPartition(t *testing.T) {
 	}
 	p := e.pay(150_000, 150_000, e.coldS, 180_000)
 	e.refuse(e.request("tc", signjob.Intent{Kind: "to-cold", ID: "tc1", To: e.coldS, Amount: "100000"}, p, 0, nil), gateway.ReasonTx) // another pool's cold address
-	p = e.pay(150_000, 150_000, e.hotS, 180_000)
-	e.refuse(e.request("rb", signjob.Intent{Kind: "rebalance", ID: "rb1", To: e.hotS, Amount: "100000"}, p, 0, nil), gateway.ReasonTx) // into another pool
 	p = e.pay(150_000, 150_000, e.other, 180_000)
 	p.Outputs[1].Address = e.hot1 // change to another shard
 	e.refuse(e.request("chg", wd("chg1", e.other), p, 0, nil), gateway.ReasonTx)
@@ -251,6 +251,31 @@ func TestCosignerBTCBindsIntentsToTheirPartition(t *testing.T) {
 	e.refuse(e.request("sw", signjob.Intent{Kind: "sweep", ID: "sw1", From: dep, To: e.hot1, Amount: "50000"}, sw, 0, nil), gateway.ReasonTx)
 	cp := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{bin(31, 50_000, 1, 0)}, Outputs: []btc.PayloadOutput{{Address: e.hot1, Value: 49_000}}}
 	e.refuse(e.request("cx", signjob.Intent{Kind: "cancel", ID: "cx1", To: e.hot1, Amount: "0"}, cp, 0, nil), gateway.ReasonTx)
+}
+
+// The cosigner reads the same signing-zone config as the gateway: two hot shards in one pool refuse to start, naming the pool.
+func TestCosignerBTCRefusesTwoHotShardsInOnePool(t *testing.T) {
+	e := newBTCEnv(t)
+	f := gateway.File{
+		Approvers: map[string]gateway.ApproverFile{"alice": {PublicKey: hex.EncodeToString(make([]byte, 32)), Enabled: true}},
+		Chains: map[string]gateway.ChainFile{btcChain: {Family: "btc", WithdrawalsPerHour: 100,
+			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: e.xpubStr, MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
+				HotShards: map[string]gateway.HotShardFile{e.part: {Address: e.hot0, Path: []uint32{1, 0}}, "qv-us/btc-cos/BTC/hot/omnibus/1": {Address: e.hot1, Path: []uint32{1, 1}}}},
+			Assets: map[string]gateway.AssetFile{"BTC": {AnyDestination: true, PerTxCap: "1", DailyCap: "1", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}}}}},
+	}
+	raw, _ := json.Marshal(f)
+	if _, err := gateway.ParseConfig(raw); err == nil || !strings.Contains(err.Error(), `pool "omnibus" has two hot shards`) {
+		t.Fatalf("two hot shards in the omnibus pool: %v", err)
+	}
+}
+
+// Bitcoin has no move between hot shards: a rogue gateway's rebalance is refused by party B whatever it pays and to whom.
+func TestCosignerBTCRefusesRebalance(t *testing.T) {
+	e := newBTCEnv(t)
+	for n, to := range []string{e.hot1, e.hotS, e.hot0, e.cold, e.other} {
+		p := e.pay(150_000, 150_000, to, 180_000)
+		e.refuse(e.request(fmt.Sprintf("rb%d", n), signjob.Intent{Kind: "rebalance", ID: fmt.Sprintf("rb%d", n), To: to, Amount: "100000"}, p, 0, nil), gateway.ReasonTx)
+	}
 }
 
 // A cancel needs no approval, so party B refuses one that spends anything an attempt did not claim.

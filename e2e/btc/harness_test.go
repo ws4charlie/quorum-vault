@@ -32,8 +32,8 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
+	"github.com/ws4charlie/quorum-vault/internal/mpcsigner"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
-	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
 
 const (
@@ -59,7 +59,7 @@ func TestMain(m *testing.M) {
 		if mpcBin, err = mpcstack.Build(dir); err != nil {
 			buildErr = err
 		}
-		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway", "qv-cold"} {
+		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway", "qv-cold", "qv-btc-xpub"} {
 			if buildErr != nil {
 				break
 			}
@@ -455,21 +455,13 @@ func (s *system) holds(d time.Duration, what string, cond func() bool) {
 	}
 }
 
-// accountXpub asks party A for the account node m/84'/1'/0' and builds the xpub the core is configured with.
+// accountXpub asks party A for the account node m/84'/coin'/0' and builds the xpub the core is configured with. It is the helper the
+// qv-btc-xpub command uses, so the suite runs on the command's own path.
 func accountXpub(t *testing.T, mpc *mpcstack.Stack, network string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	path := btc.AccountPath(network)
-	acct, err := mpc.Client.Node(ctx, &pb.NodeRequest{KeysetId: mpc.KeysetID, HardenedPath: path})
-	if err != nil {
-		t.Fatalf("Node: %v", err)
-	}
-	parent, err := mpc.Client.Node(ctx, &pb.NodeRequest{KeysetId: mpc.KeysetID, HardenedPath: path[:2]})
-	if err != nil {
-		t.Fatalf("Node (parent): %v", err)
-	}
-	x, err := btc.XpubFromNode(network, acct.PublicKey, acct.ChainCode, parent.PublicKey)
+	x, err := mpcsigner.AccountXpub(ctx, mpc.Client, mpc.KeysetID, network)
 	if err != nil {
 		t.Fatal(err)
 	}
