@@ -281,7 +281,9 @@ func TestRefillReconcileCleanAtEveryStage(t *testing.T) {
 	}
 	s.mustBeClean("signed, reserved, not sent")
 	s.startWorker()
-	s.waitFor(60*time.Second, "the refill is broadcast", func() bool { return s.refillIn("broadcast", time.Second).ID == rf.ID })
+	if got := s.refillIn("broadcast", 60*time.Second); got.ID != rf.ID {
+		t.Fatalf("refill %s was broadcast, want %s", got.ID, rf.ID)
+	}
 	s.worker.stop() // settlement waits
 	s.mustBeClean("in the mempool")
 	s.node.mine(1, "")
