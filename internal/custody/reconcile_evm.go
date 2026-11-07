@@ -7,6 +7,8 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 )
 
@@ -43,69 +45,121 @@ const recentRevert = "24 hours"
 // broadcast bookings of the items without a mined transaction are taken out, so every clearing account must then be exactly zero. What is left is a real
 // difference and raises the ALERT, in flight or not.
 //
-// Reading balances and receipts at one height is consistent on EVM; the books can change during the read. The stamp of the books is taken
-// before the height and after the last read, and the read is repeated when it changed (3 reads); only then is the comparison skipped, and
-// the report says so and is not Clean.
+// The books are read from one database snapshot (REPEATABLE READ, read only), taken before the height is read, so a busy cell answers. A
+// transaction of ours sent after the snapshot may already be mined at or below the height; when the first read shows a difference the
+// comparison is made again from a new snapshot, and only a difference both reads show by the same amount is reported: a real one persists, a
+// race does not. A comparison the reader cannot make is counted in SkippedChainChecks and the report is not Clean.
 func (s *Service) reconcileEVM(ctx context.Context, rep *Report) error {
 	rr, ok := s.Reader.(ReceiptReader)
 	if !ok {
 		s.skipChainChecks(rep, "this chain reader cannot read receipts")
 		return nil
 	}
-	for attempt := 0; attempt < 3; attempt++ {
-		// The stamp first, then the height: a settlement in the books at the stamp was decided against a safe height no higher than the one read
-		// after it, so no settled item has its transaction above h (except the early revert, which is accounted for).
-		st0, err := s.reconcileStampEVM(ctx)
+	r1, err := s.evmOnce(ctx, rr)
+	if err != nil {
+		return err
+	}
+	final := r1
+	if r1.failed() {
+		// A transaction of ours sent after the snapshot may already be mined at or below the height; a real difference persists, a race does not.
+		r2, err := s.evmOnce(ctx, rr)
 		if err != nil {
 			return err
 		}
-		h, err := s.Reader.SafeHead(ctx)
-		if err != nil {
-			return err
+		rep.Rechecked = true
+		first := map[string]*big.Int{}
+		for _, c := range r1.checks {
+			if !c.OK && !c.Skipped {
+				first[checkKey(c)] = checkDiff(c)
+			}
 		}
-		cur, err := s.Cursor(ctx)
-		if err != nil {
-			return err
+		for i, c := range r2.checks {
+			if c.OK || c.Skipped {
+				continue
+			}
+			if d, seen := first[checkKey(c)]; !seen || d.Cmp(checkDiff(c)) != 0 {
+				r2.checks[i].OK = true
+				r2.checks[i].Detail = strings.TrimSpace(c.Detail + " (not shown by the first read; gone from the rechecked one, so not a difference)")
+			}
 		}
-		checks, open, unsupported, err := s.evmChecks(ctx, rr, h, cur)
-		if err != nil {
-			return err
-		}
-		st1, err := s.reconcileStampEVM(ctx)
-		if err != nil {
-			return err
-		}
-		if st0 != st1 {
-			continue
-		}
-		rep.Height, rep.ScanCursor, rep.InFlight = h, cur, open
-		for _, ck := range checks {
-			rep.add(ck)
-		}
-		if unsupported {
-			s.skipChainChecks(rep, "this chain cell cannot read balances yet")
-			return nil
-		}
-		s.reconSkipSince.Store(0)
+		final = r2
+	}
+	rep.Height, rep.ScanCursor, rep.InFlight = final.h, final.cur, final.open
+	for _, ck := range final.checks {
+		rep.add(ck)
+	}
+	if final.unsupported {
+		s.skipChainChecks(rep, "this chain cell cannot read balances yet")
 		return nil
 	}
-	s.skipChainChecks(rep, "a change in the books arrived during each of 3 reads")
+	s.reconSkipSince.Store(0)
 	return nil
 }
 
-// reconcileStampEVM changes whenever the books change in a way that matters to the comparison: any ledger entry, any row that moves money, and
-// the attempts and allocations that say what was sent.
-func (s *Service) reconcileStampEVM(ctx context.Context) (string, error) {
-	var st string
-	err := s.Pool.QueryRow(ctx, `SELECT concat_ws('|',
-		(SELECT COALESCE(max(id),0)::text FROM ledger_entries),
-		(SELECT max(updated_at)::text FROM sweeps WHERE chain=$1), (SELECT max(updated_at)::text FROM withdrawals WHERE chain=$1),
-		(SELECT max(updated_at)::text FROM cold_moves WHERE chain=$1), (SELECT max(updated_at)::text FROM rebalance_moves WHERE chain=$1),
-		(SELECT max(updated_at)::text FROM refills WHERE chain=$1),
-		(SELECT count(*)::text FROM evm_tx_attempts WHERE chain=$1), (SELECT max(updated_at)::text FROM evm_nonce_allocations WHERE chain=$1),
-		(SELECT count(*)::text FROM deposit_addresses WHERE chain=$1),
-		(SELECT next_height::text FROM chain_cursors WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
-	return st, err
+type evmRead struct {
+	checks      []Check
+	open        int
+	h, cur      uint64
+	unsupported bool
+}
+
+func (r evmRead) failed() bool {
+	for _, c := range r.checks {
+		if !c.OK && !c.Skipped {
+			return true
+		}
+	}
+	return false
+}
+
+func checkKey(c Check) string { return c.Name + "|" + c.Asset + "|" + c.Subject }
+
+// checkDiff is chain minus ledger: the amount a check differs by (the checks that are not about amounts differ by 0, and compare equal).
+func checkDiff(c Check) *big.Int {
+	l, ok1 := new(big.Int).SetString(c.Ledger, 10)
+	ch, ok2 := new(big.Int).SetString(c.Chain, 10)
+	if !ok1 || !ok2 {
+		return new(big.Int)
+	}
+	return ch.Sub(ch, l)
+}
+
+// evmOnce makes every comparison from one snapshot of the books. The snapshot is taken (first query) before the safe height is read: a
+// settlement in it was decided against a safe head no higher than that height, so no settled item has its transaction above h (except the early
+// revert, which is accounted for). Nothing written later is seen, however busy the cell is.
+func (s *Service) evmOnce(ctx context.Context, rr ReceiptReader) (evmRead, error) {
+	var out evmRead
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback(ctx)
+	var one int
+	if err := tx.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil { // takes the snapshot
+		return out, err
+	}
+	if out.h, err = s.Reader.SafeHead(ctx); err != nil {
+		return out, err
+	}
+	if out.cur, err = s.cursorTx(ctx, tx); err != nil {
+		return out, err
+	}
+	out.checks, out.open, out.unsupported, err = s.evmChecks(ctx, tx, rr, out.h, out.cur)
+	return out, err
+}
+
+// booksQ is what the comparison reads the books through: the snapshot.
+type booksQ interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (s *Service) postedQ(ctx context.Context, q booksQ, acct string) (*big.Int, error) {
+	var p string
+	if err := q.QueryRow(ctx, `SELECT posted::text FROM ledger_accounts WHERE id=$1`, acct).Scan(&p); err != nil {
+		return nil, fmt.Errorf("custody: account %s: %w", acct, err)
+	}
+	return parseBig(p), nil
 }
 
 // evmAdj is the books put in the terms of the chain at the pinned height.
@@ -153,8 +207,8 @@ type evmAttempt struct {
 }
 
 // attemptsOf reads every transaction of ours at the nonce of an owner and its receipt.
-func (s *Service) attemptsOf(ctx context.Context, rr ReceiptReader, kind, id string) ([]evmAttempt, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT at.tx_hash, at.kind FROM evm_tx_attempts at
+func (s *Service) attemptsOf(ctx context.Context, q booksQ, rr ReceiptReader, kind, id string) ([]evmAttempt, error) {
+	rows, err := q.Query(ctx, `SELECT at.tx_hash, at.kind FROM evm_tx_attempts at
 		JOIN evm_nonce_allocations al ON al.chain=at.chain AND al.address=at.address AND al.nonce=at.nonce
 		WHERE al.chain=$1 AND al.owner_kind=$2 AND al.owner_id=$3 ORDER BY at.created_at`, s.Cfg.Chain, kind, id)
 	if err != nil {
@@ -228,13 +282,13 @@ func (s *Service) adjUnFee(a *evmAdj, partitionID string, fee *big.Int) error {
 }
 
 // evmPending works out what the books lack, or have too early, for every open item (and every item that reverted too early to be final).
-func (s *Service) evmPending(ctx context.Context, rr ReceiptReader, h uint64) (*evmAdj, error) {
+func (s *Service) evmPending(ctx context.Context, q booksQ, rr ReceiptReader, h uint64) (*evmAdj, error) {
 	c := s.Cfg
 	a := newEVMAdj()
 
 	// Sweeps. Booked at broadcast (sweep -> dep); at settlement what moved goes to the sink shard, the excess or shortfall is booked against dep,
 	// and the fee comes out of the receiving shard. A cancel that mined books nothing (the sweep ends failed): see the report.
-	sweeps, err := s.Pool.Query(ctx, `SELECT `+sweepCols+` FROM sweeps WHERE chain=$1 AND (status NOT IN ('confirmed','failed')
+	sweeps, err := q.Query(ctx, `SELECT `+sweepCols+` FROM sweeps WHERE chain=$1 AND (status NOT IN ('confirmed','failed')
 		OR (status='failed' AND failure_reason='transaction reverted' AND updated_at > now() - interval '`+recentRevert+`')) ORDER BY created_at`, c.Chain)
 	if err != nil {
 		return nil, err
@@ -250,7 +304,7 @@ func (s *Service) evmPending(ctx context.Context, rr ReceiptReader, h uint64) (*
 	}
 	sweeps.Close()
 	for _, x := range sw {
-		atts, err := s.attemptsOf(ctx, rr, "sweep", x.ID)
+		atts, err := s.attemptsOf(ctx, q, rr, "sweep", x.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -310,7 +364,7 @@ func (s *Service) evmPending(ctx context.Context, rr ReceiptReader, h uint64) (*
 
 	// Withdrawals. Nothing is booked until settlement: a mined withdrawal books the hold and the payout (wd -> hot) and the fee; a reverted one or a
 	// cancel releases the hold and books only the fee.
-	wrows, err := s.Pool.Query(ctx, `SELECT `+wdCols+` FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed') ORDER BY created_at`, c.Chain)
+	wrows, err := q.Query(ctx, `SELECT `+wdCols+` FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed') ORDER BY created_at`, c.Chain)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +379,7 @@ func (s *Service) evmPending(ctx context.Context, rr ReceiptReader, h uint64) (*
 	}
 	wrows.Close()
 	for _, w := range wds {
-		atts, err := s.attemptsOf(ctx, rr, "withdrawal", w.ID)
+		atts, err := s.attemptsOf(ctx, q, rr, "withdrawal", w.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -352,7 +406,7 @@ func (s *Service) evmPending(ctx context.Context, rr ReceiptReader, h uint64) (*
 		if kind == OwnerKindRebalance {
 			to = "to_partition_id"
 		}
-		rows, err := s.Pool.Query(ctx, `SELECT id, status, partition_id, `+to+`, asset, amount::text FROM `+table+` WHERE chain=$1 AND (status NOT IN ('confirmed','failed')
+		rows, err := q.Query(ctx, `SELECT id, status, partition_id, `+to+`, asset, amount::text FROM `+table+` WHERE chain=$1 AND (status NOT IN ('confirmed','failed')
 			OR (status='failed' AND failure_reason='transaction reverted' AND updated_at > now() - interval '`+recentRevert+`')) ORDER BY created_at`, c.Chain)
 		if err != nil {
 			return nil, err
@@ -380,7 +434,7 @@ func (s *Service) evmPending(ctx context.Context, rr ReceiptReader, h uint64) (*
 			return nil, err
 		}
 		for _, m := range ms {
-			atts, err := s.attemptsOf(ctx, rr, kind, m.id)
+			atts, err := s.attemptsOf(ctx, q, rr, kind, m.id)
 			if err != nil {
 				return nil, err
 			}
@@ -418,7 +472,7 @@ func (s *Service) evmPending(ctx context.Context, rr ReceiptReader, h uint64) (*
 	}
 
 	// Refills: the cold ceremony's transaction is not one of our allocations; its hash is on the row from the moment it is imported.
-	rrows, err := s.Pool.Query(ctx, `SELECT `+refillCols+` FROM refills WHERE chain=$1 AND COALESCE(tx_hash,'') <> '' AND (status IN ('signed','broadcast')
+	rrows, err := q.Query(ctx, `SELECT `+refillCols+` FROM refills WHERE chain=$1 AND COALESCE(tx_hash,'') <> '' AND (status IN ('signed','broadcast')
 		OR (status='failed' AND failure_reason='transaction reverted' AND updated_at > now() - interval '`+recentRevert+`')) ORDER BY created_at`, c.Chain)
 	if err != nil {
 		return nil, err
@@ -488,16 +542,16 @@ func (s *Service) adjRefillFee(a *evmAdj, r Refill, fee *big.Int) error {
 }
 
 // evmChecks makes every chain comparison of an EVM cell at height h. unsupported is true when the reader cannot read balances.
-func (s *Service) evmChecks(ctx context.Context, rr ReceiptReader, h, cur uint64) (checks []Check, open int, unsupported bool, err error) {
+func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, cur uint64) (checks []Check, open int, unsupported bool, err error) {
 	c := s.Cfg
 	checks = append(checks, Check{Name: "scan_caught_up", Ledger: fmt.Sprint(cur), Chain: fmt.Sprint(h + 1), OK: cur > h,
 		Detail: "the scan cursor must be past the pinned height"})
-	adj, err := s.evmPending(ctx, rr, h)
+	adj, err := s.evmPending(ctx, q, rr, h)
 	if err != nil {
 		return nil, 0, false, err
 	}
 	// The books' open items, as before: what the report shows as in flight.
-	if err := s.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
+	if err := q.QueryRow(ctx, `SELECT (SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM cold_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM rebalance_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
@@ -511,7 +565,7 @@ func (s *Service) evmChecks(ctx context.Context, rr ReceiptReader, h, cur uint64
 		return fmt.Sprintf("the ledger side is adjusted by %s for transactions mined at or below the pinned height and not settled yet, for bookings made at broadcast of transactions not mined yet, and for reverts settled before they were final", d)
 	}
 	adjusted := func(acct string) (*big.Int, *big.Int, error) {
-		p, err := s.posted(ctx, acct)
+		p, err := s.postedQ(ctx, q, acct)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -591,7 +645,7 @@ func (s *Service) evmChecks(ctx context.Context, rr ReceiptReader, h, cur uint64
 	}
 
 	// Deposit addresses.
-	rows, err := s.Pool.Query(ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 ORDER BY address`, c.Chain)
+	rows, err := q.Query(ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 ORDER BY address`, c.Chain)
 	if err != nil {
 		return nil, 0, false, err
 	}

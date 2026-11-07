@@ -251,19 +251,47 @@ func TestReconcileEVMRevertSettledBeforeItIsFinal(t *testing.T) {
 	}
 }
 
-// The books changing during the read leads to a new read, not to a false ALERT.
-func TestReconcileEVMReadsAgainWhenTheBooksChangeDuringTheRead(t *testing.T) {
+// A busy cell: the books get entries the whole time Reconcile runs (every Balance read posts one, on this chain and in another chain's account).
+// The comparison reads one snapshot, so it answers, clean and unskipped, without a second read.
+func TestReconcileEVMAnswersOnABusyCell(t *testing.T) {
 	ctx := context.Background()
 	s, _, m := evmWorld(t)
 	var logs bytes.Buffer
 	old := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(old) })
+	i := 0
+	m.onBalance = func() {
+		i++
+		// A posting that does not touch the chain (a transfer between two books accounts) and a funding that does not show on this chain's
+		// balances in the snapshot's terms is not needed: the snapshot must simply not see them.
+		if err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+			return s.transfer(ctx, tx, fmt.Sprintf("busy-%d", i), depAcct(testChain, "ETH"), suspenseAcct(testChain, "ETH"), big.NewInt(1), nil)
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	rep := mustReconcile(t, s)
+	requireClean(t, "busy cell", rep)
+	if rep.Rechecked || i == 0 || strings.Contains(logs.String(), "ALERT") {
+		t.Fatalf("rechecked=%v writes=%d logs=%s", rep.Rechecked, i, logs.String())
+	}
+}
 
+// A transaction of ours sent after the snapshot that has already mined at or below the height: the first read shows a difference, the recheck
+// clears it, no ALERT. A real difference is shown by both reads and reported once.
+func TestReconcileEVMRechecksADifferenceOnce(t *testing.T) {
+	ctx := context.Background()
+	s, _, m := evmWorld(t)
 	hot := s.Cfg.HotShards[0].Hex()
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
 	n := 0
 	m.onBalance = func() {
-		if n == 0 { // the first read of the chain: the operator funds the hot wallet, in the books and on the chain, in the middle of it
+		if n == 0 { // after the snapshot: the operator funds the hot wallet, in the books and on the chain
 			n++
 			if err := s.FundHot(ctx, "mid-read", 0, big.NewInt(1000)); err != nil {
 				t.Error(err)
@@ -272,28 +300,21 @@ func TestReconcileEVMReadsAgainWhenTheBooksChangeDuringTheRead(t *testing.T) {
 		}
 	}
 	rep := mustReconcile(t, s)
-	requireClean(t, "after the books changed during the read", rep)
-	if strings.Contains(logs.String(), "ALERT") {
-		t.Fatalf("a false ALERT: %s", logs.String())
+	requireClean(t, "after a change between the snapshot and the chain reads", rep)
+	if !rep.Rechecked || n != 1 || strings.Contains(logs.String(), "ALERT") {
+		t.Fatalf("rechecked=%v n=%d logs=%s", rep.Rechecked, n, logs.String())
 	}
-	if n != 1 {
-		t.Fatal("the books did not change during the read")
+
+	m.onBalance = nil
+	m.add(hot, "ETH", 5) // a real difference
+	rep = mustReconcile(t, s)
+	if rep.Clean || !rep.Rechecked || len(rep.Failures()) != 1 || strings.Count(logs.String(), "ALERT") != 1 {
+		t.Fatalf("clean=%v rechecked=%v failures=%+v alerts=%d", rep.Clean, rep.Rechecked, rep.Failures(), strings.Count(logs.String(), "ALERT"))
 	}
 }
 
-// A comparison that cannot be made is counted and the report is not Clean: three reads that each straddle a change, a reader without receipts,
-// and a chain cell that cannot read balances.
+// A comparison that cannot be made is counted and the report is not Clean: a reader without receipts and a chain cell that cannot read balances.
 func TestReconcileEVMSkipsMakeTheReportNotClean(t *testing.T) {
-	ctx := context.Background()
-	t.Run("the books keep changing", func(t *testing.T) {
-		s, _, m := evmWorld(t)
-		i := 0
-		m.onBalance = func() { i++; _ = s.FundHot(ctx, fmt.Sprintf("again-%d", i), 0, big.NewInt(1)) }
-		rep := mustReconcile(t, s)
-		if rep.Clean || rep.SkippedChainChecks != 1 || len(rep.Failures()) != 0 {
-			t.Fatalf("clean=%v skipped=%d failures=%+v", rep.Clean, rep.SkippedChainChecks, rep.Failures())
-		}
-	})
 	t.Run("a reader without receipts", func(t *testing.T) {
 		s, _, _ := evmWorld(t)
 		s.Reader = fakeReader{block: 100}

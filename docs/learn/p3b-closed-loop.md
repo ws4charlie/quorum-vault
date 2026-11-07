@@ -139,8 +139,10 @@ of the chain: the broadcast bookings of the items that have not mined are taken 
 a real difference and raises the ALERT. `TestReconcileEVMSweepMinedAndUnsettled` settles with the real code after the explanation and checks that the
 report stays clean, so the two cannot drift apart.
 
-The reads are repeated when the books change during them (a stamp of the ledger, the items, the attempts and the scan cursor before the height and
-after the last read; 3 tries). A comparison that still cannot be made is counted in `skipped_chain_checks` and the report is **not Clean**, as on Bitcoin.
+The books are read from one database snapshot (a read-only `REPEATABLE READ` transaction, started before the safe height is read), so a busy cell
+still gets an answer: entries posted meanwhile are simply not seen. A transaction of ours sent after the snapshot may already be mined at or below the
+height; when the first read shows a difference, the comparison is made again from a new snapshot (`rechecked` in the report), and only a difference both
+reads show, by the same amount, is reported. A comparison the reader cannot make is counted in `skipped_chain_checks` and the report is **not Clean**.
 
 ## 7. Deviations and limits worth knowing
 
