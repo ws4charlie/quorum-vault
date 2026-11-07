@@ -21,7 +21,7 @@ import (
 const (
 	vChain = "btc-v"
 	pOmni0 = "qv-us/btc-v/BTC/hot/omnibus/0"
-	pOmni1 = "qv-us/btc-v/BTC/hot/omnibus/1"
+	pBeta0 = "qv-us/btc-v/BTC/hot/segregated:beta/0"
 	pSeg0  = "qv-us/btc-v/BTC/hot/segregated:acme/0"
 )
 
@@ -30,7 +30,7 @@ type fixture struct {
 	acct  *Account
 	v     *Verifier
 	hot0  string // [1,0]: partition pOmni0
-	hot1  string // [1,1]: partition pOmni1
+	hot1  string // [1,1]: partition pBeta0
 	hotS  string // [1,2]: partition pSeg0, another pool
 	cold  string // the omnibus pool's cold address
 	coldS string // the segregated pool's
@@ -56,7 +56,7 @@ func newFixture(t *testing.T) *fixture {
 	f.cold, f.coldS, f.other = foreign(9), foreign(11), foreign(10)
 	xpub := acctXpub(acct)
 	v, err := NewVerifier(SigningConfig{Chain: vChain, Network: "regtest", AccountXpub: xpub,
-		HotShards:     map[string]HotShard{pOmni0: {Address: f.hot0, Path: []uint32{1, 0}}, pOmni1: {Address: f.hot1, Path: []uint32{1, 1}}, pSeg0: {Address: f.hotS, Path: []uint32{1, 2}}},
+		HotShards:     map[string]HotShard{pOmni0: {Address: f.hot0, Path: []uint32{1, 0}}, pBeta0: {Address: f.hot1, Path: []uint32{1, 1}}, pSeg0: {Address: f.hotS, Path: []uint32{1, 2}}},
 		ColdAddresses: map[string]string{"omnibus/native": f.cold, "segregated:acme/native": f.coldS}, MaxTxFeeSats: 50_000, MaxFeeRate: 100, MaxInputs: 4})
 	if err != nil {
 		t.Fatal(err)
@@ -123,15 +123,10 @@ func TestVerifyAcceptsTheRightTransactions(t *testing.T) {
 	p.Outputs[0].Value = 499_000
 	i.Amount = "499000"
 	f.mustPass(p, i)
-	// to-cold, rebalance, sweep, cancel
+	// to-cold, sweep, cancel
 	pc, ic := f.withdrawal(f.cold, 100_000)
 	ic.Kind = "to-cold"
 	f.mustPass(pc, ic)
-	pr, ir := f.withdrawal(f.hot1, 100_000)
-	pr.Inputs = []PayloadInput{in(1, 300_000, 1, 0), in(2, 200_000, 1, 0+0)}
-	pr.Inputs[1].Vout = 1
-	ir.Kind = "rebalance"
-	f.mustPass(pr, ir)
 	ps := Payload{Version: 2, Inputs: []PayloadInput{in(3, 50_000, 0, 5), {TxID: txid(4), Vout: 1, Value: 30_000, Path: []uint32{0, 5}, Sequence: SequenceRBF}},
 		Outputs: []PayloadOutput{{f.hot0, 79_000}}}
 	is := signjob.Intent{Kind: "sweep", ID: "s1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", From: f.dep, To: f.hot0, Amount: "80000"}
@@ -337,9 +332,17 @@ func TestVerifyRefusesSweepsAndCancelsThatDoNotMatch(t *testing.T) {
 	pc, ic := f.withdrawal(f.other, 100_000)
 	ic.Kind = "to-cold"
 	f.mustRefuse("to-cold to an unpinned address", pc, ic, "not the cold address of pool")
-	pr, ir := f.withdrawal(f.hot0, 100_000)
-	ir.Kind = "rebalance"
-	f.mustRefuse("a rebalance to the source's own address", pr, ir, "another shard")
+}
+
+// Bitcoin has no move between hot shards: a rebalance intent is refused whatever it asks, to another pool's shard, to the source's own
+// address or to a cold address.
+func TestVerifyRefusesRebalance(t *testing.T) {
+	f := newFixture(t)
+	for name, to := range map[string]string{"another shard": f.hot1, "the source's own shard": f.hot0, "the cold address": f.cold, "an outside address": f.other} {
+		pr, ir := f.withdrawal(to, 100_000)
+		ir.Kind = "rebalance"
+		f.mustRefuse("a rebalance to "+name, pr, ir, `intent kind "rebalance"`)
+	}
 }
 
 func TestCanonicalRejectsAnotherNetwork(t *testing.T) {
@@ -388,6 +391,25 @@ func TestVerifierConfigRefusals(t *testing.T) {
 	}
 }
 
+// Two hot shards in one pool are a configuration mistake, and the message names the pool.
+func TestVerifierRefusesTwoHotShardsInOnePool(t *testing.T) {
+	f := newFixture(t)
+	cfg := SigningConfig{Chain: vChain, Network: "regtest", AccountXpub: acctXpub(f.acct), MaxTxFeeSats: 1, MaxFeeRate: 1, MaxInputs: 1,
+		HotShards: map[string]HotShard{pOmni0: {Address: f.hot0, Path: []uint32{1, 0}}, "qv-us/btc-v/BTC/hot/omnibus/1": {Address: f.hot1, Path: []uint32{1, 1}}}}
+	if _, err := NewVerifier(cfg); err == nil || !strings.Contains(err.Error(), `pool "omnibus" has two hot shards`) {
+		t.Fatalf("two omnibus shards: %v", err)
+	}
+	c := Config{Chain: vChain, Network: "regtest", AccountXpub: acctXpub(f.acct),
+		HotShards: []HotShardConfig{{PartitionID: pOmni0, Address: f.hot0, Path: []uint32{1, 0}}, {PartitionID: "qv-us/btc-v/BTC/hot/omnibus/1", Address: f.hot1, Path: []uint32{1, 1}}}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), `pool "omnibus" has two hot shards`) {
+		t.Fatalf("two omnibus shards in the adapter's config: %v", err)
+	}
+	cfg.HotShards = map[string]HotShard{pOmni0: {Address: f.hot0, Path: []uint32{1, 0}}, pBeta0: {Address: f.hot1, Path: []uint32{1, 1}}}
+	if _, err := NewVerifier(cfg); err != nil {
+		t.Fatalf("one shard in each of two pools: %v", err)
+	}
+}
+
 // calcWith is the BIP143 digest of input i with an arbitrary sighash type, to show that none of them is a digest the verifier accepts.
 func calcWith(f *fixture, p Payload, built *Unsigned, i int, ht txscript.SigHashType) ([]byte, error) {
 	fetch := map[wire.OutPoint]*wire.TxOut{}
@@ -405,12 +427,12 @@ func calcWith(f *fixture, p Payload, built *Unsigned, i int, ht txscript.SigHash
 	return txscript.CalcWitnessSigHash(sc, txscript.NewTxSigHashes(built.Tx, txscript.NewMultiPrevOutFetcher(fetch)), ht, built.Tx, i, int64(p.Inputs[i].Value))
 }
 
-// Every kind is bound to the partition it names: its own shard, its own pool's cold address, another shard of its own pool.
+// Every kind is bound to the partition it names: its own shard and its own pool's cold address.
 func TestVerifyBindsEveryKindToItsPartition(t *testing.T) {
 	f := newFixture(t)
 	// The key partition and the intent partition are the same.
 	p, i := f.withdrawal(f.other, 100_000)
-	u := f.jobFor(pOmni1, p, 0)
+	u := f.jobFor(pBeta0, p, 0)
 	if err := f.v.Verify(u, i); err == nil || !strings.Contains(err.Error(), "key partition") {
 		t.Fatalf("key partition differs from the intent's: %v", err)
 	}
@@ -421,14 +443,11 @@ func TestVerifyBindsEveryKindToItsPartition(t *testing.T) {
 		t.Fatalf("a partition without a shard: %v", err)
 	}
 
-	// Withdrawal, to-cold and rebalance from another partition's shard (the segregated client's funds).
-	for _, kind := range []string{"withdrawal", "to-cold", "rebalance"} {
+	// Withdrawal and to-cold from another partition's shard (the segregated client's funds).
+	for _, kind := range []string{"withdrawal", "to-cold"} {
 		to := f.other
-		switch kind {
-		case "to-cold":
+		if kind == "to-cold" {
 			to = f.cold
-		case "rebalance":
-			to = f.hot1
 		}
 		bad, in := f.withdrawal(to, 100_000)
 		in.Kind = kind
@@ -459,13 +478,6 @@ func TestVerifyBindsEveryKindToItsPartition(t *testing.T) {
 	if err := f.v.Verify(f.jobFor(pSeg0, ps, 0), is); err == nil || !strings.Contains(err.Error(), "not the cold address of pool") {
 		t.Fatalf("a segregated to-cold to the omnibus cold address: %v", err)
 	}
-	// Rebalance: another shard of the same pool, never another pool's.
-	pr, ir := f.withdrawal(f.hotS, 100_000)
-	ir.Kind = "rebalance"
-	f.mustRefuse("rebalance into another pool", pr, ir, "another shard")
-	pr, ir = f.withdrawal(f.hot1, 100_000)
-	ir.Kind = "rebalance"
-	f.mustPass(pr, ir)
 	// Sweep and cancel: the partition's own shard, not any hot shard.
 	sw := Payload{Version: 2, Inputs: []PayloadInput{inp(3, 50_000, 0, 5)}, Outputs: []PayloadOutput{{f.hot1, 49_000}}}
 	si := signjob.Intent{Kind: "sweep", ID: "s1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", From: f.dep, To: f.hot1, Amount: "50000"}

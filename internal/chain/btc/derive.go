@@ -55,3 +55,13 @@ func DeriveAddress(network, accountXpub string, index uint32) (string, error) {
 	}
 	return v.addressAt(index)
 }
+
+// DeriveHotAddress is the P2WPKH address of hot shard index: the account's key at 1/index, the address the core, the gateway and the
+// cosigner pin for that shard.
+func DeriveHotAddress(network, accountXpub string, index uint32) (string, error) {
+	v, err := Config{Chain: "btc", Network: network, AccountXpub: accountXpub}.validated()
+	if err != nil {
+		return "", err
+	}
+	return v.addressAt2([]uint32{BranchHot, index})
+}

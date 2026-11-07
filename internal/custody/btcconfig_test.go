@@ -6,6 +6,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
+
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 )
 
 func xpubFor(t *testing.T, p *chaincfg.Params) string {
@@ -55,5 +57,21 @@ func TestBTCConfig(t *testing.T) {
 	f.Chain.Assets["ETH"] = AssetFile{Decimals: 18}
 	if _, err := f.Build(); err == nil {
 		t.Fatal("a second asset accepted")
+	}
+}
+
+// Bitcoin keeps one hot shard per pool, and the core serves the omnibus pool only: a second hot shard refuses to start, naming the pool.
+func TestBTCConfigRefusesTwoHotShardsInOnePool(t *testing.T) {
+	xpub := xpubFor(t, &chaincfg.RegressionNetParams)
+	one, _ := btc.DeriveHotAddress("regtest", xpub, 0)
+	two, _ := btc.DeriveHotAddress("regtest", xpub, 1)
+	f := btcFile("regtest", xpub)
+	f.Chain.BTC.HotShards = []BTCShardFile{{Address: one, Path: []uint32{1, 0}}}
+	if _, err := f.Build(); err != nil {
+		t.Fatalf("one hot shard: %v", err)
+	}
+	f.Chain.BTC.HotShards = append(f.Chain.BTC.HotShards, BTCShardFile{Address: two, Path: []uint32{1, 1}})
+	if _, err := f.Build(); err == nil || !strings.Contains(err.Error(), `pool "omnibus" has two hot shards`) {
+		t.Fatalf("two hot shards in the omnibus pool: %v", err)
 	}
 }

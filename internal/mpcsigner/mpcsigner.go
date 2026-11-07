@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/domain"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
@@ -308,3 +309,29 @@ func (d *Deriving) At(ctx context.Context, path []uint32) (signer.Signer, error)
 }
 
 var _ signer.Deriver = (*Deriving)(nil)
+
+// AccountXpub asks party A for the account node of a Bitcoin network, m/84'/coin'/0', and for its parent (which only supplies the
+// fingerprint), and returns the account xpub the core, gateway and cosigner are configured with. It reads only public values. The
+// qv-btc-xpub command and the Bitcoin e2e suite both call it.
+func AccountXpub(ctx context.Context, cl pb.MpcPartyClient, keysetID, network string) (string, error) {
+	if _, err := btc.Params(network); err != nil {
+		return "", err
+	}
+	path := btc.AccountPath(network)
+	acct, err := cl.Node(ctx, &pb.NodeRequest{KeysetId: keysetID, HardenedPath: path})
+	if err != nil {
+		return "", fmt.Errorf("mpc signer: party A Node %v: %w", path, classify(err))
+	}
+	parent, err := cl.Node(ctx, &pb.NodeRequest{KeysetId: keysetID, HardenedPath: path[:2]})
+	if err != nil {
+		return "", fmt.Errorf("mpc signer: party A Node %v: %w", path[:2], classify(err))
+	}
+	return btc.XpubFromNode(network, acct.PublicKey, acct.ChainCode, parent.PublicKey)
+}
+
+// AccountXpub is the account xpub of the keyset this signer was opened with, on the network.
+func (d *Deriving) AccountXpub(ctx context.Context, network string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, d.cfg.Timeout)
+	defer cancel()
+	return AccountXpub(ctx, d.cl, d.cfg.KeysetID, network)
+}

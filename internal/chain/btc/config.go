@@ -171,6 +171,13 @@ func (c Config) validated() (*validatedConfig, error) {
 			return nil, fmt.Errorf("btc: config: hot address: %w", err)
 		}
 	}
+	ids := make([]string, 0, len(c.HotShards))
+	for _, h := range c.HotShards {
+		ids = append(ids, h.PartitionID)
+	}
+	if err := OneShardPerPool(ids); err != nil {
+		return nil, fmt.Errorf("btc: config: %w", err)
+	}
 	for i, h := range c.HotShards {
 		if len(h.Path) != 2 || h.Path[0] != BranchHot {
 			return nil, fmt.Errorf("btc: config: hot shard %d: path %v is not on the hot branch [%d, index]", i, h.Path, BranchHot)
