@@ -43,3 +43,41 @@ broadcast booking is undone. Nothing reached cold.
 
 **Remaining.** A low-water ALERT is logged but opens no refill yet (offline signing, 6b). Hot outputs still pile up as change and swept outputs; a move
 spends the oldest first, but a shard below its high-water mark is never consolidated. A consolidation flow is still needed.
+
+## The offline signer for Bitcoin (P7-6b-1)
+
+`qv-cold` signs Bitcoin refills from files only, with the same commands as for EVM. `internal/coldsign/btc.go` holds the rules; the package still has no
+network client (the import-graph test stays), which also rules out btcd's `wire`, `txscript` and `chaincfg` (they pull in `net`), so the little Bitcoin it
+needs (P2WPKH addresses, the SegWit serialization, the BIP143 digest) is written there and checked against btcd in the tests.
+
+**The request** (`qv-cold-btc-request-v1`) is the whole transaction: network, chain, pool, the cold address, every input (outpoint, value, address) and the
+outputs. Output 0 is the payment to a hot shard; output 1, if any, is change to the cold address. Revision grows on re-export. The signed file carries the
+raw transaction and its id. The offline tool trusts none of it.
+
+**What it checks, from its own config** (`"family": "btc"`): network, chain and pool; the cold address (from the HSM key's public key); every input from the
+cold address, none twice, at most `max_inputs`; exactly the payment to a pinned hot shard and at most change to the cold address, nothing else; the
+payment above dust and under `max_amount`; the fee under `max_fee_sats` and under `max_fee_rate` (sat/vB, from the size of the signed transaction); every
+pinned address and the cold key belong to the network (a config for another network refuses to start); the approvals (distinct configured operators, at
+least the threshold, each over this request's hash).
+
+**The fee attack, and the record of outpoints.** A BIP143 signature commits only to the value of its own input, and the signer has no chain. A request
+that understates each input in turn, across requests, would gather signatures that combine into one transaction with a fee nobody saw. So the signer
+keeps, per outpoint it ever signed, the value it was signed with, the *intent* (the set of outpoints, the payment address and the amount) and the highest
+fee. A request that names a signed outpoint with another value is refused. So is one that spends it in a transaction with another intent. A request with
+the same intent and a higher fee is a replacement and is signed (at most one of them can confirm: they spend the same inputs); with the same or a lower
+fee it is refused. The record is written, with fsync, before the signature exists, under a lock, so a crash cannot leave a signature the record does not
+know; the same request again returns the same signed file.
+
+**What a dishonest online side can still do.** The first time an outpoint is seen, its value is taken on trust. If the online side lies about it, the
+signature of that input commits to a digest that does not match the chain's: the transaction is invalid on chain, so nothing moves and nothing is lost
+(the refill never confirms). The lie cannot be repaired by a second request with the true value: the pin refuses it, so that coin is stuck until the
+operators examine the record and remove the entry by hand. It costs a refill and an investigation, not money. Lying about *which address* an input is
+from does not help either: every input is signed under the cold key only.
+
+**The operator's steps.**
+1. Once: `qv-cold keygen -network <net> -out key.json` in the offline machine's `qv-cold` token. It prints the Bitcoin cold address and the compressed key;
+   put the address in the online config (`cold_addresses`) and the gateway, the compressed key and the pinned hot shards in the offline config.
+2. For each refill: carry the request file over, `qv-cold inspect -config cfg.json -request req.json` and read the summary (destination, amounts, fee).
+3. Each approving operator: `qv-cold approve -operator <name> -key <their key> -request req.json -out <name>.approval`.
+4. `qv-cold sign -config cfg.json -request req.json -approval a.approval -approval b.approval -out signed.json`, then carry `signed.json` back.
+5. A stuck refill is re-exported by the online side as a new revision with a higher fee over the same inputs, and signed the same way.

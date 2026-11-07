@@ -269,6 +269,15 @@ row. What is in flight is computed, not skipped: the cell's own records of the t
 own outputs to the pool's cold address, with change back to the shard; its size is capped at what `max_inputs` of the oldest available outputs can
 carry, so a shard of many small outputs is emptied in rounds. See [learn/p7-6-btc-cold.md](learn/p7-6-btc-cold.md).
 
+## Bitcoin: the offline cold signer
+
+`qv-cold` also signs Bitcoin refills, from files only. The request is the whole transaction (inputs with their outpoints, values and address; the payment to
+a hot shard; optional change to the cold address). The tool recomputes everything from its own config: it pays only a pinned hot shard, change goes only back
+to the cold address, every input is from the cold address, the fee is under a cap and a rate cap, and the addresses belong to the configured network.
+Because a SegWit signature commits only to its own input's value and the tool has no chain, it keeps a durable record per outpoint it has signed: the value
+it was signed with, and the one transaction (inputs, destination, amount) that may spend it again, only with a higher fee. A request that gives a signed
+outpoint another value, or spends it in a different transaction, is refused. See [learn/p7-6-btc-cold.md](learn/p7-6-btc-cold.md).
+
 ## Trust boundaries
 
 | Boundary | Protects | Does not protect |
