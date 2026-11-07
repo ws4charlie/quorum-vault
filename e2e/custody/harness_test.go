@@ -138,6 +138,8 @@ type opts struct {
 	// rebalance puts rebalance targets into the business config, so the worker's planner moves funds between shards by itself.
 	// Without it the worker plans no rebalance and a test calls PlanRebalances on the in-process service.
 	rebalance *rebalOpts
+	// gwRefuse makes the gateway (and the cosigner) refuse every job of one kind: "sweep", "to-cold" or "rebalance" (its per-hour limit is 0).
+	gwRefuse string
 }
 
 // rebalOpts are the rebalance targets of the business config: "ETH" or "USDT" for every shard, "ETH/1" for one (base units).
@@ -529,6 +531,20 @@ func newSystem(t *testing.T, o opts) *system {
 		a := gf.Chains[s.chainName].Assets["ETH"]
 		a.AnyDestination, a.WithdrawalDestinations = false, o.gwETHDest
 		gf.Chains[s.chainName].Assets["ETH"] = a
+	}
+	if o.gwRefuse != "" {
+		c := gf.Chains[s.chainName]
+		switch o.gwRefuse {
+		case "sweep":
+			c.SweepsPerHour = 0
+		case "to-cold":
+			c.ToColdPerHour = 0
+		case "rebalance":
+			c.RebalancePerHour = 0
+		default:
+			t.Fatalf("gwRefuse %q", o.gwRefuse)
+		}
+		gf.Chains[s.chainName] = c
 	}
 	s.gf = gf
 	s.gwPath = filepath.Join(s.dir, "gateway.json")

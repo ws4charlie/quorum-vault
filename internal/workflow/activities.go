@@ -337,8 +337,8 @@ func (a *Activities) TrueUp(ctx context.Context, id string) (bool, error) {
 }
 
 // FailSweep ends a sweep that never broadcast, once its nonce is freed.
-func (a *Activities) FailSweep(ctx context.Context, id, reason string) error {
-	return nonRetry(a.D.Svc.FailSweepBeforeBroadcast(ctx, id, reason))
+func (a *Activities) FailSweep(ctx context.Context, id, reason, feeTx string) error {
+	return nonRetry(a.D.Svc.FailSweepBeforeBroadcast(ctx, id, reason, feeTx))
 }
 
 // ---- hot-to-cold move steps ----
@@ -541,8 +541,8 @@ func (a *Activities) SettleColdMove(ctx context.Context, id, txHash string, reve
 }
 
 // FailColdMove ends a move that never broadcast, once its nonce is freed.
-func (a *Activities) FailColdMove(ctx context.Context, id, reason string) error {
-	return nonRetry(a.D.Svc.FailColdMoveBeforeBroadcast(ctx, id, reason))
+func (a *Activities) FailColdMove(ctx context.Context, id, reason, feeTx string) error {
+	return nonRetry(a.D.Svc.FailColdMoveBeforeBroadcast(ctx, id, reason, feeTx))
 }
 
 // ---- consolidation steps (Bitcoin) ----
@@ -655,8 +655,8 @@ func (a *Activities) SettleRebalance(ctx context.Context, id, txHash string, rev
 }
 
 // FailRebalance ends a rebalance that never broadcast, once its nonce is freed.
-func (a *Activities) FailRebalance(ctx context.Context, id, reason string) error {
-	return nonRetry(a.D.Svc.FailRebalanceBeforeBroadcast(ctx, id, reason))
+func (a *Activities) FailRebalance(ctx context.Context, id, reason, feeTx string) error {
+	return nonRetry(a.D.Svc.FailRebalanceBeforeBroadcast(ctx, id, reason, feeTx))
 }
 
 // ---- shared transaction steps (withdrawals and sweeps) ----

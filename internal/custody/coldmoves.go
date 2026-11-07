@@ -322,8 +322,13 @@ func (s *Service) SettleColdMove(ctx context.Context, id, txHash string, status 
 }
 
 // FailColdMoveBeforeBroadcast ends a move whose job was refused or failed twice, after its nonce was freed by a confirmed
-// cancel. Nothing was booked, so there is nothing to reverse; the planner may plan the move again.
-func (s *Service) FailColdMoveBeforeBroadcast(ctx context.Context, id, reason string) error {
+// cancel. Nothing was booked for the move, so there is nothing to reverse; the planner may plan the move again. The cancel paid gas, so its fee
+// (feeTx, if any) is booked (see VoidWithdrawal).
+func (s *Service) FailColdMoveBeforeBroadcast(ctx context.Context, id, reason, feeTx string) error {
+	fee, err := s.cancelFee(ctx, feeTx)
+	if err != nil {
+		return err
+	}
 	o := Owner{Kind: OwnerKindToCold, ID: id}
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		open, err := s.ReservationOpen(ctx, tx, o)
@@ -333,12 +338,21 @@ func (s *Service) FailColdMoveBeforeBroadcast(ctx context.Context, id, reason st
 		if open {
 			return ErrReservationOpen
 		}
-		tag, err := tx.Exec(ctx, `UPDATE cold_moves SET status='failed', failure_reason=$2, updated_at=now() WHERE id=$1 AND status IN ('planned','signing')`, id, reason)
+		fs := ""
+		if fee != nil {
+			fs = fee.String()
+		}
+		var part string
+		err = tx.QueryRow(ctx, `UPDATE cold_moves SET status='failed', failure_reason=$2, fee=NULLIF($3,'')::numeric, updated_at=now() WHERE id=$1 AND status IN ('planned','signing') RETURNING partition_id`,
+			id, reason, fs).Scan(&part)
+		if isNoRows(err) {
+			return nil // already ended: a repeat books nothing
+		}
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
-			return nil
+		if err := s.recordFee(ctx, tx, feeTx, part, fee); err != nil { // the cancel paid gas from the shard's address
+			return err
 		}
 		return emit(ctx, tx, outbox.TopicColdMoves, id, "cold_move.failed", map[string]any{"reason": reason})
 	})

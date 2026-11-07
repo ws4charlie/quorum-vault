@@ -372,8 +372,13 @@ func (s *Service) SettleRebalance(ctx context.Context, id, txHash string, status
 }
 
 // FailRebalanceBeforeBroadcast ends a rebalance whose job was refused or failed twice, after its nonce was freed by a confirmed
-// cancel. Nothing was booked, so there is nothing to reverse; the planner may plan it again.
-func (s *Service) FailRebalanceBeforeBroadcast(ctx context.Context, id, reason string) error {
+// cancel. Nothing was booked for the move, so there is nothing to reverse; the planner may plan it again. The cancel paid gas from the source shard, so
+// its fee (feeTx, if any) is booked (see VoidWithdrawal).
+func (s *Service) FailRebalanceBeforeBroadcast(ctx context.Context, id, reason, feeTx string) error {
+	fee, err := s.cancelFee(ctx, feeTx)
+	if err != nil {
+		return err
+	}
 	o := Owner{Kind: OwnerKindRebalance, ID: id}
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		open, err := s.ReservationOpen(ctx, tx, o)
@@ -383,12 +388,21 @@ func (s *Service) FailRebalanceBeforeBroadcast(ctx context.Context, id, reason s
 		if open {
 			return ErrReservationOpen
 		}
-		tag, err := tx.Exec(ctx, `UPDATE rebalance_moves SET status='failed', failure_reason=$2, updated_at=now() WHERE id=$1 AND status IN ('planned','signing')`, id, reason)
+		fs := ""
+		if fee != nil {
+			fs = fee.String()
+		}
+		var part string
+		err = tx.QueryRow(ctx, `UPDATE rebalance_moves SET status='failed', failure_reason=$2, fee=NULLIF($3,'')::numeric, updated_at=now() WHERE id=$1 AND status IN ('planned','signing') RETURNING partition_id`,
+			id, reason, fs).Scan(&part)
+		if isNoRows(err) {
+			return nil // already ended: a repeat books nothing
+		}
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
-			return nil
+		if err := s.recordFee(ctx, tx, feeTx, part, fee); err != nil { // the cancel paid gas from the shard's address
+			return err
 		}
 		return emit(ctx, tx, outbox.TopicColdMoves, id, "rebalance.failed", map[string]any{"reason": reason})
 	})
