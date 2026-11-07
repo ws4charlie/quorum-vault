@@ -389,8 +389,7 @@ func TestRefillStuckReplacementRefusedByTheNodeThenTheNodeIsRestarted(t *testing
 // The same for a withdrawal: its fee bump is refused by the node, the original is the only attempt, and after a restart with an empty mempool the original
 // is sent again and settles with its own fee.
 func TestRefillStuckWithdrawalBumpRefusedByTheNodeThenTheNodeIsRestarted(t *testing.T) {
-	s := newSystem(t, opts{withdraw: true, fallbackRate: 1, stuckAfter: "6s"})
-	s.requireNoEstimate()
+	s := newSystem(t, opts{withdraw: true, noEstimate: true, fallbackRate: 1, stuckAfter: "6s"})
 	s.fundHot(100_000_000)
 	s.deposit("c1", 30_000_000)
 	dest, err := s.acct.Address([]uint32{0, 900}) // not an address of the node's wallet: a wallet that sees a payment to it resubmits it itself

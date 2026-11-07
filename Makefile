@@ -129,39 +129,39 @@ E2E_BTC_ENV := QV_REQUIRE_BTC=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1
 E2E_BTC_DEPOSITS := TestXpub|TestDeposit|TestTwoOutputs|TestRescan|TestShallowReorg|TestDeepReorg|TestBelowMinimum|TestCoinbase|TestWrongNetwork|TestTwoInputTransactionsSign
 E2E_BTC_WITHDRAWALS := TestWithdrawal|TestTwoInputWithdrawal|TestExactAmount|TestManyConcurrent|TestRefusedByTheGateway|TestReorgRemoves
 test-e2e-btc-deposits:
-	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_DEPOSITS)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_DEPOSITS)' ./e2e/btc/...
 
 # Withdrawals on real mpc-party: qv-gateway, party B's cosigner, the workflows, bitcoind regtest with -txindex.
 test-e2e-btc-withdrawals:
-	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_WITHDRAWALS)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_WITHDRAWALS)' ./e2e/btc/...
 
 # Sweeps: credited deposits move into the hot shard and become spendable, on real mpc-party (deposit-branch keys), gateway, cosigner and regtest; and the
 # recovery of sweeps: bump, cancel, release, an outside spend, every crash boundary.
 E2E_BTC_SWEEPS := TestSweep|TestRecoverySweep
 test-e2e-btc-sweeps:
-	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_SWEEPS)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_SWEEPS)' ./e2e/btc/...
 
 # Recovery: fee bumps, cancel, an outside spend, every crash boundary, a killed gateway, a node restarted with an empty mempool. The last one
 # restarts the compose bitcoind (`docker compose --profile btc restart bitcoind`), so it needs the node from `make btc-up`.
 E2E_BTC_RECOVERY := TestRecovery
 test-e2e-btc-recovery:
-	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_RECOVERY)' -skip 'TestRecoverySweep' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_RECOVERY)' -skip 'TestRecoverySweep' ./e2e/btc/...
 
 # Reconciliation against the chain (scantxoutset) and hot-to-cold moves: bands, rounds under max_inputs, the attacks, crash boundaries, the cancel.
 E2E_BTC_COLD := TestCold|TestReconcile
 test-e2e-btc-cold:
-	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_COLD)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_COLD)' ./e2e/btc/...
 
 # Refills on Bitcoin: the cold key in the qv-cold SoftHSM token, qv-cold as a separate process, only files crossing. Needs `make setup` for the token.
 E2E_BTC_REFILL_STUCK := TestRefill(Stuck|Offline|Signed|TheLost)
 E2E_BTC_REFILL := TestRefill
 test-e2e-btc-refill:
-	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL)' -skip '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL)' -skip '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
 
 # Stuck refills: the fee-bumped second ceremony, both ways round, the lost signed file, the fee attacks through real files. Its own group so that each CI job
 # stays well under ten minutes (the two together take about six on a laptop).
 test-e2e-btc-refill-stuck:
-	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
 
 # cb-mpc signing path end to end (needs the C++ build once: `make mpc-build`; Postgres; anvil on 127.0.0.1:18545 with chain
 # id 11155111 for the mining test: docker run -d --name qv-anvil-p5b3 -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111").
