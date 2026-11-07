@@ -37,7 +37,10 @@ type wEnv struct {
 	n    int
 }
 
-func newWEnv(t *testing.T) *wEnv {
+func newWEnv(t *testing.T) *wEnv { return newWEnvWith(t, nil) }
+
+// newWEnvWith is newWEnv with a change to the config: the adapter, one hot shard, five inputs at most, a fallback rate of 10 sat/vB.
+func newWEnvWith(t *testing.T, change func(*Config)) *wEnv {
 	t.Helper()
 	node := newNode(t)
 	m, _ := hdkeychain.NewMaster(bytes.Repeat([]byte{7}, 32), &chaincfg.RegressionNetParams)
@@ -50,8 +53,12 @@ func newWEnv(t *testing.T) *wEnv {
 	hot, _ := acct.Address([]uint32{1, 0})
 	dest := foreignDest()
 	pool := dbtest.New(t)
-	a, err := New(context.Background(), Config{Chain: "btc-t", Network: "regtest", RPCURL: node.srv.URL, AccountXpub: xpub.String(),
-		HotShards: []HotShardConfig{{PartitionID: wPart, Address: hot, Path: []uint32{1, 0}}}, MaxInputs: 5, FallbackFeeRate: 10, MaxFeeRate: 50, MaxTxFeeSats: 20_000}, pool)
+	cfg := Config{Chain: "btc-t", Network: "regtest", RPCURL: node.srv.URL, AccountXpub: xpub.String(),
+		HotShards: []HotShardConfig{{PartitionID: wPart, Address: hot, Path: []uint32{1, 0}}}, MaxInputs: 5, FallbackFeeRate: 10, MaxFeeRate: 50, MaxTxFeeSats: 20_000}
+	if change != nil {
+		change(&cfg)
+	}
+	a, err := New(context.Background(), cfg, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +210,7 @@ func TestBuildWithdrawalNotEnoughOutputs(t *testing.T) {
 	if e.count("available") != 1 || e.count("reserved") != 0 {
 		t.Fatal("a failed build reserved outputs")
 	}
-	// More inputs than max_inputs would be needed: also "not enough" now (consolidation is a later task).
+	// More inputs than max_inputs would be needed even from the largest outputs: also "not enough" (a consolidation makes room, later).
 	e = newWEnv(t)
 	for i := 0; i < 6; i++ {
 		e.fund(20_000)
@@ -211,8 +218,68 @@ func TestBuildWithdrawalNotEnoughOutputs(t *testing.T) {
 	if _, err := e.build("w", 110_000, false); !errors.Is(err, chain.ErrNotEnoughOutputs) {
 		t.Fatalf("six small outputs, five inputs at most: %v", err)
 	}
+	if e.count("reserved") != 0 {
+		t.Fatal("a failed build reserved outputs")
+	}
 	if _, err := e.build("w", 80_000, true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The oldest max_inputs outputs are taken while they can carry the payment. When they cannot but the shard holds more, the largest are taken instead:
+// the order is decided before anything is reserved. A hot-to-cold move keeps eating the oldest.
+func TestBuildWithdrawalFallsBackToTheLargestOutputs(t *testing.T) {
+	e := newWEnv(t)
+	var small []string
+	for i := 0; i < 5; i++ { // the five oldest hold 50,000 in all: max_inputs is 5
+		small = append(small, e.fund(10_000))
+	}
+	big1 := e.fund(200_000)
+	e.fund(30_000)
+
+	// A payment the oldest outputs can carry is paid by them, as before.
+	u, err := e.build("fits", 25_000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := e.payload(u).Inputs
+	if len(in) != 3 || in[0].TxID != small[0] || in[1].TxID != small[1] || in[2].TxID != small[2] {
+		t.Fatalf("inputs %+v, want the three oldest", in)
+	}
+
+	// The oldest five cannot carry 150,000, though the shard holds more outputs: the largest output pays it alone.
+	u, err = e.build("big", 150_000, true)
+	if err != nil {
+		t.Fatalf("a shard that holds 200,000 in one output could not pay 150,000: %v", err)
+	}
+	if in := e.payload(u).Inputs; len(in) != 1 || in[0].TxID != big1 {
+		t.Fatalf("inputs %+v, want only the largest output %s", in, big1)
+	}
+	if e.count("reserved") != 1 {
+		t.Fatalf("%d outputs reserved, want only the largest", e.count("reserved"))
+	}
+
+	// A move to cold keeps eating the oldest, even when the largest could carry it alone.
+	e2 := newWEnv(t)
+	oldest := e2.fund(10_000)
+	for i := 0; i < 5; i++ {
+		e2.fund(10_000)
+	}
+	e2.fund(200_000)
+	tx, err := e2.a.pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu, err := e2.a.BuildWithdrawal(context.Background(), tx, chain.WithdrawalIntent{OwnerKind: "to-cold", ID: "mv", PartitionID: wPart, Asset: "BTC", To: e2.dest, Amount: big.NewInt(20_000)})
+	if err != nil {
+		tx.Rollback(context.Background())
+		t.Fatal(err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if in := e2.payload(mu).Inputs; in[0].TxID != oldest {
+		t.Fatalf("a move to cold started with %s, want the oldest %s", in[0].TxID, oldest)
 	}
 }
 

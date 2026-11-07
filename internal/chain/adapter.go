@@ -207,6 +207,33 @@ type MoveCapacity interface {
 	MaxMove(ctx context.Context, partitionID string) (*big.Int, error)
 }
 
+// Consolidation is what a consolidation of a hot shard would do now, or why it waits.
+type Consolidation struct {
+	// Amount is the sum of the outputs it would spend (the signing zone requires the intent's amount to be exactly that sum). Zero when Wait is set
+	// or nothing is worth merging.
+	Amount *big.Int
+	Inputs int
+	// Wait is why nothing runs although the shard holds many outputs ("" when it can go): the fee rate is above the consolidation ceiling.
+	Wait string
+}
+
+// ConsolidateIntent asks for the merge of a hot partition's small outputs into one output back to its shard.
+type ConsolidateIntent struct {
+	ID          string // consolidation ID (idempotency)
+	PartitionID string
+	Amount      *big.Int // the sum of the inputs
+}
+
+// Consolidator is implemented by a chain cell whose hot shard can fill with many small outputs (Bitcoin). PlanConsolidation says what a consolidation
+// of the partition would take now: nothing when the shard holds no more outputs than the configured threshold, or fewer than two are worth spending at
+// the current rate, or the rate is above the ceiling (then Wait says so). BuildConsolidation runs in the caller's transaction: it reserves the
+// partition's smallest worthwhile outputs until they add up to exactly the intent's amount, and pays them, less the fee, to the shard in one output.
+// When they do not add up (the set changed since the plan) it returns ErrNotEnoughOutputs and reserves nothing.
+type Consolidator interface {
+	PlanConsolidation(ctx context.Context, partitionID string) (Consolidation, error)
+	BuildConsolidation(ctx context.Context, tx pgx.Tx, c ConsolidateIntent) (UnsignedTx, error)
+}
+
 // OutputDiff is one disagreement between a chain cell's own output table and the chain.
 type OutputDiff struct {
 	Address string

@@ -226,7 +226,7 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 		return i, reject(ReasonIntent, "intent has no id")
 	}
 	switch i.Kind {
-	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance":
+	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate":
 	default:
 		return i, reject(ReasonIntent, "intent kind %q", i.Kind)
 	}
@@ -345,6 +345,22 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 			}
 			if total := new(big.Int).Add(sum, amount); total.Cmp(p.ToColdDailyCap) > 0 {
 				return reject(ReasonToColdCap, "%s already moved to cold in 24h plus %s exceeds the cap %s", sum, amount, p.ToColdDailyCap)
+			}
+		}
+	case "consolidate":
+		// Needs no approval: the chain verifier refused anything but the partition's own shard spending its own outputs back to itself, so the money
+		// stays where it is and only the fee can be lost, at most the hourly limit times max_tx_fee_sats. Approvals are ignored. A new attempt of a
+		// known intent (a fee bump) is not counted again.
+		if !codec.OwnsSender(info.Sender) {
+			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
+		}
+		if !known {
+			n, err := gt.CountSince(ctx, "consolidate", now.Add(-time.Hour))
+			if err != nil {
+				return err
+			}
+			if n >= cc.ConsolidationsPerHour {
+				return reject(ReasonConsolidateRate, "%d consolidations in the last hour, limit %d", n, cc.ConsolidationsPerHour)
 			}
 		}
 	case "rebalance":

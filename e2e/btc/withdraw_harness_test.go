@@ -55,6 +55,9 @@ func (s *system) setupWithdrawals(o opts) {
 	if o.fallbackRate != 0 {
 		s.cf.Chain.BTC.FallbackFeeRate = o.fallbackRate
 	}
+	if o.consolidateAbove > 0 {
+		s.setConsolidation(o.consolidateAbove, o.consolidateMaxRate)
+	}
 	s.lease = "30s"
 	if o.lease != "" {
 		s.lease = o.lease
@@ -89,6 +92,13 @@ func (s *system) setupWithdrawals(o opts) {
 		}
 		s.cf.Cold.Limits = map[string]custody.LimitFile{"BTC": {Low: low, High: o.coldHigh, Target: o.coldTarget}}
 	}
+	consolidations := 100000
+	switch {
+	case o.gwConsolidations > 0:
+		consolidations = o.gwConsolidations
+	case o.gwConsolidations < 0:
+		consolidations = 0
+	}
 	toColdCap := "1000000000000"
 	if o.toColdCap != "" {
 		toColdCap = o.toColdCap
@@ -104,7 +114,7 @@ func (s *system) setupWithdrawals(o opts) {
 		Approvers: apprFiles, SignTimeout: "20s", MaxIntentAge: "24h",
 		Signers: map[string]gateway.SignerFile{s.part: {Backend: "mpc", KeysetID: s.mpc.KeysetID, HardenedPath: btc.AccountPath("regtest"),
 			MPC: &gateway.MPCSignerFile{Address: s.mpc.CallerA, CertFile: crt, KeyFile: key, ServerPin: s.mpc.CertA.Pin}}},
-		Chains: map[string]gateway.ChainFile{s.chain: {Family: "btc", WithdrawalsPerHour: 100000, SweepsPerHour: sweepsPerHour, CancelsPerHour: 1000, ToColdPerHour: 1000,
+		Chains: map[string]gateway.ChainFile{s.chain: {Family: "btc", WithdrawalsPerHour: 100000, SweepsPerHour: sweepsPerHour, CancelsPerHour: 1000, ToColdPerHour: 1000, ConsolidationsPerHour: consolidations,
 			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: s.xpub, ColdAddresses: map[string]string{"omnibus/native": s.coldAddr}, MaxTxFeeSats: 100_000, MaxFeeRate: 200, MaxInputs: 20,
 				HotShards: map[string]gateway.HotShardFile{s.part: {Address: s.hotAddr, Path: []uint32{1, 0}}}},
 			Assets: map[string]gateway.AssetFile{"BTC": asset}}},
@@ -119,6 +129,19 @@ func (s *system) setupWithdrawals(o opts) {
 	_, s.gwGuard = gatewaytest.NewGuardDB(t)
 	_, cosGuard := gatewaytest.NewGuardDB(t)
 	s.mpc.StartCosigner(cosPath, cosGuard, s.gwGuard)
+}
+
+// setConsolidation turns consolidation on in the business config: the shard is merged when it holds more than above available outputs, at a fee rate of at
+// most rate sat/vB (default 50, the whole range these systems allow, since the node's own estimate depends on what ran before). 0 turns it off. The caller
+// writes the config and restarts what must read it.
+func (s *system) setConsolidation(above int, rate uint64) {
+	if rate == 0 {
+		rate = 50
+	}
+	if above == 0 {
+		rate = 0
+	}
+	s.cf.Chain.BTC.ConsolidateAbove, s.cf.Chain.BTC.ConsolidateMaxFeeRate = above, rate
 }
 
 func writeJSONFile(t *testing.T, path string, v any) {

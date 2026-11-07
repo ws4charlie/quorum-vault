@@ -62,6 +62,11 @@ type Config struct {
 	// SweepK 0 and MinSweep 0 mean no rule.
 	SweepK   uint64
 	MinSweep uint64
+	// ConsolidateAbove is the number of available hot outputs a partition may hold before a consolidation merges the small ones; 0 turns consolidation
+	// off. When on it must exceed MaxInputs. ConsolidateMaxFeeRate (sat/vB) is the most a consolidation pays: above it consolidation waits. It must be
+	// positive and at most SweepMaxFeeRate.
+	ConsolidateAbove      int
+	ConsolidateMaxFeeRate uint64
 }
 
 // HotShardConfig is one hot shard: the partition it serves, its address and the path of its key below the account.
@@ -219,6 +224,20 @@ func (c Config) validated() (*validatedConfig, error) {
 	}
 	if c.FallbackFeeRate > c.MaxFeeRate {
 		return nil, errors.New("btc: config: fallback_fee_rate is above max_fee_rate")
+	}
+	if c.ConsolidateAbove < 0 {
+		return nil, errors.New("btc: config: consolidate_above must not be negative")
+	}
+	if c.ConsolidateAbove > 0 {
+		if c.ConsolidateAbove <= c.MaxInputs {
+			return nil, fmt.Errorf("btc: config: consolidate_above (%d) must exceed max_inputs (%d): a shard that one transaction can spend whole needs no consolidation", c.ConsolidateAbove, c.MaxInputs)
+		}
+		if c.ConsolidateMaxFeeRate == 0 {
+			return nil, errors.New("btc: config: consolidate_max_fee_rate is required (and must be positive) when consolidate_above is set")
+		}
+		if c.ConsolidateMaxFeeRate > c.SweepMaxFeeRate {
+			return nil, errors.New("btc: config: consolidate_max_fee_rate is above sweep_max_fee_rate")
+		}
 	}
 	// The form of an address this config derives must belong to the network it names.
 	probe, err := v.addressAt(0)

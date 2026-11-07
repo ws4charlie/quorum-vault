@@ -490,3 +490,68 @@ func TestVerifyBindsEveryKindToItsPartition(t *testing.T) {
 }
 
 func inp(n int, value uint64, path ...uint32) PayloadInput { return in(n, value, path...) }
+
+// A consolidation spends at least two outputs of the partition's own shard and pays one output back to the same shard; its amount is the sum of the
+// inputs. Anything else is refused: the money must stay where it is.
+func TestVerifyConsolidation(t *testing.T) {
+	f := newFixture(t)
+	good := func() (Payload, signjob.Intent) {
+		p := Payload{Version: 2, Inputs: []PayloadInput{in(1, 30_000, 1, 0), in(2, 20_000, 1, 0), in(3, 10_000, 1, 0)}, Outputs: []PayloadOutput{{f.hot0, 59_000}}}
+		return p, signjob.Intent{Kind: "consolidate", ID: "co1", PartitionID: pOmni0, Chain: vChain, Asset: "BTC", To: f.hot0, Amount: "60000"}
+	}
+	p, i := good()
+	f.mustPass(p, i)
+	// Two inputs are the least; four is the verifier's own input cap.
+	two := p
+	two.Inputs, two.Outputs = p.Inputs[:2], []PayloadOutput{{f.hot0, 49_000}}
+	i2 := i
+	i2.Amount = "50000"
+	f.mustPass(two, i2)
+
+	// The segregated pool's shard consolidates itself, under its own partition.
+	seg := Payload{Version: 2, Inputs: []PayloadInput{inp(1, 30_000, 1, 2), inp(2, 20_000, 1, 2)}, Outputs: []PayloadOutput{{f.hotS, 49_000}}}
+	si := signjob.Intent{Kind: "consolidate", ID: "co2", PartitionID: pSeg0, Chain: vChain, Asset: "BTC", To: f.hotS, Amount: "50000"}
+	for n := range seg.Inputs {
+		if err := f.v.Verify(f.jobFor(pSeg0, seg, n), si); err != nil {
+			t.Fatalf("a segregated shard consolidating itself: %v", err)
+		}
+	}
+
+	refuse := func(name string, change func(p *Payload, i *signjob.Intent), want string) {
+		t.Helper()
+		bp, bi := good()
+		change(&bp, &bi)
+		f.mustRefuse(name, bp, bi, want)
+	}
+	refuse("the output goes to any other address", func(p *Payload, _ *signjob.Intent) { p.Outputs[0].Address = f.other }, "pays the partition's own shard")
+	refuse("the output goes to the cold address", func(p *Payload, _ *signjob.Intent) { p.Outputs[0].Address = f.cold }, "pays the partition's own shard")
+	refuse("the output goes to another partition's shard", func(p *Payload, _ *signjob.Intent) { p.Outputs[0].Address = f.hot1 }, "pays the partition's own shard")
+	refuse("the output goes to another pool's shard", func(p *Payload, _ *signjob.Intent) { p.Outputs[0].Address = f.hotS }, "pays the partition's own shard")
+	refuse("the intent names another address", func(_ *Payload, i *signjob.Intent) { i.To = f.other }, "pays the partition's own shard")
+	refuse("a second output", func(p *Payload, _ *signjob.Intent) {
+		p.Outputs = []PayloadOutput{{f.hot0, 29_000}, {f.other, 29_000}}
+	}, "has one output")
+	refuse("a second output to the same shard", func(p *Payload, _ *signjob.Intent) {
+		p.Outputs = []PayloadOutput{{f.hot0, 29_000}, {f.hot0, 29_000}}
+	}, "has one output")
+	refuse("one input", func(p *Payload, i *signjob.Intent) {
+		p.Inputs, p.Outputs, i.Amount = p.Inputs[:1], []PayloadOutput{{f.hot0, 29_000}}, "30000"
+	}, "at least two outputs")
+	refuse("an input from another partition's shard", func(p *Payload, _ *signjob.Intent) { p.Inputs[1] = in(2, 20_000, 1, 1) }, "not the partition's own shard")
+	refuse("an input from another pool's shard", func(p *Payload, _ *signjob.Intent) { p.Inputs[2] = in(3, 10_000, 1, 2) }, "not the partition's own shard")
+	refuse("an input from a deposit address", func(p *Payload, _ *signjob.Intent) { p.Inputs[0] = in(1, 30_000, 0, 5) }, "not the partition's own shard")
+	refuse("an input from a cold address (no key of the account signs it)", func(p *Payload, _ *signjob.Intent) { p.Inputs[0].Path = []uint32{} }, "derivation")
+	for _, amt := range []string{"59999", "60001", "0", "30000"} {
+		refuse("an amount that is not the sum ("+amt+")", func(_ *Payload, i *signjob.Intent) { i.Amount = amt }, "not the sum of the inputs")
+	}
+	refuse("a fee above the cap", func(p *Payload, _ *signjob.Intent) { p.Inputs[0].Value = 500_000; p.Outputs[0].Value = 59_000 }, "exceeds the cap")
+	refuse("a fee rate above the cap", func(p *Payload, _ *signjob.Intent) { p.Outputs[0].Value = 60_000 - 49_000 }, "sat/vB")
+	refuse("dust output", func(p *Payload, i *signjob.Intent) {
+		p.Outputs[0].Value = 293
+	}, "below the dust limit")
+	// The intent is bound to the key partition like every kind.
+	bp, bi := good()
+	if err := f.v.Verify(f.jobFor(pBeta0, bp, 0), bi); err == nil || !strings.Contains(err.Error(), "key partition") {
+		t.Fatalf("another key partition: %v", err)
+	}
+}

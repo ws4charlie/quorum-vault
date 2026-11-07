@@ -89,6 +89,9 @@ type ChainFile struct {
 	ToColdPerHour int `json:"to_cold_per_hour"`
 	// RebalancePerHour limits moves between hot shards; 0 refuses them all.
 	RebalancePerHour int `json:"rebalance_per_hour"`
+	// ConsolidationsPerHour limits how many consolidations of a Bitcoin shard are first signed in a rolling hour; 0 refuses them all. A consolidation
+	// leaves the money on the same shard, so what it can cost is bounded by this number times max_tx_fee_sats.
+	ConsolidationsPerHour int `json:"consolidations_per_hour"`
 }
 
 // AssetFile is the withdrawal policy of one (chain, asset), amounts in base units.
@@ -154,7 +157,7 @@ func (cf ChainFile) buildBTC(name string, enabledApprovers int) (*ChainConfig, e
 	if cf.WithdrawalsPerHour <= 0 {
 		return nil, fmt.Errorf("gateway: config: chain %q: withdrawals_per_hour is required and must be > 0", name)
 	}
-	if cf.SweepsPerHour < 0 || cf.CancelsPerHour < 0 || cf.ToColdPerHour < 0 || cf.RebalancePerHour < 0 {
+	if cf.SweepsPerHour < 0 || cf.CancelsPerHour < 0 || cf.ToColdPerHour < 0 || cf.RebalancePerHour < 0 || cf.ConsolidationsPerHour < 0 {
 		return nil, fmt.Errorf("gateway: config: chain %q: rate limits must be >= 0", name)
 	}
 	sc := btc.SigningConfig{Chain: name, Network: b.Network, AccountXpub: b.AccountXpub, HotShards: map[string]btc.HotShard{},
@@ -179,7 +182,7 @@ func (cf ChainFile) buildBTC(name string, enabledApprovers int) (*ChainConfig, e
 	}
 	return &ChainConfig{Name: name, Family: FamilyBTC, BTC: sc, Assets: map[string]AssetPolicy{btc.Native: pol},
 		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour,
-		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour}, nil
+		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour, ConsolidationsPerHour: cf.ConsolidationsPerHour}, nil
 }
 
 // TokenFile is a configured ERC-20.
@@ -218,6 +221,8 @@ type ChainConfig struct {
 	WithdrawalsPerHour int
 	// RebalancePerHour limits moves between hot shards (zero: none allowed).
 	RebalancePerHour int
+	// ConsolidationsPerHour limits consolidations first signed per rolling hour (Bitcoin; zero: none allowed).
+	ConsolidationsPerHour int
 }
 
 // AssetPolicy is the withdrawal policy of one asset.

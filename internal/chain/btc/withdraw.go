@@ -65,8 +65,35 @@ type utxo struct {
 	value uint64
 }
 
+// oldestCannotCarry reports whether the oldest max_inputs available outputs of the partition cannot pay the amount and the fee (no prefix of them
+// does) while the partition holds more outputs than that, so that taking the largest ones is the only way to pay. Nothing is locked or reserved.
+func (a *Adapter) oldestCannotCarry(ctx context.Context, tx pgx.Tx, partitionID string, amount uint64, destScript []byte, rate uint64) (bool, error) {
+	rows, err := tx.Query(ctx, `SELECT value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit
+		ORDER BY created_at, txid, vout LIMIT $3`, a.cfg.Chain, partitionID, a.cfg.MaxInputs+1)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	n, sum := 0, uint64(0)
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			return false, err
+		}
+		n++
+		if n > a.cfg.MaxInputs {
+			return true, rows.Err() // more outputs than one transaction takes, and no prefix of the oldest ones covered the payment
+		}
+		sum += uint64(v)
+		if sum >= amount+vsize(n, destScript)*rate {
+			return false, nil
+		}
+	}
+	return false, rows.Err() // fewer outputs than the cap: the order does not matter, all of them are taken
+}
+
 // BuildWithdrawal builds the transaction of a withdrawal inside the caller's transaction: it selects the partition's own available outputs, oldest
-// first, one at a time with FOR UPDATE SKIP LOCKED, reserving each at once, so two builds never pick one output and a rolled-back build reserves
+// first (or, when the oldest max_inputs cannot carry the payment, the largest first), one at a time with FOR UPDATE SKIP LOCKED, reserving each at once, so two builds never pick one output and a rolled-back build reserves
 // nothing. The payment is the first output, change (when it is above dust) the second, to the shard's own address. A change at or under the dust limit
 // goes to the fee. If the available outputs cannot pay the amount and the fee, it returns chain.ErrNotEnoughOutputs: the withdrawal waits.
 func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.WithdrawalIntent) (chain.UnsignedTx, error) {
@@ -100,6 +127,19 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 	feeFor := func(n int, scripts ...[]byte) uint64 { return vsize(n, scripts...) * rate }
 	changeDust := DustLimit(KindP2WPKH)
 
+	// The order is decided before anything is reserved. A withdrawal takes the oldest outputs; when the oldest max_inputs of them cannot carry it but
+	// the shard holds more, it takes the largest instead (a shard fed by many small outputs stays spendable). A hot-to-cold move keeps eating the oldest.
+	order := "created_at, txid, vout"
+	if kind == "withdrawal" {
+		largest, err := a.oldestCannotCarry(ctx, tx, w.PartitionID, amount, destScript, rate)
+		if err != nil {
+			return chain.UnsignedTx{}, err
+		}
+		if largest {
+			order = "value DESC, created_at, txid, vout"
+		}
+	}
+
 	var picked []utxo
 	var sum uint64
 	for {
@@ -113,7 +153,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 		var u utxo
 		var v int64
 		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit
-			ORDER BY created_at, txid, vout LIMIT 1 FOR UPDATE SKIP LOCKED`, a.cfg.Chain, w.PartitionID).Scan(&u.txid, &u.vout, &v)
+			ORDER BY `+order+` LIMIT 1 FOR UPDATE SKIP LOCKED`, a.cfg.Chain, w.PartitionID).Scan(&u.txid, &u.vout, &v)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats available in %s, %d needed plus fee", chain.ErrNotEnoughOutputs, sum, w.PartitionID, amount)
 		}

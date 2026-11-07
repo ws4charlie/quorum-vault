@@ -49,6 +49,7 @@ func NewWorker(c client.Client, d Deps) worker.Worker {
 	w.RegisterWorkflow(WithdrawalReconcilerWorkflow)
 	w.RegisterWorkflow(ColdPlannerWorkflow)
 	w.RegisterWorkflow(ColdMoveWorkflow)
+	w.RegisterWorkflow(ConsolidationWorkflow)
 	w.RegisterWorkflow(RebalanceWorkflow)
 	w.RegisterWorkflow(RefillWorkflow)
 	w.RegisterWorkflow(SweepWorkflow)

@@ -124,7 +124,7 @@ func newBTCHarness(t *testing.T) *btcH {
 	b.hotS, _ = acct.Address([]uint32{1, 2})
 	b.dep, _ = acct.Address([]uint32{0, 5})
 
-	cf := ChainFile{Family: "btc", WithdrawalsPerHour: 1000, SweepsPerHour: 1000, CancelsPerHour: 1000, ToColdPerHour: 1000,
+	cf := ChainFile{Family: "btc", WithdrawalsPerHour: 1000, SweepsPerHour: 1000, CancelsPerHour: 1000, ToColdPerHour: 1000, ConsolidationsPerHour: 2,
 		BTC: &BTCFile{Network: "regtest", AccountXpub: xpub.String(), MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
 			HotShards: map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 0}}, btcPart1: {Address: b.hot1, Path: []uint32{1, 1}},
 				btcPartSeg: {Address: b.hotS, Path: []uint32{1, 2}}},

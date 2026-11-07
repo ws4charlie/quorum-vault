@@ -75,3 +75,41 @@ func TestBTCConfigRefusesTwoHotShardsInOnePool(t *testing.T) {
 		t.Fatalf("two hot shards in the omnibus pool: %v", err)
 	}
 }
+
+// Consolidation: consolidate_above 0 turns it off; when on, it must exceed max_inputs, and consolidate_max_fee_rate must be positive and not above
+// sweep_max_fee_rate. Each bad value refuses to start and names the setting.
+func TestBTCConfigConsolidation(t *testing.T) {
+	xpub := xpubFor(t, &chaincfg.RegressionNetParams)
+	build := func(change func(b *BTCFile)) error {
+		f := btcFile("regtest", xpub)
+		f.Chain.BTC.MaxInputs, f.Chain.BTC.MaxFeeRate, f.Chain.BTC.SweepMaxFeeRate = 20, 100, 50
+		change(f.Chain.BTC)
+		_, err := f.Build()
+		return err
+	}
+	if err := build(func(b *BTCFile) {}); err != nil {
+		t.Fatalf("off by default: %v", err)
+	}
+	if err := build(func(b *BTCFile) { b.ConsolidateAbove, b.ConsolidateMaxFeeRate = 0, 0 }); err != nil {
+		t.Fatalf("off: %v", err)
+	}
+	if err := build(func(b *BTCFile) { b.ConsolidateAbove, b.ConsolidateMaxFeeRate = 21, 50 }); err != nil {
+		t.Fatalf("on: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		change func(b *BTCFile)
+		want   string
+	}{
+		"at max_inputs":           {func(b *BTCFile) { b.ConsolidateAbove, b.ConsolidateMaxFeeRate = 20, 10 }, "consolidate_above (20) must exceed max_inputs (20)"},
+		"below max_inputs":        {func(b *BTCFile) { b.ConsolidateAbove, b.ConsolidateMaxFeeRate = 5, 10 }, "must exceed max_inputs"},
+		"negative":                {func(b *BTCFile) { b.ConsolidateAbove, b.ConsolidateMaxFeeRate = -1, 10 }, "must not be negative"},
+		"no fee rate":             {func(b *BTCFile) { b.ConsolidateAbove = 30 }, "consolidate_max_fee_rate is required"},
+		"above sweep ceiling":     {func(b *BTCFile) { b.ConsolidateAbove, b.ConsolidateMaxFeeRate = 30, 51 }, "above sweep_max_fee_rate"},
+		"default max_inputs 20":   {func(b *BTCFile) { b.MaxInputs, b.ConsolidateAbove, b.ConsolidateMaxFeeRate = 0, 20, 10 }, "must exceed max_inputs"},
+		"ceiling defaults to max": {func(b *BTCFile) { b.SweepMaxFeeRate, b.ConsolidateAbove, b.ConsolidateMaxFeeRate = 0, 30, 101 }, "above sweep_max_fee_rate"},
+	} {
+		if err := build(tc.change); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want an error saying %q", name, err, tc.want)
+		}
+	}
+}

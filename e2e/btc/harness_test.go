@@ -376,6 +376,11 @@ type opts struct {
 	refillStuck string
 	// gwDest, when set, is the only list of destinations the gateway lets withdrawals pay (otherwise any).
 	gwDest []string
+	// consolidateAbove turns consolidation on for the hot shard (it must exceed maxInputs); consolidateMaxRate is its fee ceiling in sat/vB (default 50);
+	// gwConsolidations is the gateway's limit per hour (0: no practical limit, -1: none allowed).
+	consolidateAbove   int
+	consolidateMaxRate uint64
+	gwConsolidations   int
 }
 
 func freePort(t *testing.T) int {

@@ -194,6 +194,16 @@ func ColdPlannerWorkflow(ctx workflow.Context, in Input) error {
 		if err := call(ctx, opts(ctx), &n, a.StartOpenColdMoves); err != nil {
 			return err
 		}
+		// A shard fed by many small outputs is merged (Bitcoin; a no-op elsewhere, and where consolidate_above is 0). A loop that started before this
+		// existed keeps the calls it recorded: it replays without them, and the next run (after ContinueAsNew) has them.
+		if workflow.GetVersion(ctx, "consolidation", workflow.DefaultVersion, 1) >= 1 {
+			if err := call(ctx, planOpts(ctx), &n, a.PlanConsolidations); err != nil {
+				return err
+			}
+			if err := call(ctx, opts(ctx), &n, a.StartOpenConsolidations); err != nil {
+				return err
+			}
+		}
 		if err := workflow.Sleep(ctx, in.T.ColdInterval); err != nil {
 			return err
 		}
@@ -687,6 +697,54 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 			return call(ctx, opts(ctx), nil, a.SettleColdMove, id, r.Hash, true) // settled as a failed move, with the cancel's fee
 		}
 		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "cancelled")
+	}
+	return fmt.Errorf("unexpected outcome %q", r.Kind)
+}
+
+// ConsolidationWorkflow is one consolidation of a hot shard's small outputs. Its workflow ID is the consolidation ID: build and enqueue, wait for the
+// gateway (which checks that the transaction spends only the shard's own outputs back to the shard, and caps how many it signs per hour), broadcast,
+// wait, settle. One that fails ends cleanly and the planner plans another after a wait if the shard still holds too many outputs. A cancel that
+// mines (the same inputs back to the shard) settles it like the consolidation itself.
+func ConsolidationWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
+	id, t := in.ID, in.T
+	var st ColdState
+	if err := call(ctx, opts(ctx), &st, a.LoadConsolidation, id); err != nil {
+		return err
+	}
+	if st.Status == "confirmed" || st.Status == "failed" || st.Parked {
+		return nil
+	}
+	o := OwnerArg{Kind: custody.OwnerKindConsolidate, ID: id, Part: st.Part}
+	ow := custody.Owner{Kind: custody.OwnerKindConsolidate, ID: id, PartitionID: st.Part}
+
+	var job string
+	if err := call(ctx, buildOpts(ctx), &job, a.BuildConsolidationJob, id); err != nil {
+		workflow.GetLogger(ctx).Warn("could not build the consolidation; it will be planned again", "consolidation", id, "error", err.Error())
+		return call(ctx, opts(ctx), nil, a.FailConsolidation, id, "could not build: "+err.Error())
+	}
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
+	if err != nil {
+		return err
+	}
+	if r.Kind == txRefused {
+		cr, err := cancelNonce(ctx, t, o)
+		if err != nil {
+			return err
+		}
+		if cr.Kind == txCancelled && !(st.SettlesCancel && cr.Hash != "") {
+			return call(ctx, opts(ctx), nil, a.FailConsolidation, id, "gateway refused: "+r.Reason)
+		}
+		r = cr
+	}
+	switch r.Kind {
+	case txMined, txReverted:
+		return call(ctx, opts(ctx), nil, a.SettleConsolidation, id, r.Hash)
+	case txCancelled:
+		if st.SettlesCancel && r.Hash != "" {
+			return call(ctx, opts(ctx), nil, a.SettleConsolidation, id, r.Hash) // settled like the consolidation, with the cancel's fee
+		}
+		return call(ctx, opts(ctx), nil, a.FailConsolidation, id, "cancelled")
 	}
 	return fmt.Errorf("unexpected outcome %q", r.Kind)
 }
