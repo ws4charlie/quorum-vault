@@ -84,6 +84,7 @@ func repeat(v int64, n int) []int64 {
 func consolidateSystem(t *testing.T, o opts) *system {
 	t.Helper()
 	o.withdraw = true
+	o.noEstimate = true // the fee rate is the fallback one, whatever ran on the node before
 	o.maxInputs = 4
 	s := newSystem(t, o)
 	s.cf.Withdrawal.HotWait = "3m"

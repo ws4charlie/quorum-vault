@@ -167,7 +167,7 @@ test-e2e-btc-refill-stuck:
 # alongside, the cancel, every crash boundary, Reconcile in flight, the attacks through real files.
 E2E_BTC_CONSOLIDATE := TestConsolidate
 test-e2e-btc-consolidate:
-	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_CONSOLIDATE)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_CONSOLIDATE)' ./e2e/btc/...
 
 # cb-mpc signing path end to end (needs the C++ build once: `make mpc-build`; Postgres; anvil on 127.0.0.1:18545 with chain
 # id 11155111 for the mining test: docker run -d --name qv-anvil-p5b3 -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111").
