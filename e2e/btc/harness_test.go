@@ -59,7 +59,7 @@ func TestMain(m *testing.M) {
 		if mpcBin, err = mpcstack.Build(dir); err != nil {
 			buildErr = err
 		}
-		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway"} {
+		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway", "qv-cold"} {
 			if buildErr != nil {
 				break
 			}
@@ -274,6 +274,7 @@ type system struct {
 	gwPath   string
 	gwFile   gateway.File
 	coldAddr string
+	kit      *coldKit
 	gwGuard  string
 	tc       client.Client
 	tag      string
@@ -312,6 +313,11 @@ type opts struct {
 	// (default: far above any test).
 	coldHigh, coldLow, coldTarget string
 	toColdCap                     string
+	// refill puts the cold key in the qv-cold token (a separate process; only files cross) and uses its address as the pool's cold address; refillTTL is how
+	// long a request may wait for its signed file; refillPoll how often the workflow looks.
+	refill     bool
+	refillTTL  string
+	refillPoll string
 	// gwDest, when set, is the only list of destinations the gateway lets withdrawals pay (otherwise any).
 	gwDest []string
 }

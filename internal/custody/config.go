@@ -77,6 +77,8 @@ type RefillFile struct {
 	TokenGas   uint64 `json:"token_gas"`   // gas limit written into a token refill request, default 90000
 	StuckAfter string `json:"stuck_after"` // ALERT when a broadcast refill has not confirmed after this, default 30m
 	Poll       string `json:"poll"`        // how often the refill workflow looks for the imported file, default 15s
+	// RequestTTL: a Bitcoin refill request that is not imported within this ends (nothing was reserved), default 24h.
+	RequestTTL string `json:"request_ttl"`
 }
 
 // LimitFile is the low-water mark, high-water mark and target of one hot partition.
@@ -200,6 +202,7 @@ type Config struct {
 	RefillTokenGas   uint64
 	RefillStuckAfter time.Duration
 	RefillPoll       time.Duration
+	RefillRequestTTL time.Duration
 }
 
 // Asset is a configured asset.
@@ -604,6 +607,9 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 		c.RefillTokenGas = 90000
 	}
 	if c.RefillStuckAfter, err = dur("cold refill stuck_after", cf.Refill.StuckAfter, 30*time.Minute); err != nil {
+		return err
+	}
+	if c.RefillRequestTTL, err = dur("cold refill request_ttl", cf.Refill.RequestTTL, 24*time.Hour); err != nil {
 		return err
 	}
 	if c.RefillPoll, err = dur("cold refill poll", cf.Refill.Poll, 15*time.Second); err != nil {

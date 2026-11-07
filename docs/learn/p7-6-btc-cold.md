@@ -81,3 +81,38 @@ from does not help either: every input is signed under the cold key only.
 3. Each approving operator: `qv-cold approve -operator <name> -key <their key> -request req.json -out <name>.approval`.
 4. `qv-cold sign -config cfg.json -request req.json -approval a.approval -approval b.approval -out signed.json`, then carry `signed.json` back.
 5. A stuck refill is re-exported by the online side as a new revision with a higher fee over the same inputs, and signed the same way.
+
+## The online refill (P7-6b-2)
+
+A hot shard below its low-water mark opens a refill, through the same planner and `RefillWorkflow` as EVM. No sign job and no gateway: the cold key is
+only in the offline `qv-cold`.
+
+**Cold outputs.** `btc_utxos` rows marked `cold` (migration 0017), with the cold address and no partition, so hot selection (by partition) and sweep selection
+(deposit outputs) never see them, and only a refill spends them. They are recorded when the books settle a transaction of ours that pays the cold address
+(a move to cold, a refill's change), and by the scan at safe depth for money put there from outside, booked `cold -> opfund` like `FundCold`. Our own
+outputs are never booked as funding. *Outputs that settled before the migration:* it backfills a row for every confirmed to-cold move that has exactly one
+transaction; with a replacement in the history it cannot tell which one confirmed, so those are left for Reconcile, which reports a cold output on chain that
+the table does not hold.
+
+**Opening.** One open refill per cold address (so per shard). It is opened only if the cold address has an available output; otherwise the ALERT says so.
+
+**Export and import.** `POST /v2/refills/{id}/export` builds the request from the oldest available cold outputs, at most `max_inputs`: the payment to the
+shard, change back to the cold address, or no change when the leftover would be dust. The fee is the node's rate (fallback) under the core's caps
+(`max_tx_fee_sats`, `max_fee_rate`), which must be set below `qv-cold`'s own, so a request the signer would refuse is never exported. *Larger than
+`max_inputs` can carry:* the payment is what those inputs hold less the fee, the refill books what it pays, and the planner opens the next refill when
+this one has settled, so a big refill is done in rounds. Nothing is reserved at export. `POST /v2/refills/{id}/import` checks the signed file with
+`VerifyBTCSignedMatches` (the request's transaction byte for byte, every signature valid over the request's values), reserves the request's inputs and records
+the transaction as an attempt of the owner `refill`, in one transaction. A file for an older export, or one changed on the way, is refused.
+
+**Broadcast and settlement** are the ordinary attempt code: `Broadcast` (rebroadcast and the consumed outcome included), `Outcome`, `Settle`. An input spent by
+something that is not our transaction parks the refill with an ALERT and keeps the signed transaction and the reservation (a person decides); so does a
+broadcast the node will not take (a higher-fee ceremony is 6b-3). A stuck refill raises the stuck ALERT and waits.
+
+**Ledger** (through the clearing account `refill`, as on EVM): at broadcast `refill -> cold` (the cold balance goes down by the payment); at settlement
+`hot -> refill` (the hot wallet has it) and the fee `fee -> cold` (the cold address paid it). The change stays on the cold address and is a new cold output.
+Reconcile undoes the broadcast booking for the comparison, takes rows already spent on chain out of the ledger side, leaves unsettled outputs of ours out of
+the chain side, and checks the cold outputs in the table against the ledger.
+
+**A request that is never imported** ends when `cold.refill.request_ttl` (default 24 hours) is up: it fails, "not imported", nothing was reserved, no coin moved,
+and the planner may open another. A request the offline side refused is the same thing. A signed refill cannot be closed by hand: its inputs stay reserved until
+the transaction is resolved on the chain.

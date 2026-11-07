@@ -314,7 +314,13 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 	for n, o := range p.Outputs {
 		sh, ok := a.byAddr[o.Address]
 		if !ok {
-			continue // the payment
+			if _, isCold := a.cold[o.Address]; isCold { // an output on the cold address (a move to cold, a refill's change) is a cold output
+				if _, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path, cold, address) VALUES ($1,$2,$3,$4,'','',true,$5) ON CONFLICT DO NOTHING`,
+					a.cfg.Chain, txid, n, int64(o.Value), o.Address); err != nil {
+					return err
+				}
+			}
+			continue // otherwise the payment
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
 			a.cfg.Chain, txid, n, int64(o.Value), sh.partition, PathString(sh.path)); err != nil {
@@ -370,6 +376,14 @@ func (a *Adapter) ReleaseUnsigned(ctx context.Context, tx pgx.Tx, ownerKind, own
 
 // RecordFunding stores an output paid to a hot address from outside; it reports whether it was new.
 func (a *Adapter) RecordFunding(ctx context.Context, tx pgx.Tx, f chain.FundingOutput) (bool, error) {
+	if f.Cold {
+		if _, ok := a.cold[f.Address]; !ok {
+			return false, fmt.Errorf("btc: %s is not a cold address of this cell", f.Address)
+		}
+		tag, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path, cold, address) VALUES ($1,$2,$3,$4,'','',true,$5) ON CONFLICT DO NOTHING`,
+			a.cfg.Chain, f.TxHash, int64(f.Vout), f.Amount.Int64(), f.Address)
+		return err == nil && tag.RowsAffected() == 1, err
+	}
 	sh, ok := a.byAddr[f.Address]
 	if !ok {
 		return false, fmt.Errorf("btc: %s is not a hot address of this cell", f.Address)

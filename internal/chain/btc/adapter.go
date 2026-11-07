@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,8 +19,10 @@ type Adapter struct {
 	rpc    *RPC
 	pool   *pgxpool.Pool
 	acct   *Account
-	shards []shard          // in shard order
-	byAddr map[string]shard // canonical address -> shard
+	shards []shard           // in shard order
+	byAddr map[string]shard  // canonical address -> shard
+	cold   map[string]string // canonical cold address -> pool
+	coldBy map[string]string // pool -> canonical cold address
 
 	waitMu   sync.Mutex
 	sweepWhy string // why sweeps are waiting now ("" when they are not), to log a change once
@@ -47,7 +50,7 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 	if pool == nil {
 		return nil, errors.New("btc: nil database pool")
 	}
-	a := &Adapter{cfg: v, rpc: NewRPC(cfg.RPCURL, cfg.RPCUser, cfg.RPCPass), pool: pool, acct: &Account{Params: v.params, key: v.account}, byAddr: map[string]shard{}}
+	a := &Adapter{cfg: v, rpc: NewRPC(cfg.RPCURL, cfg.RPCUser, cfg.RPCPass), pool: pool, acct: &Account{Params: v.params, key: v.account}, byAddr: map[string]shard{}, cold: map[string]string{}, coldBy: map[string]string{}}
 	for _, h := range v.HotShards {
 		d, err := DecodeAddress(h.Address, v.params)
 		if err != nil {
@@ -60,6 +63,14 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 		sh := shard{partition: h.PartitionID, address: d.Canonical, path: h.Path, script: script}
 		a.shards = append(a.shards, sh)
 		a.byAddr[sh.address] = sh
+	}
+	for k, addr := range v.ColdAddresses {
+		d, err := DecodeAddress(addr, v.params)
+		if err != nil {
+			return nil, err
+		}
+		pool := strings.TrimSuffix(k, "/native")
+		a.cold[d.Canonical], a.coldBy[pool] = pool, d.Canonical
 	}
 	var info struct {
 		Chain string `json:"chain"`

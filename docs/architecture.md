@@ -278,6 +278,15 @@ Because a SegWit signature commits only to its own input's value and the tool ha
 it was signed with, and the one transaction (inputs, destination, amount) that may spend it again, only with a higher fee. A request that gives a signed
 outpoint another value, or spends it in a different transaction, is refused. See [learn/p7-6-btc-cold.md](learn/p7-6-btc-cold.md).
 
+## Bitcoin: refills from cold
+
+When a hot shard falls below its low-water mark and its cold address has an output to give, a refill opens. The core builds the request from the cold
+address's oldest outputs (at most `max_inputs`, so a large refill is done in rounds); operators take the file across the air gap and approve it on `qv-cold`;
+the signed file comes back and is imported, which checks it against the request, reserves the inputs and records the transaction like any other attempt of
+ours. It is then broadcast, tracked and settled by the ordinary code, with no sign job and no gateway. Cold outputs are marked in the output table and are
+seen by neither withdrawals, sweeps nor moves to cold; money put on the cold address from outside is found by the scan; our own are never booked as funding.
+A request that is not imported in time ends with nothing reserved. See [learn/p7-6-btc-cold.md](learn/p7-6-btc-cold.md).
+
 ## Trust boundaries
 
 | Boundary | Protects | Does not protect |

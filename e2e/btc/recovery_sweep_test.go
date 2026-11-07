@@ -112,7 +112,7 @@ func TestRecoverySweepStuckAndTheOriginalConfirms(t *testing.T) {
 	if sw.Fee != fo || sw.Tx != orig {
 		t.Fatalf("sweep %+v, the original %s paid %d (a replacement paid %d)", sw, orig, fo, s.attemptFee(repl))
 	}
-	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND txid=$2 AND status='available' AND NOT deposit`, s.chain, orig) != 1 ||
+	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND txid=$2 AND status='available' AND NOT deposit AND NOT cold`, s.chain, orig) != 1 ||
 		s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND txid=$2`, s.chain, repl) != 0 {
 		t.Fatal("the original's output is not the one recorded")
 	}
@@ -174,7 +174,7 @@ func TestRecoverySweepOneInputRefusedAfterAnotherWasSignedSendsACancel(t *testin
 		t.Fatalf("hot mirror %d, want %d", got, -(20_000_000 - fee))
 	}
 	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND deposit AND status='spent'`, s.chain) != 2 ||
-		s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND status='available' AND value=$2`, s.chain, 20_000_000-fee) != 1 {
+		s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold AND status='available' AND value=$2`, s.chain, 20_000_000-fee) != 1 {
 		t.Fatal("the cancel's output is not the hot output")
 	}
 	s.ledgerOK()

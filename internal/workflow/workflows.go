@@ -754,6 +754,9 @@ func RefillWorkflow(ctx workflow.Context, in Input) error {
 		}
 		switch st.Status {
 		case "requested":
+			if st.Expired {
+				return call(ctx, opts(ctx), nil, a.ExpireRefill, id)
+			}
 			if err := workflow.Sleep(ctx, t.RefillPoll); err != nil {
 				return err
 			}
@@ -770,6 +773,8 @@ func RefillWorkflow(ctx workflow.Context, in Input) error {
 			switch state {
 			case "confirmed", "reverted":
 				return call(ctx, opts(ctx), nil, a.SettleRefill, id, state == "reverted")
+			case "consumed":
+				return call(ctx, opts(ctx), nil, a.ParkRefillConsumed, id)
 			}
 			if !st.Stuck && time.Duration(st.AgeSeconds)*time.Second > t.RefillStuckAfter {
 				if err := call(ctx, opts(ctx), nil, a.AlertRefillStuck, id); err != nil {

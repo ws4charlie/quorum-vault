@@ -371,6 +371,15 @@ func (a *API) exportRefill(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.actor(w, r); !ok {
 		return
 	}
+	if a.svc.Cfg.Family == FamilyBTC {
+		f, err := a.svc.ExportBTCRefill(r.Context(), r.PathValue("id"))
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, f)
+		return
+	}
 	f, err := a.svc.ExportRefill(r.Context(), r.PathValue("id"))
 	if err != nil {
 		a.fail(w, err)
@@ -382,6 +391,20 @@ func (a *API) exportRefill(w http.ResponseWriter, r *http.Request) {
 // importRefill takes the signed file that came back from the ceremony.
 func (a *API) importRefill(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	if a.svc.Cfg.Family == FamilyBTC {
+		var bs coldsign.BTCSigned
+		if err := decode(r, &bs); err != nil {
+			a.fail(w, err)
+			return
+		}
+		x, err := a.svc.ImportBTCRefill(r.Context(), r.PathValue("id"), bs)
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, refillJSON(x))
 		return
 	}
 	var signed coldsign.Signed

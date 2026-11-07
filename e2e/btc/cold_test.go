@@ -193,7 +193,7 @@ func TestColdMoveLargerThanMaxInputsGoesInRounds(t *testing.T) {
 	}
 	s.node.mine(6, "")
 	s.waitFor(60*time.Second, "the five outputs are recorded", func() bool {
-		return s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit`, s.chain) >= 5
+		return s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold`, s.chain) >= 5
 	})
 	s.untilColdMoves(2, 150*time.Second)
 	n, sum, fees := s.coldMovesIn("confirmed")
@@ -288,7 +288,7 @@ func TestReconcileCatchesEveryKindOfDifference(t *testing.T) {
 	var txid string
 	var vout int
 	var val int64
-	if err := s.pool.QueryRow(s.ctx, `DELETE FROM btc_utxos WHERE (chain, txid, vout) = (SELECT chain, txid, vout FROM btc_utxos WHERE chain=$1 AND NOT deposit AND status='available' ORDER BY value LIMIT 1)
+	if err := s.pool.QueryRow(s.ctx, `DELETE FROM btc_utxos WHERE (chain, txid, vout) = (SELECT chain, txid, vout FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold AND status='available' ORDER BY value LIMIT 1)
 		RETURNING txid, vout, value`, s.chain).Scan(&txid, &vout, &val); err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestReconcileCatchesEveryKindOfDifference(t *testing.T) {
 	s.reconcileClean()
 
 	// 4. An output spent behind our back: the key signed outside this system.
-	if err := s.pool.QueryRow(s.ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND NOT deposit AND status='available' ORDER BY value DESC LIMIT 1`, s.chain).Scan(&txid, &vout, &val); err != nil {
+	if err := s.pool.QueryRow(s.ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold AND status='available' ORDER BY value DESC LIMIT 1`, s.chain).Scan(&txid, &vout, &val); err != nil {
 		t.Fatal(err)
 	}
 	s.outsideSpend(txid, uint32(vout), uint64(val), s.node.fresh())
@@ -359,7 +359,7 @@ func TestColdMoveOverTheDailyCapIsRefusedAndNothingMoves(t *testing.T) {
 	if n, _, _ := s.coldMovesIn("confirmed"); n != 0 || s.onChain(s.coldAddr) != 0 {
 		t.Fatal("something reached cold")
 	}
-	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND status='available' AND NOT deposit AND value=45000000`, s.chain) != 1 &&
+	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND status='available' AND NOT deposit AND NOT cold AND value=45000000`, s.chain) != 1 &&
 		s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND status='reserved'`, s.chain) == 0 {
 		t.Fatal("the shard's output is neither available nor held by a move")
 	}
@@ -411,7 +411,7 @@ func (s *system) rogueColdMove(to string, pinned bool) gateway.Decision {
 	var txid string
 	var vout uint32
 	var val int64
-	if err := s.pool.QueryRow(s.ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND NOT deposit AND status='available' ORDER BY value DESC LIMIT 1`, s.chain).Scan(&txid, &vout, &val); err != nil {
+	if err := s.pool.QueryRow(s.ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold AND status='available' ORDER BY value DESC LIMIT 1`, s.chain).Scan(&txid, &vout, &val); err != nil {
 		t.Fatal(err)
 	}
 	amount := val / 2
@@ -499,7 +499,7 @@ func TestColdMoveOneInputRefusedAfterAnotherWasSignedIsCancelled(t *testing.T) {
 	if got := s.hotPosted().Int64(); got != -(20_000_000 - fee) {
 		t.Fatalf("hot mirror %d, want %d", got, -(20_000_000 - fee))
 	}
-	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND status='available' AND value=$2`, s.chain, 20_000_000-fee) != 1 {
+	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold AND status='available' AND value=$2`, s.chain, 20_000_000-fee) != 1 {
 		t.Fatal("the cancel's output is not an available hot output")
 	}
 	s.ledgerOK()

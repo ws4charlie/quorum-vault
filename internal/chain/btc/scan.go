@@ -133,7 +133,9 @@ func (a *Adapter) matchBlock(ctx context.Context, blk Block, h uint64, tip int64
 	hotTx := map[string]bool{}
 	for _, tx := range blk.Tx {
 		for _, o := range tx.Vout {
-			if _, hot := a.byAddr[o.ScriptPubKey.Address]; hot {
+			_, hot := a.byAddr[o.ScriptPubKey.Address]
+			_, cold := a.cold[o.ScriptPubKey.Address]
+			if hot || cold {
 				hotTx[tx.Txid] = true
 			}
 		}
@@ -174,6 +176,20 @@ func (a *Adapter) matchBlock(ctx context.Context, blk Block, h uint64, tip int64
 				if amt.Sign() > 0 {
 					res.Funding = append(res.Funding, chain.FundingOutput{Chain: a.cfg.Chain, Asset: Native, PartitionID: sh.partition, Address: sh.address,
 						TxHash: tx.Txid, Vout: o.N, Amount: new(big.Int).Set(amt), BlockHeight: h})
+				}
+				continue
+			}
+			if pool, isCold := a.cold[o.ScriptPubKey.Address]; isCold {
+				if !hotTx[tx.Txid] || coinbase { // ours (the books settle it), or a coinbase (not supported to a cold address)
+					continue
+				}
+				amt, err := Sats(o.Value.String())
+				if err != nil {
+					return fmt.Errorf("btc: tx %s output %d: %w", tx.Txid, o.N, err)
+				}
+				if amt.Sign() > 0 {
+					res.Funding = append(res.Funding, chain.FundingOutput{Chain: a.cfg.Chain, Asset: Native, PartitionID: a.coldPartition(pool), Address: o.ScriptPubKey.Address,
+						TxHash: tx.Txid, Vout: o.N, Amount: new(big.Int).Set(amt), BlockHeight: h, Cold: true})
 				}
 				continue
 			}

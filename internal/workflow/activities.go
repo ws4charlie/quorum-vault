@@ -383,6 +383,8 @@ type RefillView struct {
 	Parked     bool
 	Stuck      bool
 	AgeSeconds int64 // since the row last changed (for a broadcast refill: since it was broadcast)
+	// Expired: a Bitcoin refill request that was not imported within its time. Absent (false) in histories recorded before.
+	Expired bool
 }
 
 // LoadRefill reads the refill.
@@ -395,13 +397,20 @@ func (a *Activities) LoadRefill(ctx context.Context, id string) (RefillView, err
 	if err := a.D.Svc.Pool.QueryRow(ctx, `SELECT extract(epoch from now() - updated_at)::bigint FROM refills WHERE id=$1`, id).Scan(&age); err != nil {
 		return RefillView{}, err
 	}
-	return RefillView{Status: r.Status, Parked: r.Parked(), Stuck: r.Stuck, AgeSeconds: age}, nil
+	exp := a.D.Svc.Cfg.Family == custody.FamilyBTC && r.Status == custody.RefillRequested && time.Duration(age)*time.Second > a.D.Svc.Cfg.RefillRequestTTL
+	return RefillView{Status: r.Status, Parked: r.Parked(), Stuck: r.Stuck, AgeSeconds: age, Expired: exp}, nil
 }
 
 // BroadcastRefill sends the imported, signed transaction and books it as on its way. A nonce that another transaction used
 // parks the refill: it is never retried with a new nonce (that needs a new ceremony).
 func (a *Activities) BroadcastRefill(ctx context.Context, id string) (string, error) {
 	h, err := a.D.Svc.BroadcastRefill(ctx, id, func() { Hit("refill", "after_send") })
+	if err != nil && (errors.Is(err, chain.ErrInputsSpent) || errors.Is(err, chain.ErrBroadcastStuck)) {
+		// Bitcoin: an input is gone (spent by something else), or the node will not take it at this fee. Either needs a person (a new ceremony, 6b-3).
+		a.log().Error("ALERT: the signed refill cannot be broadcast; the signed transaction is kept and its inputs stay reserved. Needs an operator", "refill", id, "error", err.Error())
+		_ = a.D.Svc.ParkRefill(ctx, id, "the signed transaction cannot be broadcast: "+err.Error())
+		return "", temporal.NewNonRetryableApplicationError("refill cannot be broadcast", "refill_unbroadcastable", err)
+	}
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "nonce too low") {
 			a.log().Error("ALERT: the cold address's nonce was used by another transaction; the signed refill can never mine. Needs an operator", "refill", id, "error", err.Error())
@@ -445,6 +454,18 @@ func (a *Activities) SettleRefill(ctx context.Context, id string, reverted bool)
 	}
 	Hit("refill", "after_settle")
 	return nil
+}
+
+// ExpireRefill ends a Bitcoin refill request that was never imported in time.
+func (a *Activities) ExpireRefill(ctx context.Context, id string) error {
+	a.log().Warn("a refill request was not imported in time; it ends and nothing moved", "refill", id)
+	return a.D.Svc.ExpireRefill(ctx, id)
+}
+
+// ParkRefillConsumed parks a Bitcoin refill whose cold inputs were spent by something that is not our transaction.
+func (a *Activities) ParkRefillConsumed(ctx context.Context, id string) error {
+	a.log().Error("ALERT: an input of a signed cold refill was spent by a transaction this system did not make; the cold key may be compromised. Needs an operator", "refill", id)
+	return a.D.Svc.ParkRefill(ctx, id, "an input of the refill was spent by a transaction this system did not make")
 }
 
 // AlertRefillStuck logs the ALERT for a refill that was broadcast and has not confirmed, once.
