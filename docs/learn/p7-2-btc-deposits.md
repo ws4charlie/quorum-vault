@@ -6,9 +6,18 @@ the address yet. Family `btc`, package [internal/chain/btc](../../internal/chain
 ## Addresses
 
 The core's config holds `chain.btc.account_xpub`, the public key of the account node m/84'/coin'/0' (coin 0 on mainnet, 1 on every
-test network) of the hot MPC keyset. You get it once from mpc-party `Node` with the hardened path `[84, coin, 0]` and build the xpub
-with `btc.XpubFromNode(network, publicKey, chainCode, parentPublicKey)` (the parent, `[84, coin]`, only supplies the fingerprint).
-The core then derives account/0/index offline, with no key and no MPC, and encodes the key as a bech32 P2WPKH address.
+test network) of the hot MPC keyset. You get it once with the command `qv-btc-xpub`, which asks party A (`Node`, hardened path
+`[84, coin, 0]`) the way the gateway's signer does: mutual TLS with the gateway's client certificate, party A's certificate pinned by hash.
+
+```bash
+go run ./cmd/qv-btc-xpub -party 127.0.0.1:7001 -cert gateway.crt -key gateway.key -server-pin <sha256 of party A's certificate> \
+  -keyset hot -network mainnet -shards 1
+```
+
+It prints public values only, one per line: `account_xpub=<xpub>`, then with `-shards N` the hot shard addresses `hot_shard.<i>=<address>`
+(the account's key at `1/i`). Paste the xpub and the addresses into the config of the core, the gateway and the cosigner. A failure
+prints one line on standard error, exits non-zero and prints nothing on standard output. The command and the e2e suite share one helper
+(`mpcsigner.AccountXpub`). The core then derives account/0/index offline, with no key and no MPC, and encodes the key as a bech32 P2WPKH address.
 
 Each customer gets the next unused derivation index of the chain, under a lock
 ([ensureIndexedAddress](../../internal/custody/customers.go)); migration 0012 makes the index unique per chain.

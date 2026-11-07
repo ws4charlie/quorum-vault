@@ -27,7 +27,7 @@ import (
 const (
 	btcChain     = "btc-test"
 	btcPartition = "qv-us/btc-test/BTC/hot/omnibus/0"
-	btcPart1     = "qv-us/btc-test/BTC/hot/omnibus/1"         // another shard of the same pool
+	btcPart1     = "qv-us/btc-test/BTC/hot/segregated:beta/0" // a hot shard of another pool
 	btcPartSeg   = "qv-us/btc-test/BTC/hot/segregated:acme/0" // a segregated client's shard
 )
 
@@ -124,13 +124,13 @@ func newBTCHarness(t *testing.T) *btcH {
 	b.hotS, _ = acct.Address([]uint32{1, 2})
 	b.dep, _ = acct.Address([]uint32{0, 5})
 
-	cf := ChainFile{Family: "btc", WithdrawalsPerHour: 1000, SweepsPerHour: 1000, CancelsPerHour: 1000, ToColdPerHour: 1000, RebalancePerHour: 1000,
+	cf := ChainFile{Family: "btc", WithdrawalsPerHour: 1000, SweepsPerHour: 1000, CancelsPerHour: 1000, ToColdPerHour: 1000,
 		BTC: &BTCFile{Network: "regtest", AccountXpub: xpub.String(), MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
 			HotShards: map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 0}}, btcPart1: {Address: b.hot1, Path: []uint32{1, 1}},
 				btcPartSeg: {Address: b.hotS, Path: []uint32{1, 2}}},
 			ColdAddresses: map[string]string{"omnibus/native": b.cold, "segregated:acme/native": b.coldS}},
 		Assets: map[string]AssetFile{"BTC": {AnyDestination: true, PerTxCap: "100000000", DailyCap: "1000000000", Tiers: []TierFile{{"0", 1}},
-			ToColdDailyCap: "1000000000", RebalanceDailyCap: "1000000000"}}}
+			ToColdDailyCap: "1000000000"}}}
 	cc, err := cf.build(btcChain, 4)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func newBTCHarness(t *testing.T) *btcH {
 	for _, q := range []string{
 		`INSERT INTO assets (chain, symbol, decimals) VALUES ('` + btcChain + `','BTC',8)`,
 		`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('` + btcPartition + `','qv-us','` + btcChain + `','BTC','hot','omnibus',0)`,
-		`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('` + btcPart1 + `','qv-us','` + btcChain + `','BTC','hot','omnibus',1)`,
+		`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('` + btcPart1 + `','qv-us','` + btcChain + `','BTC','hot','segregated:beta',0)`,
 		`INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('` + btcPartSeg + `','qv-us','` + btcChain + `','BTC','hot','segregated:acme',0)`,
 	} {
 		if _, err := h.biz.Exec(ctx, q); err != nil {
@@ -486,8 +486,8 @@ func TestBTCIntentsAreBoundToTheirPartition(t *testing.T) {
 		return p, in
 	}
 	// 1. Spending the segregated shard under an omnibus intent.
-	for n, kind := range []string{"withdrawal", "to-cold", "rebalance"} {
-		to := map[string]string{"withdrawal": b.other, "to-cold": b.cold, "rebalance": b.hot1}[kind]
+	for n, kind := range []string{"withdrawal", "to-cold"} {
+		to := map[string]string{"withdrawal": b.other, "to-cold": b.cold}[kind]
 		p, in := mk(kind, to, 100_000)
 		p.Inputs = []btc.PayloadInput{seg(10 + n*2), seg(11 + n*2)}
 		in.ID = fmt.Sprintf("seg-%d", n)
@@ -500,11 +500,9 @@ func TestBTCIntentsAreBoundToTheirPartition(t *testing.T) {
 		in.ID = fmt.Sprintf("chg-%d", n)
 		b.mustRefuse(b.jobs(fmt.Sprintf("chg%d", n), in, p, "auto")[0], ReasonTx)
 	}
-	// 3. To-cold to another pool's cold address; rebalance into another pool.
+	// 3. To-cold to another pool's cold address.
 	p, in := mk("to-cold", b.coldS, 100_000)
 	b.mustRefuse(b.jobs("tc", in, p)[0], ReasonTx)
-	p, in = mk("rebalance", b.hotS, 100_000)
-	b.mustRefuse(b.jobs("rb", in, p)[0], ReasonTx)
 	// 4. Sweep and cancel to another partition's shard.
 	sw := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{btcIn(30, 0, 50_000, 0, 5)}, Outputs: []btc.PayloadOutput{{Address: b.hot1, Value: 49_000}}}
 	b.mustRefuse(b.jobs("sw", signjob.Intent{Kind: "sweep", ID: "sw1", From: b.dep, To: b.hot1, Amount: "50000"}, sw)[0], ReasonTx)
@@ -513,6 +511,16 @@ func TestBTCIntentsAreBoundToTheirPartition(t *testing.T) {
 	// And the right ones pass, each under its own partition: a segregated to-cold goes to the segregated pool's cold address.
 	ps := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{seg(40), seg(41)}, Outputs: []btc.PayloadOutput{{Address: b.coldS, Value: 100_000}, {Address: b.hotS, Value: 180_000}}}
 	b.mustSignAll(b.jobs("ok", signjob.Intent{Kind: "to-cold", ID: "tc-seg", PartitionID: btcPartSeg, To: b.coldS, Amount: "100000"}, ps))
+}
+
+// Bitcoin has no move between hot shards: a rebalance intent is refused whatever it pays and to whom.
+func TestBTCRefusesRebalance(t *testing.T) {
+	b := newBTCHarness(t)
+	for n, to := range []string{b.hot1, b.hotS, b.hot0, b.cold, b.other} {
+		p := b.twoInputs(150_000, 150_000, to, 180_000)
+		in := signjob.Intent{Kind: "rebalance", ID: fmt.Sprintf("rb-%d", n), Asset: "BTC", To: to, Amount: "100000"}
+		b.mustRefuse(b.jobs(fmt.Sprintf("rb%d", n), in, p)[0], ReasonTx)
+	}
 }
 
 // A cancel needs no approval, so it may only spend what an attempt claimed: every input already claimed with the same pin, all by one

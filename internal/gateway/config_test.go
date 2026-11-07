@@ -117,3 +117,24 @@ func TestExampleBTCChain(t *testing.T) {
 		}
 	}
 }
+
+// Bitcoin keeps one hot shard per pool: two in one pool refuse to load, and the message names the pool. A shard in each of two pools loads.
+func TestBTCConfigRefusesTwoHotShardsInOnePool(t *testing.T) {
+	good, _ := os.ReadFile("config.example.json")
+	build := func(second string) []byte {
+		var m map[string]any
+		json.Unmarshal(good, &m)
+		shards := m["chains"].(map[string]any)["btc-example"].(map[string]any)["btc"].(map[string]any)["hot_shards"].(map[string]any)
+		one := shards["qv-us/btc-example/BTC/hot/segregated:acme/0"]
+		delete(shards, "qv-us/btc-example/BTC/hot/segregated:acme/0")
+		shards[second] = one
+		b, _ := json.Marshal(m)
+		return b
+	}
+	if _, err := ParseConfig(build("qv-us/btc-example/BTC/hot/omnibus/1")); err == nil || !strings.Contains(err.Error(), `pool "omnibus" has two hot shards`) {
+		t.Fatalf("two shards in the omnibus pool: %v", err)
+	}
+	if _, err := ParseConfig(build("qv-us/btc-example/BTC/hot/segregated:acme/0")); err != nil {
+		t.Fatalf("one shard in each of two pools: %v", err)
+	}
+}

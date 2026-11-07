@@ -104,7 +104,7 @@ func (s *system) setupWithdrawals(o opts) {
 		Approvers: apprFiles, SignTimeout: "20s", MaxIntentAge: "24h",
 		Signers: map[string]gateway.SignerFile{s.part: {Backend: "mpc", KeysetID: s.mpc.KeysetID, HardenedPath: btc.AccountPath("regtest"),
 			MPC: &gateway.MPCSignerFile{Address: s.mpc.CallerA, CertFile: crt, KeyFile: key, ServerPin: s.mpc.CertA.Pin}}},
-		Chains: map[string]gateway.ChainFile{s.chain: {Family: "btc", WithdrawalsPerHour: 100000, SweepsPerHour: sweepsPerHour, CancelsPerHour: 1000, ToColdPerHour: 1000, RebalancePerHour: 1000,
+		Chains: map[string]gateway.ChainFile{s.chain: {Family: "btc", WithdrawalsPerHour: 100000, SweepsPerHour: sweepsPerHour, CancelsPerHour: 1000, ToColdPerHour: 1000,
 			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: s.xpub, ColdAddresses: map[string]string{"omnibus/native": s.coldAddr}, MaxTxFeeSats: 100_000, MaxFeeRate: 200, MaxInputs: 20,
 				HotShards: map[string]gateway.HotShardFile{s.part: {Address: s.hotAddr, Path: []uint32{1, 0}}}},
 			Assets: map[string]gateway.AssetFile{"BTC": asset}}},
