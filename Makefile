@@ -8,7 +8,7 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-sweep-recovery test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
+.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
 
 setup: softhsm db-up chain-up
 
@@ -135,8 +135,9 @@ test-e2e-btc-deposits:
 test-e2e-btc-withdrawals:
 	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_WITHDRAWALS)' ./e2e/btc/...
 
-# Sweeps: credited deposits move into the hot shard and become spendable, on real mpc-party (deposit-branch keys), gateway, cosigner and regtest.
-E2E_BTC_SWEEPS := TestSweep
+# Sweeps: credited deposits move into the hot shard and become spendable, on real mpc-party (deposit-branch keys), gateway, cosigner and regtest; and the
+# recovery of sweeps: bump, cancel, release, an outside spend, every crash boundary.
+E2E_BTC_SWEEPS := TestSweep|TestRecoverySweep
 test-e2e-btc-sweeps:
 	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_SWEEPS)' ./e2e/btc/...
 
@@ -145,12 +146,6 @@ test-e2e-btc-sweeps:
 E2E_BTC_RECOVERY := TestRecovery
 test-e2e-btc-recovery:
 	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_RECOVERY)' -skip 'TestRecoverySweep' ./e2e/btc/...
-
-# Recovery of sweeps: bump, cancel, release, an outside spend, every crash boundary. A separate group because one regtest node's block rewards do not
-# last for both (the harness asks for a fresh node when they run out).
-E2E_BTC_SWEEP_RECOVERY := TestRecoverySweep
-test-e2e-btc-sweep-recovery:
-	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_SWEEP_RECOVERY)' ./e2e/btc/...
 
 # Reconciliation against the chain (scantxoutset) and hot-to-cold moves: bands, rounds under max_inputs, the attacks, crash boundaries, the cancel.
 E2E_BTC_COLD := TestCold|TestReconcile
@@ -163,8 +158,8 @@ E2E_BTC_REFILL := TestRefill
 test-e2e-btc-refill:
 	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL)' -skip '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
 
-# Stuck refills: the fee-bumped second ceremony, both ways round, the lost signed file, the fee attacks through real files. Its own group: one regtest
-# node's block rewards do not last for both refill groups.
+# Stuck refills: the fee-bumped second ceremony, both ways round, the lost signed file, the fee attacks through real files. Its own group so that each CI job
+# stays well under ten minutes (the two together take about six on a laptop).
 test-e2e-btc-refill-stuck:
 	$(E2E_BTC_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
 

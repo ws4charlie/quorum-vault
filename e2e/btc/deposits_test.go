@@ -142,7 +142,6 @@ func TestDeepReorgHaltsScanningAndKeepsTheCredit(t *testing.T) {
 	p := s.worker
 	s.waitFor(10*time.Second, "an ALERT in the worker log", func() bool { return fileContains(p.log, "ALERT: scanning is halted") })
 
-	s.node.mine(101, "") // the rewards of the old chain are gone: mature new ones to pay from
 	s.node.pay(map[string]string{other: "0.001"})
 	s.node.mine(8, "")
 	s.holds(3*time.Second, "nothing credited while halted; the first credit stays", func() bool {
