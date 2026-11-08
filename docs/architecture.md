@@ -1,7 +1,7 @@
 # Architecture
 
 quorum-vault is one custody system (`/v2`): deposits, sweeps and withdrawals on EVM chains, a Temporal-driven workflow engine, a
-signing gateway that is a separate trust zone, and **two-party MPC hot signing** (`mpc-party` A and B plus a cosigner).
+signing gateway that is a separate trust zone, and **MPC hot signing** (`mpc-party` A, B and C plus a cosigner next to B and one next to C: EVM hot shards are 2-of-3 keysets, Bitcoin stays two-party).
 
 ## The custody system: processes and trust zones
 
@@ -41,8 +41,8 @@ flowchart LR
 | `qv-worker` | Temporal workflows: scan, sweep planner, withdrawal reconciler, cold planner (long-running loops), one workflow per withdrawal, sweep and hot-to-cold move; a watchdog restarts a loop that stops making progress | the business database, the chain |
 | `qv-relay` | outbox to Redpanda, at least once | the business database |
 | `qv-gateway` | signing zone: claims `sign_jobs`, re-verifies the intent, the approver signatures and the policy (for a withdrawal: the destination must be on the asset's list in its config, and only so many may start per hour; for a hot-to-cold move: the pinned cold address, a rate and a daily cap; for an EVM hot-shard rebalance: another hot shard of the pool, a rate and a daily cap; Bitcoin has no rebalance and refuses the kind), reserves the digest in its own replay-guard database, then asks a signer | **not** the business database: it only reads and updates `sign_jobs` as a restricted role |
-| `mpc-party` A and B | two-party threshold ECDSA (cb-mpc): DKG, derive, sign, refresh; shares sealed by each party's own HSM token; durable two-phase refresh; backup and restore | each other only through pinned mTLS certificates |
-| `qv-cosigner` | party B's gate: repeats the gateway's checks from its own config and its own database before B takes part in a signature; fail closed | nothing from A or the gateway |
+| `mpc-party` A, B and C | threshold ECDSA (cb-mpc): 2-of-3 keysets (EVM, any two of A, B, C sign; each EVM hot shard is its own keyset) and two-party HD keysets (Bitcoin, A and B): DKG, derive, sign, refresh; shares sealed by each party's own HSM token; durable two-phase refresh; backup and restore | each other only through pinned mTLS certificates |
+| `qv-cosigner` (two: next to B, next to C) | the gate of party B and of party C: each repeats the gateway's checks from its own config file and its own replay-guard database before its party takes part in a signature, in every role; fail closed | nothing from A, the gateway or each other |
 
 One withdrawal, end to end: API commits the row, the hold and an outbox event, then starts a workflow. The workflow waits for
 approvals, builds the transaction and allocates a nonce, enqueues a `sign_job`. The gateway claims it, checks it, and asks
@@ -68,7 +68,7 @@ flowchart LR
 ```
 
 No human approves a move: the destination is pinned in the signing zone's config, which the business side cannot change, so a move
-can only make funds safer. Both the gateway and party B's cosigner check it, from their own config and their own stores, so a
+can only make funds safer. Both the gateway and the cosigners of B and C check it, from their own config and their own stores, so a
 rogue party A or a rogue business database cannot send "cold" money anywhere else. `Reconcile` compares each cold address's
 on-chain balance with the sum of the `cold:<partition>` accounts that deliver to it. Design and tests:
 [learn/p6-1-hot-to-cold.md](learn/p6-1-hot-to-cold.md).

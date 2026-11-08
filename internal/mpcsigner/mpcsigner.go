@@ -69,6 +69,9 @@ type Error struct {
 	Kind    Kind
 	Message string
 	Err     error
+	// Started: the service says the failure happened after signing messages may have been exchanged (2-of-3 Sign). An
+	// availability failure with Started false happened before any signing message: another coordinator may be tried.
+	Started bool
 }
 
 func (e *Error) Error() string { return fmt.Sprintf("mpc signer: %s", e.Message) }
@@ -206,7 +209,7 @@ func classify(err error) error {
 			case pb.ErrorKind_ERROR_KIND_UNAVAILABLE:
 				k = KindUnavailable
 			}
-			return &Error{Kind: k, Message: ed.Message, Err: err}
+			return &Error{Kind: k, Message: ed.Message, Err: err, Started: ed.Code == pb.CodeSigningStarted}
 		}
 	}
 	// No typed detail: a connection-level failure (certificate refused, server down) is a transport failure.

@@ -30,6 +30,31 @@ func MPCSigners(cfg *Config) (map[string]signer.Signer, func(), error) {
 	sort.Strings(parts)
 	for _, p := range parts {
 		sf := cfg.Signers[p]
+		if sf.Scheme == "ecdsa-2of3" {
+			pub, err := hex.DecodeString(sf.PublicKey)
+			if err != nil {
+				closeAll()
+				return nil, nil, fmt.Errorf("gateway: signer %q: public_key must be hex", p)
+			}
+			var coords []mpcsigner.Coordinator
+			for _, c := range sf.Coordinators {
+				cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+				if err != nil {
+					closeAll()
+					return nil, nil, fmt.Errorf("gateway: signer %q: coordinator %s: client certificate: %w", p, c.Name, err)
+				}
+				coords = append(coords, mpcsigner.Coordinator{Name: c.Name, Address: c.Address, ClientCert: cert, ServerPin: c.ServerPin})
+			}
+			ts, err := mpcsigner.NewThreshold(mpcsigner.ThresholdConfig{PartitionID: p, KeysetID: sf.KeysetID, PublicKey: pub, Coordinators: coords,
+				MaxRetries: sf.Coordinators[0].MaxRetries, Timeout: cfg.SignTimeout})
+			if err != nil {
+				closeAll()
+				return nil, nil, fmt.Errorf("gateway: signer %q: %w", p, err)
+			}
+			closers = append(closers, ts.Close)
+			out[p] = ts
+			continue
+		}
 		if sf.KeysetID != "" {
 			cert, err := tls.LoadX509KeyPair(sf.MPC.CertFile, sf.MPC.KeyFile)
 			if err != nil {

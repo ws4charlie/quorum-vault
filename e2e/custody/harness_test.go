@@ -235,14 +235,15 @@ type system struct {
 	tokABI                    abi.ABI
 	factoryABI                abi.ABI
 	shardAddr                 []common.Address
-	coldAddr                  common.Address  // the cold address both zones are configured with
-	cold                      *coldKit        // the offline signer's side, when opts.cold.coldHSM
-	mpc                       *mpcstack.Stack // mpc mode only
+	coldAddr                  common.Address   // the cold address both zones are configured with
+	cold                      *coldKit         // the offline signer's side, when opts.cold.coldHSM
+	mpc                       *mpcstack.Stack3 // mpc mode only: parties A, B, C, a cosigner next to B and one next to C; one 2-of-3 keyset per hot shard
 	tm                        *phasetime.Timer
 	cf                        custody.File // the files as written, so a test can change one and restart
 	gf                        gateway.File
 	cosPath                   string
-	cosGuardDSN               string
+	cosGuardDSN               string // B's cosigner's replay guard
+	cosCGuardDSN              string // C's cosigner's own replay guard
 	chainName                 string
 	queue                     string
 
@@ -372,7 +373,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.ec = ethclient.NewClient(s.rc)
 
 	if mpcMode() { // the two parties take about a second to boot: they start now, while the databases and the chain are set up, and are waited for below
-		s.mpc = mpcstack.Start(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy})
+		s.mpc = mpcstack.Start3(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy})
 		s.tm.Phase("mpc-start")
 	}
 	// Databases: the business database, and the gateway's own replay guard.
@@ -409,8 +410,8 @@ func newSystem(t *testing.T, o opts) *system {
 	s.usdt = s.mustSend(s.deployer, nil, new(big.Int), readBin(t, "UsdtLike.bin")).ContractAddress
 
 	s.tm.Phase("chain")
-	// Hot shards: HSM keys that never leave the token, or (mpc mode) keys derived from a two-party DKG whose shares live
-	// in two parties' own HSM tokens.
+	// Hot shards: HSM keys that never leave the token, or (mpc mode) one 2-of-3 keyset per shard whose shares live in
+	// three parties' own HSM tokens.
 	signers := map[string]gateway.SignerFile{}
 	var keys []struct{ id, pub string }
 	var mpcShards []mpcstack.Shard
@@ -575,6 +576,11 @@ func newSystem(t *testing.T, o opts) *system {
 		writeJSON(t, cosPath, cf2)
 		s.cosGuardDSN = s.newGuardDB()
 		s.mpc.StartCosigner(cosPath, s.cosGuardDSN, s.guardDSN)
+		// Party C's cosigner: its own config file (the same rules and trust roots as B's), its own replay-guard database.
+		cosCPath := filepath.Join(s.dir, "cosigner-c.json")
+		writeJSON(t, cosCPath, cf2)
+		s.cosCGuardDSN = s.newGuardDB()
+		s.mpc.StartCosignerC(cosCPath, s.cosCGuardDSN, s.guardDSN)
 	}
 
 	s.tm.Phase("configs")

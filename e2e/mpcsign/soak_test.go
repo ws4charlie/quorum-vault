@@ -63,7 +63,7 @@ func TestSoakWholePath(t *testing.T) {
 	time.Sleep(time.Second)
 
 	pids := func() map[string]int {
-		m := map[string]int{"party-A": s.a.cmd.Process.Pid, "party-B": s.b.cmd.Process.Pid, "cosigner": s.cosigner.cmd.Process.Pid}
+		m := map[string]int{"party-A": s.a.cmd.Process.Pid, "party-B": s.b.cmd.Process.Pid, "party-C": s.c.cmd.Process.Pid, "cosigner": s.cosigner.cmd.Process.Pid, "cosigner-C": s.cosignerC.cmd.Process.Pid}
 		for i, g := range gws {
 			m[fmt.Sprintf("gateway-%d", i)] = g.cmd.Process.Pid
 		}

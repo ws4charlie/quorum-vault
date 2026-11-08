@@ -52,6 +52,7 @@ type Server struct {
 	cache      *keyCache
 	rtMu       sync.Mutex
 	rts        map[string]*ksRT
+	linksUp    map[string]bool
 	kick       chan struct{}
 	loopCancel context.CancelFunc
 	stats      frameStats
@@ -208,14 +209,17 @@ func (s *Server) Start() error {
 		s.loopCancel = lcancel
 		go s.reconcileLoop(lctx)
 		go s.watchPeer(lctx, s.peerConn, "B", true)
+		go s.watchLink(lctx, s.peerConn, "B")
 		if s.peerCConn != nil {
 			go s.watchPeer(lctx, s.peerCConn, "C", false)
+			go s.watchLink(lctx, s.peerCConn, "C")
 		}
 	case "B":
 		if s.peerCConn != nil {
 			// keep the link to C alive: a gRPC channel goes idle after a drop and reconnects only when asked
 			lctx, lcancel := context.WithCancel(context.Background())
 			s.loopCancel = lcancel
+			go s.watchLink(lctx, s.peerCConn, "C")
 			go func() {
 				t := time.NewTicker(500 * time.Millisecond)
 				defer t.Stop()

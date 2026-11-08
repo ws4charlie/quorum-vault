@@ -94,10 +94,7 @@ func pin() string {
 
 // SealerConfig is the sealer section of a party config: the party's own SoftHSM token (A: qv-party-1, B: qv-party-2).
 func SealerConfig(role string) map[string]any {
-	tok := "qv-party-1"
-	if role == "B" {
-		tok = "qv-party-2"
-	}
+	tok := map[string]string{"A": "qv-party-1", "B": "qv-party-2", "C": "qv-party-3"}[role]
 	return map[string]any{"type": "pkcs11", "token": tok, "pin_env": "QV_HSM_PIN"}
 }
 
@@ -625,7 +622,9 @@ type Proxy struct {
 	delayNS atomic.Int64
 	cut     atomic.Bool
 
-	tdir, tn atomic.Int32 // tamper: direction (0: A to B, 1: B to A) and index; tn < 0 off
+	tdir, tn atomic.Int32    // tamper: direction (0: A to B, 1: B to A) and index; tn < 0 off
+	Fired    atomic.Int32    // how many frames Tamper has corrupted
+	Seen     [2]atomic.Int32 // DATA frames seen per direction since Tamper was armed
 	count    [2]atomic.Int32
 
 	mu     sync.Mutex
@@ -664,7 +663,9 @@ func (p *Proxy) mutate(dir int, f *pb.Frame) {
 		return
 	}
 	idx := p.count[dir].Add(1) - 1
+	p.Seen[dir].Store(idx + 1)
 	if int(p.tdir.Load()) == dir && idx == p.tn.Load() {
+		p.Fired.Add(1)
 		f.Payload = append([]byte(nil), f.Payload...)
 		f.Payload[len(f.Payload)/2] ^= 0x01
 	}
@@ -683,7 +684,10 @@ func (p *Proxy) delay(ctx context.Context) bool {
 	}
 }
 
-func (p *Proxy) Session(in pb.Peer_SessionServer) error {
+func (p *Proxy) Session(in pb.Peer_SessionServer) error { return p.session(in, p.client) }
+
+// session forwards one stream to client (the target of this link).
+func (p *Proxy) session(in pb.Peer_SessionServer, client pb.PeerClient) error {
 	if p.cut.Load() {
 		return grpcUnavailable()
 	}
@@ -700,7 +704,7 @@ func (p *Proxy) Session(in pb.Peer_SessionServer) error {
 	p.mu.Unlock()
 	defer func() { p.mu.Lock(); delete(p.active, id); p.mu.Unlock() }()
 
-	out, err := p.client.Session(ctx)
+	out, err := client.Session(ctx)
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@ package custody_test
 import (
 	"fmt"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"math/big"
 	"os"
 	"strings"
@@ -11,7 +12,7 @@ import (
 	"time"
 )
 
-// Failure tests of the two-party signer, through real withdrawals. They run only with QV_CUSTODY_SIGNER=mpc. Every test ends
+// Failure tests of the 2-of-3 signer (parties A, B, C, a cosigner next to B and one next to C), through real withdrawals. They run only with QV_CUSTODY_SIGNER=mpc. Every test ends
 // with at most one payout per withdrawal (exactly one for the ones that must complete), no failed or refused sign job where
 // the cause is an outage, and a clean Reconcile. Waits are on conditions (a log line, a database row, a health answer),
 // never on a fixed sleep, so a slow CI runner only makes them longer.
@@ -71,7 +72,7 @@ func (s *system) finish() {
 	}
 }
 
-// With one of the signing components down, a withdrawal that reaches the sign step waits (the job stays open, one ALERT, no
+// With two of the three parties (or both cosigners) down, a withdrawal that reaches the sign step waits (the job stays open, one ALERT, no
 // refusal, no void); when the component is back it completes with one payout. The worker is also killed at the two custody
 // boundaries before the signature (after_build: nonce allocated, no job yet; after_job: job queued), so the restarted
 // workflow finds a half-done withdrawal AND an outage.
@@ -88,10 +89,22 @@ func TestMPCKillSigningComponentAtCustodyBoundary(t *testing.T) {
 		name        string
 		kill, start func()
 	}
+	// With 2-of-3 one component down is no outage (see mpc3_test.go: withdrawals continue). An outage needs two down, so that no pair of
+	// parties with its cosigners can sign: any two parties, or both cosigners.
+	t0 := s.t
+	startParties := func(roles ...string) func() {
+		return func() {
+			for _, r := range roles {
+				s.mpc.Party(r).Start(t0)
+			}
+			s.mpc.WaitReady(120 * time.Second)
+		}
+	}
 	victims := []victim{
-		{"party-A", s.mpc.A.Kill, s.mpc.RestartA},
-		{"party-B", s.mpc.B.Kill, s.mpc.RestartB},
-		{"cosigner", s.mpc.Cos.Kill, s.mpc.StartCosignerAgain},
+		{"parties A+B", func() { s.mpc.A.Kill(); s.mpc.B.Kill() }, startParties("A", "B")},
+		{"parties B+C", func() { s.mpc.B.Kill(); s.mpc.C.Kill() }, startParties("B", "C")},
+		{"parties A+C", func() { s.mpc.A.Kill(); s.mpc.C.Kill() }, startParties("A", "C")},
+		{"both cosigners", func() { s.mpc.Cos.Kill(); s.mpc.CosC.Kill() }, func() { s.mpc.StartCosignerAgain(); s.mpc.StartCosignerCAgain() }},
 	}
 	n := 0
 	for _, v := range victims {
@@ -138,14 +151,18 @@ func TestMPCKillSigningComponentAtCustodyBoundary(t *testing.T) {
 	}
 }
 
-// A party that dies in the middle of a signing session (the session is made slow so there is time to hit it).
+// Two parties that die in the middle of a signing session (the session is made slow so there is time to hit it): no pair can finish, the
+// job waits, and it completes after the restart. (One party dying mid-session is a degraded run, not an outage: mpc3_test.go.)
 func TestMPCKillPartyMidSession(t *testing.T) {
 	requireMPC(t)
 	s, _ := funded(t, opts{mpcProxy: true}, "c-mid", 10)
 	for i, v := range []struct {
 		name        string
 		kill, start func()
-	}{{"party-A", s.mpc.A.Kill, s.mpc.RestartA}, {"party-B", s.mpc.B.Kill, s.mpc.RestartB}} {
+	}{
+		{"parties A+B", func() { s.mpc.A.Kill(); s.mpc.B.Kill() }, func() { s.mpc.A.Start(t); s.mpc.B.Start(t); s.mpc.WaitReady(120 * time.Second) }},
+		{"parties B+C", func() { s.mpc.B.Kill(); s.mpc.C.Kill() }, func() { s.mpc.B.Start(t); s.mpc.C.Start(t); s.mpc.WaitReady(120 * time.Second) }},
+	} {
 		s.mpc.Proxy.SetLatency(200 * time.Millisecond)
 		sessions := s.mpc.Proxy.Sessions.Load()
 		before := s.gwLogCount("ALERT signer unavailable")
@@ -164,7 +181,7 @@ func TestMPCKillPartyMidSession(t *testing.T) {
 	}
 }
 
-// The link between A and B is cut during a withdrawal and healed later: once before the session starts, once in the middle of
+// Every link between the parties is cut during a withdrawal and healed later: once before the session starts, once in the middle of
 // a session.
 func TestMPCPartitionBetweenPartiesDuringWithdrawal(t *testing.T) {
 	requireMPC(t)
@@ -310,6 +327,10 @@ func TestMPCFreezeDuringLiveWithdrawals(t *testing.T) {
 	t.Cleanup(func() {
 		if t.Failed() {
 			s.dump("freeze test, at " + current)
+			t.Logf("proxy: tamper fired %d times; DATA frames seen since armed: A->B direction %d, back %d", s.mpc.Proxy.Fired.Load(), s.mpc.Proxy.Seen[0].Load(), s.mpc.Proxy.Seen[1].Load())
+			for _, p := range []*mpcstack.Proc{s.mpc.A, s.mpc.B, s.mpc.C} {
+				t.Logf("---- %s (tail)\n%s", p.Name, tailStr(p.Output(), 3500))
+			}
 		}
 	})
 
@@ -320,9 +341,13 @@ func TestMPCFreezeDuringLiveWithdrawals(t *testing.T) {
 	// A man in the middle corrupts one protocol message during the next withdrawal's signature.
 	current = "tamper"
 	alerts := s.gwLogCount("ALERT signer failure")
-	s.mpc.Proxy.Tamper(0, 2)
+	// Message 3 from A (not 2: cb-mpc ignores a flipped byte in the middle of A's third message about half of the time, so a test that
+	// waits for the freeze would be flaky; messages 0, 1, 3, 4 and 5 are always detected).
+	s.mpc.Proxy.Tamper(0, 3)
 	id1, dest1 := s.startPayment("c-frz", "k-frz-1")
 	s.waitFor(90*time.Second, "the keyset to freeze", s.mpc.Frozen)
+	// it is frozen on ALL THREE parties: the two in the failed session, and the third, told by the coordinator
+	s.waitFor(60*time.Second, "the keyset to freeze on B and C too", func() bool { return s.mpc.FrozenOn("B", "hot-0") && s.mpc.FrozenOn("C", "hot-0") })
 	s.mpc.Proxy.Tamper(0, -1)
 	s.waitFor(60*time.Second, "an ALERT for the failed sign job", func() bool { return s.gwLogCount("ALERT signer failure") > alerts })
 
@@ -362,8 +387,8 @@ func TestMPCFreezeDuringLiveWithdrawals(t *testing.T) {
 	if err := s.mpc.Unfreeze(); err != nil {
 		t.Fatalf("unfreeze: %v", err)
 	}
-	if s.mpc.Frozen() {
-		t.Fatal("still frozen after Unfreeze")
+	if s.mpc.Frozen() || s.mpc.FrozenOn("B", "hot-0") || s.mpc.FrozenOn("C", "hot-0") {
+		t.Fatal("still frozen on some party after Unfreeze")
 	}
 	id3, dest3 := s.startPayment("c-frz", "k-frz-3")
 	s.waitBroadcast(id3)
@@ -412,4 +437,11 @@ func (s *system) nonceStatus(withdrawalID string) string {
 		return "none"
 	}
 	return st
+}
+
+func tailStr(s string, n int) string {
+	if len(s) > n {
+		return "..." + s[len(s)-n:]
+	}
+	return s
 }

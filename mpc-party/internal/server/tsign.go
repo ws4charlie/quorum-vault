@@ -103,6 +103,9 @@ func (s *Server) signViaPeer(ctx context.Context, open *pb.Open, tk *cbmpc.TKey,
 		var f *Fail
 		if err != nil && errors.As(err, &f) {
 			s.maybeFreezeT(open, f, peer)
+			if started && f.CB == 0 {
+				f.CB = CodeSigningStarted // the caller must not treat this as "nothing was exchanged"
+			}
 		}
 	}()
 	if !s.slots.acquire() {
@@ -241,20 +244,25 @@ func (s *Server) signFollowT(ctx context.Context, stream pb.Peer_SessionServer, 
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "generation check failed")
 	}
 	pub := tk.PublicKey()
-	if len(open.ExpectedPublicKey) == 0 || string(open.ExpectedPublicKey) != string(pub) {
-		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "sign without the expected public key of this keyset: this party cannot tell which key it would sign with")
+	if len(open.ExpectedPublicKey) == 0 {
+		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "sign without an expected public key: this party cannot tell which key it would sign with")
 	}
 	if open.Algorithm != pb.Algorithm_ALGORITHM_ECDSA_SECP256K1 || len(open.Digest) != 32 {
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "a 2-of-3 keyset signs 32-byte ECDSA digests")
 	}
-	// The party re-verifies what it is asked to sign BEFORE it joins: its own cosigner, in every role.
+	// The party re-verifies what it is asked to sign BEFORE it joins: its own cosigner, in every role. The cosigner judges the key the
+	// OPEN names (its transaction must come from that key); only then is that key required to be this keyset's key, so the cosigner's
+	// own key check is still exercised exactly as for a 2-party key.
 	if err := s.authz.Authorize(ctx, AuthRequest{Role: s.cfg.Role, JobID: open.JobId, KeyID: open.KeyId, KeysetID: id,
-		Algorithm: open.Algorithm, Digest: open.Digest, IntentPackage: open.IntentPackage, PublicKey: pub}); err != nil {
+		Algorithm: open.Algorithm, Digest: open.Digest, IntentPackage: open.IntentPackage, PublicKey: open.ExpectedPublicKey}); err != nil {
 		var ue *UnavailableError
 		if errors.As(err, &ue) {
 			return reject(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, "authorizer on "+s.cfg.Role+" unavailable: "+err.Error())
 		}
 		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "authorizer on "+s.cfg.Role+" refused: "+err.Error())
+	}
+	if string(open.ExpectedPublicKey) != string(pub) {
+		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "the expected public key is not the key of this keyset")
 	}
 	tr := newSessTransport(sid, stream, s.cfg.Limits.MaxFrameBytes, &s.stats)
 	if err := tr.sendFrame(pb.FrameKind_FRAME_KIND_ACK, nil); err != nil {

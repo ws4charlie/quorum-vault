@@ -26,6 +26,7 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(log) // the 2-of-3 signer logs its degraded/recovered transitions through the default logger
 	if err := run(log); err != nil {
 		log.Error("qv-gateway stopped", "error", err.Error())
 		os.Exit(1)

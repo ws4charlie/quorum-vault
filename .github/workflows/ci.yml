@@ -89,7 +89,7 @@ jobs:
           go-version-file: mpc-party/go.mod
       - name: Install C++ toolchain
         run: mpc-party/scripts/install-toolchain-linux.sh
-      # The sealer tests and the restore drill use SoftHSM tokens qv-party-1 and qv-party-2.
+      # The sealer tests and the restore drill use SoftHSM tokens qv-party-1, qv-party-2 and qv-party-3 (party C).
       - name: Install SoftHSM2 and create the tokens
         run: |
           sudo apt-get install -y softhsm2

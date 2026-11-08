@@ -53,12 +53,18 @@ type SignerFile struct {
 	KeysetID     string         `json:"keyset_id,omitempty"`
 	HardenedPath []uint32       `json:"hardened_path,omitempty"`
 	MPC          *MPCSignerFile `json:"mpc,omitempty"`
+	// Scheme "ecdsa-2of3" makes an EVM hot shard a 2-of-3 keyset on parties A, B and C (E23-3): keyset_id and public_key (the
+	// keyset's key, which the hot address is checked against) and Coordinators instead of mpc: party A first, then party B. The
+	// gateway moves to the next coordinator only when the party says nothing had been exchanged yet (see internal/mpcsigner).
+	Scheme       string          `json:"scheme,omitempty"`
+	Coordinators []MPCSignerFile `json:"coordinators,omitempty"`
 }
 
 // MPCSignerFile is how the gateway reaches party A (the caller port of mpc-party).
 type MPCSignerFile struct {
-	Address    string `json:"address"`   // host:port of party A's caller port
-	CertFile   string `json:"cert_file"` // the gateway's client certificate (pinned by party A)
+	Name       string `json:"name,omitempty"` // coordinators of a 2-of-3 signer: "A" or "B"
+	Address    string `json:"address"`        // host:port of party A's caller port
+	CertFile   string `json:"cert_file"`      // the gateway's client certificate (pinned by party A)
 	KeyFile    string `json:"key_file"`
 	ServerPin  string `json:"server_pin"`  // sha256 hex of party A's certificate
 	MaxRetries int    `json:"max_retries"` // transport/limit retries inside sign_timeout (default 3)
@@ -308,6 +314,25 @@ func (f File) build() (*Config, error) {
 				return nil, fmt.Errorf("gateway: config: signer %q: token is required for the hsm backend", p)
 			}
 		case "mpc":
+			if sf.Scheme != "" {
+				if sf.Scheme != "ecdsa-2of3" {
+					return nil, fmt.Errorf("gateway: config: signer %q: unknown scheme %q", p, sf.Scheme)
+				}
+				if sf.KeysetID == "" || sf.PublicKey == "" || sf.KeyID != "" || len(sf.HardenedPath) > 0 || sf.MPC != nil || len(sf.Coordinators) == 0 {
+					return nil, fmt.Errorf("gateway: config: signer %q: a 2-of-3 signer needs keyset_id, public_key and coordinators (party A, then party B), and no key_id, hardened_path or mpc", p)
+				}
+				seen := map[string]bool{}
+				for i, c := range sf.Coordinators {
+					if c.Name != "A" && c.Name != "B" || seen[c.Name] || c.Address == "" || c.CertFile == "" || c.KeyFile == "" || c.ServerPin == "" {
+						return nil, fmt.Errorf("gateway: config: signer %q: coordinator %d needs a distinct name (A or B) and address, cert_file, key_file and server_pin", p, i)
+					}
+					seen[c.Name] = true
+				}
+				if sf.Coordinators[0].Name != "A" {
+					return nil, fmt.Errorf("gateway: config: signer %q: the first coordinator is party A", p)
+				}
+				continue
+			}
 			deriving := sf.KeysetID != "" || len(sf.HardenedPath) > 0
 			if deriving && (sf.KeysetID == "" || len(sf.HardenedPath) == 0 || sf.KeyID != "" || sf.PublicKey != "") {
 				return nil, fmt.Errorf("gateway: config: signer %q: a key tree needs keyset_id and hardened_path, and no key_id or public_key", p)
