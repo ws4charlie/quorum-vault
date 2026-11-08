@@ -367,3 +367,68 @@ func TestReconcileEVMReportsADifferenceThatGrows(t *testing.T) {
 		t.Fatalf("detail %q", f[0].Detail)
 	}
 }
+
+// A sweep, a to-cold move or a rebalance whose job was refused and whose nonce was freed by a cancel that mined: the cancel's gas leaves the hot
+// wallet, the item ends failed, and the fee is booked once on the shard that paid. Reconcile is clean before and after, and a replay books nothing twice.
+func TestReconcileEVMMinedCancelOfSweepMoveAndRebalance(t *testing.T) {
+	ctx := context.Background()
+	for _, kind := range []string{"sweep", OwnerKindToCold, OwnerKindRebalance} {
+		t.Run(kind, func(t *testing.T) {
+			s, _, m := evmWorld(t)
+			hot := s.Cfg.HotShards[0].Hex()
+			p0 := s.Cfg.PartitionKey("ETH", 0).String()
+			p1 := s.Cfg.PartitionKey("ETH", 1).String()
+			var err error
+			switch kind {
+			case "sweep":
+				setupSweep(t, s, "x1", "ETH", 100)
+			case OwnerKindToCold:
+				_, err = s.Pool.Exec(ctx, `INSERT INTO cold_moves (id, chain, asset, partition_id, to_address, amount, status) VALUES ('x1',$1,'ETH',$2,'0xC0LD',5,'signing')`, testChain, p0)
+			default:
+				_, err = s.Pool.Exec(ctx, `INSERT INTO rebalance_moves (id, chain, asset, partition_id, to_partition_id, to_address, amount, status) VALUES ('x1',$1,'ETH',$2,$3,'0xA2',5,'signing')`, testChain, p0, p1)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt(t, s, hot, kind, "x1", "0xcancel", "cancel", 0)
+			requireClean(t, "cancel sent, not mined", mustReconcile(t, s))
+
+			m.rc["0xcancel"] = Receipt{Block: 90, Success: true, Fee: big.NewInt(7)}
+			m.add(hot, "ETH", -7)
+			rep := mustReconcile(t, s)
+			requireClean(t, "cancel mined, not settled", rep)
+			if !hasAdjusted(rep, "hot") {
+				t.Fatalf("no adjustment for the gas of a mined cancel: %+v", rep.Checks)
+			}
+			if _, err := s.Pool.Exec(ctx, `UPDATE evm_nonce_allocations SET status='cancelled' WHERE owner_id='x1'`); err != nil {
+				t.Fatal(err)
+			}
+			fail := func() error {
+				switch kind {
+				case "sweep":
+					return s.FailSweepBeforeBroadcast(ctx, "x1", "cancelled", "0xcancel")
+				case OwnerKindToCold:
+					return s.FailColdMoveBeforeBroadcast(ctx, "x1", "cancelled", "0xcancel")
+				}
+				return s.FailRebalanceBeforeBroadcast(ctx, "x1", "cancelled", "0xcancel")
+			}
+			for i := 0; i < 2; i++ { // the second is a replay
+				if err := fail(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The seed of 10 ETH was funded; the fee came out once.
+			if got, want := s.mustPosted(t, hotAcct(p0)), new(big.Int).Add(new(big.Int).Neg(tenETH), big.NewInt(7)); got.Cmp(want) != 0 {
+				t.Fatalf("hot = %s, want %s", got, want)
+			}
+			if got, want := s.mustPosted(t, feeAcct(testChain, "ETH")), new(big.Int).Sub(tenETH, big.NewInt(7)); got.Cmp(want) != 0 {
+				t.Fatalf("fee account = %s, want %s", got, want)
+			}
+			rep = mustReconcile(t, s)
+			requireClean(t, "settled", rep)
+			if rep.InFlight != 0 {
+				t.Fatalf("in flight %d", rep.InFlight)
+			}
+		})
+	}
+}

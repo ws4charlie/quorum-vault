@@ -291,7 +291,7 @@ func (s *Service) evmPending(ctx context.Context, q booksQ, rr ReceiptReader, h 
 	a := newEVMAdj()
 
 	// Sweeps. Booked at broadcast (sweep -> dep); at settlement what moved goes to the sink shard, the excess or shortfall is booked against dep,
-	// and the fee comes out of the receiving shard. A cancel that mined books nothing (the sweep ends failed): see the report.
+	// and the fee comes out of the receiving shard. A cancel that mined ends the sweep failed and books the cancel's gas.
 	sweeps, err := q.Query(ctx, `SELECT `+sweepCols+` FROM sweeps WHERE chain=$1 AND (status NOT IN ('confirmed','failed')
 		OR (status='failed' AND failure_reason='transaction reverted' AND updated_at > now() - interval '`+recentRevert+`')) ORDER BY created_at`, c.Chain)
 	if err != nil {
@@ -318,6 +318,13 @@ func (s *Service) evmPending(ctx context.Context, q booksQ, rr ReceiptReader, h 
 				if err := s.adjUnFee(a, x.PartitionID, above.rc.Fee); err != nil {
 					return nil, err
 				}
+			}
+			continue
+		}
+		if at != nil && at.cancel && x.Status != "broadcast" { // a mined cancel: the sweep ends failed and the cancel's gas is booked
+			a.mined++
+			if err := s.adjFee(a, x.PartitionID, at.rc.Fee); err != nil {
+				return nil, err
 			}
 			continue
 		}
@@ -448,6 +455,13 @@ func (s *Service) evmPending(ctx context.Context, q booksQ, rr ReceiptReader, h 
 					if err := s.adjUnFee(a, m.partition, above.rc.Fee); err != nil {
 						return nil, err
 					}
+				}
+				continue
+			}
+			if at != nil && at.cancel && m.status != "broadcast" { // a mined cancel: the move ends failed and the cancel's gas is booked
+				a.mined++
+				if err := s.adjFee(a, m.partition, at.rc.Fee); err != nil {
+					return nil, err
 				}
 				continue
 			}

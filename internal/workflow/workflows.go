@@ -605,7 +605,7 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 			return nil // marked failed; the planner plans it again after unfreezing
 		}
 		workflow.GetLogger(ctx).Warn("could not build the sweep; it will be planned again", "sweep", id, "error", err.Error())
-		return call(ctx, opts(ctx), nil, a.FailSweep, id, "could not build: "+err.Error())
+		return call(ctx, opts(ctx), nil, a.FailSweep, id, "could not build: "+err.Error(), "")
 	}
 	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
 	if err != nil {
@@ -617,7 +617,7 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 			return err
 		}
 		if cr.Kind == txCancelled && !(st.SettlesCancel && cr.Hash != "") {
-			return call(ctx, opts(ctx), nil, a.FailSweep, id, "gateway refused: "+r.Reason)
+			return call(ctx, opts(ctx), nil, a.FailSweep, id, "gateway refused: "+r.Reason, cr.Hash)
 		}
 		r = cr
 	}
@@ -628,7 +628,7 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 		}
 	case txCancelled:
 		if !(st.SettlesCancel && r.Hash != "") {
-			return call(ctx, opts(ctx), nil, a.FailSweep, id, "cancelled")
+			return call(ctx, opts(ctx), nil, a.FailSweep, id, "cancelled", r.Hash)
 		}
 		// Bitcoin: the cancel spent the same inputs to the same shard, so the coins reached the hot shard anyway. It settles as the sweep would
 		// have, with the cancel's own fee.
@@ -673,7 +673,7 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 	var job string
 	if err := call(ctx, buildOpts(ctx), &job, a.BuildColdMoveJob, id); err != nil {
 		workflow.GetLogger(ctx).Warn("could not build the cold move; it will be planned again", "cold_move", id, "error", err.Error())
-		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "could not build: "+err.Error())
+		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "could not build: "+err.Error(), "")
 	}
 	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
 	if err != nil {
@@ -685,7 +685,7 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 			return err
 		}
 		if cr.Kind == txCancelled && !(st.SettlesCancel && cr.Hash != "") {
-			return call(ctx, opts(ctx), nil, a.FailColdMove, id, "gateway refused: "+r.Reason)
+			return call(ctx, opts(ctx), nil, a.FailColdMove, id, "gateway refused: "+r.Reason, cr.Hash)
 		}
 		r = cr
 	}
@@ -696,7 +696,7 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 		if st.SettlesCancel && r.Hash != "" {
 			return call(ctx, opts(ctx), nil, a.SettleColdMove, id, r.Hash, true) // settled as a failed move, with the cancel's fee
 		}
-		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "cancelled")
+		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "cancelled", r.Hash)
 	}
 	return fmt.Errorf("unexpected outcome %q", r.Kind)
 }
@@ -768,7 +768,7 @@ func RebalanceWorkflow(ctx workflow.Context, in Input) error {
 	var job string
 	if err := call(ctx, buildOpts(ctx), &job, a.BuildRebalanceJob, id); err != nil {
 		workflow.GetLogger(ctx).Warn("could not build the rebalance; it will be planned again", "rebalance", id, "error", err.Error())
-		return call(ctx, opts(ctx), nil, a.FailRebalance, id, "could not build: "+err.Error())
+		return call(ctx, opts(ctx), nil, a.FailRebalance, id, "could not build: "+err.Error(), "")
 	}
 	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
 	if err != nil {
@@ -780,7 +780,7 @@ func RebalanceWorkflow(ctx workflow.Context, in Input) error {
 			return err
 		}
 		if cr.Kind == txCancelled {
-			return call(ctx, opts(ctx), nil, a.FailRebalance, id, "gateway refused: "+r.Reason)
+			return call(ctx, opts(ctx), nil, a.FailRebalance, id, "gateway refused: "+r.Reason, cr.Hash)
 		}
 		r = cr
 	}
@@ -788,7 +788,7 @@ func RebalanceWorkflow(ctx workflow.Context, in Input) error {
 	case txMined, txReverted:
 		return call(ctx, opts(ctx), nil, a.SettleRebalance, id, r.Hash, r.Kind == txReverted)
 	case txCancelled:
-		return call(ctx, opts(ctx), nil, a.FailRebalance, id, "cancelled")
+		return call(ctx, opts(ctx), nil, a.FailRebalance, id, "cancelled", r.Hash)
 	}
 	return fmt.Errorf("unexpected outcome %q", r.Kind)
 }

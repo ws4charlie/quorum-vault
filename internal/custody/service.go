@@ -222,3 +222,11 @@ func (s *Service) FundHot(ctx context.Context, id string, shard int, amount *big
 		return s.transfer(ctx, tx, "fund:"+id, hotAcct(part), feeAcct(s.Cfg.Chain, s.Cfg.Native), amount, map[string]any{"kind": "hot_funding"})
 	})
 }
+
+// cancelFee is the fee of the cancel transaction that freed a nonce ("" means none was sent or it is not ours to book).
+func (s *Service) cancelFee(ctx context.Context, feeTx string) (*big.Int, error) {
+	if feeTx == "" {
+		return nil, nil
+	}
+	return s.Chain.TxFee(ctx, feeTx)
+}
