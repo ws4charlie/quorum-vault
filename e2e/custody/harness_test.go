@@ -69,6 +69,8 @@ var (
 func mpcMode() bool { return os.Getenv("QV_CUSTODY_SIGNER") == "mpc" }
 
 func TestMain(m *testing.M) {
+	mpcstack.ReaperMain() // in the reaper process: waits for this binary to die, kills the children, never returns
+	stopReaper := func() {}
 	code := 0
 	if os.Getenv("QV_REQUIRE_CUSTODY") == "1" {
 		dir, err := os.MkdirTemp("", "qv-e2e-bin-")
@@ -77,6 +79,12 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		binDir = dir
+		built := time.Now()
+		if stop, err := mpcstack.StartReaper(); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err) // the tests run, but a killed binary would leave its children
+		} else {
+			stopReaper = stop
+		}
 		switch os.Getenv("QV_CUSTODY_SIGNER") {
 		case "", "hsm", "mpc":
 		default:
@@ -100,8 +108,10 @@ func TestMain(m *testing.M) {
 				break
 			}
 		}
+		fmt.Printf("qv-timing-main package=e2e/custody build=%.1f\n", time.Since(built).Seconds()) // compiling the binaries the tests start
 	}
 	code = m.Run()
+	stopReaper()
 	if binDir != "" {
 		os.RemoveAll(binDir)
 	}
@@ -768,6 +778,7 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 		cmd.Env = append(cmd.Env, "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf())
 	}
 	cmd.Stdout, cmd.Stderr = lf, lf
+	mpcstack.Guard(cmd)
 	if err := cmd.Start(); err != nil {
 		s.t.Fatalf("start %s: %v", name, err)
 	}

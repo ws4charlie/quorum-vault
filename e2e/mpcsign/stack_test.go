@@ -50,9 +50,16 @@ import (
 var binMPC, binCosigner, binGateway string
 
 func TestMain(m *testing.M) {
+	mpcstack.ReaperMain() // in the reaper process: waits for this binary to die, kills the children, never returns
+	stopReaper := func() {}
 	if os.Getenv("QV_MPC_E2E") != "1" {
 		fmt.Println("skipped: set QV_MPC_E2E=1 (needs the cb-mpc build, Postgres; see make test-mpc)")
 		os.Exit(0)
+	}
+	if stop, err := mpcstack.StartReaper(); err != nil {
+		fmt.Fprintln(os.Stderr, "warning:", err)
+	} else {
+		stopReaper = stop
 	}
 	dir, err := os.MkdirTemp("", "mpcsign-bin-")
 	if err != nil {
@@ -72,6 +79,7 @@ func TestMain(m *testing.M) {
 	binCosigner = build("../..", "qv-cosigner", "./cmd/qv-cosigner")
 	binGateway = build("../..", "qv-gateway", "./cmd/qv-gateway")
 	code := m.Run()
+	stopReaper()
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
@@ -160,6 +168,7 @@ func startProc(t testing.TB, name, bin string, env []string, args ...string) *pr
 	p := &proc{name: name, cmd: exec.Command(bin, args...), out: &syncBuf{}, done: make(chan struct{})}
 	p.cmd.Env = append(os.Environ(), env...)
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
+	mpcstack.Guard(p.cmd)
 	if err := p.cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

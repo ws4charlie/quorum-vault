@@ -195,6 +195,7 @@ func (p *Proc) Start(t testing.TB) {
 	cmd := exec.Command(p.bin, p.args...)
 	cmd.Env = append(os.Environ(), p.env...)
 	cmd.Stdout, cmd.Stderr = f, f
+	Guard(cmd)
 	if err := cmd.Start(); err != nil {
 		f.Close()
 		t.Fatal(err)
