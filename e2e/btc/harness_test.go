@@ -27,6 +27,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
+	"github.com/ws4charlie/quorum-vault/e2e/phasetime"
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
@@ -314,6 +315,7 @@ type system struct {
 	worker  *proc
 	core    *proc
 	start   int64 // the height the scan starts from
+	tm      *phasetime.Timer
 
 	// withdrawals (opts.withdraw)
 	acct     *btc.Account
@@ -446,9 +448,11 @@ func scale(d time.Duration) time.Duration {
 
 func (s *system) waitFor(timeout time.Duration, what string, f func() bool) {
 	s.t.Helper()
-	dl := time.Now().Add(scale(timeout))
+	start := time.Now()
+	dl := start.Add(scale(timeout))
 	for {
 		if f() {
+			s.tm.Wait(what, time.Since(start))
 			return
 		}
 		if time.Now().After(dl) {
@@ -483,10 +487,19 @@ func accountXpub(t *testing.T, mpc *mpcstack.Stack, network string) string {
 	return x
 }
 
-func newMPC(t *testing.T, dir string) *mpcstack.Stack {
+func newMPC(t *testing.T, dir string) *mpcstack.Stack { return newTimedMPC(t, dir, nil) }
+
+// newTimedMPC also records the start of the parties and the DKG as phases of tm (nil: not timed).
+func newTimedMPC(t *testing.T, dir string, tm *phasetime.Timer) *mpcstack.Stack {
 	t.Helper()
 	m := mpcstack.New(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{})
+	if tm != nil {
+		tm.Phase("mpc-start")
+	}
 	m.DKG()
+	if tm != nil {
+		tm.Phase("dkg")
+	}
 	return m
 }
 
@@ -496,13 +509,17 @@ func newSystem(t *testing.T, o opts) *system {
 	if o.minDeposit == "" {
 		o.minDeposit = "1000"
 	}
-	s := &system{t: t, ctx: context.Background(), dir: t.TempDir(), chain: "btc-" + uuid.NewString()[:8], queue: "qv-e2e-btc-" + uuid.NewString()[:8]}
+	tm := phasetime.Start(t, "btc")
+	s := &system{t: t, ctx: context.Background(), dir: t.TempDir(), chain: "btc-" + uuid.NewString()[:8], queue: "qv-e2e-btc-" + uuid.NewString()[:8], tm: tm}
 	s.node = newNode(t)
+	tm.Phase("chain")
 	s.pool = dbtest.New(t)
 	cc := s.pool.Config().ConnConfig
 	s.bizDSN = fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", cc.User, cc.Host, cc.Port, cc.Database)
-	s.mpc = newMPC(t, s.dir)
+	tm.Phase("db")
+	s.mpc = newTimedMPC(t, s.dir, tm)
 	s.xpub = accountXpub(t, s.mpc, "regtest")
+	tm.Phase("xpub")
 	s.start = s.node.height() + 1
 	rpcURL := nodeURL()
 	if o.noEstimate {
@@ -542,6 +559,7 @@ func newSystem(t *testing.T, o opts) *system {
 		s.cf.Chain.BTC.SpendConfirmations = o.spendConf
 	}
 	s.writeConfig(s.cf)
+	tm.Phase("configs") // includes the keys, gateway config and cosigner of a withdrawal test
 
 	addr := os.Getenv("QV_TEMPORAL_ADDR")
 	if addr == "" {
@@ -582,12 +600,15 @@ func newSystem(t *testing.T, o opts) *system {
 			_ = tc.TerminateWorkflow(context.Background(), id, "", "test over")
 		}
 	})
+	tm.Phase("temporal")
 	if o.withdraw {
 		s.startGateway()
 	}
 	s.workerFailpoint = o.failpoint
 	s.startWorker()
 	s.startCore()
+	tm.Phase("spawn")
+	tm.Ready(t)
 	return s
 }
 

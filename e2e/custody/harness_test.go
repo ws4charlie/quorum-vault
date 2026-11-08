@@ -46,6 +46,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/e2e"
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
+	"github.com/ws4charlie/quorum-vault/e2e/phasetime"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
@@ -227,7 +228,7 @@ type system struct {
 	coldAddr                  common.Address  // the cold address both zones are configured with
 	cold                      *coldKit        // the offline signer's side, when opts.cold.coldHSM
 	mpc                       *mpcstack.Stack // mpc mode only
-	tm                        *timing
+	tm                        *phasetime.Timer
 	cf                        custody.File // the files as written, so a test can change one and restart
 	gf                        gateway.File
 	cosPath                   string
@@ -319,8 +320,7 @@ func eth(n int64) *big.Int { return new(big.Int).Mul(big.NewInt(n), big.NewInt(e
 func newSystem(t *testing.T, o opts) *system {
 	t.Helper()
 	requireCustody(t)
-	tm := newTiming(t)
-	t.Cleanup(func() { tm.finish(t) }) // registered first, so it runs last: after everything is torn down
+	tm := phasetime.Start(t, os.Getenv("QV_CUSTODY_SIGNER")) // registered first, so it logs last: after everything is torn down
 	if o.shards == 0 {
 		o.shards = 1
 	}
@@ -372,7 +372,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.queue = "qv-e2e-" + uuid.NewString()[:8]
 	s.auditSrc = "e2e-" + uuid.NewString()[:8]
 
-	s.tm.phase("databases (Postgres, guard DBs)")
+	s.tm.Phase("db")
 	// Chain: factory (deployed frozen), token, keys. All keys are generated now.
 	s.deployer, _ = crypto.GenerateKey()
 	s.admin, _ = crypto.GenerateKey()
@@ -394,7 +394,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.factory = s.mustSend(s.deployer, nil, new(big.Int), evm.FactoryDeployData(common.Address{}, adminAddr, crypto.PubkeyToAddress(s.guardian.PublicKey))).ContractAddress
 	s.usdt = s.mustSend(s.deployer, nil, new(big.Int), readBin(t, "UsdtLike.bin")).ContractAddress
 
-	s.tm.phase("chain (factory, token, funding keys)")
+	s.tm.Phase("chain")
 	// Hot shards: HSM keys that never leave the token, or (mpc mode) keys derived from a two-party DKG whose shares live
 	// in two parties' own HSM tokens.
 	signers := map[string]gateway.SignerFile{}
@@ -402,7 +402,9 @@ func newSystem(t *testing.T, o opts) *system {
 	var mpcShards []mpcstack.Shard
 	if mpcMode() {
 		s.mpc = mpcstack.New(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy})
+		s.tm.Phase("mpc-start")
 		s.mpc.DKG()
+		s.tm.Phase("dkg")
 		for i := 0; i < o.shards; i++ {
 			sh := s.mpc.Derive(i)
 			mpcShards = append(mpcShards, sh)
@@ -425,7 +427,7 @@ func newSystem(t *testing.T, o opts) *system {
 		}
 	}
 
-	s.tm.phase("hot keys (HSM generate, or mpc parties + DKG + derive)")
+	s.tm.Phase("keys")
 	// Approvers.
 	apprFiles := map[string]gateway.ApproverFile{}
 	for _, name := range []string{"alice", "bob", "carol", "auto"} {
@@ -561,7 +563,7 @@ func newSystem(t *testing.T, o opts) *system {
 		s.mpc.StartCosigner(cosPath, s.cosGuardDSN, s.guardDSN)
 	}
 
-	s.tm.phase("configs")
+	s.tm.Phase("configs")
 	// In-process service for funding and Reconcile (reads only, plus FundHot).
 	adapter, err := evm.New(s.ctx, s.cfg.EVM, s.pool)
 	if err != nil {
@@ -578,7 +580,7 @@ func newSystem(t *testing.T, o opts) *system {
 		t.Fatal(err)
 	}
 
-	s.tm.phase("in-process service + adapter")
+	s.tm.Phase("service")
 	// Temporal.
 	addr := os.Getenv("QV_TEMPORAL_ADDR")
 	if addr == "" {
@@ -605,7 +607,7 @@ func newSystem(t *testing.T, o opts) *system {
 	t.Cleanup(s.tc.Close)
 	t.Cleanup(s.terminateWorkflows)
 
-	s.tm.phase("Temporal connect")
+	s.tm.Phase("temporal")
 	// Fund the hot wallets: gas money on chain and in the books.
 	for i, a := range s.shardAddr {
 		n := int64(100)
@@ -624,16 +626,15 @@ func newSystem(t *testing.T, o opts) *system {
 		s.setDestination(s.shardAddr[0])
 	}
 
-	s.tm.phase("fund hot wallets")
+	s.tm.Phase("fund")
 	s.startGateway()
 	if !o.noRelay {
 		s.startRelay()
 	}
 	s.startWorker("")
 	s.startCore()
-	s.tm.phase("start gateway, relay, worker, core")
-	s.tm.markReady()
-	t.Cleanup(tm.markBodyEnd) // registered last, so it runs first: the moment the test body is over
+	s.tm.Phase("spawn")
+	s.tm.Ready(t) // registers the end of the body last, so it runs first
 	return s
 }
 
@@ -856,7 +857,7 @@ func (s *system) waitFor(timeout time.Duration, what string, f func() bool) {
 	dl := start.Add(timeout)
 	for {
 		if f() {
-			s.tm.wait(what, time.Since(start))
+			s.tm.Wait(what, time.Since(start))
 			return
 		}
 		if time.Now().After(dl) {
