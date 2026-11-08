@@ -77,14 +77,16 @@ restore it from a backup of the current generation, then refresh. Details: [runb
 
 ## Gaps and decisions for the lead
 
-- **A member that is away or stale does not stop the other two.** (A restart of A with one member down; a member restored from an
-  older backup; a member that lost its state.) The strict three-way reconciliation cannot succeed then. Left as is, the keyset would answer
-  `UNAVAILABLE` for as long as the member is away, which is the availability 2-of-3 exists for. So when the three-way run fails
-  because a link is down or a member is stale, A reconciles with each of the other two alone (`reconcilePairWith`); the stale or missing member is flagged (`ALERT keyset cannot be reconciled`) and stays out: unresolved, never signing, re-tried slowly, but only when that is safe without the
-  third: both hold the same current generation, neither has a candidate, and A has recorded no decision. They prove the keyset with a
-  signature between the two and serve; the keyset is marked partial, and the moment the missing member's link comes up A reconciles
-  all three, so the returning member never serves unreconciled. This goes beyond the letter of the spec ("reconciled across the
-  three"); it is tested (`TestThresholdAbsentMemberDuringRestart`) and easy to remove if you disagree.
+- **A member that is away or stale does not stop the other two.** This covers A restarting while one member is down, a member
+  restored from an older backup, and a member that lost its state. The strict three-way reconciliation cannot succeed in those cases,
+  and left as it is the keyset would answer `UNAVAILABLE` for as long as the member is gone, which is the availability 2-of-3 exists
+  for. So when the three-way run fails because a link is down or a member is stale, A reconciles with each of the other two alone
+  (`reconcilePairWith`), but only when that is safe without the third: both hold the same current generation, neither has a
+  candidate, and A has recorded no commit decision. They prove the keyset with a signature between the two and serve. The keyset is
+  marked partial: when the missing member's link comes up A reconciles all three (and retries slowly if that still reports a stale
+  member, with an `ALERT`), so a returning member never serves unreconciled and a stale one stays out (unresolved, never signing). This
+  goes beyond the letter of the spec ("reconciled across the three"); it is tested (`TestThresholdAbsentMemberDuringRestart`,
+  `TestThresholdMixedGenerationsNeverSign`, `TestThresholdBackupRestoreLostMember`) and one function to remove if you disagree.
 - **B and C restart while A is down:** they stay unresolved until A returns and reconciles them (they cannot sign meanwhile); not
   changed. A pairwise B+C reconcile would be the same idea with B as the driver; not built.
 - B cannot tell A directly that it froze a keyset (no link); A learns at its next contact with B (tested).
