@@ -254,3 +254,30 @@ func TestClassifySendFeeRefusals(t *testing.T) {
 		t.Errorf("missing inputs: %v", got)
 	}
 }
+
+// No refusals at all: a transaction that is only stuck is still raised up to the cap, not left a step short of it. Accepted just under the cap, the next
+// step over it: the replacement pays exactly the cap; the one after that cannot be built.
+func TestBumpReachesTheCapWithoutRefusals(t *testing.T) {
+	e := newWEnvWith(t, func(c *Config) { c.MaxTxFeeSats = 3000 })
+	e.fund(1_000_000)
+	orig, _ := e.broadcastOne("w1", 40_000)
+	last := e.fee(orig)
+	for i := 0; ; i++ {
+		_, st := e.replacementAttempt() // builds, signs
+		if _, err := e.a.Broadcast(context.Background(), st); err != nil {
+			t.Fatal(err)
+		}
+		var f int64
+		e.a.pool.QueryRow(context.Background(), `SELECT max(fee) FROM btc_attempts WHERE chain='btc-t'`).Scan(&f)
+		if uint64(f) <= last || f > 3000 || i > 40 {
+			t.Fatalf("attempt %d pays %d after %d (cap 3000)", i, f, last)
+		}
+		last = uint64(f)
+		if last == 3000 {
+			break
+		}
+	}
+	if _, err := e.replace(); !errors.Is(err, chain.ErrCannotBump) {
+		t.Fatalf("after the cap: %v", err)
+	}
+}

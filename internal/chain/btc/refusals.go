@@ -102,8 +102,8 @@ func (a *Adapter) forgetRefusals(ctx context.Context, tx pgx.Tx, ownerKind, owne
 // refused one, so that every attempt pays strictly more than any the node refused. within is the builder's own caps (the fee cap and the fee rate
 // ceiling, and a sweep's or a consolidation's own ceiling): it returns chain.ErrCannotBump for a fee over one of them, and a fee is never above them.
 //
-// The cap is the limit, not the step: when the next step is over it, the highest fee every cap allows (limit) is tried, if it is strictly above the
-// highest refused fee and meets the replacement rule against the accepted attempt. A cap at or below the highest refused fee, or below what the rule
+// The cap is the limit, not the step, with or without refusals: when the next step is over it, the highest fee every cap allows (limit) is tried, if it
+// is strictly above the accepted and the highest refused fee and meets the replacement rule against the accepted attempt. A cap at or below the highest refused fee, or below what the rule
 // needs, leaves nothing to try; then the following applies.
 //
 // When the refusals are what pushes the fee past a cap (the next fee from the accepted one would still fit), the cap is not the whole story: the
@@ -117,11 +117,14 @@ func (a *Adapter) escalate(ctx context.Context, tx pgx.Tx, ownerKind, ownerID st
 	}
 	fee := a.nextFee(ctx, max(oldFee, r.Fee), vs)
 	err = within(fee)
-	if err == nil || r.Fee <= oldFee {
-		return fee, err
+	if err == nil {
+		return fee, nil
 	}
-	if limit > r.Fee && limit >= oldFee+vs*incrementalRate && within(limit) == nil {
+	if limit > max(oldFee, r.Fee) && limit >= oldFee+vs*incrementalRate && within(limit) == nil {
 		return limit, nil
+	}
+	if r.Fee <= oldFee {
+		return 0, err // no refusal is involved: the market rule below is about refusals
 	}
 	if !a.marketNow(ctx).lowerThan(r.Market) {
 		return 0, fmt.Errorf("%w: the node refused %d sats as too little and the next step, %d sats, is over a limit (%v); waiting for the fee market to change",
