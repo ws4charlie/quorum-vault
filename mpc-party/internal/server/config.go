@@ -184,6 +184,13 @@ func (c *Config) Validate() error {
 		if len(c.PeerPins) != 0 {
 			errs = append(errs, errors.New("peer_pins is not for role C: use peer_a_pins and peer_b_pins"))
 		}
+		for _, a := range c.PeerAPins {
+			for _, b := range c.PeerBPins {
+				if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)) {
+					errs = append(errs, errors.New("peer_a_pins and peer_b_pins share a certificate: C could not tell A from B"))
+				}
+			}
+		}
 	} else if len(c.PeerAPins) != 0 || len(c.PeerBPins) != 0 {
 		errs = append(errs, errors.New("peer_a_pins and peer_b_pins are only for role C"))
 	}

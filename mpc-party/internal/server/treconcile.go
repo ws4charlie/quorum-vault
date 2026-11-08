@@ -220,6 +220,7 @@ func (s *Server) reconcileAT(ctx context.Context, id string) (err error) {
 	if p.Target == 0 {
 		s.log.Warn("reconciled: an unfinished DKG was aborted on all three parties", "role", "A", "keyset_id", id)
 		rt.setResolved(true)
+		rt.setPartial(false)
 		return nil
 	}
 	tk, _, err := s.tkey(ctx, id, p.Target)
@@ -253,6 +254,7 @@ func (s *Server) reconcileAT(ctx context.Context, id string) (err error) {
 	}
 	s.store.DeleteGenerationsBelow(ctx, id, p.Target)
 	rt.setResolved(true)
+	rt.setPartial(false)
 	s.log.Info("keyset reconciled and proven", "role", "A", "scheme", "ecdsa-2of3", "keyset_id", id, "generation", p.Target)
 	return nil
 }
@@ -333,6 +335,7 @@ func (s *Server) reconcileFollowT(ctx context.Context, open *pb.Open, me string,
 	}
 	s.store.DeleteGenerationsBelow(ctx, id, p.Target)
 	rt.setResolved(true)
+	rt.setPartial(false)
 	s.log.Info("keyset reconciled and proven", "role", me, "scheme", "ecdsa-2of3", "keyset_id", id, "generation", p.Target)
 	return nil
 }

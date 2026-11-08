@@ -331,7 +331,12 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 			continue
 		}
 		for _, id := range ids {
-			if s.rt(id).isResolved() || time.Since(last[id]) < time.Second {
+			rt := s.rt(id)
+			// A 2-of-3 keyset resolved with one member only is reconciled across all three as soon as both of A's links are up
+			// (watchPeer catches a link coming up; this catches the case where B could not yet reach C at that moment).
+			partialRetry := rt.isResolved() && rt.isPartial() && s.peerConn.GetState() == connectivity.Ready &&
+				s.peerCConn != nil && s.peerCConn.GetState() == connectivity.Ready
+			if (rt.isResolved() && !partialRetry) || time.Since(last[id]) < time.Second || (partialRetry && time.Since(last[id]) < 2*time.Second) {
 				continue
 			}
 			last[id] = time.Now()
@@ -339,6 +344,9 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 			rec := s.reconcileA
 			if st, e := s.store.State(ctx, id); e == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
 				rec = s.reconcileTWithFallback
+				if partialRetry {
+					rec = s.reconcileAT
+				}
 			}
 			if err := rec(ctx, id); err != nil {
 				s.log.Warn("reconciliation pending", "keyset_id", id, "error", err.Error())
