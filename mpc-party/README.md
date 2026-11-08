@@ -287,3 +287,24 @@ certificate only. C needs its own `role: "C"`, token (`qv-party-3`), certificate
 Tests: `e2e/threshold_test.go`, `threshold_crash_test.go` (three real processes), `internal/server/trio_test.go` (three parties in one
 process with tamper proxies on any link), `treconcile_internal_test.go`.
 
+### Three-party layout (placeholders; never commit real values)
+
+```json
+// a.json: dials B and C. caller_pins: the gateway's certificate. authorizer: the gateway already decided.
+{ "role": "A", "caller_listen": "127.0.0.1:7001", "peer_address": "PARTY-B-HOST:7003", "peer_pins": ["<sha256 of b.crt>"],
+  "peer_c_address": "PARTY-C-HOST:7005", "peer_c_pins": ["<sha256 of c.crt>"], "caller_pins": ["<sha256 of gateway.crt>"],
+  "authorizer": { "type": "pinned-caller" }, "sealer": { "type": "pkcs11", "token": "qv-party-1", "pin_file": "..." }, "...": "cert_file, key_file, data_dir, admin_keys" }
+// b.json: listens for A, dials C, asks ITS cosigner in every role.
+{ "role": "B", "caller_listen": "127.0.0.1:7002", "peer_listen": "127.0.0.1:7003", "peer_pins": ["<sha256 of a.crt>"],
+  "peer_c_address": "PARTY-C-HOST:7005", "peer_c_pins": ["<sha256 of c.crt>"], "caller_pins": ["<sha256 of gateway.crt>"],
+  "authorizer": { "type": "cosigner", "socket": "/run/qv/cosigner-b.sock" }, "sealer": { "type": "pkcs11", "token": "qv-party-2", "pin_file": "..." } }
+// c.json: listens for A and B (told apart by certificate), dials nobody, has ITS OWN cosigner.
+{ "role": "C", "caller_listen": "127.0.0.1:7004", "peer_listen": "127.0.0.1:7005", "peer_a_pins": ["<sha256 of a.crt>"], "peer_b_pins": ["<sha256 of b.crt>"],
+  "caller_pins": ["<sha256 of gateway.crt>"], "authorizer": { "type": "cosigner", "socket": "/run/qv/cosigner-c.sock" },
+  "sealer": { "type": "pkcs11", "token": "qv-party-3", "pin_file": "..." } }
+```
+
+Run one `qv-cosigner` next to B and another next to C: each with its own config file (the gateway's rules without the `signers` section;
+the same approvers, caps and trust roots), its own `-guard-dsn` database and its own `-socket`; both read the gateway's guard through
+`-gateway-guard-dsn`. The gateway's signer entry for an EVM hot shard lists coordinators A then B (`internal/gateway/config.example.json`).
+

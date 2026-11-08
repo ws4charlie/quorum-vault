@@ -1,7 +1,7 @@
 name: mpc-env
 description: >
   Everything an end-to-end job needs besides the checkout: the CI image (clang-20, cb-mpc, SoftHSM2, Go; see ci/qv-ci.Dockerfile), the SoftHSM
-  tokens (quorumvault, qv-party-1, qv-party-2, qv-cold), and the services the tests talk to. The services start in the background first, the
+  tokens (quorumvault, qv-party-1, qv-party-2, qv-party-3, qv-cold), and the services the tests talk to. The services start in the background first, the
   other set-up runs meanwhile, and the action waits for them last, so the tests start as soon as everything is ready. The calling job provides
   the Postgres service and checks the repository out, and runs its tests with ci/run-in-image.sh.
 inputs:
@@ -43,7 +43,7 @@ runs:
         path: ~/.cache/qv-go
         key: qv-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum') }}
         restore-keys: qv-go-${{ runner.os }}-${{ runner.arch }}-
-    - name: Create the SoftHSM2 tokens (quorumvault, qv-party-1, qv-party-2, qv-cold)
+    - name: Create the SoftHSM2 tokens (quorumvault, qv-party-1, qv-party-2, qv-party-3, qv-cold)
       shell: bash
       run: ci/run-in-image.sh ./scripts/setup-softhsm.sh
     - name: Wait for the services

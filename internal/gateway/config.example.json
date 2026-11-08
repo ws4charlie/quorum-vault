@@ -1,5 +1,5 @@
 {
-  "_comment": "PLACEHOLDER signing-zone config. Every key and address below is a dummy; replace all of them in the signing zone. Never commit real values.",
+  "_comment": "PLACEHOLDER signing-zone config. Every key and address below is a dummy; replace all of them in the signing zone. Never commit real values. PLACEHOLDER-partition-2of3 shows an EVM hot shard held as a 2-of-3 keyset on mpc-party A, B and C: the keyset is the key (public_key is its 65-byte uncompressed key, and the hot address must be its address); coordinators are tried in order A, then B, and the gateway moves to B only when A says that nothing was exchanged yet.",
   "max_intent_age": "24h",
   "sign_timeout": "30s",
   "approvers": {
@@ -8,7 +8,14 @@
     "auto":  { "public_key": "0000000000000000000000000000000000000000000000000000000000000003", "enabled": true }
   },
   "signers": {
-    "PLACEHOLDER-partition-id": { "token": "PLACEHOLDER-token-label", "key_id": "00", "public_key": "04" }
+    "PLACEHOLDER-partition-id": { "token": "PLACEHOLDER-token-label", "key_id": "00", "public_key": "04" },
+    "PLACEHOLDER-partition-2of3": {
+      "backend": "mpc", "scheme": "ecdsa-2of3", "keyset_id": "PLACEHOLDER-keyset", "public_key": "04",
+      "coordinators": [
+        { "name": "A", "address": "PLACEHOLDER-party-a:7001", "cert_file": "PLACEHOLDER-gateway.crt", "key_file": "PLACEHOLDER-gateway.key", "server_pin": "PLACEHOLDER-sha256-of-party-a-certificate" },
+        { "name": "B", "address": "PLACEHOLDER-party-b:7002", "cert_file": "PLACEHOLDER-gateway.crt", "key_file": "PLACEHOLDER-gateway.key", "server_pin": "PLACEHOLDER-sha256-of-party-b-certificate" }
+      ]
+    }
   },
   "chains": {
     "evm-example": {

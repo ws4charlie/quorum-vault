@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"time"
 
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/protobuf/proto"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
@@ -120,3 +121,47 @@ func (s *Server) freezeNoticeFollow(stream pb.Peer_SessionServer, sid string, op
 }
 
 var _ = time.Second
+
+// watchLink logs, per transition (not per job), that a link this party dials went down and that it came back. Operators alert on
+// the log line `ALERT mpc party link down`; Health of every party shows the same (peers[].reachable). The first connection after
+// start is not a transition.
+func (s *Server) watchLink(ctx context.Context, conn interface {
+	GetState() connectivity.State
+	WaitForStateChange(context.Context, connectivity.State) bool
+}, name string) {
+	up := false
+	state := conn.GetState()
+	for {
+		ready := state == connectivity.Ready
+		switch {
+		case ready && !up:
+			if s.linkEverUp(name) {
+				s.log.Info("mpc party link restored", "role", s.cfg.Role, "peer", name)
+			}
+			s.markLinkUp(name)
+			up = true
+		case !ready && up:
+			s.log.Error("ALERT mpc party link down: signing continues with the other two parties", "role", s.cfg.Role, "peer", name)
+			up = false
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			return
+		}
+		state = conn.GetState()
+	}
+}
+
+func (s *Server) linkEverUp(name string) bool {
+	s.rtMu.Lock()
+	defer s.rtMu.Unlock()
+	return s.linksUp[s.cfg.Role+">"+name+"@"+s.cfg.Role]
+}
+
+func (s *Server) markLinkUp(name string) {
+	s.rtMu.Lock()
+	defer s.rtMu.Unlock()
+	if s.linksUp == nil {
+		s.linksUp = map[string]bool{}
+	}
+	s.linksUp[s.cfg.Role+">"+name+"@"+s.cfg.Role] = true
+}

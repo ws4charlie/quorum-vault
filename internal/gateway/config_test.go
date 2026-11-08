@@ -66,10 +66,34 @@ func TestConfigRefusesBadFiles(t *testing.T) {
 		"bad max_intent_age": mutate(func(m map[string]any) { m["max_intent_age"] = "soon" }),
 		"no fee cap":         mutate(func(m map[string]any) { chain(m)["evm"].(map[string]any)["max_tx_fee_wei"] = "0" }),
 	}
+	sig2 := func(m map[string]any) map[string]any {
+		return m["signers"].(map[string]any)["PLACEHOLDER-partition-2of3"].(map[string]any)
+	}
+	coords := func(m map[string]any) []any { return sig2(m)["coordinators"].([]any) }
+	cases["2of3: unknown scheme"] = mutate(func(m map[string]any) { sig2(m)["scheme"] = "ecdsa-3of5" })
+	cases["2of3: no keyset"] = mutate(func(m map[string]any) { delete(sig2(m), "keyset_id") })
+	cases["2of3: no public key"] = mutate(func(m map[string]any) { delete(sig2(m), "public_key") })
+	cases["2of3: no coordinators"] = mutate(func(m map[string]any) { sig2(m)["coordinators"] = []any{} })
+	cases["2of3: with key_id"] = mutate(func(m map[string]any) { sig2(m)["key_id"] = "k" })
+	cases["2of3: B first"] = mutate(func(m map[string]any) { c := coords(m); c[0], c[1] = c[1], c[0] })
+	cases["2of3: twice A"] = mutate(func(m map[string]any) { coords(m)[1].(map[string]any)["name"] = "A" })
+	cases["2of3: party C as coordinator"] = mutate(func(m map[string]any) { coords(m)[1].(map[string]any)["name"] = "C" })
+	cases["2of3: no pin"] = mutate(func(m map[string]any) { delete(coords(m)[0].(map[string]any), "server_pin") })
 	for name, b := range cases {
 		if _, err := ParseConfig(b); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+func TestExample2of3Signer(t *testing.T) {
+	cfg, err := LoadConfig("config.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sf := cfg.Signers["PLACEHOLDER-partition-2of3"]
+	if sf.Scheme != "ecdsa-2of3" || len(sf.Coordinators) != 2 || sf.Coordinators[0].Name != "A" || sf.Coordinators[1].Name != "B" {
+		t.Fatalf("%+v", sf)
 	}
 }
 

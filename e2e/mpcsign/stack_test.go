@@ -1,4 +1,4 @@
-// Package mpcsign_test runs the real processes of the cb-mpc signing path: qv-gateway, mpc-party A and B, qv-cosigner,
+// Package mpcsign_test runs the real processes of the cb-mpc signing path: qv-gateway, mpc-party A, B and C (the hot key is a 2-of-3 keyset), a qv-cosigner next to B and one next to C,
 // Postgres and (for the mining test) anvil. It needs the cb-mpc build (mpc-party/scripts/fetch-build-cbmpc.sh) and is
 // skipped unless QV_MPC_E2E=1:  make test-mpc
 package mpcsign_test
@@ -225,21 +225,27 @@ type stack struct {
 	dir      string
 	certA    cert
 	certB    cert
-	certGW   cert // the gateway's client certificate (pinned by party A's caller port)
+	certC    cert
+	certGW   cert // the gateway's client certificate (pinned by the parties' caller ports)
 	certProx cert
 	adminPub ed25519.PublicKey
 	admin    ed25519.PrivateKey
 
-	callerA, callerB, peerB string
-	peerForA                string // where A dials: B's peer port, or the tamper proxy
-	sock                    string
+	callerA, callerB, callerC string
+	peerB, peerC              string
+	peerForA                  string // where A dials B: B's peer port, or the tamper proxy
+	sock, sockC               string // the cosigners' unix sockets (B's, C's)
 
-	proxy          *tamperProxy
-	cosignerTweak  func(gateway.File) gateway.File
-	a, b, cosigner *proc
-	cfgA, cfgB     string
-	cosignerArgs   []string
-	cosignerCfg    string
+	proxy         *tamperProxy
+	cosignerTweak func(gateway.File) gateway.File
+	a, b, c       *proc
+	cosigner      *proc // B's cosigner
+	cosignerC     *proc // C's cosigner: its own process, config and replay guard
+	cfgA, cfgB    string
+	cfgC          string
+	cosignerArgs  []string
+	cosignerCfg   string
+	cosignerCfgC  string
 
 	client pb.MpcPartyClient // gateway identity -> party A
 	conn   *grpc.ClientConn
@@ -254,6 +260,7 @@ type stack struct {
 	biz                    *pgxpool.Pool
 	bizDSN                 string
 	gwGuardDSN, csGuardDSN string
+	csGuardDSNC            string
 	chainID                uint64
 }
 
@@ -278,45 +285,57 @@ func newStack(t *testing.T, o stackOpts) *stack {
 		o.chainID = 31337
 	}
 	s := &stack{t: t, dir: t.TempDir(), chainID: o.chainID, keysetID: "hot"}
-	s.certA, s.certB, s.certGW, s.certProx = newCert(t, "party-a"), newCert(t, "party-b"), newCert(t, "gateway"), newCert(t, "proxy")
+	s.certA, s.certB, s.certC, s.certGW, s.certProx = newCert(t, "party-a"), newCert(t, "party-b"), newCert(t, "party-c"), newCert(t, "gateway"), newCert(t, "proxy")
 	s.adminPub, s.admin, _ = ed25519.GenerateKey(rand.Reader)
-	s.callerA, s.callerB, s.peerB = freeAddr(t), freeAddr(t), freeAddr(t)
+	s.callerA, s.callerB, s.callerC, s.peerB, s.peerC = freeAddr(t), freeAddr(t), freeAddr(t), freeAddr(t), freeAddr(t)
 	s.peerForA = s.peerB
 	s.sock = filepath.Join(os.TempDir(), fmt.Sprintf("qvcs-%d.sock", time.Now().UnixNano()%1e9))
-	t.Cleanup(func() { os.Remove(s.sock) })
+	s.sockC = filepath.Join(os.TempDir(), fmt.Sprintf("qvcsc-%d.sock", time.Now().UnixNano()%1e9))
+	t.Cleanup(func() { os.Remove(s.sock); os.Remove(s.sockC) })
 	pin := ""
 	if o.proxy {
-		// A believes the proxy is party B; B believes the proxy is party A.
+		// A believes the proxy is party B; B believes the proxy is party A. (The tamper proxy sits on the A-B link: A+B is
+		// A's first choice.)
 		s.proxy, s.peerForA = startProxy(t, s)
 		pin = s.certProx.pin
 	}
-	s.cfgA, s.cfgB = s.writeParty(t, "A", "", pin), s.writeParty(t, "B", "", pin)
+	s.cfgA, s.cfgB, s.cfgC = s.writeParty(t, "A", "", pin), s.writeParty(t, "B", "", pin), s.writeParty(t, "C", "", "")
 	s.startParties(t)
 	return s
 }
 
-// writeParty writes a mpc-party config. peerPin overrides the pin of the other party (tamper proxy).
+// writeParty writes a mpc-party config. peerPin overrides the pin of the other party on the A-B link (tamper proxy).
 func (s *stack) writeParty(t *testing.T, role, seal, peerPin string) string {
-	own, other := s.certA, s.certB
-	if role == "B" {
-		own, other = s.certB, s.certA
-	}
-	if peerPin == "" {
-		peerPin = other.pin
-	}
+	own := map[string]cert{"A": s.certA, "B": s.certB, "C": s.certC}[role]
 	crt, key := own.write(t, s.dir)
 	cfg := map[string]any{
-		"role": role, "cert_file": crt, "key_file": key, "peer_pins": []string{peerPin}, "caller_pins": []string{s.certGW.pin},
+		"role": role, "cert_file": crt, "key_file": key, "caller_pins": []string{s.certGW.pin},
 		"data_dir": filepath.Join(s.dir, "data-"+role), "admin_keys": []string{hex.EncodeToString(s.adminPub)},
 		"sealer": mpcstack.SealerConfig(role),
 		"limits": map[string]any{"recv_timeout_ms": 3000, "session_timeout_ms": 20000, "sessions_per_sec_key": 100000, "max_peer_sessions": 32},
 	}
-	if role == "A" {
+	abPin := peerPin
+	switch role {
+	case "A":
+		if abPin == "" {
+			abPin = s.certB.pin
+		}
+		cfg["peer_pins"] = []string{abPin}
 		cfg["caller_listen"], cfg["peer_address"] = s.callerA, s.peerForA
+		cfg["peer_c_address"], cfg["peer_c_pins"] = s.peerC, []string{s.certC.pin}
 		cfg["authorizer"] = map[string]any{"type": "pinned-caller"}
-	} else {
+	case "B":
+		if abPin == "" {
+			abPin = s.certA.pin
+		}
+		cfg["peer_pins"] = []string{abPin}
 		cfg["caller_listen"], cfg["peer_listen"] = s.callerB, s.peerB
+		cfg["peer_c_address"], cfg["peer_c_pins"] = s.peerC, []string{s.certC.pin}
 		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.sock, "timeout_ms": 5000}
+	case "C":
+		cfg["caller_listen"], cfg["peer_listen"] = s.callerC, s.peerC
+		cfg["peer_a_pins"], cfg["peer_b_pins"] = []string{s.certA.pin}, []string{s.certB.pin}
+		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.sockC, "timeout_ms": 5000}
 	}
 	raw, _ := json.MarshalIndent(cfg, "", " ")
 	p := filepath.Join(s.dir, "party-"+role+".json")
@@ -325,6 +344,7 @@ func (s *stack) writeParty(t *testing.T, role, seal, peerPin string) string {
 }
 
 func (s *stack) startParties(t *testing.T) {
+	s.c = startProc(t, "C", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgC)
 	s.b = startProc(t, "B", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgB)
 	s.a = startProc(t, "A", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgA)
 	conn, err := grpc.NewClient(s.callerA, grpc.WithTransportCredentials(credentials.NewTLS(pinnedTLS(s.certGW, s.certA.pin))))
@@ -338,12 +358,12 @@ func (s *stack) startParties(t *testing.T) {
 		c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		h, err := s.client.Health(c, &pb.HealthRequest{})
 		cancel()
-		if err == nil && h.PeerReachable {
+		if err == nil && len(h.Peers) == 2 && h.Peers[0].Reachable && h.Peers[1].Reachable {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("parties not ready\nA: %s\nB: %s", s.a.out, s.b.out)
+	t.Fatalf("parties not ready\nA: %s\nB: %s\nC: %s", s.a.out, s.b.out, s.c.out)
 }
 
 func ctx(t testing.TB, d time.Duration) context.Context {
@@ -357,14 +377,12 @@ func ctx(t testing.TB, d time.Duration) context.Context {
 func (s *stack) provision(t *testing.T, noCosigner bool) {
 	t.Helper()
 	x := ctx(t, 60*time.Second)
-	if _, err := s.client.DKG(x, &pb.DKGRequest{KeysetId: s.keysetID, Curve: pb.Curve_CURVE_SECP256K1, Admin: s.adminAuth("dkg", s.keysetID, adminNow())}); err != nil {
-		t.Fatal(err)
-	}
-	d, err := s.client.Derive(x, &pb.DeriveRequest{KeysetId: s.keysetID, HardenedPath: []uint32{44, 60, 0}, Path: []uint32{0}})
+	// The hot key is a 2-of-3 keyset on A, B and C: the keyset is the key (Sign names it as key_id).
+	d, err := s.client.DKG(x, &pb.DKGRequest{KeysetId: s.keysetID, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: s.adminAuth("dkg", s.keysetID, adminNow())})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.keyID, s.pub33 = d.KeyId, d.PublicKey
+	s.keyID, s.pub33 = s.keysetID, d.RootPublicKey
 	pk, err := crypto.DecompressPubkey(s.pub33)
 	if err != nil {
 		t.Fatal(err)
@@ -390,6 +408,7 @@ func (s *stack) provision(t *testing.T, noCosigner bool) {
 	s.bizDSN = u.String()
 	_, s.gwGuardDSN = gatewaytest.NewGuardDB(t)
 	_, s.csGuardDSN = gatewaytest.NewGuardDB(t)
+	_, s.csGuardDSNC = gatewaytest.NewGuardDB(t) // party C's cosigner has its own replay guard
 
 	s.cosignerCfg = filepath.Join(s.dir, "cosigner.json")
 	cf := s.h.File
@@ -398,9 +417,28 @@ func (s *stack) provision(t *testing.T, noCosigner bool) {
 	}
 	raw, _ := json.MarshalIndent(cf, "", " ")
 	os.WriteFile(s.cosignerCfg, raw, 0o600)
+	// C's cosigner: its own config file with the same rules and trust roots as B's (B's may be made stricter by a test).
+	s.cosignerCfgC = filepath.Join(s.dir, "cosigner-c.json")
+	os.WriteFile(s.cosignerCfgC, mustJSON(s.h.File), 0o600)
 	if !noCosigner {
 		s.startCosigner(t)
+		s.startCosignerC(t)
 	}
+}
+
+func mustJSON(v any) []byte { b, _ := json.MarshalIndent(v, "", " "); return b }
+
+func (s *stack) startCosignerC(t *testing.T) {
+	s.cosignerC = startProc(t, "cosigner-c", binCosigner, nil, "-config", s.cosignerCfgC, "-guard-dsn", s.csGuardDSNC, "-gateway-guard-dsn", s.gwGuardDSN, "-socket", s.sockC)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if c, err := net.Dial("unix", s.sockC); err == nil {
+			c.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("cosigner C did not start: %s", s.cosignerC.out)
 }
 
 func (s *stack) startCosigner(t *testing.T) {
@@ -433,8 +471,12 @@ func (s *stack) gatewayConfig() string {
 		cf.EVM = &e
 		f.Chains[name] = cf
 	}
-	sf := gateway.SignerFile{Backend: "mpc", KeyID: s.keyID, PublicKey: hex.EncodeToString(s.pub65),
-		MPC: &gateway.MPCSignerFile{Address: s.callerA, CertFile: filepath.Join(s.dir, "gateway.crt"), KeyFile: filepath.Join(s.dir, "gateway.key"), ServerPin: s.certA.pin}}
+	gcrt, gkey := filepath.Join(s.dir, "gateway.crt"), filepath.Join(s.dir, "gateway.key")
+	sf := gateway.SignerFile{Backend: "mpc", Scheme: "ecdsa-2of3", KeysetID: s.keysetID, PublicKey: hex.EncodeToString(s.pub65),
+		Coordinators: []gateway.MPCSignerFile{
+			{Name: "A", Address: s.callerA, CertFile: gcrt, KeyFile: gkey, ServerPin: s.certA.pin},
+			{Name: "B", Address: s.callerB, CertFile: gcrt, KeyFile: gkey, ServerPin: s.certB.pin},
+		}}
 	// Every hot partition needs a signer; the cold-move test partition shares the one hot key.
 	f.Signers = map[string]gateway.SignerFile{gatewaytest.Partition: sf, gatewaytest.ColdPartition: sf}
 	f.SignTimeout = "4s" // short on purpose: outage tests wait past it
@@ -594,19 +636,34 @@ func startProxy(t *testing.T, s *stack) (*tamperProxy, string) {
 	return p, ln.Addr().String()
 }
 
-func (s *stack) restartB(t *testing.T) {
-	s.b = startProc(t, "B", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgB)
-	deadline := time.Now().Add(30 * time.Second)
+func (s *stack) waitAllUp(t *testing.T, what string) {
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		h, err := s.client.Health(c, &pb.HealthRequest{})
 		cancel()
-		if err == nil && h.PeerReachable {
-			return
+		if err == nil && len(h.Peers) == 2 && h.Peers[0].Reachable && h.Peers[1].Reachable {
+			ok := true
+			for _, k := range h.Keysets {
+				ok = ok && k.Resolved
+			}
+			if ok {
+				return
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatal("B did not come back")
+	t.Fatalf("%s: the parties did not come back", what)
+}
+
+func (s *stack) restartB(t *testing.T) {
+	s.b = startProc(t, "B", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgB)
+	s.waitAllUp(t, "B")
+}
+
+func (s *stack) restartC(t *testing.T) {
+	s.c = startProc(t, "C", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgC)
+	s.waitAllUp(t, "C")
 }
 
 func (s *stack) countLog(b *syncBuf, parts ...string) int {

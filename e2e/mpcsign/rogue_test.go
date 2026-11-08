@@ -21,19 +21,39 @@ import (
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
 
-// rogue speaks the peer protocol to party B with party A's REAL certificate: what an attacker who owns A's host has.
+// rogue speaks the peer protocol to party B or to party C with party A's REAL certificate: what an attacker who owns A's host has.
+// Each of the two asks ITS OWN cosigner (own process, config and replay guard): the same attacks must be refused by both.
 type rogue struct {
 	s  *stack
 	cl pb.PeerClient
 }
 
-func (s *stack) rogue(t *testing.T) *rogue {
-	conn, err := grpc.NewClient(s.peerB, grpc.WithTransportCredentials(credentials.NewTLS(pinnedTLS(s.certA, s.certB.pin))))
+func (s *stack) rogue(t *testing.T, to string) *rogue {
+	addr, pin := s.peerB, s.certB.pin
+	if to == "C" {
+		addr, pin = s.peerC, s.certC.pin
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(pinnedTLS(s.certA, pin))))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
 	return &rogue{s: s, cl: pb.NewPeerClient(conn)}
+}
+
+// bothTargets runs a rogue-party test against party B's cosigner, and again against party C's with party B DOWN (so the only
+// pair left is A+C and C's cosigner is the independent check).
+func bothTargets(t *testing.T, f func(t *testing.T, to string)) {
+	for _, to := range []string{"B", "C"} {
+		to := to
+		t.Run("to_"+to, func(t *testing.T) { f(t, to) })
+	}
+}
+
+func (s *stack) targetSetup(to string) {
+	if to == "C" {
+		s.b.kill()
+	}
 }
 
 // open sends OPEN and returns B's first answer: an ACK (B accepted: a protocol run would start) or a FIN with the refusal.
@@ -70,7 +90,7 @@ func (r *rogue) signOpen(j signjob.Job, expected []byte) *pb.Open {
 	if err != nil {
 		r.s.t.Fatal(err)
 	}
-	return &pb.Open{Op: pb.Op_OP_SIGN, KeysetId: r.s.keysetID, HardenedPath: []uint32{44, 60, 0}, Path: []uint32{0}, KeyId: r.s.keyID,
+	return &pb.Open{Op: pb.Op_OP_SIGN, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Initiator: "A", Generation: 1, KeysetId: r.s.keysetID, KeyId: r.s.keyID,
 		Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: j.Digest, JobId: j.ID, IntentPackage: pkg, ExpectedPublicKey: expected}
 }
 
@@ -95,10 +115,13 @@ func (s *stack) signRequest(j signjob.Job) *pb.SignRequest {
 	return &pb.SignRequest{KeyId: s.keyID, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: j.Digest, JobId: j.ID, IntentPackage: pkg}
 }
 
-func TestRogueParty_Decisions(t *testing.T) {
+func TestRogueParty_Decisions(t *testing.T) { bothTargets(t, rogueDecisions) }
+
+func rogueDecisions(t *testing.T, to string) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)
-	r := s.rogue(t)
+	s.targetSetup(to)
+	r := s.rogue(t, to)
 	user, evil := gatewaytest.AddrUser, gatewaytest.AddrEvil
 
 	t.Run("unapproved intent", func(t *testing.T) {
@@ -162,10 +185,13 @@ func TestRogueParty_Decisions(t *testing.T) {
 
 // A rogue party A asks party B to take part in hot-to-cold moves it should refuse: B's cosigner holds its own copy of the cold
 // address, rate and daily cap, so owning A (or the gateway) does not let anyone move funds anywhere but the cold address.
-func TestRogueParty_ToCold(t *testing.T) {
+func TestRogueParty_ToCold(t *testing.T) { bothTargets(t, rogueToCold) }
+
+func rogueToCold(t *testing.T, to string) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)
-	r := s.rogue(t)
+	s.targetSetup(to)
+	r := s.rogue(t, to)
 	cold, evil := gatewaytest.AddrCold, gatewaytest.AddrEvil
 
 	t.Run("another destination, no approvals needed to ask", func(t *testing.T) {
@@ -193,10 +219,13 @@ func TestRogueParty_ToCold(t *testing.T) {
 
 // A rogue party A asks party B to take part in rebalances it should refuse: B's cosigner holds its own list of hot shards, rate and
 // daily cap, so owning A (or the gateway) does not let anyone move hot funds anywhere but to another shard of the pool.
-func TestRogueParty_Rebalance(t *testing.T) {
+func TestRogueParty_Rebalance(t *testing.T) { bothTargets(t, rogueRebalance) }
+
+func rogueRebalance(t *testing.T, to string) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)
-	r := s.rogue(t)
+	s.targetSetup(to)
+	r := s.rogue(t, to)
 	shard2, evil := gatewaytest.AddrShard2, gatewaytest.AddrEvil
 
 	t.Run("destination outside the pinned shards", func(t *testing.T) {
@@ -225,10 +254,13 @@ func TestRogueParty_Rebalance(t *testing.T) {
 	})
 }
 
-func TestRogueParty_DailyCapSplitting(t *testing.T) {
+func TestRogueParty_DailyCapSplitting(t *testing.T) { bothTargets(t, rogueDailyCapSplitting) }
+
+func rogueDailyCapSplitting(t *testing.T, to string) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)
-	r := s.rogue(t)
+	s.targetSetup(to)
+	r := s.rogue(t, to)
 	// Policy: 8000 per day, 5000 per transaction, two approvals above 1000. Split 12000 into three approved withdrawals.
 	for i := 0; i < 2; i++ {
 		j := s.h.Withdrawal(fmt.Sprintf("split-%d", i), gatewaytest.AddrUser, 4000, uint64(i), "alice", "bob")
@@ -240,11 +272,24 @@ func TestRogueParty_DailyCapSplitting(t *testing.T) {
 	r.refused(t, r.signOpen(j, s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonDailyCap)
 }
 
-func TestRogueParty_AdminOperations(t *testing.T) {
+func TestRogueParty_AdminOperations(t *testing.T) { bothTargets(t, rogueAdminOperations) }
+
+func rogueAdminOperations(t *testing.T, to string) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)
-	r := s.rogue(t)
+	s.targetSetup(to)
+	r := s.rogue(t, to)
 	otherPub, otherPriv := newAdminKey()
+	// The keyset is a 2-of-3 one (and party C holds 2-of-3 keysets only), so these admin operations are three-party ones (a group id,
+	// the scheme); B is also asked to create a 2-party keyset, the old way.
+	mk := func(o *pb.Open) *pb.Open {
+		if to == "C" || o.Op != pb.Op_OP_DKG { // the keyset is a 2-of-3 one; B is also asked to create a 2-party keyset the old way
+			var g [16]byte
+			rand.Read(g[:])
+			o.Scheme, o.Initiator, o.Group = pb.Scheme_SCHEME_ECDSA_2OF3, "A", hex.EncodeToString(g[:])
+		}
+		return o
+	}
 	_ = otherPub
 	for _, op := range []struct {
 		name string
@@ -256,14 +301,14 @@ func TestRogueParty_AdminOperations(t *testing.T) {
 			keyset = "rogue-keyset"
 		}
 		t.Run(op.name+" without a signature", func(t *testing.T) {
-			r.refused(t, &pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1}, pb.ErrorKind_ERROR_KIND_REFUSED, "admin authorization")
+			r.refused(t, mk(&pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1}), pb.ErrorKind_ERROR_KIND_REFUSED, "admin authorization")
 		})
 		t.Run(op.name+" signed by a key B does not know", func(t *testing.T) {
-			r.refused(t, &pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1, Admin: signWith(otherPriv, op.str, keyset, time.Now())},
+			r.refused(t, mk(&pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1, Admin: signWith(otherPriv, op.str, keyset, time.Now())}),
 				pb.ErrorKind_ERROR_KIND_REFUSED, "not a configured admin key")
 		})
 		t.Run(op.name+" with a stale timestamp", func(t *testing.T) {
-			r.refused(t, &pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1, Admin: s.adminAuth(op.str, keyset, time.Now().Add(-time.Hour))},
+			r.refused(t, mk(&pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1, Admin: s.adminAuth(op.str, keyset, time.Now().Add(-time.Hour))}),
 				pb.ErrorKind_ERROR_KIND_REFUSED, "outside the accepted window")
 		})
 		t.Run(op.name+" with a signature for another operation", func(t *testing.T) {
@@ -271,7 +316,7 @@ func TestRogueParty_AdminOperations(t *testing.T) {
 			if op.str == "refresh" {
 				wrong = "dkg"
 			}
-			r.refused(t, &pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1, Admin: s.adminAuth(wrong, keyset, adminNow())},
+			r.refused(t, mk(&pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1, Admin: s.adminAuth(wrong, keyset, adminNow())}),
 				pb.ErrorKind_ERROR_KIND_REFUSED, "bad signature")
 		})
 	}

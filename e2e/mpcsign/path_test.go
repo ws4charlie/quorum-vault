@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
+	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"github.com/ws4charlie/quorum-vault/internal/chain/eth"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/gateway/gatewaytest"
@@ -94,7 +95,7 @@ func TestEndToEndWithdrawalMinesOnAnvil(t *testing.T) {
 	t.Logf("party B log (cosigner decision made before B joined):\n%s", tail(s.b.out.String(), 600))
 }
 
-// An outage is not a refusal and not a failure: with the cosigner down nothing is signed, the job is neither rejected nor
+// An outage is not a refusal and not a failure: with BOTH cosigners down (B's and C's: any pair needs one of them) nothing is signed, the job is neither rejected nor
 // failed (it would otherwise be cancelled and parked), and when the cosigner returns the job completes by itself with one
 // signature.
 func TestCosignerOutageKeepsJobsWaitingAndTheyComplete(t *testing.T) {
@@ -107,6 +108,7 @@ func TestCosignerOutageKeepsJobsWaitingAndTheyComplete(t *testing.T) {
 		t.Fatalf("baseline: %s %s", g.Status, g.RejectReason)
 	}
 	s.cosigner.kill()
+	s.cosignerC.kill()
 
 	// Directly at party A: UNAVAILABLE, never a signature, and not a refusal.
 	_, err := s.client.Sign(ctx(t, 30*time.Second), s.signRequest(s.h.Withdrawal("o-direct", gatewaytest.AddrUser, 100, 5, "alice")))
@@ -122,6 +124,7 @@ func TestCosignerOutageKeepsJobsWaitingAndTheyComplete(t *testing.T) {
 		t.Fatalf("during the outage the job is %s %q: it must stay signing and unsigned\n%s", row.Status, row.RejectReason, tail(gw.out.String(), 1500))
 	}
 	s.startCosigner(t)
+	s.startCosignerC(t)
 	g := s.waitJob(j1.ID, 60*time.Second)
 	if g.Status != signjob.StatusDone || len(g.Signature) != 64 {
 		t.Fatalf("after the outage the job is %s %q\n%s", g.Status, g.RejectReason, tail(gw.out.String(), 2000))
@@ -138,43 +141,91 @@ func TestCosignerOutageKeepsJobsWaitingAndTheyComplete(t *testing.T) {
 	}
 }
 
-// Party B down for longer than sign_timeout, then restarted: the job completes on its own.
-func TestPartyBDownLongerThanSignTimeout(t *testing.T) {
+// Two parties (B and C) down for longer than sign_timeout: party A is alone, nothing can sign, the job waits; when they are back it
+// completes on its own.
+func TestTwoPartiesDownLongerThanSignTimeout(t *testing.T) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)
 	gw := s.startGateway("w1")
 	s.b.kill()
+	s.c.kill()
 	j := s.h.Withdrawal("bdown", gatewaytest.AddrUser, 100, 0, "alice")
 	s.enqueue(j)
 	time.Sleep(9 * time.Second)
 	row, _ := signjob.Get(context.Background(), s.biz, j.ID)
 	if row.Status != signjob.StatusSigning {
-		t.Fatalf("with B down the job is %s %q", row.Status, row.RejectReason)
+		t.Fatalf("with B and C down the job is %s %q", row.Status, row.RejectReason)
 	}
-	s.restartB(t)
+	s.b = startProc(t, "B", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgB)
+	s.c = startProc(t, "C", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgC)
+	s.waitAllUp(t, "B and C")
 	g := s.waitJob(j.ID, 60*time.Second)
 	if g.Status != signjob.StatusDone || len(g.Signature) != 64 {
-		t.Fatalf("after B returned: %s %q\n%s", g.Status, g.RejectReason, tail(gw.out.String(), 2000))
+		t.Fatalf("after B and C returned: %s %q\n%s", g.Status, g.RejectReason, tail(gw.out.String(), 2000))
 	}
 }
 
-// The cosigner's own guard database going away is an outage too: UNAVAILABLE, not REFUSED.
+// ONE party down is not an outage: the job completes at once without anyone coming back, B down (A+C), C down (A+B), A down (the
+// gateway moves to coordinator B: B+C), and the gateway raises ONE ALERT for the degraded period when it has to use coordinator B.
+func TestOnePartyDownJobsStillComplete(t *testing.T) {
+	s := newStack(t, stackOpts{})
+	s.provision(t, false)
+	gw := s.startGateway("w1")
+	n := 0
+	job := func(what string) {
+		t.Helper()
+		j := s.h.Withdrawal(fmt.Sprintf("one-%s-%d", what, n), gatewaytest.AddrUser, 100, uint64(n), "alice")
+		n++
+		s.enqueue(j)
+		if g := s.waitJob(j.ID, 30*time.Second); g.Status != signjob.StatusDone || len(g.Signature) != 64 {
+			t.Fatalf("%s: job %s %q\n%s", what, g.Status, g.RejectReason, tail(gw.out.String(), 1500))
+		}
+	}
+	job("all up")
+	s.b.kill()
+	job("B down")
+	job("B down again")
+	s.restartB(t)
+	s.c.kill()
+	job("C down")
+	s.restartC(t)
+	if n := s.countLog(gw.out, "ALERT mpc signer degraded"); n != 0 {
+		t.Fatalf("%d degraded ALERTs although party A coordinated every signature", n)
+	}
+	s.a.kill()
+	job("A down")
+	job("A down again")
+	job("A down a third time")
+	if n := s.countLog(gw.out, "ALERT mpc signer degraded"); n != 1 {
+		t.Fatalf("%d degraded ALERTs for one period of A being down, want exactly 1:\n%s", n, gw.out)
+	}
+}
+
+// The cosigners' own guard databases going away are an outage too: UNAVAILABLE, not REFUSED. One of them going away is not (the
+// other pair member signs), and that is checked first.
 func TestCosignerGuardDatabaseDownIsUnavailable(t *testing.T) {
 	s := newStack(t, stackOpts{})
 	s.provision(t, false)
-	u, _ := url.Parse(s.csGuardDSN)
-	name := strings.TrimPrefix(u.Path, "/")
-	admin, err := pgx.Connect(context.Background(), os.Getenv("DATABASE_URL"))
-	if err != nil {
-		t.Fatal(err)
+	drop := func(dsn string) {
+		u, _ := url.Parse(dsn)
+		name := strings.TrimPrefix(u.Path, "/")
+		admin, err := pgx.Connect(context.Background(), os.Getenv("DATABASE_URL"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer admin.Close(context.Background())
+		if _, err := admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
+			t.Fatal(err)
+		}
 	}
-	defer admin.Close(context.Background())
-	if _, err := admin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
-		t.Fatal(err)
+	drop(s.csGuardDSN) // B's
+	if _, err := s.client.Sign(ctx(t, 30*time.Second), s.signRequest(s.h.Withdrawal("db-down-b", gatewaytest.AddrUser, 100, 0, "alice"))); err != nil {
+		t.Fatalf("with B's guard database down A must sign with C: %v", err)
 	}
-	_, err = s.client.Sign(ctx(t, 30*time.Second), s.signRequest(s.h.Withdrawal("db-down", gatewaytest.AddrUser, 100, 0, "alice")))
+	drop(s.csGuardDSNC) // and C's
+	_, err := s.client.Sign(ctx(t, 30*time.Second), s.signRequest(s.h.Withdrawal("db-down", gatewaytest.AddrUser, 100, 1, "alice")))
 	if k, _ := kindOfErr(err); k != pb.ErrorKind_ERROR_KIND_UNAVAILABLE || grpcstatus.Code(err) != codes.Unavailable {
-		t.Fatalf("guard database down: %v (kind %v), want UNAVAILABLE and not REFUSED", err, k)
+		t.Fatalf("both guard databases down: %v (kind %v), want UNAVAILABLE and not REFUSED", err, k)
 	}
 }
 
@@ -209,6 +260,14 @@ func TestRealRefusalRejectsAndCancelIsSigned(t *testing.T) {
 	if g.Status != signjob.StatusRejected || !strings.HasPrefix(g.RejectReason, gateway.ReasonSignerRefused+":") || !strings.Contains(g.RejectReason, gateway.ReasonPerTxCap) {
 		t.Fatalf("job %s %q, want rejected signer_refused ... policy_per_tx_cap", g.Status, g.RejectReason)
 	}
+	// A refusal by B is final: A did not try party C (whose cosigner has the gateway's own, looser cap and would have signed), and the
+	// gateway did not try B as coordinator either.
+	if n := s.countLog(s.c.out, "OP_SIGN"); n != 0 {
+		t.Fatalf("party C saw %d signing sessions after B's cosigner refused", n)
+	}
+	if n := s.countLog(s.b.out, "OP_SIGN"); n > 1 {
+		t.Fatalf("party B logged %d signing sessions for a refused job (the gateway must not try B as coordinator after a refusal)", n)
+	}
 	cin := signjob.Intent{Kind: "cancel", ID: "c-refuse-1", Asset: "ETH", To: s.hot.Hex(), Amount: "0"}
 	c := s.h.Job("cancel-1", cin, gatewaytest.TxSpec{Nonce: 0, To: s.hot, Gas: 21000})
 	s.enqueue(c)
@@ -219,7 +278,7 @@ func TestRealRefusalRejectsAndCancelIsSigned(t *testing.T) {
 }
 
 // A man in the middle between A and B flips a byte in a signing message: the job fails (not rejected), an ALERT is logged
-// by the gateway and by both parties, the keyset is frozen on both sides, and after an authorized unfreeze signing works.
+// by the gateway and by the parties, the keyset is frozen on all three (and not retried with party C), and after an authorized unfreeze signing works.
 func TestTamperingFreezesKeysetAndOperatorUnfreezes(t *testing.T) {
 	s := newStack(t, stackOpts{proxy: true})
 	s.provision(t, false)
@@ -232,8 +291,9 @@ func TestTamperingFreezesKeysetAndOperatorUnfreezes(t *testing.T) {
 	if g := s.waitJob(j0.ID, 60*time.Second); g.Status != signjob.StatusDone {
 		t.Fatalf("clean job: %s %s\nA: %s\nB: %s", g.Status, g.RejectReason, s.a.out, s.b.out)
 	}
-	// 2. tamper with the third message A sends in the next session (derive is message 0, signing starts at 1)
-	s.proxy.set(0, 2)
+	// 2. tamper with the fourth message A sends in the next session (the third is partly ignored by cb-mpc: a flipped byte in its
+	// middle goes unnoticed about half of the time)
+	s.proxy.set(0, 3)
 	j1 := s.h.Withdrawal("t-1", gatewaytest.AddrUser, 100, 1, "alice")
 	s.enqueue(j1)
 	g1 := s.waitJob(j1.ID, 60*time.Second)
@@ -245,6 +305,7 @@ func TestTamperingFreezesKeysetAndOperatorUnfreezes(t *testing.T) {
 	waitLog(t, gw.out, "ALERT", 10*time.Second)
 	waitLog(t, s.a.out, "ALERT keyset frozen", 10*time.Second)
 	waitLog(t, s.b.out, "ALERT keyset frozen", 10*time.Second)
+	waitLog(t, s.c.out, "ALERT keyset frozen", 10*time.Second) // the third party is told: frozen on all three
 
 	// 3. frozen: the next honest job also fails, with the frozen error, and nothing is signed
 	j2 := s.h.Withdrawal("t-2", gatewaytest.AddrUser, 100, 2, "alice")
@@ -263,6 +324,7 @@ func TestTamperingFreezesKeysetAndOperatorUnfreezes(t *testing.T) {
 	}
 	waitLog(t, s.a.out, "AUDIT keyset unfrozen", 5*time.Second)
 	waitLog(t, s.b.out, "AUDIT keyset unfrozen", 5*time.Second)
+	waitLog(t, s.c.out, "AUDIT keyset unfrozen", 5*time.Second) // and unfreezing needs all three
 	j3 := s.h.Withdrawal("t-3", gatewaytest.AddrUser, 100, 3, "alice")
 	s.enqueue(j3)
 	if g := s.waitJob(j3.ID, 60*time.Second); g.Status != signjob.StatusDone {

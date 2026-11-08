@@ -8,7 +8,7 @@ quorum-vault is a working model of how an institution holds customer crypto.
 
 **The custody core (`/v2`)**: customers, deposit addresses, **deposits, sweeps and withdrawals on EVM chains** with a
   double-entry ledger, holds, nonce management, stuck-transaction replacement, crash-safe Temporal workflows, an outbox to
-  Redpanda, and a `Reconcile` check that compares the books with the chain. Hot wallets sign with **two-party MPC**
+  Redpanda, and a `Reconcile` check that compares the books with the chain. Hot wallets sign with **MPC** (EVM: 2-of-3 threshold ECDSA on three parties; Bitcoin: two-party)
   (`mpc-party` A and B, Coinbase's cb-mpc), behind a **signing gateway** and a **cosigner** that are separate trust zones
   and each re-check every request.
 
@@ -107,8 +107,8 @@ make test-custody                 # the closed loop with HSM hot keys (about 5 m
 
 ```bash
 make mpc-build                    # once: cb-mpc at the pinned commit
-make test-mpc                     # gateway -> party A -> party B -> cosigner, about 1 minute
-make test-e2e-evm             # the closed loop with two-party MPC hot keys plus all failure tests (about 15 minutes)
+make test-mpc                     # gateway -> party A/B/C (2-of-3) -> cosigners, about 1.5 minutes
+make test-e2e-evm             # the closed loop with 2-of-3 MPC hot keys plus all failure tests (about 15 minutes)
 ```
 
 `QV_CUSTODY_SIGNER=hsm|mpc` chooses the signer for `e2e/custody`. To run one test, or a few, by name (a Go `-run` regexp):
@@ -164,7 +164,7 @@ Apple M3 Pro, Go 1.27.3, SoftHSM 2.7.0, all processes on one machine. Sources:
 - **Keys.** HSM keys are non-exportable (`CKA_SENSITIVE`, `!CKA_EXTRACTABLE`). MPC shares are sealed with an AES key inside each
   party's own token; the associated data binds role, keyset and generation. A refresh commits in two durable phases and a crash
   at any step converges to one working generation.
-- **Two gates.** The gateway and party B's cosigner each check approver signatures, policy and the replay guard from their own
+- **Two gates.** The gateway and the cosigners of party B and party C each check approver signatures, policy and the replay guard from their own
   config and database. An attacker who owns party A, or the business database, cannot get a signature for a request that was not
   approved.
 - **Freeze.** A cryptographic failure freezes the keyset on both parties until an operator signs an unfreeze.
