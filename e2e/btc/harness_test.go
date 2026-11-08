@@ -27,6 +27,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
+	"github.com/ws4charlie/quorum-vault/e2e/phasetime"
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
@@ -48,6 +49,8 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	mpcstack.ReaperMain() // in the reaper process: waits for this binary to die, kills the children, never returns
+	stopReaper := func() {}
 	code := 0
 	if os.Getenv("QV_REQUIRE_BTC") == "1" {
 		dir, err := os.MkdirTemp("", "qv-e2e-btc-bin-")
@@ -56,6 +59,12 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		binDir = dir
+		built := time.Now()
+		if stop, err := mpcstack.StartReaper(); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err) // the tests run, but a killed binary would leave its children
+		} else {
+			stopReaper = stop
+		}
 		if mpcBin, err = mpcstack.Build(dir); err != nil {
 			buildErr = err
 		}
@@ -72,8 +81,10 @@ func TestMain(m *testing.M) {
 				buildErr = fmt.Errorf("build %s: %v\n%s", b, err, out)
 			}
 		}
+		fmt.Printf("qv-timing-main package=e2e/btc build=%.1f\n", time.Since(built).Seconds()) // compiling the binaries the tests start
 	}
 	code = m.Run()
+	stopReaper()
 	if binDir != "" {
 		os.RemoveAll(binDir)
 	}
@@ -314,6 +325,7 @@ type system struct {
 	worker  *proc
 	core    *proc
 	start   int64 // the height the scan starts from
+	tm      *phasetime.Timer
 
 	// withdrawals (opts.withdraw)
 	acct     *btc.Account
@@ -409,6 +421,7 @@ func (s *system) spawnEnv(name string, env []string, args ...string) *proc {
 	cmd := exec.Command(filepath.Join(binDir, name), args...)
 	cmd.Env = append(append(os.Environ(), "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf()), env...)
 	cmd.Stdout, cmd.Stderr = lf, lf
+	mpcstack.Guard(cmd)
 	if err := cmd.Start(); err != nil {
 		s.t.Fatalf("start %s: %v", name, err)
 	}
@@ -446,9 +459,11 @@ func scale(d time.Duration) time.Duration {
 
 func (s *system) waitFor(timeout time.Duration, what string, f func() bool) {
 	s.t.Helper()
-	dl := time.Now().Add(scale(timeout))
+	start := time.Now()
+	dl := start.Add(scale(timeout))
 	for {
 		if f() {
+			s.tm.Wait(what, time.Since(start))
 			return
 		}
 		if time.Now().After(dl) {
@@ -496,13 +511,23 @@ func newSystem(t *testing.T, o opts) *system {
 	if o.minDeposit == "" {
 		o.minDeposit = "1000"
 	}
-	s := &system{t: t, ctx: context.Background(), dir: t.TempDir(), chain: "btc-" + uuid.NewString()[:8], queue: "qv-e2e-btc-" + uuid.NewString()[:8]}
+	tm := phasetime.Start(t, "btc")
+	s := &system{t: t, ctx: context.Background(), dir: t.TempDir(), chain: "btc-" + uuid.NewString()[:8], queue: "qv-e2e-btc-" + uuid.NewString()[:8], tm: tm}
+	// The two parties take about a second to boot: they start first and are waited for after the node and the database are set up.
+	s.mpc = mpcstack.Start(t, filepath.Join(s.dir, "mpc"), mpcBin, mpcstack.Opts{})
+	tm.Phase("mpc-start")
 	s.node = newNode(t)
+	tm.Phase("chain")
 	s.pool = dbtest.New(t)
 	cc := s.pool.Config().ConnConfig
 	s.bizDSN = fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", cc.User, cc.Host, cc.Port, cc.Database)
-	s.mpc = newMPC(t, s.dir)
+	tm.Phase("db")
+	s.mpc.WaitReady(60 * time.Second)
+	tm.Phase("mpc-wait")
+	s.mpc.DKG()
+	tm.Phase("dkg")
 	s.xpub = accountXpub(t, s.mpc, "regtest")
+	tm.Phase("xpub")
 	s.start = s.node.height() + 1
 	rpcURL := nodeURL()
 	if o.noEstimate {
@@ -542,6 +567,7 @@ func newSystem(t *testing.T, o opts) *system {
 		s.cf.Chain.BTC.SpendConfirmations = o.spendConf
 	}
 	s.writeConfig(s.cf)
+	tm.Phase("configs") // includes the keys, gateway config and cosigner of a withdrawal test
 
 	addr := os.Getenv("QV_TEMPORAL_ADDR")
 	if addr == "" {
@@ -582,12 +608,15 @@ func newSystem(t *testing.T, o opts) *system {
 			_ = tc.TerminateWorkflow(context.Background(), id, "", "test over")
 		}
 	})
+	tm.Phase("temporal")
 	if o.withdraw {
 		s.startGateway()
 	}
 	s.workerFailpoint = o.failpoint
 	s.startWorker()
 	s.startCore()
+	tm.Phase("spawn")
+	tm.Ready(t)
 	return s
 }
 

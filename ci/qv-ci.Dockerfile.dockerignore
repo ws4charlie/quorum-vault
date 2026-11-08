@@ -1,0 +1,4 @@
+*
+!mpc-party/scripts/install-toolchain-linux.sh
+!mpc-party/scripts/fetch-build-cbmpc.sh
+!mpc-party/cbmpc.pin

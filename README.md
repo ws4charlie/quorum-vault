@@ -137,7 +137,8 @@ All optional; see [.env.example](.env.example).
 | `QV_HSM_PIN` | `user-dev-1234` (dev only) | user PIN of all tokens |
 | `QV_PKCS11_LIB` | the SoftHSM2 library of the OS | PKCS#11 module |
 | `QV_CUSTODY_SIGNER` | `hsm` | `e2e/custody`: `hsm` or `mpc` |
-| `QV_E2E_TIMEOUT_SCALE` | `1` | stretches every condition wait in the custody tests (CI sets 3) |
+| `QV_E2E_TIMEOUT_SCALE` | `1` | stretches the limit of every condition wait in the e2e tests (CI sets 3); a slow runner gets longer before a test calls it stuck |
+| `QV_E2E_DELAY_SCALE` | `1` | stretches the delays of the system under test in `e2e/custody` (engine timeouts, stuck-after, gateway lease) and its negative checks; CI leaves it at 1 |
 
 ## The API
 

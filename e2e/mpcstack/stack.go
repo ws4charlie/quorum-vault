@@ -195,6 +195,7 @@ func (p *Proc) Start(t testing.TB) {
 	cmd := exec.Command(p.bin, p.args...)
 	cmd.Env = append(os.Environ(), p.env...)
 	cmd.Stdout, cmd.Stderr = f, f
+	Guard(cmd)
 	if err := cmd.Start(); err != nil {
 		f.Close()
 		t.Fatal(err)
@@ -390,8 +391,17 @@ type Stack struct {
 	RootPub  []byte
 }
 
-// New writes the party configs and starts B and then A. The keyset does not exist yet: call DKG.
+// New writes the party configs and starts B and then A, and waits until A sees B. The keyset does not exist yet: call DKG.
 func New(t testing.TB, dir string, bin Binaries, o Opts) *Stack {
+	t.Helper()
+	s := Start(t, dir, bin, o)
+	s.WaitReady(60 * time.Second)
+	return s
+}
+
+// Start is New without the wait: the parties boot in the background while the caller does other set-up, and WaitReady (or DKG's caller) waits
+// for them when the keys are needed. The keyset does not exist yet.
+func Start(t testing.TB, dir string, bin Binaries, o Opts) *Stack {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -422,7 +432,6 @@ func New(t testing.TB, dir string, bin Binaries, o Opts) *Stack {
 	}
 	t.Cleanup(func() { conn.Close() })
 	s.conn, s.Client = conn, pb.NewMpcPartyClient(conn)
-	s.WaitReady(60 * time.Second)
 	return s
 }
 

@@ -10,8 +10,39 @@ on:
 
 jobs:
 
+  # The CI image of this commit's inputs (see ci.yml): a no-op when it exists, built and pushed when not.
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            ci
+            mpc-party/scripts
+            mpc-party/cbmpc.pin
+            mpc-party/go.mod
+            mpc-party/api/go.mod
+            go.mod
+          sparse-checkout-cone-mode: false
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Build and push the image if its tag does not exist
+        env:
+          QV_CI_PUSH: "1"
+        run: ci/ensure-image.sh publish
+
   mpc-nightly:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 45
     services:
       postgres:
@@ -41,8 +72,8 @@ jobs:
         with:
           infra: "true"
       - name: make test-mpc
-        run: make test-mpc
+        run: ci/run-in-image.sh make test-mpc
       - name: make test-e2e-evm (all tests)
-        run: make test-e2e-evm
+        run: ci/run-in-image.sh make test-e2e-evm
       - name: make test-e2e-evm-latency (the slow-link measurement)
-        run: make test-e2e-evm-latency
+        run: ci/run-in-image.sh make test-e2e-evm-latency

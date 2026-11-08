@@ -46,6 +46,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/e2e"
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
+	"github.com/ws4charlie/quorum-vault/e2e/phasetime"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
@@ -68,6 +69,8 @@ var (
 func mpcMode() bool { return os.Getenv("QV_CUSTODY_SIGNER") == "mpc" }
 
 func TestMain(m *testing.M) {
+	mpcstack.ReaperMain() // in the reaper process: waits for this binary to die, kills the children, never returns
+	stopReaper := func() {}
 	code := 0
 	if os.Getenv("QV_REQUIRE_CUSTODY") == "1" {
 		dir, err := os.MkdirTemp("", "qv-e2e-bin-")
@@ -76,6 +79,12 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		binDir = dir
+		built := time.Now()
+		if stop, err := mpcstack.StartReaper(); err != nil {
+			fmt.Fprintln(os.Stderr, "warning:", err) // the tests run, but a killed binary would leave its children
+		} else {
+			stopReaper = stop
+		}
 		switch os.Getenv("QV_CUSTODY_SIGNER") {
 		case "", "hsm", "mpc":
 		default:
@@ -99,8 +108,10 @@ func TestMain(m *testing.M) {
 				break
 			}
 		}
+		fmt.Printf("qv-timing-main package=e2e/custody build=%.1f\n", time.Since(built).Seconds()) // compiling the binaries the tests start
 	}
 	code = m.Run()
+	stopReaper()
 	if binDir != "" {
 		os.RemoveAll(binDir)
 	}
@@ -227,7 +238,7 @@ type system struct {
 	coldAddr                  common.Address  // the cold address both zones are configured with
 	cold                      *coldKit        // the offline signer's side, when opts.cold.coldHSM
 	mpc                       *mpcstack.Stack // mpc mode only
-	tm                        *timing
+	tm                        *phasetime.Timer
 	cf                        custody.File // the files as written, so a test can change one and restart
 	gf                        gateway.File
 	cosPath                   string
@@ -319,8 +330,7 @@ func eth(n int64) *big.Int { return new(big.Int).Mul(big.NewInt(n), big.NewInt(e
 func newSystem(t *testing.T, o opts) *system {
 	t.Helper()
 	requireCustody(t)
-	tm := newTiming(t)
-	t.Cleanup(func() { tm.finish(t) }) // registered first, so it runs last: after everything is torn down
+	tm := phasetime.Start(t, os.Getenv("QV_CUSTODY_SIGNER")) // registered first, so it logs last: after everything is torn down
 	if o.shards == 0 {
 		o.shards = 1
 	}
@@ -361,6 +371,10 @@ func newSystem(t *testing.T, o opts) *system {
 	_ = s.rc.CallContext(s.ctx, nil, "evm_setAutomine", true)
 	s.ec = ethclient.NewClient(s.rc)
 
+	if mpcMode() { // the two parties take about a second to boot: they start now, while the databases and the chain are set up, and are waited for below
+		s.mpc = mpcstack.Start(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy})
+		s.tm.Phase("mpc-start")
+	}
 	// Databases: the business database, and the gateway's own replay guard.
 	s.pool = dbtest.New(t)
 	cc := s.pool.Config().ConnConfig
@@ -372,7 +386,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.queue = "qv-e2e-" + uuid.NewString()[:8]
 	s.auditSrc = "e2e-" + uuid.NewString()[:8]
 
-	s.tm.phase("databases (Postgres, guard DBs)")
+	s.tm.Phase("db")
 	// Chain: factory (deployed frozen), token, keys. All keys are generated now.
 	s.deployer, _ = crypto.GenerateKey()
 	s.admin, _ = crypto.GenerateKey()
@@ -394,15 +408,17 @@ func newSystem(t *testing.T, o opts) *system {
 	s.factory = s.mustSend(s.deployer, nil, new(big.Int), evm.FactoryDeployData(common.Address{}, adminAddr, crypto.PubkeyToAddress(s.guardian.PublicKey))).ContractAddress
 	s.usdt = s.mustSend(s.deployer, nil, new(big.Int), readBin(t, "UsdtLike.bin")).ContractAddress
 
-	s.tm.phase("chain (factory, token, funding keys)")
+	s.tm.Phase("chain")
 	// Hot shards: HSM keys that never leave the token, or (mpc mode) keys derived from a two-party DKG whose shares live
 	// in two parties' own HSM tokens.
 	signers := map[string]gateway.SignerFile{}
 	var keys []struct{ id, pub string }
 	var mpcShards []mpcstack.Shard
 	if mpcMode() {
-		s.mpc = mpcstack.New(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy})
+		s.mpc.WaitReady(60 * time.Second)
+		s.tm.Phase("mpc-wait")
 		s.mpc.DKG()
+		s.tm.Phase("dkg")
 		for i := 0; i < o.shards; i++ {
 			sh := s.mpc.Derive(i)
 			mpcShards = append(mpcShards, sh)
@@ -425,7 +441,7 @@ func newSystem(t *testing.T, o opts) *system {
 		}
 	}
 
-	s.tm.phase("hot keys (HSM generate, or mpc parties + DKG + derive)")
+	s.tm.Phase("keys")
 	// Approvers.
 	apprFiles := map[string]gateway.ApproverFile{}
 	for _, name := range []string{"alice", "bob", "carol", "auto"} {
@@ -561,7 +577,7 @@ func newSystem(t *testing.T, o opts) *system {
 		s.mpc.StartCosigner(cosPath, s.cosGuardDSN, s.guardDSN)
 	}
 
-	s.tm.phase("configs")
+	s.tm.Phase("configs")
 	// In-process service for funding and Reconcile (reads only, plus FundHot).
 	adapter, err := evm.New(s.ctx, s.cfg.EVM, s.pool)
 	if err != nil {
@@ -578,7 +594,7 @@ func newSystem(t *testing.T, o opts) *system {
 		t.Fatal(err)
 	}
 
-	s.tm.phase("in-process service + adapter")
+	s.tm.Phase("service")
 	// Temporal.
 	addr := os.Getenv("QV_TEMPORAL_ADDR")
 	if addr == "" {
@@ -605,7 +621,7 @@ func newSystem(t *testing.T, o opts) *system {
 	t.Cleanup(s.tc.Close)
 	t.Cleanup(s.terminateWorkflows)
 
-	s.tm.phase("Temporal connect")
+	s.tm.Phase("temporal")
 	// Fund the hot wallets: gas money on chain and in the books.
 	for i, a := range s.shardAddr {
 		n := int64(100)
@@ -624,22 +640,21 @@ func newSystem(t *testing.T, o opts) *system {
 		s.setDestination(s.shardAddr[0])
 	}
 
-	s.tm.phase("fund hot wallets")
+	s.tm.Phase("fund")
 	s.startGateway()
 	if !o.noRelay {
 		s.startRelay()
 	}
 	s.startWorker("")
 	s.startCore()
-	s.tm.phase("start gateway, relay, worker, core")
-	s.tm.markReady()
-	t.Cleanup(tm.markBodyEnd) // registered last, so it runs first: the moment the test body is over
+	s.tm.Phase("spawn")
+	s.tm.Ready(t) // registers the end of the body last, so it runs first
 	return s
 }
 
 // signTimeout bounds one signer call at the gateway, and is also how long a reserved digest counts as "being signed" (a retry
 // after an outage waits that long) and, with the lease, how long a failed attempt keeps its job. An HSM answers in milliseconds
-// and two parties in about 50 ms, so the test values are short (they are stretched by QV_E2E_TIMEOUT_SCALE on a slow runner):
+// and two parties in about 50 ms, so the test values are short (QV_E2E_DELAY_SCALE stretches them):
 // 3 s for the HSM, 5 s for two parties. A test that makes signatures slow on purpose sets opts.signTimeout. The business config's
 // sign_timeout (how long the workflow waits before it re-enqueues a failed job) is the same value.
 // QV_CUSTODY_SIGN_TIMEOUT overrides everything.
@@ -665,12 +680,23 @@ func gatewayLease(o opts) string {
 	return (d + sdur(3*time.Second)).String()
 }
 
-// sd is a test duration written as a config string, stretched by QV_E2E_TIMEOUT_SCALE.
+// sd is a delay of the system under test written as a config string (an engine timeout, the stuck-after interval, the gateway's lease),
+// stretched by QV_E2E_DELAY_SCALE (default 1).
 func sd(d time.Duration) string { return sdur(d).String() }
 
-func sdur(d time.Duration) time.Duration { return scaled(d) }
+// sdur is such a delay as a duration. These are NOT stretched by QV_E2E_TIMEOUT_SCALE: they are not limits the test waits against but time the
+// system takes to react (a killed worker is noticed after the activity timeout, a stuck transaction is bumped after stuck-after), so every crash and
+// recovery test pays them in full. With CI's QV_E2E_TIMEOUT_SCALE=3 they were three times longer there than on a laptop and cost the EVM jobs
+// about 30% of their time (docs/measurements/e2e-timing.md). The Bitcoin suite never stretched them and passes on the same runners. If a slow runner
+// ever needs longer delays, set QV_E2E_DELAY_SCALE (only the delays) rather than QV_E2E_TIMEOUT_SCALE.
+func sdur(d time.Duration) time.Duration {
+	if v, err := strconv.ParseFloat(os.Getenv("QV_E2E_DELAY_SCALE"), 64); err == nil && v > 0 {
+		return time.Duration(float64(d) * v)
+	}
+	return d
+}
 
-// scaled stretches a wait by QV_E2E_TIMEOUT_SCALE (default 1; CI sets a larger value). Every wait in these tests is on a
+// scaled stretches the limit of a wait by QV_E2E_TIMEOUT_SCALE (default 1; CI sets a larger value). Every wait in these tests is on a
 // condition, so the scale only changes how long a slow machine is given before the test calls it stuck.
 func scaled(d time.Duration) time.Duration {
 	if v, err := strconv.ParseFloat(os.Getenv("QV_E2E_TIMEOUT_SCALE"), 64); err == nil && v > 0 {
@@ -767,6 +793,7 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 		cmd.Env = append(cmd.Env, "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf())
 	}
 	cmd.Stdout, cmd.Stderr = lf, lf
+	mpcstack.Guard(cmd)
 	if err := cmd.Start(); err != nil {
 		s.t.Fatalf("start %s: %v", name, err)
 	}
@@ -856,7 +883,7 @@ func (s *system) waitFor(timeout time.Duration, what string, f func() bool) {
 	dl := start.Add(timeout)
 	for {
 		if f() {
-			s.tm.wait(what, time.Since(start))
+			s.tm.Wait(what, time.Since(start))
 			return
 		}
 		if time.Now().After(dl) {
@@ -890,10 +917,11 @@ func (s *system) waitHistory(id string, n int) {
 func (s *system) waitPasses(id string, passes int) { s.t.Helper(); s.waitHistory(id, passes*6) }
 
 // holds asserts that cond stays true for d (a negative check cannot be a condition wait: something that must NOT happen is only
-// shown by waiting). d is stretched by QV_E2E_TIMEOUT_SCALE.
+// shown by waiting). d is stretched by QV_E2E_DELAY_SCALE like the delays of the system it watches (not by QV_E2E_TIMEOUT_SCALE: it is a
+// duration to wait out, not a limit).
 func (s *system) holds(d time.Duration, what string, cond func() bool) {
 	s.t.Helper()
-	end := time.Now().Add(scaled(d))
+	end := time.Now().Add(sdur(d))
 	for time.Now().Before(end) {
 		if !cond() {
 			s.t.Fatalf("%s: stopped being true", what)

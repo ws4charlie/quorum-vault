@@ -5,7 +5,39 @@ on:
     branches: [main, dev]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  # The CI image (ci/qv-ci.Dockerfile): clang-20, cb-mpc, SoftHSM2 and Go, tagged by a hash of its inputs (ci/image-tag.sh). Almost always the tag
+  # exists already and this job is a no-op of a few seconds; when an input changed it builds the image and pushes it, and the jobs below wait for it.
+  # Fork pull requests cannot push: their jobs pull the tag if main has it, else build it themselves (ci/ensure-image.sh use).
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            ci
+            mpc-party/scripts
+            mpc-party/cbmpc.pin
+            mpc-party/go.mod
+            mpc-party/api/go.mod
+            go.mod
+          sparse-checkout-cone-mode: false
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Build and push the image if its tag does not exist
+        env:
+          QV_CI_PUSH: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '1' || '0' }}
+        run: ci/ensure-image.sh publish
+
   test:
     runs-on: ubuntu-latest
     services:
@@ -106,6 +138,10 @@ jobs:
 
   mpc-signing:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 15
     services:
       postgres:
@@ -133,10 +169,14 @@ jobs:
         with:
           infra: "false"
       - name: make test-mpc
-        run: make test-mpc
+        run: ci/run-in-image.sh make test-mpc
 
   e2e-evm-flows:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 15
     services:
       postgres:
@@ -166,10 +206,14 @@ jobs:
         with:
           infra: "true"
       - name: make test-e2e-evm-flows
-        run: make test-e2e-evm-flows
+        run: ci/run-in-image.sh make test-e2e-evm-flows
 
   e2e-evm-tx-failures:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 15
     services:
       postgres:
@@ -199,10 +243,14 @@ jobs:
         with:
           infra: "true"
       - name: make test-e2e-evm-tx-failures
-        run: make test-e2e-evm-tx-failures
+        run: ci/run-in-image.sh make test-e2e-evm-tx-failures
 
   e2e-evm-recovery:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 15
     services:
       postgres:
@@ -232,11 +280,15 @@ jobs:
         with:
           infra: "true"
       - name: make test-e2e-evm-recovery
-        run: make test-e2e-evm-recovery
+        run: ci/run-in-image.sh make test-e2e-evm-recovery
 
   # Bitcoin cell, deposits: bitcoind in regtest, real mpc-party. The cb-mpc build cache is shared through the mpc-env action.
   e2e-btc-deposits:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 20
     services:
       postgres:
@@ -257,21 +309,24 @@ jobs:
       DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
       QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: Start bitcoind (regtest) on 18443
-        run: docker compose --profile btc up -d --wait bitcoind
+          anvil: "false"
+          bitcoind: "true"
       - name: make test-e2e-btc-deposits
-        run: make test-e2e-btc-deposits
+        run: ci/run-in-image.sh make test-e2e-btc-deposits
 
   # Bitcoin cell, withdrawals: the gateway, party B's cosigner and the workflows on real mpc-party, bitcoind in regtest with -txindex.
   e2e-btc-withdrawals:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 20
     services:
       postgres:
@@ -292,21 +347,24 @@ jobs:
       DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
       QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: Start bitcoind (regtest) on 18443
-        run: docker compose --profile btc up -d --wait bitcoind
+          anvil: "false"
+          bitcoind: "true"
       - name: make test-e2e-btc-withdrawals
-        run: make test-e2e-btc-withdrawals
+        run: ci/run-in-image.sh make test-e2e-btc-withdrawals
 
   # Bitcoin cell, sweeps and their recovery: credited deposits are swept into the hot shard under deposit-branch keys (gateway, cosigner, workflows, real mpc-party).
   e2e-btc-sweeps:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 20
     services:
       postgres:
@@ -327,21 +385,24 @@ jobs:
       DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
       QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: Start bitcoind (regtest) on 18443
-        run: docker compose --profile btc up -d --wait bitcoind
+          anvil: "false"
+          bitcoind: "true"
       - name: make test-e2e-btc-sweeps
-        run: make test-e2e-btc-sweeps
+        run: ci/run-in-image.sh make test-e2e-btc-sweeps
 
   # Bitcoin cell, reconciliation against the chain and hot-to-cold moves (bands, rounds under max_inputs, attacks, crash boundaries, cancel).
   e2e-btc-cold:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 10
     services:
       postgres:
@@ -362,21 +423,24 @@ jobs:
       DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
       QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: Start bitcoind (regtest) on 18443
-        run: docker compose --profile btc up -d --wait bitcoind
+          anvil: "false"
+          bitcoind: "true"
       - name: make test-e2e-btc-cold
-        run: make test-e2e-btc-cold
+        run: ci/run-in-image.sh make test-e2e-btc-cold
 
   # Bitcoin cell, consolidation of a hot shard's small outputs.
   e2e-btc-consolidate:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 10
     services:
       postgres:
@@ -397,21 +461,24 @@ jobs:
       DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
       QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: Start bitcoind (regtest) on 18443
-        run: docker compose --profile btc up -d --wait bitcoind
+          anvil: "false"
+          bitcoind: "true"
       - name: make test-e2e-btc-consolidate
-        run: make test-e2e-btc-consolidate
+        run: ci/run-in-image.sh make test-e2e-btc-consolidate
 
   # Bitcoin cell, refills from cold: the cold key in the qv-cold SoftHSM token, qv-cold as its own process, only files crossing.
   e2e-btc-refill:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 10
     services:
       postgres:
@@ -432,21 +499,24 @@ jobs:
       DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
       QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: Start bitcoind (regtest) on 18443
-        run: docker compose --profile btc up -d --wait bitcoind
+          anvil: "false"
+          bitcoind: "true"
       - name: make test-e2e-btc-refill
-        run: make test-e2e-btc-refill
+        run: ci/run-in-image.sh make test-e2e-btc-refill
 
   # Bitcoin cell, stuck refills: the fee-bumped second ceremony, the lost signed file, the fee attacks, through real files with qv-cold as its own process.
   e2e-btc-refill-stuck:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 10
     services:
       postgres:
@@ -467,21 +537,24 @@ jobs:
       DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
       QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: Start bitcoind (regtest) on 18443
-        run: docker compose --profile btc up -d --wait bitcoind
+          anvil: "false"
+          bitcoind: "true"
       - name: make test-e2e-btc-refill-stuck
-        run: make test-e2e-btc-refill-stuck
+        run: ci/run-in-image.sh make test-e2e-btc-refill-stuck
 
   # Bitcoin cell, recovery: fee bumps, cancel, an outside spend, the crash boundaries, a killed gateway, a node restarted with an empty mempool.
   e2e-btc-recovery:
     runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 30
     services:
       postgres:
@@ -502,14 +575,13 @@ jobs:
       DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
       QV_E2E_TIMEOUT_SCALE: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
           infra: "true"
-      - name: Start bitcoind (regtest) on 18443
-        run: docker compose --profile btc up -d --wait bitcoind
+          anvil: "false"
+          bitcoind: "true"
       - name: make test-e2e-btc-recovery
-        run: make test-e2e-btc-recovery
+        run: ci/run-in-image.sh make test-e2e-btc-recovery

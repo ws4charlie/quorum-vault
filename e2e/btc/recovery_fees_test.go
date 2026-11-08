@@ -81,7 +81,7 @@ func (s *system) stuckWithdrawal(p *feeProxy) (w wd, dest string) {
 // more than the highest refused fee, the node takes one above its minimum, and the withdrawal settles once with that transaction's fee booked.
 func TestRecoveryFeeRefusedBumpsEscalateAcrossARestartAndPastMaxReplacements(t *testing.T) {
 	px := newFeeProxy(t)
-	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "4s"})
+	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "2s"})
 	w, dest := s.stuckWithdrawal(px)
 	f0 := s.firstFee(px)
 	px.setMin(f0*15/2 + 1) // 7.5 x f0: refuses 2, 3, 4, 5, 6 and 7 x f0, takes 8 x f0
@@ -142,7 +142,7 @@ func TestRecoveryFeeRefusedBumpsEscalateAcrossARestartAndPastMaxReplacements(t *
 func TestRecoveryFeeRefusedAboveTheCapAlertsOnceAndRetriesWhenTheMinimumFalls(t *testing.T) {
 	px := newFeeProxy(t)
 	const cap = 450 // sats: 3 x 141 fits, 4 x 141 does not
-	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "4s", maxTxFee: cap})
+	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "2s", maxTxFee: cap})
 	w, dest := s.stuckWithdrawal(px)
 	f0 := s.firstFee(px)
 	if 3*f0 > cap || 4*f0 <= cap {
@@ -192,7 +192,7 @@ func TestRecoveryFeeRefusedAboveTheCapAlertsOnceAndRetriesWhenTheMinimumFalls(t 
 // not cancelled or voided; and it goes through once the minimum falls.
 func TestRecoveryFeeRefusedConsolidationStopsAtItsCeilingAndRetries(t *testing.T) {
 	px := newFeeProxy(t)
-	s := consolidateSystem(t, opts{consolidateAbove: 6, consolidateMaxRate: 3, fallbackRate: 1, stuckAfter: "4s", proxy: px})
+	s := consolidateSystem(t, opts{consolidateAbove: 6, consolidateMaxRate: 3, fallbackRate: 1, stuckAfter: "2s", proxy: px})
 	s.fundHotOutputs(repeat(100_000, 7)...)
 	f0 := s.firstFee(px) // 1 sat/vB: the size of the transaction in satoshis
 	px.setMin(10 * f0)
@@ -234,7 +234,7 @@ func TestRecoveryFeeRefusedConsolidationStopsAtItsCeilingAndRetries(t *testing.T
 // is not voided, and it settles when the node takes a transaction.
 func TestRecoveryNonFeeRefusalDoesNotEscalate(t *testing.T) {
 	px := newFeeProxy(t)
-	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "4s"})
+	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "2s"})
 	w, dest := s.stuckWithdrawal(px)
 	f0 := s.firstFee(px)
 	px.setOther("too-long-mempool-chain, too many unconfirmed ancestors [limit: 25]")
