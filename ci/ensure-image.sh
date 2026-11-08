@@ -11,7 +11,16 @@ IMAGE="$(ci/image-tag.sh)"
 REPO="${IMAGE%:*}"
 GO_VERSION="$(ci/image-tag.sh --go-version)"
 
+# The default builder uses the `docker` driver, which cannot export a registry cache. Build with a docker-container builder (--load still works).
+use_container_builder() {
+  if docker buildx inspect 2>/dev/null | grep -qi '^Driver:[[:space:]]*docker$'; then
+    docker buildx inspect qv-ci >/dev/null 2>&1 || docker buildx create --name qv-ci --driver docker-container >/dev/null
+    docker buildx use qv-ci
+  fi
+}
+
 build() { # build [extra buildx flags]
+  use_container_builder
   docker buildx build --file ci/qv-ci.Dockerfile --build-arg "GO_VERSION=$GO_VERSION" --tag "$IMAGE" "$@" .
 }
 
