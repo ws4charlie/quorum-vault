@@ -371,6 +371,10 @@ func newSystem(t *testing.T, o opts) *system {
 	_ = s.rc.CallContext(s.ctx, nil, "evm_setAutomine", true)
 	s.ec = ethclient.NewClient(s.rc)
 
+	if mpcMode() { // the two parties take about a second to boot: they start now, while the databases and the chain are set up, and are waited for below
+		s.mpc = mpcstack.Start(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy})
+		s.tm.Phase("mpc-start")
+	}
 	// Databases: the business database, and the gateway's own replay guard.
 	s.pool = dbtest.New(t)
 	cc := s.pool.Config().ConnConfig
@@ -411,8 +415,8 @@ func newSystem(t *testing.T, o opts) *system {
 	var keys []struct{ id, pub string }
 	var mpcShards []mpcstack.Shard
 	if mpcMode() {
-		s.mpc = mpcstack.New(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy})
-		s.tm.Phase("mpc-start")
+		s.mpc.WaitReady(60 * time.Second)
+		s.tm.Phase("mpc-wait")
 		s.mpc.DKG()
 		s.tm.Phase("dkg")
 		for i := 0; i < o.shards; i++ {
@@ -650,7 +654,7 @@ func newSystem(t *testing.T, o opts) *system {
 
 // signTimeout bounds one signer call at the gateway, and is also how long a reserved digest counts as "being signed" (a retry
 // after an outage waits that long) and, with the lease, how long a failed attempt keeps its job. An HSM answers in milliseconds
-// and two parties in about 50 ms, so the test values are short (they are stretched by QV_E2E_TIMEOUT_SCALE on a slow runner):
+// and two parties in about 50 ms, so the test values are short (QV_E2E_DELAY_SCALE stretches them):
 // 3 s for the HSM, 5 s for two parties. A test that makes signatures slow on purpose sets opts.signTimeout. The business config's
 // sign_timeout (how long the workflow waits before it re-enqueues a failed job) is the same value.
 // QV_CUSTODY_SIGN_TIMEOUT overrides everything.
@@ -676,12 +680,23 @@ func gatewayLease(o opts) string {
 	return (d + sdur(3*time.Second)).String()
 }
 
-// sd is a test duration written as a config string, stretched by QV_E2E_TIMEOUT_SCALE.
+// sd is a delay of the system under test written as a config string (an engine timeout, the stuck-after interval, the gateway's lease),
+// stretched by QV_E2E_DELAY_SCALE (default 1).
 func sd(d time.Duration) string { return sdur(d).String() }
 
-func sdur(d time.Duration) time.Duration { return scaled(d) }
+// sdur is such a delay as a duration. These are NOT stretched by QV_E2E_TIMEOUT_SCALE: they are not limits the test waits against but time the
+// system takes to react (a killed worker is noticed after the activity timeout, a stuck transaction is bumped after stuck-after), so every crash and
+// recovery test pays them in full. With CI's QV_E2E_TIMEOUT_SCALE=3 they were three times longer there than on a laptop and cost the EVM jobs
+// about 30% of their time (docs/measurements/e2e-timing.md). The Bitcoin suite never stretched them and passes on the same runners. If a slow runner
+// ever needs longer delays, set QV_E2E_DELAY_SCALE (only the delays) rather than QV_E2E_TIMEOUT_SCALE.
+func sdur(d time.Duration) time.Duration {
+	if v, err := strconv.ParseFloat(os.Getenv("QV_E2E_DELAY_SCALE"), 64); err == nil && v > 0 {
+		return time.Duration(float64(d) * v)
+	}
+	return d
+}
 
-// scaled stretches a wait by QV_E2E_TIMEOUT_SCALE (default 1; CI sets a larger value). Every wait in these tests is on a
+// scaled stretches the limit of a wait by QV_E2E_TIMEOUT_SCALE (default 1; CI sets a larger value). Every wait in these tests is on a
 // condition, so the scale only changes how long a slow machine is given before the test calls it stuck.
 func scaled(d time.Duration) time.Duration {
 	if v, err := strconv.ParseFloat(os.Getenv("QV_E2E_TIMEOUT_SCALE"), 64); err == nil && v > 0 {
@@ -902,10 +917,11 @@ func (s *system) waitHistory(id string, n int) {
 func (s *system) waitPasses(id string, passes int) { s.t.Helper(); s.waitHistory(id, passes*6) }
 
 // holds asserts that cond stays true for d (a negative check cannot be a condition wait: something that must NOT happen is only
-// shown by waiting). d is stretched by QV_E2E_TIMEOUT_SCALE.
+// shown by waiting). d is stretched by QV_E2E_DELAY_SCALE like the delays of the system it watches (not by QV_E2E_TIMEOUT_SCALE: it is a
+// duration to wait out, not a limit).
 func (s *system) holds(d time.Duration, what string, cond func() bool) {
 	s.t.Helper()
-	end := time.Now().Add(scaled(d))
+	end := time.Now().Add(sdur(d))
 	for time.Now().Before(end) {
 		if !cond() {
 			s.t.Fatalf("%s: stopped being true", what)

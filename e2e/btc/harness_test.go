@@ -498,19 +498,10 @@ func accountXpub(t *testing.T, mpc *mpcstack.Stack, network string) string {
 	return x
 }
 
-func newMPC(t *testing.T, dir string) *mpcstack.Stack { return newTimedMPC(t, dir, nil) }
-
-// newTimedMPC also records the start of the parties and the DKG as phases of tm (nil: not timed).
-func newTimedMPC(t *testing.T, dir string, tm *phasetime.Timer) *mpcstack.Stack {
+func newMPC(t *testing.T, dir string) *mpcstack.Stack {
 	t.Helper()
 	m := mpcstack.New(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{})
-	if tm != nil {
-		tm.Phase("mpc-start")
-	}
 	m.DKG()
-	if tm != nil {
-		tm.Phase("dkg")
-	}
 	return m
 }
 
@@ -522,13 +513,19 @@ func newSystem(t *testing.T, o opts) *system {
 	}
 	tm := phasetime.Start(t, "btc")
 	s := &system{t: t, ctx: context.Background(), dir: t.TempDir(), chain: "btc-" + uuid.NewString()[:8], queue: "qv-e2e-btc-" + uuid.NewString()[:8], tm: tm}
+	// The two parties take about a second to boot: they start first and are waited for after the node and the database are set up.
+	s.mpc = mpcstack.Start(t, filepath.Join(s.dir, "mpc"), mpcBin, mpcstack.Opts{})
+	tm.Phase("mpc-start")
 	s.node = newNode(t)
 	tm.Phase("chain")
 	s.pool = dbtest.New(t)
 	cc := s.pool.Config().ConnConfig
 	s.bizDSN = fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", cc.User, cc.Host, cc.Port, cc.Database)
 	tm.Phase("db")
-	s.mpc = newTimedMPC(t, s.dir, tm)
+	s.mpc.WaitReady(60 * time.Second)
+	tm.Phase("mpc-wait")
+	s.mpc.DKG()
+	tm.Phase("dkg")
 	s.xpub = accountXpub(t, s.mpc, "regtest")
 	tm.Phase("xpub")
 	s.start = s.node.height() + 1
