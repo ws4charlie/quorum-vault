@@ -1,4 +1,4 @@
-// C ABI over Coinbase cb-mpc (pinned in ../../cbmpc.pin). Only 2-party protocols.
+// C ABI over Coinbase cb-mpc (pinned in ../../cbmpc.pin). 2-party protocols, and threshold ECDSA 2-of-3 (E23-1).
 //
 // Conventions
 //  - Every function returns 0 on success, else a non-zero code. Codes in the 0xff0n.... range come from cb-mpc
@@ -80,9 +80,27 @@ int qv_pve_verify(int curve, const uint8_t* ek, size_t ekl, const uint8_t* ct, s
 int qv_pve_decrypt(int curve, const uint8_t* dk, size_t dkl, const uint8_t* ek, size_t ekl,
                    const uint8_t* ct, size_t ctl, const uint8_t* label, size_t labell, uint8_t** xs32, size_t* n);
 
+// ---- Threshold ECDSA (secp256k1), 2-of-3, cb-mpc ecdsa_mp with an access structure (E23-1). Members are 0, 1, 2 with the
+// fixed party names qv-t0..qv-t2. h is a Go mesh session (one link per peer): qv_go_send_peer / qv_go_recv_peer.
+// DKG and refresh need all three members online; sign needs only `self` and `peer`.
+int qv_t_dkg(int self, uintptr_t h, uint8_t** blob, size_t* bl);
+int qv_t_refresh(int self, uintptr_t h, const uint8_t* blob, size_t bl, uint8_t** nblob, size_t* nbl);
+// Only `receiver` (self or peer) gets the DER signature (low-S, verified against Q by cb-mpc); the other gets NULL/0.
+int qv_t_sign(int self, uintptr_t h, int peer, int receiver, const uint8_t* blob, size_t bl,
+              const uint8_t* msg, size_t ml, uint8_t** sig, size_t* sl);
+// Parse and check a share blob: layout, version 2, curve, the three names, ranges, x*G == Qi_self. Returns the
+// member the blob belongs to, Q (33 bytes) and this member's share point Qi (33 bytes).
+int qv_t_info(const uint8_t* blob, size_t bl, int* self, uint8_t Q[33], uint8_t Qi[33]);
+// Backup: public blob (x wiped) + x as 32 bytes big-endian; and back (checks x*G == Qi).
+int qv_t_split(const uint8_t* blob, size_t bl, uint8_t** pub, size_t* pl, uint8_t** x32);
+int qv_t_join(const uint8_t* pub, size_t pl, const uint8_t* x32, const uint8_t* Qi, uint8_t** blob, size_t* bl);
+
 // Implemented in Go (cgo //export): one blocking transport per protocol session. Return 0 or non-zero.
 int qv_go_send(uintptr_t h, void* msg, size_t len);
 int qv_go_recv(uintptr_t h, void** out, size_t* outlen);  // *out is malloc'ed, freed by the shim
+// Mesh sessions (threshold): the same, addressed to / from member `peer` (0..2).
+int qv_go_send_peer(uintptr_t h, int peer, void* msg, size_t len);
+int qv_go_recv_peer(uintptr_t h, int peer, void** out, size_t* outlen);
 
 #ifdef __cplusplus
 }

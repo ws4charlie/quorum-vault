@@ -1,4 +1,4 @@
-// Package cbmpc is a tested Go wrapper over Coinbase cb-mpc (2-party protocols), pinned in ../../cbmpc.pin.
+// Package cbmpc is a tested Go wrapper over Coinbase cb-mpc (2-party protocols and 2-of-3 threshold ECDSA, see threshold.go), pinned in ../../cbmpc.pin.
 //
 // Parties: P1 (role 0) is the coordinator and the only party that receives signatures; P2 (role 1) follows.
 // Every protocol call is one blocking cgo call on its own OS thread, driven through a Transport (see transport.go).

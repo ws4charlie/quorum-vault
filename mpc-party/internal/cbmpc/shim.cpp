@@ -12,11 +12,15 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <new>
+#include <string>
 #include <stdexcept>
 #include <vector>
 
 #include <cbmpc/api/ecdsa_2p.h>
+#include <cbmpc/api/ecdsa_mp.h>
+#include <cbmpc/core/access_structure.h>
 #include <cbmpc/api/eddsa_2p.h>
 #include <cbmpc/api/hd_keyset_ecdsa_2p.h>
 #include <cbmpc/api/hd_keyset_eddsa_2p.h>
@@ -96,6 +100,83 @@ int out(const buf_t& b, uint8_t** p, size_t* n) { return out(b.data(), (size_t)b
 
 mem_t M(const uint8_t* p, size_t n) { return mem_t(p, (int)n); }
 api::bip32_path_t P(const uint32_t* p, size_t n) { return api::bip32_path_t{std::vector<uint32_t>(p, p + n)}; }
+
+// Mesh transport for threshold sessions: protocol party index -> member number (0..2), one Go link per member.
+class go_mesh_transport : public api::data_transport_i {
+ public:
+  go_mesh_transport(uintptr_t h, std::vector<int> members) : h_(h), m_(std::move(members)) {}
+  error_t send(api::party_idx_t r, mem_t msg) override {
+    if (r < 0 || (size_t)r >= m_.size()) return (error_t)QV_E_TRANSPORT;
+    return qv_go_send_peer(h_, m_[r], (void*)msg.data, (size_t)msg.size) ? (error_t)QV_E_TRANSPORT : 0;
+  }
+  error_t receive(api::party_idx_t s, buf_t& msg) override {
+    if (s < 0 || (size_t)s >= m_.size()) return (error_t)QV_E_TRANSPORT;
+    void* p = nullptr;
+    size_t n = 0;
+    if (qv_go_recv_peer(h_, m_[s], &p, &n)) return (error_t)QV_E_TRANSPORT;
+    msg = buf_t((const uint8_t*)p, (int)n);
+    free(p);
+    return 0;
+  }
+  error_t receive_all(const std::vector<api::party_idx_t>& senders, std::vector<buf_t>& msgs) override {
+    msgs.resize(senders.size());
+    for (size_t i = 0; i < senders.size(); i++)
+      if (error_t rv = receive(senders[i], msgs[i])) return rv;
+    return 0;
+  }
+
+ private:
+  uintptr_t h_;
+  std::vector<int> m_;
+};
+
+// Fixed party names: the share blobs are bound to them (name-bound, not index-bound), and so is every proof (pid = hash
+// of the name). Changing them makes every stored share unusable: golden-tested.
+const std::string_view kTNames[3] = {"qv-t0", "qv-t1", "qv-t2"};
+const int kTCurve = QV_CURVE_SECP256K1;
+
+api::access_structure_t t_access() {
+  return api::access_structure_t::Threshold(
+      2, {api::access_structure_t::leaf(kTNames[0]), api::access_structure_t::leaf(kTNames[1]),
+          api::access_structure_t::leaf(kTNames[2])});
+}
+
+// Mirror of the ecdsa_mp key blob, src/cbmpc/api/ecdsa_mp.cpp key_blob_v1_t (access-structure blobs are version 2).
+// Field order is the wire order. Pinned by golden tests.
+struct tkey_blob_t {
+  uint32_t version = 2, curve = 0;
+  std::string party_name;
+  buf_t Q_compressed;
+  std::map<std::string, buf_t> Qis_compressed;
+  crypto::bn_t x_share;
+  void convert(converter_t& c) { c.convert(version, curve, party_name, Q_compressed, Qis_compressed, x_share); }
+};
+
+// Same checks as upstream's deserialize_ac_key_blob (self binding, ranges, x*G == Qi_self) plus the ones it leaves to
+// the caller: version, curve, the exact party set, point validity.
+error_t t_parse(mem_t in, tkey_blob_t& b, int& self) {
+  if (in.size <= 0 || in.size > (1 << 20)) return (error_t)QV_E_LAYOUT;
+  if (error_t rv = convert(b, in)) return rv;
+  if (b.version != 2 || (int)b.curve != kTCurve) return (error_t)QV_E_LAYOUT;
+  self = -1;
+  for (int i = 0; i < 3; i++)
+    if (b.party_name == kTNames[i]) self = i;
+  if (self < 0 || b.Qis_compressed.size() != 3) return (error_t)QV_E_LAYOUT;
+  for (int i = 0; i < 3; i++)
+    if (!b.Qis_compressed.count(std::string(kTNames[i]))) return (error_t)QV_E_LAYOUT;
+  ecurve_t curve = crypto::curve_secp256k1;
+  if (!curve.order().is_in_range(b.x_share)) return (error_t)QV_E_LAYOUT;
+  ecc_point_t Q;
+  if (error_t rv = Q.from_bin(curve, b.Q_compressed)) return rv;
+  if (error_t rv = curve.check(Q)) return rv;
+  for (auto& kv : b.Qis_compressed) {
+    ecc_point_t P;
+    if (error_t rv = P.from_bin(curve, kv.second)) return rv;
+    if (error_t rv = curve.check(P)) return rv;
+    if (kv.first == b.party_name && b.x_share * curve.generator() != P) return (error_t)QV_E_LAYOUT;
+  }
+  return 0;
+}
 
 // Mirrors of the HD keyset blobs (see header comment). Field order is the wire order.
 struct ks_ecdsa_t {
@@ -503,6 +584,99 @@ int qv_pve_decrypt(int curve, const uint8_t* dk, size_t dkl, const uint8_t* ek, 
   *xs32 = m;
   *n = v.size();
   return 0;
+  QV_CATCH
+}
+
+// ---- Threshold ECDSA (E23-1) ----
+
+int qv_t_dkg(int self, uintptr_t h, uint8_t** blob, size_t* bl) {
+  QV_TRY
+  if (self < 0 || self > 2) return (int)E_BADARG;
+  go_mesh_transport tr(h, {0, 1, 2});
+  api::job_mp_t job{self, {kTNames[0], kTNames[1], kTNames[2]}, tr};
+  buf_t sid, key;  // sid empty: derived jointly by the protocol
+  std::vector<std::string_view> quorum = {kTNames[0], kTNames[1], kTNames[2]};  // all three contribute
+  error_t rv = api::ecdsa_mp::dkg_ac(job, curve_id::secp256k1, sid, t_access(), quorum, key);
+  return rv ? rv : out(key, blob, bl);
+  QV_CATCH
+}
+
+int qv_t_refresh(int self, uintptr_t h, const uint8_t* blob, size_t bl, uint8_t** nblob, size_t* nbl) {
+  QV_TRY
+  if (self < 0 || self > 2) return (int)E_BADARG;
+  go_mesh_transport tr(h, {0, 1, 2});
+  api::job_mp_t job{self, {kTNames[0], kTNames[1], kTNames[2]}, tr};
+  buf_t sid, key;
+  std::vector<std::string_view> quorum = {kTNames[0], kTNames[1], kTNames[2]};
+  error_t rv = api::ecdsa_mp::refresh_ac(job, sid, M(blob, bl), t_access(), quorum, key);
+  return rv ? rv : out(key, nblob, nbl);
+  QV_CATCH
+}
+
+int qv_t_sign(int self, uintptr_t h, int peer, int receiver, const uint8_t* blob, size_t bl, const uint8_t* msg,
+              size_t ml, uint8_t** sig, size_t* sl) {
+  QV_TRY
+  if (self < 0 || self > 2 || peer < 0 || peer > 2 || self == peer || (receiver != self && receiver != peer))
+    return (int)E_BADARG;
+  // The signing set in ascending member order, the same on both sides (protocol roles follow the index).
+  int lo = self < peer ? self : peer, hi = self < peer ? peer : self;
+  go_mesh_transport tr(h, {lo, hi});
+  api::job_mp_t job{self == lo ? 0 : 1, {kTNames[lo], kTNames[hi]}, tr};
+  buf_t s;
+  // The access structure is not stored in the blob: it is always this constant one.
+  error_t rv = api::ecdsa_mp::sign_ac(job, M(blob, bl), t_access(), M(msg, ml), receiver == lo ? 0 : 1, s);
+  if (rv) return rv;
+  if (receiver != self) {
+    *sig = nullptr;
+    *sl = 0;
+    return 0;
+  }
+  return out(s, sig, sl);
+  QV_CATCH
+}
+
+int qv_t_info(const uint8_t* blob, size_t bl, int* self, uint8_t Q[33], uint8_t Qi[33]) {
+  QV_TRY
+  tkey_blob_t b;
+  int s = -1;
+  if (error_t rv = t_parse(M(blob, bl), b, s)) return rv;
+  if (b.Q_compressed.size() != 33 || b.Qis_compressed.at(b.party_name).size() != 33) return (int)QV_E_LAYOUT;
+  memcpy(Q, b.Q_compressed.data(), 33);
+  memcpy(Qi, b.Qis_compressed.at(b.party_name).data(), 33);
+  *self = s;
+  return 0;
+  QV_CATCH
+}
+
+int qv_t_split(const uint8_t* blob, size_t bl, uint8_t** pub, size_t* pl, uint8_t** x32) {
+  QV_TRY
+  tkey_blob_t b;
+  int s = -1;
+  if (error_t rv = t_parse(M(blob, bl), b, s)) return rv;
+  buf_t pubb, x;
+  if (error_t rv = api::ecdsa_mp::detach_private_scalar(M(blob, bl), pubb, x)) return rv;
+  if (x.size() != 32) return (int)QV_E_LAYOUT;
+  uint8_t* xp = nullptr;
+  size_t xn = 0;
+  if (int rv = out(x, &xp, &xn)) return rv;
+  if (int rv = out(pubb, pub, pl)) {
+    OPENSSL_cleanse(xp, xn);
+    free(xp);
+    return rv;
+  }
+  *x32 = xp;
+  return 0;
+  QV_CATCH
+}
+
+int qv_t_join(const uint8_t* pub, size_t pl, const uint8_t* x32, const uint8_t* Qi, uint8_t** blob, size_t* bl) {
+  QV_TRY
+  buf_t k;
+  if (error_t rv = api::ecdsa_mp::attach_private_scalar(M(pub, pl), mem_t(x32, 32), mem_t(Qi, 33), k)) return rv;
+  tkey_blob_t b;
+  int s = -1;
+  if (error_t rv = t_parse(mem_t(k.data(), k.size()), b, s)) return rv;
+  return out(k, blob, bl);
   QV_CATCH
 }
 
