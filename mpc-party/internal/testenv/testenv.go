@@ -110,21 +110,21 @@ func FreeAddr(t testing.TB) string {
 
 // Env is a full set of identities for one A/B pair plus a legitimate caller.
 type Env struct {
-	Dir                      string
-	CertA, CertB, CertCaller Cert
-	Stranger                 Cert // pinned nowhere
-	SealKeyFile              string
-	mu                       sync.Mutex
-	n                        int
-	AdminPriv                ed25519.PrivateKey
-	AdminPub                 ed25519.PublicKey
+	Dir                             string
+	CertA, CertB, CertC, CertCaller Cert
+	Stranger                        Cert // pinned nowhere
+	SealKeyFile                     string
+	mu                              sync.Mutex
+	n                               int
+	AdminPriv                       ed25519.PrivateKey
+	AdminPub                        ed25519.PublicKey
 }
 
 func NewEnv(t testing.TB) *Env {
 	t.Helper()
 	dir := t.TempDir()
 	apub, apriv, _ := ed25519.GenerateKey(rand.Reader)
-	e := &Env{AdminPriv: apriv, AdminPub: apub, Dir: dir, CertA: NewCert(t, "party-a"), CertB: NewCert(t, "party-b"), CertCaller: NewCert(t, "caller"), Stranger: NewCert(t, "stranger")}
+	e := &Env{AdminPriv: apriv, AdminPub: apub, Dir: dir, CertA: NewCert(t, "party-a"), CertB: NewCert(t, "party-b"), CertC: NewCert(t, "party-c"), CertCaller: NewCert(t, "caller"), Stranger: NewCert(t, "stranger")}
 	e.SealKeyFile = filepath.Join(dir, "seal.key")
 	key := make([]byte, 32)
 	rand.Read(key)
@@ -151,6 +151,42 @@ func (e *Env) Config(t testing.TB, role string, peerAddr string, callerAddr, pee
 		c.PeerAddress = peerAddr
 	} else {
 		c.PeerListen = peerListen
+	}
+	return c
+}
+
+// Addrs are the listen addresses of a three-party deployment.
+type Addrs struct {
+	CallerA, CallerB, CallerC string
+	PeerB, PeerC              string
+}
+
+// NewAddrs picks free addresses.
+func NewAddrs(t testing.TB) Addrs {
+	return Addrs{CallerA: FreeAddr(t), CallerB: FreeAddr(t), CallerC: FreeAddr(t), PeerB: FreeAddr(t), PeerC: FreeAddr(t)}
+}
+
+// Config3 returns the config of one party of a three-party (A, B, C) deployment: A dials B and C, B dials C. peerB and peerC
+// are the addresses A and B actually dial (they may point at a proxy).
+func (e *Env) Config3(t testing.TB, role string, a Addrs, dialB, dialC string) *server.Config {
+	t.Helper()
+	own := map[string]Cert{"A": e.CertA, "B": e.CertB, "C": e.CertC}[role]
+	crt, key := own.Write(t, e.Dir)
+	c := &server.Config{Role: role, CertFile: crt, KeyFile: key, CallerPins: []string{e.CertCaller.Pin},
+		AdminKeys:  []string{hex.EncodeToString(e.AdminPub)},
+		DataDir:    filepath.Join(e.Dir, "data-"+role),
+		Sealer:     server.SealerConfig{Type: server.InsecureSealerType, KeyFile: e.SealKeyFile},
+		Authorizer: server.AuthorizerConfig{Type: "dev-allow-all", AcceptRisk: server.DevAllowAllRiskPhrase}}
+	switch role {
+	case "A":
+		c.CallerListen, c.PeerAddress, c.PeerPins = a.CallerA, dialB, []string{e.CertB.Pin}
+		c.PeerCAddress, c.PeerCPins = dialC, []string{e.CertC.Pin}
+	case "B":
+		c.CallerListen, c.PeerListen, c.PeerPins = a.CallerB, a.PeerB, []string{e.CertA.Pin}
+		c.PeerCAddress, c.PeerCPins = dialC, []string{e.CertC.Pin}
+	case "C":
+		c.CallerListen, c.PeerListen = a.CallerC, a.PeerC
+		c.PeerAPins, c.PeerBPins = []string{e.CertA.Pin}, []string{e.CertB.Pin}
 	}
 	return c
 }

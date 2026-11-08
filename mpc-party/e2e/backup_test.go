@@ -18,10 +18,7 @@ func pkcs11Tweak(t *testing.T) func(role string, c *server.Config) {
 	pin := testenv.HSMEnv(t)
 	t.Setenv("QV_TEST_PIN", pin)
 	return func(role string, c *server.Config) {
-		tok := "qv-party-1"
-		if role == "B" {
-			tok = "qv-party-2"
-		}
+		tok := map[string]string{"A": "qv-party-1", "B": "qv-party-2", "C": "qv-party-3"}[role]
 		c.Sealer = server.SealerConfig{Type: "pkcs11", Token: tok, PinEnv: "QV_TEST_PIN"}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/protobuf/proto"
@@ -322,6 +323,9 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 		// Keep the connection to B alive (a gRPC channel goes idle after a drop). A NEW connection is noticed by watchPeer, not
 		// here: this loop only reconciles what is unresolved.
 		s.peerConn.Connect()
+		if s.peerCConn != nil {
+			s.peerCConn.Connect()
+		}
 		ids, err := s.store.List(ctx)
 		if err != nil {
 			continue
@@ -332,7 +336,11 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 			}
 			last[id] = time.Now()
 			t0 := time.Now()
-			if err := s.reconcileA(ctx, id); err != nil {
+			rec := s.reconcileA
+			if st, e := s.store.State(ctx, id); e == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+				rec = s.reconcileTWithFallback
+			}
+			if err := rec(ctx, id); err != nil {
 				s.log.Warn("reconciliation pending", "keyset_id", id, "error", err.Error())
 			} else {
 				s.log.Info("reconciliation finished", "keyset_id", id, "duration_ms", time.Since(t0).Milliseconds())
@@ -343,32 +351,48 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 
 var _ = codes.OK
 
-// watchPeer notices, the moment it happens, that the connection to party B was lost and came back. B may have restarted or been
-// restored in between, so every keyset is marked unresolved and reconciled again before it serves. The first connection after
-// start is not a reconnection (every keyset starts unresolved). Because this reacts to the state change itself and not to a
-// timer, a keyset that is committed AFTER the new connection was established is never marked unresolved by it: the mark
-// always comes before any work on the new connection.
-func (s *Server) watchPeer(ctx context.Context) {
+// watchPeer notices, the moment it happens, that the connection to a peer was lost and came back. The peer may have restarted or
+// been restored in between, so the keysets that use that peer are marked unresolved and reconciled again before they serve
+// (all keysets for party B's link; only 2-of-3 keysets for party C's). The first connection after start is not a
+// reconnection (every keyset starts unresolved). Because this reacts to the state change itself and not to a timer, a keyset that
+// is committed AFTER the new connection was established is never marked unresolved by it: the mark always comes before any
+// work on the new connection.
+func (s *Server) watchPeer(ctx context.Context, conn *grpc.ClientConn, name string, allKeysets bool) {
 	everReady, wasReady := false, false
-	state := s.peerConn.GetState()
+	state := conn.GetState()
 	for {
 		ready := state == connectivity.Ready
-		if ready && !wasReady && everReady {
+		if ready && !wasReady {
+			// a reconnection re-reconciles everything this link carries; the FIRST connection only the keysets that were
+			// resolved without this member (partial)
 			ids, _ := s.store.List(ctx)
+			n := 0
 			for _, id := range ids {
+				if !allKeysets {
+					if st, err := s.store.State(ctx, id); err != nil || st.Scheme != int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+						continue
+					}
+				}
+				if !everReady && !s.rt(id).isPartial() {
+					continue
+				}
 				s.rt(id).setResolved(false)
+				s.rt(id).setPartial(false)
+				n++
 			}
-			s.log.Info("connection to party B re-established: keysets are reconciled again before they serve", "keysets", len(ids))
-			select {
-			case s.kick <- struct{}{}:
-			default:
+			if n > 0 || everReady {
+				s.log.Info("connection to a peer re-established: keysets are reconciled again before they serve", "peer", name, "keysets", n)
+				select {
+				case s.kick <- struct{}{}:
+				default:
+				}
 			}
 		}
 		wasReady = ready
 		everReady = everReady || ready
-		if !s.peerConn.WaitForStateChange(ctx, state) {
+		if !conn.WaitForStateChange(ctx, state) {
 			return
 		}
-		state = s.peerConn.GetState()
+		state = conn.GetState()
 	}
 }

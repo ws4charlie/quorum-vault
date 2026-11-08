@@ -82,6 +82,10 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		return reject(pb.ErrorKind_ERROR_KIND_LIMIT, "session rate limit exceeded for this key")
 	}
 
+	if s.cfg.Role == "C" || open.Scheme != pb.Scheme_SCHEME_UNSPECIFIED {
+		return s.sessionT(ctx, stream, sid, &open, start, rejectCode)
+	}
+
 	// Pre-checks that decide whether anything may start. B trusts nothing A says: admin operations need an operator
 	// signature that B verifies against its own keys, a frozen keyset refuses work, and a Sign must name the key it will
 	// use.

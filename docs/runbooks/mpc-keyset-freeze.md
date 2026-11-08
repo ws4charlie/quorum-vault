@@ -47,3 +47,26 @@ An operator signs `(unfreeze, keyset id, timestamp)` with an Ed25519 admin key (
 their own `admin_keys`, within `admin_max_age_seconds`, once. Call `Unfreeze` on party A; A asks B, B verifies the signature
 itself. Both log `AUDIT keyset unfrozen` with the admin key. Run a signing self-test through a non-production key first if in
 doubt, then watch the next signs.
+
+## 2-of-3 keysets (A, B and C)
+
+Same meaning, three members. A cryptographic failure in a session between two members freezes the keyset on **both of them**; the
+coordinator (A, or B when B+C signed) then tells the third member with a freeze notice. If the third was down or has no link to the
+coordinator (B cannot reach A, C reaches nobody), it learns it at its next contact: a frozen member answers every session with
+`FROZEN`, the one that hears it freezes too, and A's reconciliation carries the flag, so after A restarts or reconnects all three
+are frozen. Check `Health` on all three parties (`frozen`) before and after.
+
+Log lines: `ALERT keyset frozen after a cryptographic failure` (`scheme: ecdsa-2of3`, `op`, `job_id`, `session_peer`),
+`ALERT keyset frozen on notice from another member`, `ALERT keyset frozen: another member holds it frozen`.
+
+**The protocol aborts without blame.** `session_peer` is the member on the other end of the failed session, that is where the failing
+message came in. It is not proof that this member cheated: the cause may equally be your own member, the link, or the third member
+that fed the peer. Investigate all three hosts, not only the named one. (A three-party DKG, Refresh or Reconcile has no single peer:
+the field is empty.)
+
+Which pair signs does not matter for the remedy: the choices are the same as above (Unfreeze, Refresh, restore one member). With one
+share possibly exposed, treat it as a compromised member: restore that member on a clean host from a backup and **refresh**; the old
+share becomes useless, the public key (and so the address) is unchanged.
+
+**Unfreeze** needs the operator signature accepted by **all three** members, each verifying it against its own `admin_keys`; if one
+member is down or refuses, nothing is lifted anywhere. Call `Unfreeze` on party A. Each member logs `AUDIT keyset unfrozen`.

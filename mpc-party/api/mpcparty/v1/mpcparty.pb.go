@@ -119,6 +119,54 @@ func (Algorithm) EnumDescriptor() ([]byte, []int) {
 	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{1}
 }
 
+// The signing scheme of a keyset. UNSPECIFIED is today's 2-party HD keyset (members A and B). Additive: every existing
+// message that does not set it means the 2-party scheme.
+type Scheme int32
+
+const (
+	Scheme_SCHEME_UNSPECIFIED Scheme = 0 // 2-party HD keyset (members A, B), Bitcoin and, until E23-3, EVM
+	Scheme_SCHEME_ECDSA_2OF3  Scheme = 1 // 2-of-3 threshold ECDSA on secp256k1, not HD (members A, B, C); the keyset IS the key: Sign names it as key_id
+)
+
+// Enum value maps for Scheme.
+var (
+	Scheme_name = map[int32]string{
+		0: "SCHEME_UNSPECIFIED",
+		1: "SCHEME_ECDSA_2OF3",
+	}
+	Scheme_value = map[string]int32{
+		"SCHEME_UNSPECIFIED": 0,
+		"SCHEME_ECDSA_2OF3":  1,
+	}
+)
+
+func (x Scheme) Enum() *Scheme {
+	p := new(Scheme)
+	*p = x
+	return p
+}
+
+func (x Scheme) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Scheme) Descriptor() protoreflect.EnumDescriptor {
+	return file_mpcparty_v1_mpcparty_proto_enumTypes[2].Descriptor()
+}
+
+func (Scheme) Type() protoreflect.EnumType {
+	return &file_mpcparty_v1_mpcparty_proto_enumTypes[2]
+}
+
+func (x Scheme) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Scheme.Descriptor instead.
+func (Scheme) EnumDescriptor() ([]byte, []int) {
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{2}
+}
+
 type ErrorKind int32
 
 const (
@@ -167,11 +215,11 @@ func (x ErrorKind) String() string {
 }
 
 func (ErrorKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_mpcparty_v1_mpcparty_proto_enumTypes[2].Descriptor()
+	return file_mpcparty_v1_mpcparty_proto_enumTypes[3].Descriptor()
 }
 
 func (ErrorKind) Type() protoreflect.EnumType {
-	return &file_mpcparty_v1_mpcparty_proto_enumTypes[2]
+	return &file_mpcparty_v1_mpcparty_proto_enumTypes[3]
 }
 
 func (x ErrorKind) Number() protoreflect.EnumNumber {
@@ -180,7 +228,7 @@ func (x ErrorKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ErrorKind.Descriptor instead.
 func (ErrorKind) EnumDescriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{2}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{3}
 }
 
 type FrameKind int32
@@ -225,11 +273,11 @@ func (x FrameKind) String() string {
 }
 
 func (FrameKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_mpcparty_v1_mpcparty_proto_enumTypes[3].Descriptor()
+	return file_mpcparty_v1_mpcparty_proto_enumTypes[4].Descriptor()
 }
 
 func (FrameKind) Type() protoreflect.EnumType {
-	return &file_mpcparty_v1_mpcparty_proto_enumTypes[3]
+	return &file_mpcparty_v1_mpcparty_proto_enumTypes[4]
 }
 
 func (x FrameKind) Number() protoreflect.EnumNumber {
@@ -238,20 +286,21 @@ func (x FrameKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FrameKind.Descriptor instead.
 func (FrameKind) EnumDescriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{3}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{4}
 }
 
 type Op int32
 
 const (
-	Op_OP_UNSPECIFIED Op = 0
-	Op_OP_DKG         Op = 1
-	Op_OP_NODE        Op = 2
-	Op_OP_DERIVE      Op = 3
-	Op_OP_SIGN        Op = 4
-	Op_OP_REFRESH     Op = 5
-	Op_OP_UNFREEZE    Op = 6
-	Op_OP_RECONCILE   Op = 7 // after a restart: agree on one generation, prove it with a SelfTest
+	Op_OP_UNSPECIFIED   Op = 0
+	Op_OP_DKG           Op = 1
+	Op_OP_NODE          Op = 2
+	Op_OP_DERIVE        Op = 3
+	Op_OP_SIGN          Op = 4
+	Op_OP_REFRESH       Op = 5
+	Op_OP_UNFREEZE      Op = 6
+	Op_OP_RECONCILE     Op = 7 // after a restart: agree on one generation, prove it with a SelfTest
+	Op_OP_FREEZE_NOTICE Op = 8 // 2-of-3: "I froze this keyset"; the receiver freezes too (Open.reason)
 )
 
 // Enum value maps for Op.
@@ -265,16 +314,18 @@ var (
 		5: "OP_REFRESH",
 		6: "OP_UNFREEZE",
 		7: "OP_RECONCILE",
+		8: "OP_FREEZE_NOTICE",
 	}
 	Op_value = map[string]int32{
-		"OP_UNSPECIFIED": 0,
-		"OP_DKG":         1,
-		"OP_NODE":        2,
-		"OP_DERIVE":      3,
-		"OP_SIGN":        4,
-		"OP_REFRESH":     5,
-		"OP_UNFREEZE":    6,
-		"OP_RECONCILE":   7,
+		"OP_UNSPECIFIED":   0,
+		"OP_DKG":           1,
+		"OP_NODE":          2,
+		"OP_DERIVE":        3,
+		"OP_SIGN":          4,
+		"OP_REFRESH":       5,
+		"OP_UNFREEZE":      6,
+		"OP_RECONCILE":     7,
+		"OP_FREEZE_NOTICE": 8,
 	}
 )
 
@@ -289,11 +340,11 @@ func (x Op) String() string {
 }
 
 func (Op) Descriptor() protoreflect.EnumDescriptor {
-	return file_mpcparty_v1_mpcparty_proto_enumTypes[4].Descriptor()
+	return file_mpcparty_v1_mpcparty_proto_enumTypes[5].Descriptor()
 }
 
 func (Op) Type() protoreflect.EnumType {
-	return &file_mpcparty_v1_mpcparty_proto_enumTypes[4]
+	return &file_mpcparty_v1_mpcparty_proto_enumTypes[5]
 }
 
 func (x Op) Number() protoreflect.EnumNumber {
@@ -302,7 +353,7 @@ func (x Op) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Op.Descriptor instead.
 func (Op) EnumDescriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{4}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{5}
 }
 
 // An operator's Ed25519 signature over ("qv-mpc-admin-v1\n" op "\n" keyset_id "\n" unix_seconds). Both parties verify it
@@ -371,8 +422,9 @@ func (x *AdminAuth) GetSignature() []byte {
 type DKGRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	KeysetId      string                 `protobuf:"bytes,1,opt,name=keyset_id,json=keysetId,proto3" json:"keyset_id,omitempty"`
-	Curve         Curve                  `protobuf:"varint,2,opt,name=curve,proto3,enum=qv.mpcparty.v1.Curve" json:"curve,omitempty"`
+	Curve         Curve                  `protobuf:"varint,2,opt,name=curve,proto3,enum=qv.mpcparty.v1.Curve" json:"curve,omitempty"` // 2-of-3: CURVE_SECP256K1 or unspecified
 	Admin         *AdminAuth             `protobuf:"bytes,3,opt,name=admin,proto3" json:"admin,omitempty"`
+	Scheme        Scheme                 `protobuf:"varint,4,opt,name=scheme,proto3,enum=qv.mpcparty.v1.Scheme" json:"scheme,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -426,6 +478,13 @@ func (x *DKGRequest) GetAdmin() *AdminAuth {
 		return x.Admin
 	}
 	return nil
+}
+
+func (x *DKGRequest) GetScheme() Scheme {
+	if x != nil {
+		return x.Scheme
+	}
+	return Scheme_SCHEME_UNSPECIFIED
 }
 
 type DKGResponse struct {
@@ -1010,6 +1069,8 @@ type KeysetStatus struct {
 	BackupGeneration uint64                 `protobuf:"varint,4,opt,name=backup_generation,json=backupGeneration,proto3" json:"backup_generation,omitempty"` // generation of the last verified backup, 0 = none
 	BackupStale      bool                   `protobuf:"varint,5,opt,name=backup_stale,json=backupStale,proto3" json:"backup_stale,omitempty"`                // the keyset moved on since the last verified backup
 	Frozen           bool                   `protobuf:"varint,6,opt,name=frozen,proto3" json:"frozen,omitempty"`
+	Scheme           Scheme                 `protobuf:"varint,7,opt,name=scheme,proto3,enum=qv.mpcparty.v1.Scheme" json:"scheme,omitempty"`
+	PublicKey        []byte                 `protobuf:"bytes,8,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"` // 2-of-3 keysets: the group public key (compressed), empty for 2-party HD keysets
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -1086,6 +1147,73 @@ func (x *KeysetStatus) GetFrozen() bool {
 	return false
 }
 
+func (x *KeysetStatus) GetScheme() Scheme {
+	if x != nil {
+		return x.Scheme
+	}
+	return Scheme_SCHEME_UNSPECIFIED
+}
+
+func (x *KeysetStatus) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+// State of one peer link as seen from this party.
+type PeerStatus struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // "A", "B" or "C"
+	Reachable     bool                   `protobuf:"varint,2,opt,name=reachable,proto3" json:"reachable,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PeerStatus) Reset() {
+	*x = PeerStatus{}
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeerStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeerStatus) ProtoMessage() {}
+
+func (x *PeerStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeerStatus.ProtoReflect.Descriptor instead.
+func (*PeerStatus) Descriptor() ([]byte, []int) {
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *PeerStatus) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PeerStatus) GetReachable() bool {
+	if x != nil {
+		return x.Reachable
+	}
+	return false
+}
+
 type HealthRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1094,7 +1222,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[14]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1106,7 +1234,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[14]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1119,7 +1247,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{14}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{15}
 }
 
 type HealthResponse struct {
@@ -1130,13 +1258,14 @@ type HealthResponse struct {
 	Version        string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
 	CbmpcCommit    string                 `protobuf:"bytes,5,opt,name=cbmpc_commit,json=cbmpcCommit,proto3" json:"cbmpc_commit,omitempty"`
 	Keysets        []*KeysetStatus        `protobuf:"bytes,6,rep,name=keysets,proto3" json:"keysets,omitempty"`
+	Peers          []*PeerStatus          `protobuf:"bytes,7,rep,name=peers,proto3" json:"peers,omitempty"` // the links this party dials (A: B and C; B: C; C: none)
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[15]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1148,7 +1277,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[15]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1161,7 +1290,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{15}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *HealthResponse) GetRole() string {
@@ -1206,6 +1335,13 @@ func (x *HealthResponse) GetKeysets() []*KeysetStatus {
 	return nil
 }
 
+func (x *HealthResponse) GetPeers() []*PeerStatus {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
 type ErrorDetail struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Kind          ErrorKind              `protobuf:"varint,1,opt,name=kind,proto3,enum=qv.mpcparty.v1.ErrorKind" json:"kind,omitempty"`
@@ -1219,7 +1355,7 @@ type ErrorDetail struct {
 
 func (x *ErrorDetail) Reset() {
 	*x = ErrorDetail{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[16]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1231,7 +1367,7 @@ func (x *ErrorDetail) String() string {
 func (*ErrorDetail) ProtoMessage() {}
 
 func (x *ErrorDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[16]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1244,7 +1380,7 @@ func (x *ErrorDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ErrorDetail.ProtoReflect.Descriptor instead.
 func (*ErrorDetail) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{16}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ErrorDetail) GetKind() ErrorKind {
@@ -1293,7 +1429,7 @@ type Frame struct {
 
 func (x *Frame) Reset() {
 	*x = Frame{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[17]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1305,7 +1441,7 @@ func (x *Frame) String() string {
 func (*Frame) ProtoMessage() {}
 
 func (x *Frame) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[17]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1318,7 +1454,7 @@ func (x *Frame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Frame.ProtoReflect.Descriptor instead.
 func (*Frame) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{17}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Frame) GetSessionId() string {
@@ -1358,13 +1494,21 @@ type Open struct {
 	ExpectedPublicKey []byte     `protobuf:"bytes,11,opt,name=expected_public_key,json=expectedPublicKey,proto3" json:"expected_public_key,omitempty"` // sign: REQUIRED. The key the authorizer judges; B refuses an empty one and aborts if the derived key differs
 	Admin             *AdminAuth `protobuf:"bytes,12,opt,name=admin,proto3" json:"admin,omitempty"`                                                    // dkg, refresh, unfreeze
 	Generation        uint64     `protobuf:"varint,13,opt,name=generation,proto3" json:"generation,omitempty"`                                         // the generation of the keyset the initiator uses; the follower refuses a different one (UNAVAILABLE: retry)
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// ---- 2-of-3 (all additive) ----
+	Scheme    Scheme `protobuf:"varint,14,opt,name=scheme,proto3,enum=qv.mpcparty.v1.Scheme" json:"scheme,omitempty"`
+	Initiator string `protobuf:"bytes,15,opt,name=initiator,proto3" json:"initiator,omitempty"` // "A" or "B": who started the operation (the party that opened this stream, or for a link stream the one the group belongs to)
+	// Three-party operations (DKG, Refresh, Reconcile, Unfreeze): A opens a stream to B and to C with the same group id;
+	// B then opens a LINK stream to C carrying the same group id. C starts when both streams arrived.
+	Group         string `protobuf:"bytes,16,opt,name=group,proto3" json:"group,omitempty"`
+	Link          bool   `protobuf:"varint,17,opt,name=link,proto3" json:"link,omitempty"`    // this is the B -> C link stream of group `group`
+	Reason        string `protobuf:"bytes,18,opt,name=reason,proto3" json:"reason,omitempty"` // FREEZE_NOTICE: why the sender froze
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Open) Reset() {
 	*x = Open{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[18]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1376,7 +1520,7 @@ func (x *Open) String() string {
 func (*Open) ProtoMessage() {}
 
 func (x *Open) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[18]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1389,7 +1533,7 @@ func (x *Open) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Open.ProtoReflect.Descriptor instead.
 func (*Open) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{18}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Open) GetOp() Op {
@@ -1483,6 +1627,41 @@ func (x *Open) GetGeneration() uint64 {
 	return 0
 }
 
+func (x *Open) GetScheme() Scheme {
+	if x != nil {
+		return x.Scheme
+	}
+	return Scheme_SCHEME_UNSPECIFIED
+}
+
+func (x *Open) GetInitiator() string {
+	if x != nil {
+		return x.Initiator
+	}
+	return ""
+}
+
+func (x *Open) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *Open) GetLink() bool {
+	if x != nil {
+		return x.Link
+	}
+	return false
+}
+
+func (x *Open) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 type Fin struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Ok    bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
@@ -1497,13 +1676,14 @@ type Fin struct {
 	Prepared      bool `protobuf:"varint,7,opt,name=prepared,proto3" json:"prepared,omitempty"` // B -> A: B has durably stored the candidate generation
 	Switched      bool `protobuf:"varint,8,opt,name=switched,proto3" json:"switched,omitempty"` // B -> A: B has made the candidate current
 	Confirm       bool `protobuf:"varint,9,opt,name=confirm,proto3" json:"confirm,omitempty"`   // A -> B: both parties are on the new generation; delete the old one
+	Frozen        bool `protobuf:"varint,10,opt,name=frozen,proto3" json:"frozen,omitempty"`    // reconcile (2-of-3): the sender holds this keyset frozen
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Fin) Reset() {
 	*x = Fin{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[19]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1515,7 +1695,7 @@ func (x *Fin) String() string {
 func (*Fin) ProtoMessage() {}
 
 func (x *Fin) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[19]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1528,7 +1708,7 @@ func (x *Fin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Fin.ProtoReflect.Descriptor instead.
 func (*Fin) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{19}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Fin) GetOk() bool {
@@ -1594,6 +1774,13 @@ func (x *Fin) GetConfirm() bool {
 	return false
 }
 
+func (x *Fin) GetFrozen() bool {
+	if x != nil {
+		return x.Frozen
+	}
+	return false
+}
+
 var File_mpcparty_v1_mpcparty_proto protoreflect.FileDescriptor
 
 const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
@@ -1603,12 +1790,13 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\funix_seconds\x18\x01 \x01(\x03R\vunixSeconds\x12\x1d\n" +
 	"\n" +
 	"public_key\x18\x02 \x01(\fR\tpublicKey\x12\x1c\n" +
-	"\tsignature\x18\x03 \x01(\fR\tsignature\"\x87\x01\n" +
+	"\tsignature\x18\x03 \x01(\fR\tsignature\"\xb7\x01\n" +
 	"\n" +
 	"DKGRequest\x12\x1b\n" +
 	"\tkeyset_id\x18\x01 \x01(\tR\bkeysetId\x12+\n" +
 	"\x05curve\x18\x02 \x01(\x0e2\x15.qv.mpcparty.v1.CurveR\x05curve\x12/\n" +
-	"\x05admin\x18\x03 \x01(\v2\x19.qv.mpcparty.v1.AdminAuthR\x05admin\"5\n" +
+	"\x05admin\x18\x03 \x01(\v2\x19.qv.mpcparty.v1.AdminAuthR\x05admin\x12.\n" +
+	"\x06scheme\x18\x04 \x01(\x0e2\x16.qv.mpcparty.v1.SchemeR\x06scheme\"5\n" +
 	"\vDKGResponse\x12&\n" +
 	"\x0froot_public_key\x18\x01 \x01(\fR\rrootPublicKey\"O\n" +
 	"\vNodeRequest\x12\x1b\n" +
@@ -1644,7 +1832,7 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\x0fUnfreezeRequest\x12\x1b\n" +
 	"\tkeyset_id\x18\x01 \x01(\tR\bkeysetId\x12/\n" +
 	"\x05admin\x18\x02 \x01(\v2\x19.qv.mpcparty.v1.AdminAuthR\x05admin\"\x12\n" +
-	"\x10UnfreezeResponse\"\xcf\x01\n" +
+	"\x10UnfreezeResponse\"\x9e\x02\n" +
 	"\fKeysetStatus\x12\x1b\n" +
 	"\tkeyset_id\x18\x01 \x01(\tR\bkeysetId\x12\x1e\n" +
 	"\n" +
@@ -1653,15 +1841,23 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\bresolved\x18\x03 \x01(\bR\bresolved\x12+\n" +
 	"\x11backup_generation\x18\x04 \x01(\x04R\x10backupGeneration\x12!\n" +
 	"\fbackup_stale\x18\x05 \x01(\bR\vbackupStale\x12\x16\n" +
-	"\x06frozen\x18\x06 \x01(\bR\x06frozen\"\x0f\n" +
-	"\rHealthRequest\"\xe9\x01\n" +
+	"\x06frozen\x18\x06 \x01(\bR\x06frozen\x12.\n" +
+	"\x06scheme\x18\a \x01(\x0e2\x16.qv.mpcparty.v1.SchemeR\x06scheme\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\b \x01(\fR\tpublicKey\">\n" +
+	"\n" +
+	"PeerStatus\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1c\n" +
+	"\treachable\x18\x02 \x01(\bR\treachable\"\x0f\n" +
+	"\rHealthRequest\"\x9b\x02\n" +
 	"\x0eHealthResponse\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12%\n" +
 	"\x0epeer_reachable\x18\x02 \x01(\bR\rpeerReachable\x12'\n" +
 	"\x0factive_sessions\x18\x03 \x01(\x05R\x0eactiveSessions\x12\x18\n" +
 	"\aversion\x18\x04 \x01(\tR\aversion\x12!\n" +
 	"\fcbmpc_commit\x18\x05 \x01(\tR\vcbmpcCommit\x126\n" +
-	"\akeysets\x18\x06 \x03(\v2\x1c.qv.mpcparty.v1.KeysetStatusR\akeysets\"\x8e\x01\n" +
+	"\akeysets\x18\x06 \x03(\v2\x1c.qv.mpcparty.v1.KeysetStatusR\akeysets\x120\n" +
+	"\x05peers\x18\a \x03(\v2\x1a.qv.mpcparty.v1.PeerStatusR\x05peers\"\x8e\x01\n" +
 	"\vErrorDetail\x12-\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x19.qv.mpcparty.v1.ErrorKindR\x04kind\x12\x0e\n" +
 	"\x02op\x18\x02 \x01(\tR\x02op\x12\x12\n" +
@@ -1672,7 +1868,7 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12-\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x19.qv.mpcparty.v1.FrameKindR\x04kind\x12\x18\n" +
-	"\apayload\x18\x03 \x01(\fR\apayload\"\xd4\x03\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\"\xe4\x04\n" +
 	"\x04Open\x12\"\n" +
 	"\x02op\x18\x01 \x01(\x0e2\x12.qv.mpcparty.v1.OpR\x02op\x12\x1b\n" +
 	"\tkeyset_id\x18\x02 \x01(\tR\bkeysetId\x12+\n" +
@@ -1689,7 +1885,12 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\x05admin\x18\f \x01(\v2\x19.qv.mpcparty.v1.AdminAuthR\x05admin\x12\x1e\n" +
 	"\n" +
 	"generation\x18\r \x01(\x04R\n" +
-	"generation\"\xf4\x01\n" +
+	"generation\x12.\n" +
+	"\x06scheme\x18\x0e \x01(\x0e2\x16.qv.mpcparty.v1.SchemeR\x06scheme\x12\x1c\n" +
+	"\tinitiator\x18\x0f \x01(\tR\tinitiator\x12\x14\n" +
+	"\x05group\x18\x10 \x01(\tR\x05group\x12\x12\n" +
+	"\x04link\x18\x11 \x01(\bR\x04link\x12\x16\n" +
+	"\x06reason\x18\x12 \x01(\tR\x06reason\"\x8c\x02\n" +
 	"\x03Fin\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x16\n" +
 	"\x06commit\x18\x02 \x01(\bR\x06commit\x12-\n" +
@@ -1699,7 +1900,9 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\x06result\x18\x06 \x01(\fR\x06result\x12\x1a\n" +
 	"\bprepared\x18\a \x01(\bR\bprepared\x12\x1a\n" +
 	"\bswitched\x18\b \x01(\bR\bswitched\x12\x18\n" +
-	"\aconfirm\x18\t \x01(\bR\aconfirm*F\n" +
+	"\aconfirm\x18\t \x01(\bR\aconfirm\x12\x16\n" +
+	"\x06frozen\x18\n" +
+	" \x01(\bR\x06frozen*F\n" +
 	"\x05Curve\x12\x15\n" +
 	"\x11CURVE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fCURVE_SECP256K1\x10\x01\x12\x11\n" +
@@ -1707,7 +1910,10 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\tAlgorithm\x12\x19\n" +
 	"\x15ALGORITHM_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19ALGORITHM_ECDSA_SECP256K1\x10\x01\x12\x15\n" +
-	"\x11ALGORITHM_ED25519\x10\x02*\xd9\x01\n" +
+	"\x11ALGORITHM_ED25519\x10\x02*7\n" +
+	"\x06Scheme\x12\x16\n" +
+	"\x12SCHEME_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11SCHEME_ECDSA_2OF3\x10\x01*\xd9\x01\n" +
 	"\tErrorKind\x12\x1a\n" +
 	"\x16ERROR_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14ERROR_KIND_TRANSPORT\x10\x01\x12\x1c\n" +
@@ -1723,7 +1929,7 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\x0eFRAME_KIND_ACK\x10\x02\x12\x13\n" +
 	"\x0fFRAME_KIND_DATA\x10\x03\x12\x14\n" +
 	"\x10FRAME_KIND_ABORT\x10\x04\x12\x12\n" +
-	"\x0eFRAME_KIND_FIN\x10\x05*\x80\x01\n" +
+	"\x0eFRAME_KIND_FIN\x10\x05*\x96\x01\n" +
 	"\x02Op\x12\x12\n" +
 	"\x0eOP_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -1734,7 +1940,8 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\n" +
 	"OP_REFRESH\x10\x05\x12\x0f\n" +
 	"\vOP_UNFREEZE\x10\x06\x12\x10\n" +
-	"\fOP_RECONCILE\x10\a2\xfd\x03\n" +
+	"\fOP_RECONCILE\x10\a\x12\x14\n" +
+	"\x10OP_FREEZE_NOTICE\x10\b2\xfd\x03\n" +
 	"\bMpcParty\x12>\n" +
 	"\x03DKG\x12\x1a.qv.mpcparty.v1.DKGRequest\x1a\x1b.qv.mpcparty.v1.DKGResponse\x12A\n" +
 	"\x04Node\x12\x1b.qv.mpcparty.v1.NodeRequest\x1a\x1c.qv.mpcparty.v1.NodeResponse\x12G\n" +
@@ -1758,70 +1965,76 @@ func file_mpcparty_v1_mpcparty_proto_rawDescGZIP() []byte {
 	return file_mpcparty_v1_mpcparty_proto_rawDescData
 }
 
-var file_mpcparty_v1_mpcparty_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_mpcparty_v1_mpcparty_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_mpcparty_v1_mpcparty_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_mpcparty_v1_mpcparty_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_mpcparty_v1_mpcparty_proto_goTypes = []any{
 	(Curve)(0),               // 0: qv.mpcparty.v1.Curve
 	(Algorithm)(0),           // 1: qv.mpcparty.v1.Algorithm
-	(ErrorKind)(0),           // 2: qv.mpcparty.v1.ErrorKind
-	(FrameKind)(0),           // 3: qv.mpcparty.v1.FrameKind
-	(Op)(0),                  // 4: qv.mpcparty.v1.Op
-	(*AdminAuth)(nil),        // 5: qv.mpcparty.v1.AdminAuth
-	(*DKGRequest)(nil),       // 6: qv.mpcparty.v1.DKGRequest
-	(*DKGResponse)(nil),      // 7: qv.mpcparty.v1.DKGResponse
-	(*NodeRequest)(nil),      // 8: qv.mpcparty.v1.NodeRequest
-	(*NodeResponse)(nil),     // 9: qv.mpcparty.v1.NodeResponse
-	(*DeriveRequest)(nil),    // 10: qv.mpcparty.v1.DeriveRequest
-	(*DeriveResponse)(nil),   // 11: qv.mpcparty.v1.DeriveResponse
-	(*SignRequest)(nil),      // 12: qv.mpcparty.v1.SignRequest
-	(*SignResponse)(nil),     // 13: qv.mpcparty.v1.SignResponse
-	(*RefreshRequest)(nil),   // 14: qv.mpcparty.v1.RefreshRequest
-	(*RefreshResponse)(nil),  // 15: qv.mpcparty.v1.RefreshResponse
-	(*UnfreezeRequest)(nil),  // 16: qv.mpcparty.v1.UnfreezeRequest
-	(*UnfreezeResponse)(nil), // 17: qv.mpcparty.v1.UnfreezeResponse
-	(*KeysetStatus)(nil),     // 18: qv.mpcparty.v1.KeysetStatus
-	(*HealthRequest)(nil),    // 19: qv.mpcparty.v1.HealthRequest
-	(*HealthResponse)(nil),   // 20: qv.mpcparty.v1.HealthResponse
-	(*ErrorDetail)(nil),      // 21: qv.mpcparty.v1.ErrorDetail
-	(*Frame)(nil),            // 22: qv.mpcparty.v1.Frame
-	(*Open)(nil),             // 23: qv.mpcparty.v1.Open
-	(*Fin)(nil),              // 24: qv.mpcparty.v1.Fin
+	(Scheme)(0),              // 2: qv.mpcparty.v1.Scheme
+	(ErrorKind)(0),           // 3: qv.mpcparty.v1.ErrorKind
+	(FrameKind)(0),           // 4: qv.mpcparty.v1.FrameKind
+	(Op)(0),                  // 5: qv.mpcparty.v1.Op
+	(*AdminAuth)(nil),        // 6: qv.mpcparty.v1.AdminAuth
+	(*DKGRequest)(nil),       // 7: qv.mpcparty.v1.DKGRequest
+	(*DKGResponse)(nil),      // 8: qv.mpcparty.v1.DKGResponse
+	(*NodeRequest)(nil),      // 9: qv.mpcparty.v1.NodeRequest
+	(*NodeResponse)(nil),     // 10: qv.mpcparty.v1.NodeResponse
+	(*DeriveRequest)(nil),    // 11: qv.mpcparty.v1.DeriveRequest
+	(*DeriveResponse)(nil),   // 12: qv.mpcparty.v1.DeriveResponse
+	(*SignRequest)(nil),      // 13: qv.mpcparty.v1.SignRequest
+	(*SignResponse)(nil),     // 14: qv.mpcparty.v1.SignResponse
+	(*RefreshRequest)(nil),   // 15: qv.mpcparty.v1.RefreshRequest
+	(*RefreshResponse)(nil),  // 16: qv.mpcparty.v1.RefreshResponse
+	(*UnfreezeRequest)(nil),  // 17: qv.mpcparty.v1.UnfreezeRequest
+	(*UnfreezeResponse)(nil), // 18: qv.mpcparty.v1.UnfreezeResponse
+	(*KeysetStatus)(nil),     // 19: qv.mpcparty.v1.KeysetStatus
+	(*PeerStatus)(nil),       // 20: qv.mpcparty.v1.PeerStatus
+	(*HealthRequest)(nil),    // 21: qv.mpcparty.v1.HealthRequest
+	(*HealthResponse)(nil),   // 22: qv.mpcparty.v1.HealthResponse
+	(*ErrorDetail)(nil),      // 23: qv.mpcparty.v1.ErrorDetail
+	(*Frame)(nil),            // 24: qv.mpcparty.v1.Frame
+	(*Open)(nil),             // 25: qv.mpcparty.v1.Open
+	(*Fin)(nil),              // 26: qv.mpcparty.v1.Fin
 }
 var file_mpcparty_v1_mpcparty_proto_depIdxs = []int32{
 	0,  // 0: qv.mpcparty.v1.DKGRequest.curve:type_name -> qv.mpcparty.v1.Curve
-	5,  // 1: qv.mpcparty.v1.DKGRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
-	1,  // 2: qv.mpcparty.v1.SignRequest.algorithm:type_name -> qv.mpcparty.v1.Algorithm
-	5,  // 3: qv.mpcparty.v1.RefreshRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
-	5,  // 4: qv.mpcparty.v1.UnfreezeRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
-	18, // 5: qv.mpcparty.v1.HealthResponse.keysets:type_name -> qv.mpcparty.v1.KeysetStatus
-	2,  // 6: qv.mpcparty.v1.ErrorDetail.kind:type_name -> qv.mpcparty.v1.ErrorKind
-	3,  // 7: qv.mpcparty.v1.Frame.kind:type_name -> qv.mpcparty.v1.FrameKind
-	4,  // 8: qv.mpcparty.v1.Open.op:type_name -> qv.mpcparty.v1.Op
-	0,  // 9: qv.mpcparty.v1.Open.curve:type_name -> qv.mpcparty.v1.Curve
-	1,  // 10: qv.mpcparty.v1.Open.algorithm:type_name -> qv.mpcparty.v1.Algorithm
-	5,  // 11: qv.mpcparty.v1.Open.admin:type_name -> qv.mpcparty.v1.AdminAuth
-	2,  // 12: qv.mpcparty.v1.Fin.kind:type_name -> qv.mpcparty.v1.ErrorKind
-	6,  // 13: qv.mpcparty.v1.MpcParty.DKG:input_type -> qv.mpcparty.v1.DKGRequest
-	8,  // 14: qv.mpcparty.v1.MpcParty.Node:input_type -> qv.mpcparty.v1.NodeRequest
-	10, // 15: qv.mpcparty.v1.MpcParty.Derive:input_type -> qv.mpcparty.v1.DeriveRequest
-	12, // 16: qv.mpcparty.v1.MpcParty.Sign:input_type -> qv.mpcparty.v1.SignRequest
-	14, // 17: qv.mpcparty.v1.MpcParty.Refresh:input_type -> qv.mpcparty.v1.RefreshRequest
-	19, // 18: qv.mpcparty.v1.MpcParty.Health:input_type -> qv.mpcparty.v1.HealthRequest
-	16, // 19: qv.mpcparty.v1.MpcParty.Unfreeze:input_type -> qv.mpcparty.v1.UnfreezeRequest
-	22, // 20: qv.mpcparty.v1.Peer.Session:input_type -> qv.mpcparty.v1.Frame
-	7,  // 21: qv.mpcparty.v1.MpcParty.DKG:output_type -> qv.mpcparty.v1.DKGResponse
-	9,  // 22: qv.mpcparty.v1.MpcParty.Node:output_type -> qv.mpcparty.v1.NodeResponse
-	11, // 23: qv.mpcparty.v1.MpcParty.Derive:output_type -> qv.mpcparty.v1.DeriveResponse
-	13, // 24: qv.mpcparty.v1.MpcParty.Sign:output_type -> qv.mpcparty.v1.SignResponse
-	15, // 25: qv.mpcparty.v1.MpcParty.Refresh:output_type -> qv.mpcparty.v1.RefreshResponse
-	20, // 26: qv.mpcparty.v1.MpcParty.Health:output_type -> qv.mpcparty.v1.HealthResponse
-	17, // 27: qv.mpcparty.v1.MpcParty.Unfreeze:output_type -> qv.mpcparty.v1.UnfreezeResponse
-	22, // 28: qv.mpcparty.v1.Peer.Session:output_type -> qv.mpcparty.v1.Frame
-	21, // [21:29] is the sub-list for method output_type
-	13, // [13:21] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	6,  // 1: qv.mpcparty.v1.DKGRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
+	2,  // 2: qv.mpcparty.v1.DKGRequest.scheme:type_name -> qv.mpcparty.v1.Scheme
+	1,  // 3: qv.mpcparty.v1.SignRequest.algorithm:type_name -> qv.mpcparty.v1.Algorithm
+	6,  // 4: qv.mpcparty.v1.RefreshRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
+	6,  // 5: qv.mpcparty.v1.UnfreezeRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
+	2,  // 6: qv.mpcparty.v1.KeysetStatus.scheme:type_name -> qv.mpcparty.v1.Scheme
+	19, // 7: qv.mpcparty.v1.HealthResponse.keysets:type_name -> qv.mpcparty.v1.KeysetStatus
+	20, // 8: qv.mpcparty.v1.HealthResponse.peers:type_name -> qv.mpcparty.v1.PeerStatus
+	3,  // 9: qv.mpcparty.v1.ErrorDetail.kind:type_name -> qv.mpcparty.v1.ErrorKind
+	4,  // 10: qv.mpcparty.v1.Frame.kind:type_name -> qv.mpcparty.v1.FrameKind
+	5,  // 11: qv.mpcparty.v1.Open.op:type_name -> qv.mpcparty.v1.Op
+	0,  // 12: qv.mpcparty.v1.Open.curve:type_name -> qv.mpcparty.v1.Curve
+	1,  // 13: qv.mpcparty.v1.Open.algorithm:type_name -> qv.mpcparty.v1.Algorithm
+	6,  // 14: qv.mpcparty.v1.Open.admin:type_name -> qv.mpcparty.v1.AdminAuth
+	2,  // 15: qv.mpcparty.v1.Open.scheme:type_name -> qv.mpcparty.v1.Scheme
+	3,  // 16: qv.mpcparty.v1.Fin.kind:type_name -> qv.mpcparty.v1.ErrorKind
+	7,  // 17: qv.mpcparty.v1.MpcParty.DKG:input_type -> qv.mpcparty.v1.DKGRequest
+	9,  // 18: qv.mpcparty.v1.MpcParty.Node:input_type -> qv.mpcparty.v1.NodeRequest
+	11, // 19: qv.mpcparty.v1.MpcParty.Derive:input_type -> qv.mpcparty.v1.DeriveRequest
+	13, // 20: qv.mpcparty.v1.MpcParty.Sign:input_type -> qv.mpcparty.v1.SignRequest
+	15, // 21: qv.mpcparty.v1.MpcParty.Refresh:input_type -> qv.mpcparty.v1.RefreshRequest
+	21, // 22: qv.mpcparty.v1.MpcParty.Health:input_type -> qv.mpcparty.v1.HealthRequest
+	17, // 23: qv.mpcparty.v1.MpcParty.Unfreeze:input_type -> qv.mpcparty.v1.UnfreezeRequest
+	24, // 24: qv.mpcparty.v1.Peer.Session:input_type -> qv.mpcparty.v1.Frame
+	8,  // 25: qv.mpcparty.v1.MpcParty.DKG:output_type -> qv.mpcparty.v1.DKGResponse
+	10, // 26: qv.mpcparty.v1.MpcParty.Node:output_type -> qv.mpcparty.v1.NodeResponse
+	12, // 27: qv.mpcparty.v1.MpcParty.Derive:output_type -> qv.mpcparty.v1.DeriveResponse
+	14, // 28: qv.mpcparty.v1.MpcParty.Sign:output_type -> qv.mpcparty.v1.SignResponse
+	16, // 29: qv.mpcparty.v1.MpcParty.Refresh:output_type -> qv.mpcparty.v1.RefreshResponse
+	22, // 30: qv.mpcparty.v1.MpcParty.Health:output_type -> qv.mpcparty.v1.HealthResponse
+	18, // 31: qv.mpcparty.v1.MpcParty.Unfreeze:output_type -> qv.mpcparty.v1.UnfreezeResponse
+	24, // 32: qv.mpcparty.v1.Peer.Session:output_type -> qv.mpcparty.v1.Frame
+	25, // [25:33] is the sub-list for method output_type
+	17, // [17:25] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_mpcparty_v1_mpcparty_proto_init() }
@@ -1834,8 +2047,8 @@ func file_mpcparty_v1_mpcparty_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mpcparty_v1_mpcparty_proto_rawDesc), len(file_mpcparty_v1_mpcparty_proto_rawDesc)),
-			NumEnums:      5,
-			NumMessages:   20,
+			NumEnums:      6,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

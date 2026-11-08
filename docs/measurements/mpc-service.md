@@ -74,3 +74,26 @@ within what the Postgres pools and the replay-guard caches explain, but it is th
 | `make test-custody` in HSM mode (18 tests) | 5 min 8 s |
 | All custody tests in MPC mode (24 tests), three runs | 14 min 12 s, 15 min 12 s, 15 min 9 s |
 | `make test-mpc-soak` | 10 min 7 s |
+
+## E23-2: 2-of-3 signing through the service
+
+Three `mpc-party` processes A, B, C (dev build, insecure sealer, allow-all authorizers: the measurement is the signing path, not the
+cosigner or the HSM) and the caller, on loopback, same laptop. Each row is `Sign` as the caller sees it (gRPC call to the
+coordinator, including the signature check and the durable job record), 40 sequential signatures after 3 warm-ups, the 2-party HD
+signature of the same processes first (`Derive` done before). `recv_timeout_ms` is 1000 in this run.
+
+| Signature | N | p50 ms | p95 ms |
+|---|---:|---:|---:|
+| 2-party HD key (A+B) | 40 | 65 | 69 |
+| 2-of-3, A coordinates with B (A+B) | 40 | 109 | 112 |
+| 2-of-3, B coordinates with C (B+C) | 40 | 110 | 112 |
+| 2-of-3, B process killed, A signs with C (A+C) | 40 | 110 | 113 |
+| 2-of-3, B stalled (SIGSTOP), A waits one receive timeout and signs with C | 10 | 1144 | 1145 |
+
+Reading: every pair of a 2-of-3 keyset signs in about 110 ms, 1.6-1.7 times the 2-party signature through the service (the
+wrapper alone measured 2.0 times, `docs/measurements/mpc.md`; the fixed costs of the service dilute it). The pair does not matter.
+A first peer that is **down** (connection refused) costs nothing measurable: A tries the next one at once. A first peer that is
+**stalled** costs one `recv_timeout_ms` (the wait for its ACK; 5 s by default, 1 s here) and only that: set it as low as the
+slowest legitimate answer of a follower plus its cosigner allows. Once a signing message has been exchanged nothing is retried.
+
+Reproduce: `cd mpc-party && QV_MEASURE=1 QV_MEASURE_N=40 go test ./e2e -run TestMeasureThresholdService -v`.

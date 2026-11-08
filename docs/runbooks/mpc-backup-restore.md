@@ -72,3 +72,31 @@ and restore again into an empty data directory. Nothing is signed with a stale s
 Every quarter, and after every change to the tooling: `mpc-party/scripts/restore-drill.sh` (local stack, destroys party B,
 restores it, signs; prints `PASS`). Once a year: a drill with the real custodians, the real offline machine and the real HSM
 token for one party on a non-production keyset. Record the date, who attended, and the output.
+
+## 2-of-3 keysets (A, B and C)
+
+Each member backs up its **own** share: a file per member per generation (`"scheme":"ecdsa-2of3"`), the member's one secret scalar
+under PVE to the same recovery key plus the share blob with the scalar wiped. **Any one member's backup is useless alone; two
+members' backups of one generation plus the recovery private key equal the whole signing key.** Keep the three members' backups in
+three different places, held by three different people, never two together. The routine is the same as above on all three hosts
+(`export` after every DKG and Refresh; `Health` on A, B and C shows `backup_generation` and `backup_stale`).
+
+### One member lost (host destroyed, disk or HSM token gone)
+
+Signing continues without it (any two sign). There is no emergency; do this when convenient, the sooner the better because a
+second loss leaves nothing.
+
+1. Make sure the other two are healthy and agree on the generation (`Health` of A, B and C).
+2. Offline machine, recovery private key: `mpc-party backup restore -config <lost member's party.json> -recovery-private
+   recovery.private -file <that member's backup of the CURRENT generation>`. The config names its token (`qv-party-3` for C) and an
+   empty data directory. The tool refuses a backup of another member, a non-empty directory, a wrong recovery key, a tampered file.
+3. Start the member. A reconciles all three and proves the keyset with the three-way self-test before it serves. If the backup is of an
+   older generation, A logs `party C is on generation 2 but another party is on 3 ... restore it from a backup of generation 3`, the
+   keyset stays unresolved (nothing signs) and you fetch the right backup and restore again into an empty directory.
+4. **Refresh the keyset** (operator-signed `Refresh` on A, all three online). The restored share becomes a new share on a new
+   generation; the public key is unchanged. Refresh runs the self-test (every pair signs) before it commits.
+5. Take new backups of the new generation from all three members.
+
+If two members are lost at once, restore both from backups of the same generation (a single lost-member restore at a time is
+safer), then refresh. If a member and its backup are both lost while the other two are healthy, you can still keep signing with the
+two; run a new DKG to a new keyset and move funds, and retire the old key, before a second member can fail.

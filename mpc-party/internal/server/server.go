@@ -13,9 +13,11 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/cbmpc"
@@ -64,8 +66,13 @@ type Server struct {
 	callerLn, peerLn net.Listener
 	callerSrv        *grpc.Server
 	peerSrv          *grpc.Server
+	peerA, peerB     map[Pin]bool // party C: who may be calling, by certificate
 	peerConn         *grpc.ClientConn
 	peerClient       pb.PeerClient
+	peerCConn        *grpc.ClientConn // A and B: the link to party C (2-of-3 keysets)
+	peerCClient      pb.PeerClient
+	tcache           *tkeyCache
+	groups           groupTable
 
 	jobMu    sync.Mutex
 	inflight map[string]*flight
@@ -121,7 +128,7 @@ func New(o Options) (*Server, error) {
 		return nil, err
 	}
 	return &Server{cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
-		cache: newKeyCache(), rts: map[string]*ksRT{}, kick: make(chan struct{}, 1), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
+		cache: newKeyCache(), tcache: newTKeyCache(), rts: map[string]*ksRT{}, kick: make(chan struct{}, 1), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
 		replay: newReplayCache(c.Limits.ReplayCacheSize), inflight: map[string]*flight{}}, nil
 }
 
@@ -167,14 +174,30 @@ func (s *Server) Start() error {
 		return err
 	}
 	s.callerSrv = grpc.NewServer(append(common, grpc.Creds(credentials.NewTLS(ServerTLS(s.cert, callerPins))))...)
-	if c.Role == "A" {
-		pb.RegisterMpcPartyServer(s.callerSrv, s)
-		// Party A dials B on the peer port.
-		conn, err := grpc.NewClient(c.PeerAddress,
-			grpc.WithTransportCredentials(credentials.NewTLS(ClientTLS(s.cert, peerPins))),
+	dial := func(addr string, pins map[Pin]bool) (*grpc.ClientConn, error) {
+		return grpc.NewClient(addr,
+			grpc.WithTransportCredentials(credentials.NewTLS(ClientTLS(s.cert, pins))),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsg), grpc.MaxCallSendMsgSize(maxMsg)),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 20 * time.Second, Timeout: 10 * time.Second, PermitWithoutStream: true}),
 			grpc.WithConnectParams(grpc.ConnectParams{Backoff: backoff.Config{BaseDelay: 100 * time.Millisecond, Multiplier: 1.6, MaxDelay: time.Second}, MinConnectTimeout: 2 * time.Second}))
+	}
+	if c.PeerCAddress != "" { // A and B dial C
+		cpins, err := parsePins(c.PeerCPins)
+		if err != nil {
+			return err
+		}
+		conn, err := dial(c.PeerCAddress, cpins)
+		if err != nil {
+			return err
+		}
+		s.peerCConn, s.peerCClient = conn, pb.NewPeerClient(conn)
+		conn.Connect()
+	}
+	switch c.Role {
+	case "A":
+		pb.RegisterMpcPartyServer(s.callerSrv, s)
+		// Party A dials B on the peer port.
+		conn, err := dial(c.PeerAddress, peerPins)
 		if err != nil {
 			return err
 		}
@@ -184,15 +207,61 @@ func (s *Server) Start() error {
 		lctx, lcancel := context.WithCancel(context.Background())
 		s.loopCancel = lcancel
 		go s.reconcileLoop(lctx)
-		go s.watchPeer(lctx)
-	} else {
-		pb.RegisterMpcPartyServer(s.callerSrv, healthOnly{s: s})
+		go s.watchPeer(lctx, s.peerConn, "B", true)
+		if s.peerCConn != nil {
+			go s.watchPeer(lctx, s.peerCConn, "C", false)
+		}
+	case "B":
+		if s.peerCConn != nil {
+			// keep the link to C alive: a gRPC channel goes idle after a drop and reconnects only when asked
+			lctx, lcancel := context.WithCancel(context.Background())
+			s.loopCancel = lcancel
+			go func() {
+				t := time.NewTicker(500 * time.Millisecond)
+				defer t.Stop()
+				for {
+					select {
+					case <-lctx.Done():
+						return
+					case <-t.C:
+						s.peerCConn.Connect()
+					}
+				}
+			}()
+		}
+		pb.RegisterMpcPartyServer(s.callerSrv, bCaller{s: s})
 		s.peerLn, err = net.Listen("tcp", c.PeerListen)
 		if err != nil {
 			return err
 		}
 		s.peerSrv = grpc.NewServer(append(common, grpc.MaxConcurrentStreams(uint32(2*c.Limits.MaxPeerSessions)+4),
 			grpc.Creds(credentials.NewTLS(ServerTLS(s.cert, peerPins))))...)
+		pb.RegisterPeerServer(s.peerSrv, s)
+		go s.peerSrv.Serve(s.peerLn)
+	case "C":
+		pb.RegisterMpcPartyServer(s.callerSrv, healthOnly{s: s})
+		apins, err := parsePins(c.PeerAPins)
+		if err != nil {
+			return err
+		}
+		bpins, err := parsePins(c.PeerBPins)
+		if err != nil {
+			return err
+		}
+		s.peerA, s.peerB = apins, bpins
+		all := map[Pin]bool{}
+		for p := range apins {
+			all[p] = true
+		}
+		for p := range bpins {
+			all[p] = true
+		}
+		s.peerLn, err = net.Listen("tcp", c.PeerListen)
+		if err != nil {
+			return err
+		}
+		s.peerSrv = grpc.NewServer(append(common, grpc.MaxConcurrentStreams(uint32(4*c.Limits.MaxPeerSessions)+8),
+			grpc.Creds(credentials.NewTLS(ServerTLS(s.cert, all))))...)
 		pb.RegisterPeerServer(s.peerSrv, s)
 		go s.peerSrv.Serve(s.peerLn)
 	}
@@ -237,11 +306,18 @@ func (s *Server) Shutdown(ctx context.Context) {
 	if s.peerConn != nil {
 		s.peerConn.Close()
 	}
+	if s.peerCConn != nil {
+		s.peerCConn.Close()
+	}
 	s.cache.wipeAll()
+	s.tcache.wipeAll()
 	s.log.Info("stopped, keysets wiped")
 }
 
 func (s *Server) peerReachable() bool {
+	if s.cfg.Role == "B" {
+		return s.peerCConn != nil && s.peerCConn.GetState() == connectivity.Ready
+	}
 	return s.peerConn != nil && s.peerConn.GetState() == connectivity.Ready
 }
 
@@ -254,4 +330,24 @@ type healthOnly struct {
 
 func (h healthOnly) Health(ctx context.Context, r *pb.HealthRequest) (*pb.HealthResponse, error) {
 	return h.s.Health(ctx, r)
+}
+
+// bCaller is what party B serves on its caller port: Health, and Sign for 2-of-3 keysets (B coordinates B+C signatures). Key
+// operations and 2-party keysets belong to party A.
+type bCaller struct {
+	pb.UnimplementedMpcPartyServer
+	s *Server
+}
+
+func (b bCaller) Health(ctx context.Context, r *pb.HealthRequest) (*pb.HealthResponse, error) {
+	return b.s.Health(ctx, r)
+}
+
+func (b bCaller) Sign(ctx context.Context, r *pb.SignRequest) (*pb.SignResponse, error) {
+	if validID(r.GetKeyId()) {
+		if st, err := b.s.store.State(ctx, r.KeyId); err == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) && st.Current != 0 {
+			return b.s.Sign(ctx, r)
+		}
+	}
+	return nil, status.Error(codes.Unimplemented, "party B signs 2-of-3 keysets only; 2-party keys are signed through party A")
 }
