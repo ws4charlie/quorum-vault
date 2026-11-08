@@ -33,12 +33,12 @@ func (a *Adapter) nextFee(ctx context.Context, oldFee, vs uint64) uint64 {
 	return max(step, oldFee+vs*incrementalRate, a.feeRate(ctx)*vs)
 }
 
+// feeCap is the most a transaction of vs virtual bytes may pay: the fee cap and the fee rate ceiling, whichever is lower.
+func (a *Adapter) feeCap(vs uint64) uint64 { return min(a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate*vs) }
+
 func (a *Adapter) checkFee(fee, vs uint64) error {
-	if fee > a.cfg.MaxTxFeeSats {
-		return fmt.Errorf("%w: %d sats would be above the fee cap %d", chain.ErrCannotBump, fee, a.cfg.MaxTxFeeSats)
-	}
-	if fee > a.cfg.MaxFeeRate*vs {
-		return fmt.Errorf("%w: %d sats over %d vbytes would be above %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.MaxFeeRate)
+	if fee > a.feeCap(vs) {
+		return fmt.Errorf("%w: %d sats over %d vbytes would be above the fee cap %d sats or %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate)
 	}
 	return nil
 }
@@ -113,7 +113,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 		return chain.UnsignedTx{}, err
 	}
 	vs := uint64(EstimateVSize(built.Tx))
-	fee, err := a.escalate(ctx, tx, ownerKind, ownerID, oldFee, vs, func(fee uint64) error { return a.checkFee(fee, vs) })
+	fee, err := a.escalate(ctx, tx, ownerKind, ownerID, oldFee, vs, a.feeCap(vs), func(fee uint64) error { return a.checkFee(fee, vs) })
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -206,7 +206,11 @@ func (a *Adapter) buildSweepReplacement(ctx context.Context, tx pgx.Tx, ownerID 
 		return chain.UnsignedTx{}, err
 	}
 	vs := uint64(EstimateVSize(built.Tx))
-	fee, err := a.escalate(ctx, tx, "sweep", ownerID, oldFee, vs, func(fee uint64) error {
+	sweepCap := a.feeCap(vs)
+	if !a.urgent(sum) {
+		sweepCap = min(sweepCap, a.cfg.SweepMaxFeeRate*vs)
+	}
+	fee, err := a.escalate(ctx, tx, "sweep", ownerID, oldFee, vs, sweepCap, func(fee uint64) error {
 		if err := a.checkFee(fee, vs); err != nil {
 			return err
 		}
@@ -253,7 +257,7 @@ func (a *Adapter) buildConsolidateReplacement(ctx context.Context, tx pgx.Tx, ow
 		return chain.UnsignedTx{}, err
 	}
 	vs := uint64(EstimateVSize(built.Tx))
-	fee, err := a.escalate(ctx, tx, OwnerKindConsolidate, ownerID, oldFee, vs, func(fee uint64) error {
+	fee, err := a.escalate(ctx, tx, OwnerKindConsolidate, ownerID, oldFee, vs, min(a.feeCap(vs), a.cfg.ConsolidateMaxFeeRate*vs), func(fee uint64) error {
 		if err := a.checkFee(fee, vs); err != nil {
 			return err
 		}

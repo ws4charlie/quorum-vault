@@ -102,11 +102,15 @@ func (a *Adapter) forgetRefusals(ctx context.Context, tx pgx.Tx, ownerKind, owne
 // refused one, so that every attempt pays strictly more than any the node refused. within is the builder's own caps (the fee cap and the fee rate
 // ceiling, and a sweep's or a consolidation's own ceiling): it returns chain.ErrCannotBump for a fee over one of them, and a fee is never above them.
 //
+// The cap is the limit, not the step: when the next step is over it, the highest fee every cap allows (limit) is tried, if it is strictly above the
+// highest refused fee and meets the replacement rule against the accepted attempt. A cap at or below the highest refused fee, or below what the rule
+// needs, leaves nothing to try; then the following applies.
+//
 // When the refusals are what pushes the fee past a cap (the next fee from the accepted one would still fit), the cap is not the whole story: the
 // refusals were made in a market that may be gone. While the node's minimum fee and its estimate have not fallen, the answer is chain.ErrCannotBump
 // (one ALERT in the workflow, and it keeps waiting, nothing is voided). Once either has fallen, the refusals are forgotten and the fee is built
 // from the accepted attempt again, so that a fee under the cap may now be accepted.
-func (a *Adapter) escalate(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string, oldFee, vs uint64, within func(fee uint64) error) (uint64, error) {
+func (a *Adapter) escalate(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string, oldFee, vs, limit uint64, within func(fee uint64) error) (uint64, error) {
 	r, err := a.refusalsOf(ctx, tx, ownerKind, ownerID)
 	if err != nil {
 		return 0, err
@@ -115,6 +119,9 @@ func (a *Adapter) escalate(ctx context.Context, tx pgx.Tx, ownerKind, ownerID st
 	err = within(fee)
 	if err == nil || r.Fee <= oldFee {
 		return fee, err
+	}
+	if limit > r.Fee && limit >= oldFee+vs*incrementalRate && within(limit) == nil {
+		return limit, nil
 	}
 	if !a.marketNow(ctx).lowerThan(r.Market) {
 		return 0, fmt.Errorf("%w: the node refused %d sats as too little and the next step, %d sats, is over a limit (%v); waiting for the fee market to change",

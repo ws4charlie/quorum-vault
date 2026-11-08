@@ -154,8 +154,9 @@ func TestRecoveryFeeRefusedAboveTheCapAlertsOnceAndRetriesWhenTheMinimumFalls(t 
 		return s.getWd(w.ID).Status == "broadcast" && s.workerLogCount("cannot be replaced") == 1
 	})
 	refused := px.feesWith("fee")
-	if len(refused) != 2 || refused[1] <= refused[0] || refused[1] > cap {
-		t.Fatalf("refused %v: want two increasing fees, then nothing above the cap of %d", refused, cap)
+	// 2 x f0 and 3 x f0 are the steps; the next step (4 x f0) is over the cap, so the attempt at the cap itself is made, and refused, before the ALERT.
+	if len(refused) != 3 || refused[1] <= refused[0] || refused[2] != cap {
+		t.Fatalf("refused %v: want two increasing steps, then exactly the cap of %d, then nothing", refused, cap)
 	}
 	for _, o := range px.offered() {
 		if o.Fee > cap {

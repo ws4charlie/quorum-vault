@@ -177,6 +177,10 @@ func TestFeeRefusalsStopAtTheCapAndRetryWhenTheMarketFalls(t *testing.T) {
 			if !errors.Is(err, chain.ErrCannotBump) {
 				t.Fatalf("at the cap: %v", err)
 			}
+			// The cap is the limit, not the step: the last attempt before the wait paid exactly what the caps allow, and was refused too.
+			if top != tc.limit(e.vs) {
+				t.Fatalf("the last attempt paid %d, want exactly the cap %d", top, tc.limit(e.vs))
+			}
 			if top <= e.fee(orig) {
 				t.Fatalf("nothing escalated (top %d, accepted %d)", top, e.fee(orig))
 			}
