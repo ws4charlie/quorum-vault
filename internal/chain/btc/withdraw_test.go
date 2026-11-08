@@ -35,6 +35,8 @@ type wEnv struct {
 	hot  string
 	dest string
 	n    int
+	vs   uint64 // the size of the transaction refuse built last
+	cfg  Config // what the adapter was made from, to make another one on the same database (a restart)
 }
 
 func newWEnv(t *testing.T) *wEnv { return newWEnvWith(t, nil) }
@@ -62,7 +64,7 @@ func newWEnvWith(t *testing.T, change func(*Config)) *wEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &wEnv{t: t, a: a, node: node, priv: k, hot: hot, dest: dest}
+	return &wEnv{t: t, a: a, node: node, priv: k, hot: hot, dest: dest, cfg: cfg}
 }
 
 func foreignDest() string {

@@ -748,6 +748,10 @@ type NonceResult struct {
 	State string
 	Hash  string
 	Kind  string
+	// FeeRefusals and Refusal: what the node refused of the owner's replacements (Bitcoin). A replacement refused as too cheap was never in the
+	// mempool and does not count against the limit on replacements; any other refusal is an ALERT. Absent in older histories: zero.
+	FeeRefusals int
+	Refusal     string
 }
 
 // WaitNonce polls every attempt of the owner for up to wait and returns
@@ -768,7 +772,7 @@ func (a *Activities) WaitNonce(ctx context.Context, o OwnerArg, wait time.Durati
 			return NonceResult{State: n.State}, nil
 		}
 		if time.Now().After(deadline) {
-			return NonceResult{State: n.State}, nil
+			return NonceResult{State: n.State, FeeRefusals: n.FeeRefusals, Refusal: n.Refusal}, nil
 		}
 		activity.RecordHeartbeat(ctx)
 		select {

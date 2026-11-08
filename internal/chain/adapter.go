@@ -96,6 +96,12 @@ type Outcome struct {
 	Failed   bool   // the deciding attempt confirmed but failed (EVM: reverted); it still paid its fee
 	Attempts int    // how many attempts were ever broadcast
 	Detail   string // for OutcomeConsumed: what was used, for the operator's alert
+	// FeeRefusals counts the replacements the node refused for a fee that was too low (Bitcoin). They were never in the mempool, so they do not count
+	// against the limit on replacements; the next fee is raised above the highest of them.
+	FeeRefusals int
+	// Refusal is the node's last refusal of an attempt for a reason a higher fee does not cure (Bitcoin), or "". The fee is not raised for it: an
+	// operator looks.
+	Refusal string
 }
 
 // Reservation is what an owner's transaction holds on the chain side.
@@ -314,6 +320,9 @@ var (
 	// ErrBroadcastStuck: the node refused the transaction for a reason a higher fee or time may cure (fee below the relay or mempool minimum, the
 	// replacement rules, a conflict with a pending transaction of ours). The attempt is stuck, not failed: the workflow keeps waiting and bumps.
 	ErrBroadcastStuck = errors.New("chain: the node refused the transaction for now")
+	// ErrFeeTooLow: the refusal is about the fee (below the relay or mempool minimum, or below what the replacement rules require). It is always
+	// wrapped with ErrBroadcastStuck. A fee refusal raises the next fee; any other ErrBroadcastStuck does not.
+	ErrFeeTooLow = errors.New("chain: the fee is too low for the node")
 	// ErrInputsSpent: an input of the transaction is missing or already spent. It goes to the outcome check, which tells whether one of our own
 	// attempts spent it or something else did.
 	ErrInputsSpent = errors.New("chain: an input of the transaction is missing or spent")

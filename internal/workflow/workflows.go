@@ -326,10 +326,14 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 	if _, _, _, _, short := act(ctx); short {
 		slice = 2 * time.Second // tests: look at the transaction (and at "stuck") more often
 	}
+	refused0 := -1 // replacements the node had refused as too cheap when this run began to look
 	for {
 		var n NonceResult
 		if err := call(ctx, longOpts(ctx, slice), &n, a.WaitNonce, o, slice); err != nil {
 			return txResult{}, err
+		}
+		if refused0 < 0 {
+			refused0 = n.FeeRefusals
 		}
 		switch n.State {
 		case custody.AttemptMined:
@@ -352,10 +356,16 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 			}
 			return txResult{}, temporal.NewNonRetryableApplicationError("nonce consumed by an unknown transaction", "nonce_consumed", nil)
 		}
-		if !workflow.Now(ctx).Before(stuckAt) && replacements >= t.MaxReplacements {
+		if n.Refusal != "" {
+			// Not about the fee, so a higher fee does not cure it: the replacement is built again as it was, up to the limit, and an operator looks.
+			alert("the node refused a replacement for a reason a higher fee does not cure: " + n.Refusal)
+		}
+		// A replacement the node refused as too cheap was never in the mempool: it does not use up a replacement. The next one pays more, up to the caps.
+		used := replacements - (n.FeeRefusals - refused0)
+		if !workflow.Now(ctx).Before(stuckAt) && used >= t.MaxReplacements {
 			alert("replacements exhausted")
 		}
-		if !workflow.Now(ctx).Before(stuckAt) && replacements < t.MaxReplacements {
+		if !workflow.Now(ctx).Before(stuckAt) && used < t.MaxReplacements {
 			replacements++
 			var rj string
 			if err := call(ctx, buildOpts(ctx), &rj, a.EnqueueReplacement, o, string(track), replacements); err != nil {

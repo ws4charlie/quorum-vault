@@ -17,6 +17,17 @@ and the extra comes out of the change. If the transaction has no change output, 
 one ALERT ("transaction is stuck and cannot be replaced") and keeps waiting; it never voids a transaction that may still mine. The replacement's jobs
 pass the signing zone's own rules: same claims and pins, a new txid, a higher fee.
 
+**A refused replacement raises the next fee.** A replacement the node refuses is deleted, so that it is never the newest attempt (it would hide the earlier
+ones from the rebroadcast and the outcome check). Its fee is not forgotten: `Broadcast` keeps, per owner, the highest fee the node refused for being too
+low (table `btc_refusals`, [refusals.go](../../internal/chain/btc/refusals.go)), and the next replacement is built from the higher of the last accepted
+fee and that one (`escalate`), so every attempt pays strictly more than any refused one, also after a restart. The row goes when the owner settles or its
+reservation is released. Refusals about the fee do not count against `max_replacements`: the transaction was never in the mempool, and the workflow
+asks the cell how many it saw. The caps stay the limit. When refusals push the next fee over `max_tx_fee_sats`, `max_fee_rate` (or a consolidation's
+`consolidate_max_fee_rate`), `BuildReplacement` returns `chain.ErrCannotBump` (one ALERT, and it keeps waiting, nothing is voided). The refusals were made in
+a fee market, and the row keeps it (the node's `mempoolminfee` and its estimate): once either is lower than at the last refusal the refusals are
+forgotten and the fee is built from the accepted attempt again, so a fee under the cap may now be accepted. A market that stays the same, or rises, changes
+nothing. A cancel is not raised by refusals: it only has to beat what the node holds.
+
 **The fee actually paid is booked.** `Outcome` looks at every attempt of the owner; whichever is confirmed at the spend depth decides, its txid goes to
 `SettleWithdrawal`, `TxFee` is that attempt's fee, and `Settle` spends the inputs and records *that* attempt's change. If the original confirms after a
 replacement was broadcast, the original's fee and change are booked (the miner that never saw the replacement; tested with `generateblock`), and the
@@ -28,6 +39,11 @@ replacement is gone from the node. If the replacement confirms, its are.
 (`chain.ErrInputsSpent`): nothing is sent, and the outcome check decides who spent them. Everything else the node refuses (a fee below the relay or mempool
 minimum, the replacement rules, a conflict with a pending transaction of ours) is `chain.ErrBroadcastStuck`: the attempt is stuck, not failed, and the stuck
 handling bumps it. `SubmitJob` returns no hash for either, so the activity does not retry them for ever. A transport error is returned as it is.
+
+Of those, only a refusal about the fee also wraps `chain.ErrFeeTooLow`: the node's own words `min relay fee not met`, `mempool min fee not met` and
+`insufficient fee` (the replacement rules, all three of them). It is the only kind that raises the next fee. Anything else (non-standard, a too long chain
+of unconfirmed parents, a conflict, a message not seen before) is recorded as text and not acted on: a higher fee does not cure it, the same replacement is
+built again up to `max_replacements`, and the workflow raises one ALERT that says why. The strings are tested exactly in `TestClassifySendFeeRefusals`.
 
 ## Rebroadcast
 

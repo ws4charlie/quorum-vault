@@ -338,12 +338,17 @@ type opts struct {
 	// noEstimate puts a proxy between the core and bitcoind that answers estimatesmartfee as a node without data does, for tests that assume the
 	// fallback fee rate whatever ran on the node before.
 	noEstimate bool
+	// proxy puts a feeProxy between the system and bitcoind (it also answers estimatesmartfee as a node without data, like noEstimate): the test
+	// makes the node refuse transactions below a minimum fee, or for another reason, whenever it likes.
+	proxy      *feeProxy
 	minDeposit string // default 1000 sats
 	conf       uint64 // default 6
 	// withdraw starts the whole withdrawal path: the signing gateway and party B's cosigner, one hot shard, approvers and the automated key.
 	withdraw bool
 	// failpoint arms the first worker ("withdrawal.after_build", ...): it exits there, and the test restarts it without.
 	failpoint string
+	// maxTxFee is the builder's fee cap in satoshis (default 50000, withdrawals only).
+	maxTxFee uint64
 	// fallbackRate is the builder's fee rate in sat/vB when the node has no estimate (default 5); stuckAfter how long a broadcast transaction may wait
 	// before it is bumped (default 10m, so a test that does not bump never does); lease how long the gateway keeps a claimed job (default 30s).
 	fallbackRate uint64
@@ -502,6 +507,9 @@ func newSystem(t *testing.T, o opts) *system {
 	rpcURL := nodeURL()
 	if o.noEstimate {
 		rpcURL = noEstimateProxy(t)
+	}
+	if o.proxy != nil {
+		rpcURL = o.proxy.url
 	}
 	s.cf = custody.File{
 		Entity: "qv-us",
