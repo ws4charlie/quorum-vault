@@ -20,4 +20,9 @@ if [ -S /var/run/docker.sock ]; then
 fi
 # The job's environment: the variables the Makefile and the tests read.
 for v in $(compgen -e | grep -E '^(QV_|DATABASE_URL$|CGO_ENABLED$|CC$|CXX$|COMPOSE_|SOFTHSM2_CONF$)'); do args+=(-e "$v"); done
+# cb-mpc comes from the image. A real mpc-party/.deps directory is a host build (macOS objects, or another Linux): it cannot be used in here.
+if [ -e mpc-party/.deps ] && [ ! -L mpc-party/.deps ]; then
+  echo "run-in-image: mpc-party/.deps is a host build of cb-mpc; move it away: the image has its own (/opt/qv-ci/mpc-party/.deps)" >&2
+  exit 1
+fi
 exec docker "${args[@]}" "$IMAGE" bash -c 'ln -sfn /opt/qv-ci/mpc-party/.deps mpc-party/.deps && exec "$@"' qv-ci "$@"

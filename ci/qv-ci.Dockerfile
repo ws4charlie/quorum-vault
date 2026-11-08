@@ -2,7 +2,7 @@
 #
 #   clang-20 + cmake + ninja   mpc-party/scripts/install-toolchain-linux.sh   (the same script a developer runs on Linux)
 #   cb-mpc at the pinned commit mpc-party/scripts/fetch-build-cbmpc.sh at mpc-party/cbmpc.pin   (the same recipe as `make mpc-build`)
-#   SoftHSM2, make, jq, git, curl, Go (the version in go.mod), the docker CLI with the compose plugin (the tests restart the compose bitcoind)
+#   SoftHSM2, make, jq, git, curl, Go (the highest version a go.mod asks for), the docker CLI with the compose plugin (the tests restart the compose bitcoind)
 #
 # Tools and libraries only. No SoftHSM token, PIN, key, share, certificate or .env value is in any layer: the tokens are made at job time by
 # scripts/setup-softhsm.sh, in the checkout. The image is public (the repository is): nothing private may ever be added here.
@@ -34,7 +34,7 @@ RUN CC=clang-20 CXX=clang++-20 /opt/qv-ci/mpc-party/scripts/fetch-build-cbmpc.sh
  && rm -rf /opt/qv-ci/mpc-party/.deps/cb-mpc/build /opt/qv-ci/mpc-party/.deps/openssl-work \
  && chmod -R a+rX /opt/qv-ci
 
-# 3. Go, the version in go.mod. The tarball is checked against the SHA-256 that go.dev publishes for it.
+# 3. Go: the highest version any go.mod of the repository asks for (ci/image-tag.sh). The tarball is checked against the SHA-256 that go.dev publishes for it.
 ARG GO_VERSION
 RUN set -eu; \
     test -n "$GO_VERSION"; \

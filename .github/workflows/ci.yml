@@ -25,6 +25,8 @@ jobs:
             ci
             mpc-party/scripts
             mpc-party/cbmpc.pin
+            mpc-party/go.mod
+            mpc-party/api/go.mod
             go.mod
           sparse-checkout-cone-mode: false
       - name: Log in to ghcr.io
