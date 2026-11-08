@@ -75,22 +75,37 @@ func (a *Adapter) Broadcast(ctx context.Context, s chain.SignedTx) (string, erro
 		return "", fmt.Errorf("btc: decode raw transaction: %w", err)
 	}
 	txid := tx.TxHash().String()
-	tag, err := a.pool.Exec(ctx, `UPDATE btc_attempts SET broadcast_at = COALESCE(broadcast_at, now()), raw = $3, last_sent_at = now() WHERE chain=$1 AND txid=$2`, a.cfg.Chain, txid, s.Raw)
+	var ownerKind, ownerID string
+	var fee int64
+	err := a.pool.QueryRow(ctx, `UPDATE btc_attempts SET broadcast_at = COALESCE(broadcast_at, now()), raw = $3, last_sent_at = now() WHERE chain=$1 AND txid=$2 RETURNING owner_kind, owner_id, fee`,
+		a.cfg.Chain, txid, s.Raw).Scan(&ownerKind, &ownerID, &fee)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("btc: %s is not a transaction this cell built", txid)
+	}
 	if err != nil {
 		return "", err
 	}
-	if tag.RowsAffected() != 1 {
-		return "", fmt.Errorf("btc: %s is not a transaction this cell built", txid)
-	}
 	h, serr := a.send(ctx, txid, s.Raw)
+	if serr == nil {
+		// The node has it: whatever it refused before about this owner, it takes this one. Only the fee floor stays (a later bump pays more than it).
+		_, err := a.pool.Exec(ctx, `UPDATE btc_refusals SET other_refusal = '', updated_at = now() WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND other_refusal <> ''`, a.cfg.Chain, ownerKind, ownerID)
+		return h, err
+	}
 	if errors.Is(serr, chain.ErrBroadcastStuck) || errors.Is(serr, chain.ErrInputsSpent) {
-		// The node's own judgement, not a transport error. A refused replacement (an attempt after the owner's first) leaves no trace: it must not stay
-		// as the newest attempt, where it would hide the earlier ones from the rebroadcast and the outcome. The owner's first attempt stays: it is
-		// stuck, not forgotten, and the workflow bumps it.
-		if _, derr := a.pool.Exec(ctx, `DELETE FROM btc_attempts a WHERE a.chain=$1 AND a.txid=$2 AND EXISTS (
+		// The node's own judgement, not a transport error. A refused replacement (an attempt after the owner's first) leaves no trace among the
+		// attempts: it must not stay as the newest, where it would hide the earlier ones from the rebroadcast and the outcome. The owner's first attempt
+		// stays: it is stuck, not forgotten, and the workflow bumps it. What the node refused is kept in btc_refusals (refusals.go), so that the next
+		// bump pays more than a fee that was refused for being too low.
+		tag, derr := a.pool.Exec(ctx, `DELETE FROM btc_attempts a WHERE a.chain=$1 AND a.txid=$2 AND EXISTS (
 			SELECT 1 FROM btc_attempts b WHERE b.chain=a.chain AND b.owner_kind=a.owner_kind AND b.owner_id=a.owner_id AND b.txid <> a.txid
-			AND b.broadcast_at IS NOT NULL AND b.created_at <= a.created_at)`, a.cfg.Chain, txid); derr != nil {
+			AND b.broadcast_at IS NOT NULL AND b.created_at <= a.created_at)`, a.cfg.Chain, txid)
+		if derr != nil {
 			return h, derr
+		}
+		if errors.Is(serr, chain.ErrBroadcastStuck) {
+			if rerr := a.recordRefusal(ctx, ownerKind, ownerID, uint64(fee), serr, tag.RowsAffected() > 0); rerr != nil {
+				return h, rerr
+			}
 		}
 	}
 	return h, serr
@@ -108,7 +123,10 @@ func (a *Adapter) send(ctx context.Context, txid string, raw []byte) (string, er
 // classifySend maps the node's answer to sendrawtransaction. nil: the node has it (already in the mempool, known, or in a block). A refusal
 // that is the node's own judgement (an RPC error) is never retried as a failing activity: inputs missing or spent is chain.ErrInputsSpent
 // (the outcome check decides who spent them), and everything else (fee below the relay or mempool minimum, the replacement rules, a conflict
-// with a pending transaction of ours) is chain.ErrBroadcastStuck. A transport error is returned as it is and is retried.
+// with a pending transaction of ours) is chain.ErrBroadcastStuck. Of those, a refusal about the fee (the node's own words for a fee under the relay
+// minimum, under the mempool minimum, or under what the replacement rules require) is also chain.ErrFeeTooLow: it raises the next fee. Every other
+// one does not (non-standard, a too long chain of unconfirmed parents, a conflict, anything unknown). A transport error is returned as it is and is
+// retried.
 func classifySend(err error) error {
 	var re *RPCError
 	if !errors.As(err, &re) {
@@ -121,7 +139,32 @@ func classifySend(err error) error {
 	case re.Code == -25 || strings.Contains(m, "missingorspent") || strings.Contains(m, "missing inputs") || strings.Contains(m, "inputs-missing"):
 		return fmt.Errorf("%w: %s", chain.ErrInputsSpent, re.Message)
 	}
+	if feeRefusal(re.Message) {
+		return fmt.Errorf("%w: %w: %s", chain.ErrBroadcastStuck, chain.ErrFeeTooLow, re.Message)
+	}
 	return fmt.Errorf("%w: %s", chain.ErrBroadcastStuck, re.Message)
+}
+
+// feeRefusals are Bitcoin Core's reject reasons for a fee that is too low (validation.cpp and policy/rbf.cpp, as sendrawtransaction reports them
+// with code -26):
+//
+//	"min relay fee not met, 50 < 110"                  the fee rate is under the relay minimum
+//	"mempool min fee not met, 80 < 110"                the mempool is full and asks for more than the transaction pays
+//	"insufficient fee, rejecting replacement <txid>; new feerate <x> <= old feerate <y>"
+//	"insufficient fee, rejecting replacement <txid>, less fees than conflicting txs; <x> < <y>"
+//	"insufficient fee, rejecting replacement <txid>, not enough additional fees to relay; <x> < <y>"
+//
+// The last three are the replacement rules (BIP125) and share the reason "insufficient fee".
+var feeRefusals = []string{"min relay fee not met", "mempool min fee not met", "insufficient fee"}
+
+func feeRefusal(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, f := range feeRefusals {
+		if strings.Contains(m, f) {
+			return true
+		}
+	}
+	return false
 }
 
 // confirmations of a transaction: -1 when the node does not know it, 0 in the mempool, else the depth. It needs the node to run with -txindex.
@@ -221,6 +264,11 @@ func (a *Adapter) Outcome(ctx context.Context, ownerKind, ownerID string) (chain
 		return chain.Outcome{}, err
 	}
 	out := chain.Outcome{State: chain.OutcomeOpen, Attempts: len(atts)}
+	rf, err := a.refusalsOf(ctx, a.pool, ownerKind, ownerID)
+	if err != nil {
+		return chain.Outcome{}, err
+	}
+	out.FeeRefusals, out.Refusal = rf.FeeRefusals, rf.Other
 	inBlock := false
 	for i := range atts {
 		c, err := a.confirmations(ctx, atts[i].txid)
@@ -334,6 +382,9 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 	if _, err := tx.Exec(ctx, `UPDATE btc_attempts SET settled_at = COALESCE(settled_at, now()) WHERE chain=$1 AND txid=$2`, a.cfg.Chain, txid); err != nil {
 		return err
 	}
+	if err := a.forgetRefusals(ctx, tx, ownerKind, ownerID); err != nil {
+		return err
+	}
 	for _, in := range p.Inputs {
 		if _, err := tx.Exec(ctx, `UPDATE btc_utxos SET status='spent', updated_at=now() WHERE chain=$1 AND txid=$2 AND vout=$3`, a.cfg.Chain, in.TxID, in.Vout); err != nil {
 			return err
@@ -398,8 +449,10 @@ func (a *Adapter) ReleaseUnsigned(ctx context.Context, tx pgx.Tx, ownerKind, own
 	}
 	// Nothing was signed, so nothing of the owner was ever sent: its built attempts go. The same outputs may be built into the very same transaction
 	// again (a sweep planned a second time), and a transaction has one row.
-	_, err = tx.Exec(ctx, `DELETE FROM btc_attempts WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND broadcast_at IS NULL`, a.cfg.Chain, ownerKind, ownerID)
-	return err
+	if _, err = tx.Exec(ctx, `DELETE FROM btc_attempts WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND broadcast_at IS NULL`, a.cfg.Chain, ownerKind, ownerID); err != nil {
+		return err
+	}
+	return a.forgetRefusals(ctx, tx, ownerKind, ownerID)
 }
 
 // RecordFunding stores an output paid to a hot address from outside; it reports whether it was new.

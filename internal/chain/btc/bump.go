@@ -19,8 +19,9 @@ import (
 //	old fee + vsize x 1 sat/vB                (BIP125 rules 3 and 4)
 //	the current fee rate x vsize              (what the node would ask for now)
 //
-// and refuses (chain.ErrCannotBump) when that is above the fee cap or the fee rate ceiling, or leaves the change at or under dust, or when the
-// attempt has no change output to pay it from.
+// where "old fee" is the higher of the last accepted attempt's and the highest fee the node refused as too low (escalate), so that every attempt
+// pays strictly more than any refused one. It refuses (chain.ErrCannotBump) when that is above the fee cap or the fee rate ceiling, or leaves the
+// change at or under dust, or when the attempt has no change output to pay it from.
 const (
 	bumpPercent     = 15
 	incrementalRate = 1 // sat/vB, the incremental relay fee
@@ -32,12 +33,12 @@ func (a *Adapter) nextFee(ctx context.Context, oldFee, vs uint64) uint64 {
 	return max(step, oldFee+vs*incrementalRate, a.feeRate(ctx)*vs)
 }
 
+// feeCap is the most a transaction of vs virtual bytes may pay: the fee cap and the fee rate ceiling, whichever is lower.
+func (a *Adapter) feeCap(vs uint64) uint64 { return min(a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate*vs) }
+
 func (a *Adapter) checkFee(fee, vs uint64) error {
-	if fee > a.cfg.MaxTxFeeSats {
-		return fmt.Errorf("%w: %d sats would be above the fee cap %d", chain.ErrCannotBump, fee, a.cfg.MaxTxFeeSats)
-	}
-	if fee > a.cfg.MaxFeeRate*vs {
-		return fmt.Errorf("%w: %d sats over %d vbytes would be above %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.MaxFeeRate)
+	if fee > a.feeCap(vs) {
+		return fmt.Errorf("%w: %d sats over %d vbytes would be above the fee cap %d sats or %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate)
 	}
 	return nil
 }
@@ -112,8 +113,8 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 		return chain.UnsignedTx{}, err
 	}
 	vs := uint64(EstimateVSize(built.Tx))
-	fee := a.nextFee(ctx, oldFee, vs)
-	if err := a.checkFee(fee, vs); err != nil {
+	fee, err := a.escalate(ctx, tx, ownerKind, ownerID, oldFee, vs, a.feeCap(vs), func(fee uint64) error { return a.checkFee(fee, vs) })
+	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
 	change := &p.Outputs[len(p.Outputs)-1]
@@ -168,7 +169,7 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 		sum += in.Value
 	}
 	vs := vsize(len(p.Inputs), sh.script)
-	fee := a.nextFee(ctx, uint64(top), vs)
+	fee := a.nextFee(ctx, uint64(top), vs) // a cancel replaces what the node holds, so only accepted attempts count: refused fees do not raise it
 	if err := a.checkFee(fee, vs); err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -205,18 +206,27 @@ func (a *Adapter) buildSweepReplacement(ctx context.Context, tx pgx.Tx, ownerID 
 		return chain.UnsignedTx{}, err
 	}
 	vs := uint64(EstimateVSize(built.Tx))
-	fee := a.nextFee(ctx, oldFee, vs)
-	if err := a.checkFee(fee, vs); err != nil {
+	sweepCap := a.feeCap(vs)
+	if !a.urgent(sum) {
+		sweepCap = min(sweepCap, a.cfg.SweepMaxFeeRate*vs)
+	}
+	fee, err := a.escalate(ctx, tx, "sweep", ownerID, oldFee, vs, sweepCap, func(fee uint64) error {
+		if err := a.checkFee(fee, vs); err != nil {
+			return err
+		}
+		if !a.urgent(sum) && fee > a.cfg.SweepMaxFeeRate*vs {
+			return fmt.Errorf("%w: %d sats over %d vbytes is above the sweep ceiling of %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.SweepMaxFeeRate)
+		}
+		if need := max(a.cfg.MinSweep, a.cfg.SweepK*fee); sum < need {
+			return fmt.Errorf("%w: at a fee of %d the sweep of %d sats would break the sweep rule (it needs %d)", chain.ErrCannotBump, fee, sum, need)
+		}
+		if sum < fee+DustLimit(KindP2WPKH) {
+			return fmt.Errorf("%w: %d sats cannot pay a fee of %d and leave an output", chain.ErrCannotBump, sum, fee)
+		}
+		return nil
+	})
+	if err != nil {
 		return chain.UnsignedTx{}, err
-	}
-	if !a.urgent(sum) && fee > a.cfg.SweepMaxFeeRate*vs {
-		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats over %d vbytes is above the sweep ceiling of %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.SweepMaxFeeRate)
-	}
-	if need := max(a.cfg.MinSweep, a.cfg.SweepK*fee); sum < need {
-		return chain.UnsignedTx{}, fmt.Errorf("%w: at a fee of %d the sweep of %d sats would break the sweep rule (it needs %d)", chain.ErrCannotBump, fee, sum, need)
-	}
-	if sum < fee+DustLimit(KindP2WPKH) {
-		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats cannot pay a fee of %d and leave an output", chain.ErrCannotBump, sum, fee)
 	}
 	p.Outputs[0].Value = sum - fee
 	b2, raw, err := a.record(ctx, tx, "sweep", ownerID, "send", p, fee)
@@ -247,15 +257,20 @@ func (a *Adapter) buildConsolidateReplacement(ctx context.Context, tx pgx.Tx, ow
 		return chain.UnsignedTx{}, err
 	}
 	vs := uint64(EstimateVSize(built.Tx))
-	fee := a.nextFee(ctx, oldFee, vs)
-	if err := a.checkFee(fee, vs); err != nil {
+	fee, err := a.escalate(ctx, tx, OwnerKindConsolidate, ownerID, oldFee, vs, min(a.feeCap(vs), a.cfg.ConsolidateMaxFeeRate*vs), func(fee uint64) error {
+		if err := a.checkFee(fee, vs); err != nil {
+			return err
+		}
+		if fee > a.cfg.ConsolidateMaxFeeRate*vs {
+			return fmt.Errorf("%w: %d sats over %d vbytes is above the consolidation ceiling of %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.ConsolidateMaxFeeRate)
+		}
+		if sum < fee+DustLimit(KindP2WPKH)+1 {
+			return fmt.Errorf("%w: %d sats cannot pay a fee of %d and leave an output above dust", chain.ErrCannotBump, sum, fee)
+		}
+		return nil
+	})
+	if err != nil {
 		return chain.UnsignedTx{}, err
-	}
-	if fee > a.cfg.ConsolidateMaxFeeRate*vs {
-		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats over %d vbytes is above the consolidation ceiling of %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.ConsolidateMaxFeeRate)
-	}
-	if sum < fee+DustLimit(KindP2WPKH)+1 {
-		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats cannot pay a fee of %d and leave an output above dust", chain.ErrCannotBump, sum, fee)
 	}
 	p.Outputs[0].Value = sum - fee
 	b2, raw, err := a.record(ctx, tx, OwnerKindConsolidate, ownerID, "send", p, fee)

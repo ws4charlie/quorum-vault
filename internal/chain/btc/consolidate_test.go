@@ -281,12 +281,12 @@ func TestConsolidationBumpRefusals(t *testing.T) {
 		e.fund(10_000)
 	}
 	e.node.mu.Lock()
-	e.node.estimate = 19
+	e.node.estimate = 20 // at the ceiling already: the cap is the limit, so from 19 the bump would pay exactly the ceiling (TestBumpReachesTheCapWithoutRefusals)
 	e.node.mu.Unlock()
 	if _, err := e.consolidate("c1", 50_000); err != nil {
 		t.Fatal(err)
 	}
-	// Bumping from 19 sat/vB: at least 15 percent more, which is above the ceiling of 20.
+	// Bumping from 20 sat/vB: more than the ceiling of 20.
 	err := e.commit(func(tx pgx.Tx) error {
 		_, err := e.a.BuildReplacement(context.Background(), tx, OwnerKindConsolidate, "c1")
 		return err

@@ -322,6 +322,10 @@ type AttemptOutcome struct {
 	Kind  string
 	// Detail says what was consumed, for the alert (consumed only).
 	Detail string
+	// FeeRefusals and Refusal come from the chain cell (chain.Outcome) for a pending owner: replacements the node refused as too cheap, which do not
+	// count as replacements, and the last refusal that a higher fee does not cure.
+	FeeRefusals int
+	Refusal     string
 }
 
 // AttemptState looks at all attempts through the chain cell (chain.Adapter.Outcome) and names the result as the
@@ -346,7 +350,7 @@ func (s *Service) AttemptState(ctx context.Context, o Owner) (AttemptOutcome, er
 	if oc.Attempts == 0 {
 		return AttemptOutcome{State: AttemptNone}, nil
 	}
-	return AttemptOutcome{State: AttemptPending}, nil
+	return AttemptOutcome{State: AttemptPending, FeeRefusals: oc.FeeRefusals, Refusal: oc.Refusal}, nil
 }
 
 // ReservationOpen reports whether the owner still holds something on the chain side that is not final. While it

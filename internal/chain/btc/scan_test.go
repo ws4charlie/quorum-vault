@@ -26,6 +26,7 @@ type fakeNode struct {
 	refuse      map[string]bool // raw transactions (hex) the node refuses as stuck, whatever sendErr says
 	spent       map[string]bool // "txid:vout" -> spent on chain (gettxout answers null)
 	estimate    float64         // sat/vB the node answers to estimatesmartfee; 0: no estimate
+	mempoolMin  float64         // sat/vB the node answers to getmempoolinfo as its minimum mempool fee
 	beforeTxOut func()          // called (unlocked state allowed) before gettxout answers, to change the chain between two reads
 }
 
@@ -60,6 +61,8 @@ func (n *fakeNode) serve(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		res = map[string]any{"errors": []string{"Insufficient data or no feerate found"}}
+	case "getmempoolinfo":
+		res = map[string]any{"mempoolminfee": n.mempoolMin / 1e5}
 	case "getrawtransaction":
 		var id string
 		json.Unmarshal(req.Params[0], &id)

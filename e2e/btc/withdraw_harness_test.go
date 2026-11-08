@@ -45,6 +45,9 @@ func (s *system) setupWithdrawals(o opts) {
 	s.cf.Chain.BTC.SpendConfirmations = 2
 	s.cf.Chain.BTC.MaxFeeRate = 50
 	s.cf.Chain.BTC.MaxTxFeeSats = 50_000
+	if o.maxTxFee > 0 {
+		s.cf.Chain.BTC.MaxTxFeeSats = o.maxTxFee
+	}
 	s.cf.Withdrawal.Tiers = map[string][]custody.TierFile{"BTC": {{MinAmount: "0", Approvals: 1, Auto: true}, {MinAmount: btcTier2, Approvals: 2}}}
 	s.cf.Withdrawal.HotWait = "4m"
 	s.cf.Withdrawal.SignTimeout = "20s"
