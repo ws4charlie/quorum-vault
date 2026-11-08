@@ -151,14 +151,16 @@ func (s *system) outpointsOfValue(v int64) []string {
 func TestConsolidateMergesTheSmallestKeepsTheLargestAndTheShardPaysAgain(t *testing.T) {
 	s := consolidateSystem(t, opts{})
 	s.fundHotOutputs(repeat(100_000, 10)...)
-	s.fundHotOutputs(150_000, 150_000)
+	s.fundHotOutputs(110_000, 110_000)
 	s.deposit("c1", 5_000_000)
-	large := s.outpointsOfValue(150_000)
+	large := s.outpointsOfValue(110_000)
 	if len(large) != 2 {
-		t.Fatalf("%d outputs of 150000", len(large))
+		t.Fatalf("%d outputs of 110000", len(large))
 	}
-	// 600,000 needs six outputs of these: more than max_inputs, so no choice of four can pay it.
-	w := s.withdraw("ini", "k1", "c1", s.node.fresh(), 600_000)
+	// 750,000 is more than any four of these outputs carry (440,000), and more than any four carry after one consolidation (one merged output of
+	// about 398,000 plus 110,000, 110,000 and 100,000: about 718,000). Only the two merged outputs together (about 797,000) pay it. So the
+	// withdrawal cannot slip in between the two consolidations and spend the first merged output, whatever the timing.
+	w := s.withdraw("ini", "k1", "c1", s.node.fresh(), 750_000)
 	if w.Code != 201 {
 		t.Fatalf("request: %d %v", w.Code, w.Raw)
 	}
