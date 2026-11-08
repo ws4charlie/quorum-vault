@@ -40,6 +40,8 @@ type KeyMeta struct {
 // KeysetState is the durable state of one keyset on one party. Generations only grow. During a refresh there is one
 // candidate beside the current generation; the old generation's file stays until both parties confirmed the new one.
 type KeysetState struct {
+	Scheme    int32     `json:"scheme,omitempty"`  // 0 = 2-party HD keyset, 1 = 2-of-3 threshold ECDSA (pb.Scheme)
+	PubKey    string    `json:"pub_key,omitempty"` // 2-of-3: the group public key (hex, public data)
 	Alg       cbmpc.Alg `json:"alg"`
 	Current   uint64    `json:"current"`   // 0 while a DKG is still a candidate
 	Candidate uint64    `json:"candidate"` // 0 = none
@@ -52,6 +54,9 @@ type KeyStore interface {
 	PutCandidate(ctx context.Context, id string, gen uint64, ks *cbmpc.Keyset) error
 	// GetKeyset returns a keyset the caller must Wipe.
 	GetKeyset(ctx context.Context, id string, gen uint64) (*cbmpc.Keyset, error)
+	// PutTCandidate / GetTKey are the same for a 2-of-3 threshold share (E23-2). The caller of GetTKey must Wipe it.
+	PutTCandidate(ctx context.Context, id string, gen uint64, k *cbmpc.TKey) error
+	GetTKey(ctx context.Context, id string, gen uint64) (*cbmpc.TKey, error)
 	// State returns ErrNotFound if the keyset has no state at all.
 	State(ctx context.Context, id string) (KeysetState, error)
 	RecordDecision(ctx context.Context, id string, gen uint64) error
@@ -91,6 +96,7 @@ func NewFileStore(dir, role string, sealer Sealer) (*FileStore, error) {
 
 type keysetFile struct {
 	V      int       `json:"v"`
+	Scheme int32     `json:"scheme,omitempty"`
 	Alg    cbmpc.Alg `json:"alg"`
 	Role   string    `json:"role"`
 	Gen    uint64    `json:"gen"`
@@ -100,6 +106,22 @@ type keysetFile struct {
 // AAD binds role, keyset id, generation and algorithm: a sealed blob moved to another party, keyset or generation does not open.
 func aadKeyset(role, id string, gen uint64, alg cbmpc.Alg) []byte {
 	return []byte(fmt.Sprintf("qv-mpc-party|keyset|v2|%s|%s|%d|%s", role, id, gen, alg))
+}
+
+// aadTKeyset binds role, keyset id and generation of a threshold share.
+func aadTKeyset(role, id string, gen uint64) []byte {
+	return []byte(fmt.Sprintf("qv-mpc-party|tkeyset|v1|%s|%s|%d", role, id, gen))
+}
+
+// memberOf maps a role to the member number of the wrapper (A=0, B=1, C=2).
+func memberOf(role string) cbmpc.Member {
+	switch role {
+	case "B":
+		return 1
+	case "C":
+		return 2
+	}
+	return 0
 }
 
 func (s *FileStore) kdir(id string) string { return filepath.Join(s.dir, "keysets", id) }
@@ -145,7 +167,30 @@ func (s *FileStore) PutCandidate(_ context.Context, id string, gen uint64, ks *c
 	if err != nil {
 		return err
 	}
-	raw, _ := json.Marshal(keysetFile{V: 2, Alg: ks.Alg(), Role: s.role, Gen: gen, Sealed: sealed})
+	return s.putCandidate(id, gen, keysetFile{V: 2, Alg: ks.Alg(), Role: s.role, Gen: gen, Sealed: sealed}, 0, "")
+}
+
+func (s *FileStore) PutTCandidate(_ context.Context, id string, gen uint64, k *cbmpc.TKey) error {
+	if !validID(id) {
+		return fmt.Errorf("invalid keyset id %q", id)
+	}
+	if k.Self() != memberOf(s.role) {
+		return fmt.Errorf("keyset %s: the share belongs to %s, not to party %s", id, k.Self(), s.role)
+	}
+	blob, err := k.Secret.Bytes()
+	if err != nil {
+		return err
+	}
+	defer cbmpc.WipeBytes(blob)
+	sealed, err := s.sealer.Seal(aadTKeyset(s.role, id, gen), blob)
+	if err != nil {
+		return err
+	}
+	return s.putCandidate(id, gen, keysetFile{V: 3, Scheme: 1, Alg: cbmpc.ECDSA, Role: s.role, Gen: gen, Sealed: sealed}, 1, hex.EncodeToString(k.PublicKey()))
+}
+
+func (s *FileStore) putCandidate(id string, gen uint64, f keysetFile, scheme int32, pub string) error {
+	raw, _ := json.Marshal(f)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := os.MkdirAll(s.kdir(id), 0o700); err != nil {
@@ -153,9 +198,15 @@ func (s *FileStore) PutCandidate(_ context.Context, id string, gen uint64, ks *c
 	}
 	st, err := s.readState(id)
 	if errors.Is(err, ErrNotFound) {
-		st = KeysetState{Alg: ks.Alg()}
+		st = KeysetState{Alg: f.Alg, Scheme: scheme, PubKey: pub}
 	} else if err != nil {
 		return err
+	}
+	if st.Scheme != scheme {
+		return fmt.Errorf("keyset %s: scheme %d does not match the stored scheme %d", id, scheme, st.Scheme)
+	}
+	if scheme == 1 && st.Current != 0 && st.PubKey != pub { // an orphaned DKG candidate (no current generation) may be replaced
+		return fmt.Errorf("keyset %s: the public key of a threshold keyset cannot change", id)
 	}
 	if gen <= st.Current || (st.Candidate != 0 && st.Candidate != gen) {
 		return fmt.Errorf("keyset %s: cannot store candidate generation %d (current %d, candidate %d)", id, gen, st.Current, st.Candidate)
@@ -164,8 +215,30 @@ func (s *FileStore) PutCandidate(_ context.Context, id string, gen uint64, ks *c
 		return err
 	}
 	st.Candidate = gen
+	st.PubKey = pub
 	st.Decision = 0             // a new candidate never inherits an old decision
 	return s.writeState(id, st) // the candidate exists only once this write is durable
+}
+
+func (s *FileStore) GetTKey(_ context.Context, id string, gen uint64) (*cbmpc.TKey, error) {
+	if !validID(id) {
+		return nil, fmt.Errorf("invalid keyset id %q", id)
+	}
+	raw, err := os.ReadFile(filepath.Join(s.kdir(id), fmt.Sprintf("g%d.json", gen)))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	var f keysetFile
+	if err := json.Unmarshal(raw, &f); err != nil || f.V != 3 || f.Scheme != 1 || f.Role != s.role || f.Gen != gen {
+		return nil, fmt.Errorf("keyset %s generation %d: bad file", id, gen)
+	}
+	blob, err := s.sealer.Open(aadTKeyset(s.role, id, gen), f.Sealed)
+	if err != nil {
+		return nil, fmt.Errorf("keyset %s generation %d: cannot unseal: %w", id, gen, err)
+	}
+	return cbmpc.LoadTKey(memberOf(s.role), blob) // wipes blob
 }
 
 func (s *FileStore) GetKeyset(_ context.Context, id string, gen uint64) (*cbmpc.Keyset, error) {

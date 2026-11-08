@@ -124,18 +124,31 @@ func cmdExport(args []string) error {
 	if err != nil || state.Current == 0 {
 		return fmt.Errorf("keyset %q has no current generation on this party", *id)
 	}
-	ks, err := st.GetKeyset(ctx, *id, state.Current)
-	if err != nil {
-		return err
-	}
-	defer ks.Wipe()
 	pub, err := os.ReadFile(*pubPath)
 	if err != nil {
 		return err
 	}
-	f, err := backup.Export(ks, *id, state.Current, cfg.Role, pub)
-	if err != nil {
-		return err
+	var f *backup.File
+	if state.Scheme == 1 { // a 2-of-3 share: this party's own scalar
+		tk, err := st.GetTKey(ctx, *id, state.Current)
+		if err != nil {
+			return err
+		}
+		defer tk.Wipe()
+		f, err = backup.ExportT(tk, *id, state.Current, cfg.Role, pub)
+		if err != nil {
+			return err
+		}
+	} else {
+		ks, err := st.GetKeyset(ctx, *id, state.Current)
+		if err != nil {
+			return err
+		}
+		defer ks.Wipe()
+		f, err = backup.Export(ks, *id, state.Current, cfg.Role, pub)
+		if err != nil {
+			return err
+		}
 	}
 	// Verify right away, from the bytes that will be written: a backup that was never verified is not a backup.
 	raw := f.Marshal()
@@ -217,6 +230,25 @@ func cmdRestore(args []string) error {
 	priv, err := os.ReadFile(*privPath)
 	if err != nil {
 		return err
+	}
+	if f.Scheme == backup.SchemeT2of3 {
+		tk, err := backup.RestoreT(f, priv)
+		if err != nil {
+			return err
+		}
+		defer tk.Wipe()
+		if state, err := st.State(ctx, f.KeysetID); err == nil {
+			return fmt.Errorf("the target data directory %s already has keyset %q (generation %d): restore into an empty directory", filepath.Clean(cfg.DataDir), f.KeysetID, state.Current)
+		}
+		if err := st.PutTCandidate(ctx, f.KeysetID, f.Generation, tk); err != nil {
+			return err
+		}
+		if err := st.Promote(ctx, f.KeysetID, f.Generation); err != nil {
+			return err
+		}
+		fmt.Printf("restored 2-of-3 keyset %s generation %d for party %s into %s, sealed under token %q\n", f.KeysetID, f.Generation, cfg.Role, cfg.DataDir, cfg.Sealer.Token)
+		fmt.Println("start the party, then have the operator REFRESH the keyset from party A: the other two parties reconcile with the restored share, and the refresh moves all three to a new generation (existing backups become stale)")
+		return nil
 	}
 	ks, err := backup.Restore(f, priv)
 	if err != nil {

@@ -122,8 +122,9 @@ type File struct {
 	V              int       `json:"v"`
 	KeysetID       string    `json:"keyset_id"`
 	Generation     uint64    `json:"generation"`
-	Role           string    `json:"role"` // "A" or "B"
-	Alg            string    `json:"alg"`  // "ecdsa" or "ed25519"
+	Role           string    `json:"role"`             // "A" or "B" (2-party keysets), "A", "B" or "C" (2-of-3 keysets)
+	Alg            string    `json:"alg"`              // "ecdsa" or "ed25519"
+	Scheme         string    `json:"scheme,omitempty"` // "" = 2-party HD keyset; "ecdsa-2of3" = one member's share of a 2-of-3 keyset
 	RootPublicKey  string    `json:"root_public_key"`
 	CreatedAt      time.Time `json:"created_at"`
 	RecoveryKeyFpr string    `json:"recovery_key_fingerprint"`
@@ -133,12 +134,32 @@ type File struct {
 	Stripped       Stripped  `json:"stripped"`
 }
 
+// SchemeT2of3 is File.Scheme of a 2-of-3 threshold share.
+const SchemeT2of3 = "ecdsa-2of3"
+
 func (f *File) header() []byte {
-	return []byte(fmt.Sprintf("qv-backup-v%d|%s|%d|%s|%s|%s|%s", f.V, f.KeysetID, f.Generation, f.Role, f.Alg, f.RootPublicKey, f.RecoveryKeyFpr))
+	h := fmt.Sprintf("qv-backup-v%d|%s|%d|%s|%s|%s|%s", f.V, f.KeysetID, f.Generation, f.Role, f.Alg, f.RootPublicKey, f.RecoveryKeyFpr)
+	if f.Scheme != "" {
+		h += "|" + f.Scheme // 2-party headers stay exactly as they were
+	}
+	return []byte(h)
 }
 
 func (f *File) label() []byte {
+	if f.Scheme == SchemeT2of3 {
+		return cbmpc.TBackupLabel(f.KeysetID, memberOfRole(f.Role), f.Generation)
+	}
 	return cbmpc.BackupLabel(fmt.Sprintf("%s#%d", f.KeysetID, f.Generation), algOf(f.Alg), roleOf(f.Role))
+}
+
+func memberOfRole(r string) cbmpc.Member {
+	switch r {
+	case "B":
+		return 1
+	case "C":
+		return 2
+	}
+	return 0
 }
 
 func algOf(s string) cbmpc.Alg {
@@ -176,8 +197,20 @@ func Parse(b []byte) (*File, error) {
 	if f.V != FileVersion {
 		return nil, fmt.Errorf("backup file: version %d, this tool reads version %d", f.V, FileVersion)
 	}
-	if f.KeysetID == "" || f.Generation == 0 || (f.Role != "A" && f.Role != "B") || (f.Alg != "ecdsa" && f.Alg != "ed25519") {
+	if f.KeysetID == "" || f.Generation == 0 || (f.Role != "A" && f.Role != "B" && f.Role != "C") || (f.Alg != "ecdsa" && f.Alg != "ed25519") {
 		return nil, errors.New("backup file: incomplete header")
+	}
+	switch f.Scheme {
+	case "":
+		if f.Role == "C" {
+			return nil, errors.New("backup file: party C holds 2-of-3 keysets only")
+		}
+	case SchemeT2of3:
+		if f.Alg != "ecdsa" || f.PubK != "" {
+			return nil, errors.New("backup file: malformed 2-of-3 header")
+		}
+	default:
+		return nil, fmt.Errorf("backup file: unknown scheme %q", f.Scheme)
 	}
 	return &f, nil
 }
@@ -229,6 +262,39 @@ func Export(ks *cbmpc.Keyset, id string, gen uint64, role string, recoveryPublic
 	return f, nil
 }
 
+// ExportT builds the backup of one member's share of a 2-of-3 keyset. The PVE ciphertext carries the share scalar x_i; the
+// "stripped" part is the share blob with the scalar wiped (public points, no secret), encrypted the same way for uniformity.
+func ExportT(k *cbmpc.TKey, id string, gen uint64, role string, recoveryPublic []byte) (*File, error) {
+	pub, rsaPub, err := parsePublic(recoveryPublic)
+	if err != nil {
+		return nil, err
+	}
+	f := &File{V: FileVersion, KeysetID: id, Generation: gen, Role: role, Alg: "ecdsa", Scheme: SchemeT2of3,
+		RootPublicKey: hex.EncodeToString(k.PublicKey()), CreatedAt: time.Now().UTC(), RecoveryKeyFpr: pub.Fingerprint}
+	sp, err := k.Split()
+	if err != nil {
+		return nil, err
+	}
+	defer sp.Wipe()
+	f.PubX = hex.EncodeToString(sp.PubX)
+	if f.PVE, err = sp.PVEExport(pub.PVEEk, f.label()); err != nil {
+		return nil, err
+	}
+	aesKey := make([]byte, 32)
+	rand.Read(aesKey)
+	defer cbmpc.WipeBytes(aesKey)
+	blk, _ := aes.NewCipher(aesKey)
+	gcm, _ := cipher.NewGCM(blk)
+	iv := make([]byte, gcm.NonceSize())
+	rand.Read(iv)
+	wrapped, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, rsaPub, aesKey, f.header())
+	if err != nil {
+		return nil, err
+	}
+	f.Stripped = Stripped{WrappedKey: wrapped, IV: iv, CT: gcm.Seal(nil, iv, sp.Public, f.header())}
+	return f, nil
+}
+
 // Verify checks the backup with PUBLIC data only: header, recovery key fingerprint, and the PVE proof that the ciphertext
 // encrypts scalars whose public points are pub_x and pub_k, bound to this keyset, generation, role and algorithm.
 func Verify(f *File, recoveryPublic []byte) error {
@@ -247,10 +313,76 @@ func Verify(f *File, recoveryPublic []byte) error {
 	if len(f.Stripped.WrappedKey) == 0 || len(f.Stripped.IV) != 12 || len(f.Stripped.CT) < 16 {
 		return errors.New("backup file: the encrypted stripped blob is malformed")
 	}
+	if f.Scheme == SchemeT2of3 {
+		if err := cbmpc.TPVEVerify(pub.PVEEk, f.PVE, f.label(), px); err != nil {
+			return fmt.Errorf("backup file: the PVE ciphertext does not verify (tampered, or for another keyset, generation or member): %w", err)
+		}
+		return nil
+	}
 	if err := cbmpc.PVEVerify(algOf(f.Alg), pub.PVEEk, f.PVE, f.label(), px, pk); err != nil {
 		return fmt.Errorf("backup file: the PVE ciphertext does not verify (tampered, or for another keyset, generation, role or algorithm): %w", err)
 	}
 	return nil
+}
+
+// RestoreT rebuilds one member's share of a 2-of-3 keyset. Offline: needs the recovery PRIVATE key file.
+func RestoreT(f *File, recoveryPrivate []byte) (*cbmpc.TKey, error) {
+	if f.Scheme != SchemeT2of3 {
+		return nil, errors.New("this is not a 2-of-3 backup")
+	}
+	var priv RecoveryPrivate
+	if err := strictJSON(recoveryPrivate, &priv); err != nil {
+		return nil, fmt.Errorf("recovery private key file: %w", err)
+	}
+	if priv.V != KeyVersion || priv.Kind != "qv-recovery-private" {
+		return nil, errors.New("recovery private key file: wrong kind or version")
+	}
+	rkAny, err := x509.ParsePKCS8PrivateKey(priv.RSAPrivate)
+	if err != nil {
+		return nil, fmt.Errorf("recovery private key file: %w", err)
+	}
+	rk, ok := rkAny.(*rsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("recovery private key file: not an RSA key")
+	}
+	pubDER, _ := x509.MarshalPKIXPublicKey(&rk.PublicKey)
+	if fingerprint(priv.PVEEk, pubDER) != f.RecoveryKeyFpr {
+		return nil, errors.New("this is not the recovery key the backup was made for (fingerprint differs)")
+	}
+	aesKey, err := rsa.DecryptOAEP(sha256.New(), nil, rk, f.Stripped.WrappedKey, f.header())
+	if err != nil {
+		return nil, errors.New("cannot unwrap the public blob key: wrong recovery key or a tampered backup")
+	}
+	defer cbmpc.WipeBytes(aesKey)
+	blk, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return nil, err
+	}
+	gcm, _ := cipher.NewGCM(blk)
+	public, err := gcm.Open(nil, f.Stripped.IV, f.Stripped.CT, f.header())
+	if err != nil {
+		return nil, errors.New("the public blob does not decrypt: tampered backup or a header that was changed")
+	}
+	px, _ := hex.DecodeString(f.PubX)
+	if err := cbmpc.TPVEVerify(priv.PVEEk, f.PVE, f.label(), px); err != nil {
+		return nil, fmt.Errorf("the PVE ciphertext does not verify (tampered backup): %w", err)
+	}
+	dk := cbmpc.SecretFromBytes(priv.PVEDk)
+	defer dk.Wipe()
+	x, err := cbmpc.TRestoreScalar(dk, priv.PVEEk, f.PVE, f.label())
+	if err != nil {
+		return nil, fmt.Errorf("PVE restore failed (tampered backup or wrong recovery key): %w", err)
+	}
+	defer x.Wipe()
+	k, err := cbmpc.TJoin(memberOfRole(f.Role), public, x, px)
+	if err != nil {
+		return nil, fmt.Errorf("the restored share does not match the recorded share point: %w", err)
+	}
+	if hex.EncodeToString(k.PublicKey()) != f.RootPublicKey {
+		k.Wipe()
+		return nil, errors.New("the restored share has another group public key than the backup header says")
+	}
+	return k, nil
 }
 
 // Restore rebuilds the keyset. Offline: needs the recovery PRIVATE key file. It checks that the result has the root public

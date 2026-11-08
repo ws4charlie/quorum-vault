@@ -43,10 +43,18 @@ message AdminAuth {
   bytes signature = 3;
 }
 
+// The signing scheme of a keyset. UNSPECIFIED is today's 2-party HD keyset (members A and B). Additive: every existing
+// message that does not set it means the 2-party scheme.
+enum Scheme {
+  SCHEME_UNSPECIFIED = 0; // 2-party HD keyset (members A, B), Bitcoin and, until E23-3, EVM
+  SCHEME_ECDSA_2OF3 = 1;  // 2-of-3 threshold ECDSA on secp256k1, not HD (members A, B, C); the keyset IS the key: Sign names it as key_id
+}
+
 message DKGRequest {
   string keyset_id = 1;
-  Curve curve = 2;
+  Curve curve = 2; // 2-of-3: CURVE_SECP256K1 or unspecified
   AdminAuth admin = 3;
+  Scheme scheme = 4;
 }
 message DKGResponse {
   bytes root_public_key = 1;
@@ -106,6 +114,14 @@ message KeysetStatus {
   uint64 backup_generation = 4; // generation of the last verified backup, 0 = none
   bool backup_stale = 5;        // the keyset moved on since the last verified backup
   bool frozen = 6;
+  Scheme scheme = 7;
+  bytes public_key = 8;         // 2-of-3 keysets: the group public key (compressed), empty for 2-party HD keysets
+}
+
+// State of one peer link as seen from this party.
+message PeerStatus {
+  string name = 1; // "A", "B" or "C"
+  bool reachable = 2;
 }
 
 message HealthRequest {}
@@ -116,6 +132,7 @@ message HealthResponse {
   string version = 4;
   string cbmpc_commit = 5;
   repeated KeysetStatus keysets = 6;
+  repeated PeerStatus peers = 7; // the links this party dials (A: B and C; B: C; C: none)
 }
 
 // ---- Typed error detail, attached to every gRPC status the service returns for protocol failures ----
@@ -170,6 +187,7 @@ enum Op {
   OP_REFRESH = 5;
   OP_UNFREEZE = 6;
   OP_RECONCILE = 7; // after a restart: agree on one generation, prove it with a SelfTest
+  OP_FREEZE_NOTICE = 8; // 2-of-3: "I froze this keyset"; the receiver freezes too (Open.reason)
 }
 
 message Open {
@@ -187,6 +205,14 @@ message Open {
   bytes expected_public_key = 11; // sign: REQUIRED. The key the authorizer judges; B refuses an empty one and aborts if the derived key differs
   AdminAuth admin = 12;           // dkg, refresh, unfreeze
   uint64 generation = 13;         // the generation of the keyset the initiator uses; the follower refuses a different one (UNAVAILABLE: retry)
+  // ---- 2-of-3 (all additive) ----
+  Scheme scheme = 14;
+  string initiator = 15; // "A" or "B": who started the operation (the party that opened this stream, or for a link stream the one the group belongs to)
+  // Three-party operations (DKG, Refresh, Reconcile, Unfreeze): A opens a stream to B and to C with the same group id;
+  // B then opens a LINK stream to C carrying the same group id. C starts when both streams arrived.
+  string group = 16;
+  bool link = 17;      // this is the B -> C link stream of group `group`
+  string reason = 18;  // FREEZE_NOTICE: why the sender froze
 }
 
 message Fin {
@@ -202,4 +228,5 @@ message Fin {
   bool prepared = 7; // B -> A: B has durably stored the candidate generation
   bool switched = 8; // B -> A: B has made the candidate current
   bool confirm = 9;  // A -> B: both parties are on the new generation; delete the old one
+  bool frozen = 10;  // reconcile (2-of-3): the sender holds this keyset frozen
 }

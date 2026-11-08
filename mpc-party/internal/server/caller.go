@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/cbmpc"
@@ -36,7 +37,7 @@ func (s *Server) logOp(op string, start time.Time, err error, kv ...any) {
 			kind = f.Kind.String()
 		}
 	}
-	s.log.Info("op", append([]any{"role", "A", "op", op, "duration_ms", time.Since(start).Milliseconds(), "outcome", outcome, "kind", kind}, kv...)...)
+	s.log.Info("op", append([]any{"role", s.cfg.Role, "op", op, "duration_ms", time.Since(start).Milliseconds(), "outcome", outcome, "kind", kind}, kv...)...)
 }
 
 func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, err error) {
@@ -45,8 +46,18 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 	if !validID(r.KeysetId) {
 		return nil, invalid("dkg", "keyset_id must match [A-Za-z0-9._-]{1,64}")
 	}
-	if _, e := algForCurve(r.Curve); e != nil {
+	threshold := r.Scheme == pb.Scheme_SCHEME_ECDSA_2OF3
+	if threshold {
+		if r.Curve != pb.Curve_CURVE_UNSPECIFIED && r.Curve != pb.Curve_CURVE_SECP256K1 {
+			return nil, invalid("dkg", "a 2-of-3 keyset is secp256k1 ECDSA")
+		}
+	} else if r.Scheme != pb.Scheme_SCHEME_UNSPECIFIED {
+		return nil, invalid("dkg", "unknown scheme %v", r.Scheme)
+	} else if _, e := algForCurve(r.Curve); e != nil {
 		return nil, invalid("dkg", "%v", e)
+	}
+	if s.cfg.Role != "A" {
+		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Unimplemented, "dkg", "DKG is served by party A")
 	}
 	if st, e := s.store.State(ctx, r.KeysetId); e == nil && st.Current != 0 {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.AlreadyExists, "dkg", "keyset %q already exists", r.KeysetId)
@@ -61,6 +72,13 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 	if _, e := s.admin.check("dkg", r.KeysetId, r.Admin); e != nil {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "dkg", "%v", e)
 	}
+	if threshold {
+		res, err := s.coordinateGroup(ctx, "dkg", &pb.Open{Op: pb.Op_OP_DKG, KeysetId: r.KeysetId, Curve: pb.Curve_CURVE_SECP256K1, Admin: r.Admin})
+		if err != nil {
+			return nil, err
+		}
+		return &pb.DKGResponse{RootPublicKey: res.public}, nil
+	}
 	res, err := s.coordinate(ctx, "dkg", &pb.Open{Op: pb.Op_OP_DKG, KeysetId: r.KeysetId, Curve: r.Curve, Admin: r.Admin}, r.KeysetId)
 	if err != nil {
 		return nil, err
@@ -71,6 +89,22 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 func (s *Server) Refresh(ctx context.Context, r *pb.RefreshRequest) (_ *pb.RefreshResponse, err error) {
 	start := time.Now()
 	defer func() { s.logOp("refresh", start, err, "keyset_id", r.GetKeysetId()); err = toStatus("refresh", err) }()
+	if st, e := s.store.State(ctx, r.KeysetId); e == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+		if _, _, e := s.tkey(ctx, r.KeysetId, 0); e != nil {
+			return nil, e
+		}
+		if frozen, why := s.freeze.Frozen(r.KeysetId); frozen {
+			return nil, frozenFail("refresh", r.KeysetId, why)
+		}
+		if _, e := s.admin.check("refresh", r.KeysetId, r.Admin); e != nil {
+			return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "refresh", "%v", e)
+		}
+		res, err := s.coordinateGroup(ctx, "refresh", &pb.Open{Op: pb.Op_OP_REFRESH, KeysetId: r.KeysetId, Admin: r.Admin})
+		if err != nil {
+			return nil, err
+		}
+		return &pb.RefreshResponse{RootPublicKey: res.public}, nil
+	}
 	if _, _, e := s.keyset(ctx, r.KeysetId, 0); e != nil {
 		return nil, e
 	}
@@ -148,6 +182,12 @@ func (s *Server) Derive(ctx context.Context, r *pb.DeriveRequest) (_ *pb.DeriveR
 func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthResponse, error) {
 	h := &pb.HealthResponse{Role: s.cfg.Role, PeerReachable: s.peerReachable(), ActiveSessions: int32(s.slots.active()),
 		Version: Version, CbmpcCommit: cbmpc.PinnedCommit}
+	if s.peerConn != nil {
+		h.Peers = append(h.Peers, &pb.PeerStatus{Name: "B", Reachable: s.peerConn.GetState() == connectivity.Ready})
+	}
+	if s.peerCConn != nil {
+		h.Peers = append(h.Peers, &pb.PeerStatus{Name: "C", Reachable: s.peerCConn.GetState() == connectivity.Ready})
+	}
 	ids, _ := s.store.List(ctx)
 	for _, id := range ids {
 		st, err := s.store.State(ctx, id)
@@ -156,8 +196,13 @@ func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthRes
 		}
 		bk := ReadBackup(s.cfg.DataDir, id)
 		frozen, _ := s.freeze.Frozen(id)
-		h.Keysets = append(h.Keysets, &pb.KeysetStatus{KeysetId: id, Generation: st.Current, Resolved: s.rt(id).isResolved(),
-			BackupGeneration: bk.Generation, BackupStale: st.Current != 0 && bk.Generation < st.Current, Frozen: frozen})
+		ks := &pb.KeysetStatus{KeysetId: id, Generation: st.Current, Resolved: s.rt(id).isResolved(),
+			BackupGeneration: bk.Generation, BackupStale: st.Current != 0 && bk.Generation < st.Current, Frozen: frozen,
+			Scheme: pb.Scheme(st.Scheme)}
+		if st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) && st.PubKey != "" {
+			ks.PublicKey, _ = hex.DecodeString(st.PubKey)
+		}
+		h.Keysets = append(h.Keysets, ks)
 	}
 	return h, nil
 }
@@ -184,11 +229,26 @@ func (s *Server) Sign(ctx context.Context, r *pb.SignRequest) (resp *pb.SignResp
 	if alg == cbmpc.ECDSA && len(r.Digest) != 32 {
 		return nil, invalid("sign", "an ECDSA digest must be 32 bytes")
 	}
-	meta, e := s.store.GetKey(ctx, r.KeyId)
-	if errors.Is(e, ErrNotFound) {
-		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.NotFound, "sign", "key %q not found (call Derive first)", r.KeyId)
-	} else if e != nil {
-		return nil, fromWrapper("sign", e)
+	var meta KeyMeta
+	var e2 error
+	tkeyset := false
+	if validID(r.KeyId) {
+		// A 2-of-3 keyset IS the key: Sign names the keyset as key_id.
+		if st, e := s.store.State(ctx, r.KeyId); e == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) && st.Current != 0 {
+			tkeyset = true
+			meta = KeyMeta{KeyID: r.KeyId, KeysetID: r.KeyId, Alg: cbmpc.ECDSA, PublicKey: st.PubKey}
+		}
+	}
+	if !tkeyset {
+		if s.cfg.Role != "A" {
+			return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Unimplemented, "sign", "2-of-3 keyset %q not found on this party (party %s signs 2-of-3 keysets only)", r.KeyId, s.cfg.Role)
+		}
+		meta, e2 = s.store.GetKey(ctx, r.KeyId)
+		if errors.Is(e2, ErrNotFound) {
+			return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.NotFound, "sign", "key %q not found (call Derive first)", r.KeyId)
+		} else if e2 != nil {
+			return nil, fromWrapper("sign", e2)
+		}
 	}
 	if meta.Alg != alg {
 		return nil, invalid("sign", "algorithm does not match the key")
@@ -202,13 +262,13 @@ func (s *Server) Sign(ctx context.Context, r *pb.SignRequest) (resp *pb.SignResp
 	}
 
 	// Party A's own check, before anything else happens (B repeats it on its side).
-	if e := s.authz.Authorize(ctx, AuthRequest{Role: "A", JobID: r.JobId, KeyID: r.KeyId, KeysetID: meta.KeysetID,
+	if e := s.authz.Authorize(ctx, AuthRequest{Role: s.cfg.Role, JobID: r.JobId, KeyID: r.KeyId, KeysetID: meta.KeysetID,
 		Algorithm: r.Algorithm, Digest: r.Digest, IntentPackage: r.IntentPackage, PublicKey: pub}); e != nil {
 		var ue *UnavailableError
 		if errors.As(e, &ue) {
-			return nil, failf(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, codes.Unavailable, "sign", "authorizer on A unavailable: %v", e)
+			return nil, failf(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, codes.Unavailable, "sign", "authorizer on %s unavailable: %v", s.cfg.Role, e)
 		}
-		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "sign", "refused by the authorizer on A: %v", e)
+		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "sign", "refused by the authorizer on %s: %v", s.cfg.Role, e)
 	}
 
 	digestHex := hex.EncodeToString(r.Digest)
@@ -238,7 +298,7 @@ func (s *Server) Sign(ctx context.Context, r *pb.SignRequest) (resp *pb.SignResp
 		f := &flight{done: make(chan struct{})}
 		s.inflight[r.JobId] = f
 		s.jobMu.Unlock()
-		resp, err = s.signLeader(ctx, r, meta, pub, digestHex)
+		resp, err = s.signLeader(ctx, r, meta, pub, digestHex, tkeyset)
 		s.jobMu.Lock()
 		delete(s.inflight, r.JobId)
 		s.jobMu.Unlock()
@@ -247,10 +307,16 @@ func (s *Server) Sign(ctx context.Context, r *pb.SignRequest) (resp *pb.SignResp
 	}
 }
 
-func (s *Server) signLeader(ctx context.Context, r *pb.SignRequest, meta KeyMeta, pub []byte, digestHex string) (*pb.SignResponse, error) {
+func (s *Server) signLeader(ctx context.Context, r *pb.SignRequest, meta KeyMeta, pub []byte, digestHex string, tkeyset bool) (*pb.SignResponse, error) {
 	open := &pb.Open{Op: pb.Op_OP_SIGN, KeysetId: meta.KeysetID, HardenedPath: meta.HardenedPath, Path: meta.Path, KeyId: r.KeyId,
 		Algorithm: r.Algorithm, Digest: r.Digest, JobId: r.JobId, IntentPackage: r.IntentPackage, ExpectedPublicKey: pub}
-	res, err := s.coordinate(ctx, "sign", open, r.KeyId)
+	var res *opResult
+	var err error
+	if tkeyset {
+		res, err = s.coordinateSignT(ctx, open, r.KeyId)
+	} else {
+		res, err = s.coordinate(ctx, "sign", open, r.KeyId)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +340,12 @@ func (s *Server) Unfreeze(ctx context.Context, r *pb.UnfreezeRequest) (_ *pb.Unf
 	if e != nil {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "unfreeze", "%v", e)
 	}
-	if e := s.unfreezeSession(ctx, r.KeysetId, r.Admin); e != nil {
+	if st, e := s.store.State(ctx, r.KeysetId); e == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+		// all three accept the operator signature or nothing is lifted
+		if e := s.unfreezeGroup(ctx, r.KeysetId, r.Admin); e != nil {
+			return nil, e
+		}
+	} else if e := s.unfreezeSession(ctx, r.KeysetId, r.Admin); e != nil {
 		return nil, e
 	}
 	if e := s.freeze.Unfreeze(r.KeysetId); e != nil {

@@ -27,6 +27,7 @@ type ksRT struct {
 	mu       sync.Mutex
 	busy     string // "dkg", "refresh" or "reconcile" while one is running
 	resolved bool   // reconciled with the peer (and proven by a SelfTest) since this process started, or created here
+	partial  bool   // 2-of-3: resolved with ONE other member only because the third was unreachable (treconcile.go)
 }
 
 func (s *Server) rt(id string) *ksRT {
@@ -117,6 +118,9 @@ func (c *keyCache) get(ctx context.Context, s *Server, id string, wantGen uint64
 	}
 	if err != nil {
 		return nil, 0, fromWrapper("keyset", err)
+	}
+	if st.Scheme != 0 {
+		return nil, 0, invalid("keyset", "keyset %q is a 2-of-3 keyset: this call is for 2-party HD keysets", id)
 	}
 	if wantGen != 0 && st.Current != wantGen {
 		return nil, 0, genMismatchFail("keyset", id, wantGen, st.Current)

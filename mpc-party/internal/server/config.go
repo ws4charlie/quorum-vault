@@ -17,9 +17,9 @@ import (
 
 // Config is the JSON config file. Unknown fields are an error; a missing or invalid file stops the process.
 type Config struct {
-	Role         string `json:"role"`          // "A" (coordinator, P1) or "B" (follower, P2)
+	Role         string `json:"role"`          // "A" (coordinator, P1), "B" (follower, P2; coordinator of B+C signing) or "C" (third party of 2-of-3 keysets)
 	CallerListen string `json:"caller_listen"` // gRPC for callers; mTLS, callers pinned by certificate fingerprint
-	PeerListen   string `json:"peer_listen"`   // B only: gRPC for party A; mTLS, A pinned
+	PeerListen   string `json:"peer_listen"`   // B and C: gRPC for the parties that dial this one; mTLS, those pinned
 	PeerAddress  string `json:"peer_address"`  // A only: B's peer_listen address
 
 	CertFile string `json:"cert_file"` // this party's certificate (PEM), used on both ports
@@ -28,6 +28,14 @@ type Config struct {
 	// Pins are lowercase hex SHA-256 fingerprints of the DER leaf certificate.
 	PeerPins   []string `json:"peer_pins"`   // the other party's certificate (exactly the cert it presents)
 	CallerPins []string `json:"caller_pins"` // certificates allowed on the caller port
+
+	// 2-of-3 (E23-2). Links: A dials B and C, B dials C. A and B list where C listens and which certificate it presents
+	// (both or neither); C lists, separately, the certificate of A and the certificate of B (it learns who is calling from
+	// the certificate, and a certificate pinned for A is never accepted as B). B's peer_pins stay A's certificate only.
+	PeerCAddress string   `json:"peer_c_address"` // A and B: C's peer_listen address
+	PeerCPins    []string `json:"peer_c_pins"`    // A and B: C's certificate
+	PeerAPins    []string `json:"peer_a_pins"`    // C only: A's certificate
+	PeerBPins    []string `json:"peer_b_pins"`    // C only: B's certificate
 
 	DataDir string `json:"data_dir"`
 
@@ -158,15 +166,43 @@ func (c *Config) Validate() error {
 		req("peer_address", c.PeerAddress)
 	case "B":
 		req("peer_listen", c.PeerListen)
+	case "C":
+		req("peer_listen", c.PeerListen)
 	default:
-		errs = append(errs, fmt.Errorf(`role must be "A" or "B", got %q`, c.Role))
+		errs = append(errs, fmt.Errorf(`role must be "A", "B" or "C", got %q`, c.Role))
+	}
+	if (c.PeerCAddress == "") != (len(c.PeerCPins) == 0) {
+		errs = append(errs, errors.New("peer_c_address and peer_c_pins go together"))
+	}
+	if c.Role == "C" {
+		if c.PeerCAddress != "" || len(c.PeerCPins) != 0 || c.PeerAddress != "" {
+			errs = append(errs, errors.New("party C dials nobody: peer_address, peer_c_address and peer_c_pins are not for role C"))
+		}
+		if len(c.PeerAPins) == 0 || len(c.PeerBPins) == 0 {
+			errs = append(errs, errors.New("peer_a_pins and peer_b_pins: party C needs the certificate of A and of B"))
+		}
+		if len(c.PeerPins) != 0 {
+			errs = append(errs, errors.New("peer_pins is not for role C: use peer_a_pins and peer_b_pins"))
+		}
+		for _, a := range c.PeerAPins {
+			for _, b := range c.PeerBPins {
+				if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b)) {
+					errs = append(errs, errors.New("peer_a_pins and peer_b_pins share a certificate: C could not tell A from B"))
+				}
+			}
+		}
+	} else if len(c.PeerAPins) != 0 || len(c.PeerBPins) != 0 {
+		errs = append(errs, errors.New("peer_a_pins and peer_b_pins are only for role C"))
+	}
+	if c.Role == "A" && c.PeerCAddress == c.PeerAddress && c.PeerCAddress != "" {
+		errs = append(errs, errors.New("peer_c_address must differ from peer_address"))
 	}
 	req("caller_listen", c.CallerListen)
 	req("cert_file", c.CertFile)
 	req("key_file", c.KeyFile)
 	req("data_dir", c.DataDir)
 	if c.Role == "A" && c.PeerListen != "" {
-		errs = append(errs, errors.New("peer_listen is only for role B (party A dials B)"))
+		errs = append(errs, errors.New("peer_listen is only for roles B and C (party A dials)"))
 	}
 	if c.Role == "B" && c.PeerAddress != "" {
 		errs = append(errs, errors.New("peer_address is only for role A"))
@@ -174,13 +210,13 @@ func (c *Config) Validate() error {
 	if c.PeerListen != "" && c.PeerListen == c.CallerListen && !strings.HasSuffix(c.PeerListen, ":0") {
 		errs = append(errs, errors.New("peer_listen and caller_listen must be different listeners"))
 	}
-	if len(c.PeerPins) == 0 {
+	if len(c.PeerPins) == 0 && c.Role != "C" {
 		errs = append(errs, errors.New("peer_pins: at least one pin is required"))
 	}
 	if len(c.CallerPins) == 0 {
 		errs = append(errs, errors.New("caller_pins: at least one pin is required"))
 	}
-	for _, p := range append(append([]string{}, c.PeerPins...), c.CallerPins...) {
+	for _, p := range append(append(append(append(append([]string{}, c.PeerPins...), c.CallerPins...), c.PeerCPins...), c.PeerAPins...), c.PeerBPins...) {
 		if _, err := ParsePin(p); err != nil {
 			errs = append(errs, err)
 		}

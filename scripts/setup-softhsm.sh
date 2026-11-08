@@ -10,7 +10,7 @@ TOKEN_DIR="$SOFTHSM_DIR/tokens"
 CONF="$SOFTHSM_DIR/softhsm2.conf"
 SO_PIN="${QV_HSM_SO_PIN:-so-dev-1234}"
 USER_PIN="${QV_HSM_PIN:-user-dev-1234}"
-TOKENS=(quorumvault qv-party-1 qv-party-2 qv-cold)
+TOKENS=(quorumvault qv-party-1 qv-party-2 qv-party-3 qv-cold)
 
 command -v softhsm2-util >/dev/null || {
   echo "softhsm2-util not found: brew install softhsm (macOS) or apt-get install softhsm2 (Ubuntu)" >&2

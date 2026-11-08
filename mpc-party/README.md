@@ -238,3 +238,52 @@ duration, outcome, kind); no secrets.
   `docs/runbooks/mpc-keyset-freeze.md`. Drill: `scripts/restore-drill.sh`.
 - Crash testing: `-tags devauth` builds read `QV_FAILPOINT=<name>` and exit at that step (e2e `TestCrashMatrix*`). Production
   builds contain neither the failpoints nor the insecure sealer.
+
+## E23-2: 2-of-3 keysets and party C
+
+A keyset has a **scheme**: today's 2-party HD keyset (members A and B; Bitcoin, and EVM until E23-3) or a **2-of-3 threshold ECDSA**
+keyset (members A, B and C; secp256k1, not HD; the keyset IS the key, `Sign` names it as `key_id`). Both kinds live in the same
+processes; a process refuses an operation on a keyset whose scheme it does not hold (party C holds 2-of-3 keysets only).
+Wrapper, review and numbers: [docs/spikes/e23-threshold.md](../docs/spikes/e23-threshold.md). Learn page:
+[docs/learn/e23-2-three-party-service.md](../docs/learn/e23-2-three-party-service.md).
+
+| Party | Caller port serves | Peer port | Dials |
+|---|---|---|---|
+| A | everything (DKG, Refresh, Node, Derive, Sign, Unfreeze, Health) | none: A never follows a session | B and C |
+| B | Health; `Sign` of 2-of-3 keysets (B coordinates B+C) | A only (2-party and 2-of-3 sessions) | C |
+| C | Health | A and B, told apart by their pinned certificates | nobody |
+
+New config fields (all optional except for C): `peer_c_address` + `peer_c_pins` (A and B: where C listens and its certificate, both or
+neither); `peer_a_pins` + `peer_b_pins` (C only; a certificate pinned for A is never accepted as B). B's `peer_pins` stay A's
+certificate only. C needs its own `role: "C"`, token (`qv-party-3`), certificate, data directory and `admin_keys`.
+
+- **Signing a 2-of-3 keyset.** The gateway may call `Sign` on A or on B. The coordinator picks its peer in fixed order, A: B then C,
+  B: C. It moves on **only** when the failure is `TRANSPORT` or `UNAVAILABLE` and happened before any signing message (connect, OPEN,
+  ACK; a follower checks the generation, the freeze, the expected key and its cosigner **before** the ACK). It never moves on after
+  `REFUSED`, `CRYPTOGRAPHIC`, `FROZEN`, `LIMIT`, or a failure after the ACK. The coordinator verifies the signature (btcec, low-S),
+  stores it durably under the job id and returns it. A retry through another pair can give a different signature over the same digest.
+- **Who checks what.** A authorizes with `pinned-caller` and only coordinates. B and C authorize every 2-of-3 `Sign` through their
+  own `cosigner` in **every** role (B as coordinator asks before it opens a session), and refuse an OPEN whose `expected_public_key` is
+  not the keyset's key.
+- **DKG and Refresh** (A, with an `AdminAuth` that B and C each verify): all three must be online. A opens a stream to B and C, B opens
+  a link stream to C, C starts when both arrived. After the protocol every pair signs (`SelfTest`); the candidate generation is stored
+  by B and C, then by A, A records its decision, B and C switch, A switches, everybody confirms and deletes the old generation. Crash
+  matrix: every step, B and C, `e2e/threshold_crash_test.go`.
+- **After a restart** (or when A's link to B or C comes back) A reconciles every 2-of-3 keyset with both, applies the three-way plan
+  and proves it with the self-test; until then the keyset answers `UNAVAILABLE`. If a member is down, A reconciles with each reachable member alone, but only a clean
+  keyset (same generation, no candidate, no decision), marks it partial and runs the full reconciliation as soon as the missing member
+  returns (learn page, gaps). B and C restarted while A is down wait for A.
+- **Freeze.** A cryptographic failure freezes the keyset durably on both members of the session; the coordinator tells the third member
+  (`FREEZE_NOTICE`) if it has a link to it (A: B and C; B: C). A member that was not told learns it at its next contact: a frozen
+  member refuses every session with `FROZEN`, the one that hears it freezes too, and reconciliation carries the flag. `Unfreeze` is a
+  session with B and C: each verifies the operator signature itself, and nothing is lifted unless all three accepted.
+- **Backup.** `mpc-party backup export | verify | restore` handle the new scheme (the file has `"scheme":"ecdsa-2of3"` and PVE of the
+  member's one scalar); `Health` reports `backup_generation` and `backup_stale` per keyset on every party. Runbook:
+  `docs/runbooks/mpc-backup-restore.md`.
+- **Health** reports the scheme and the group public key per keyset and the state of each peer link (`peers`).
+- **Errors** are the same kinds. The protocol aborts without blame; the freeze alert names the session peer (where the failed message
+  came in) and says that this is not proof of guilt.
+
+Tests: `e2e/threshold_test.go`, `threshold_crash_test.go` (three real processes), `internal/server/trio_test.go` (three parties in one
+process with tamper proxies on any link), `treconcile_internal_test.go`.
+
