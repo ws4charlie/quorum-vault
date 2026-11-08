@@ -26,6 +26,7 @@ import (
 // Codes added for 2-of-3 so the initiator can react without matching text.
 const (
 	CodeLinkDown uint32 = 0xff0c0003 // a link the operation needs could not be established
+	CodePlan     uint32 = 0xff0c0004 // reconciliation found a member that is stale or has lost its state: operator action needed
 )
 
 func isT(open *pb.Open) bool { return open.GetScheme() == pb.Scheme_SCHEME_ECDSA_2OF3 }

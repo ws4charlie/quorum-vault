@@ -198,7 +198,9 @@ func (s *Server) reconcileAT(ctx context.Context, id string) (err error) {
 	if p.Err != "" {
 		sendAll(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_INTERNAL, Message: p.Err})
 		s.log.Error("ALERT keyset cannot be reconciled with the peers: operator action needed", "role", "A", "scheme", "ecdsa-2of3", "keyset_id", id, "reason", p.Err)
-		return errors.New(p.Err)
+		pf := failf(pb.ErrorKind_ERROR_KIND_INTERNAL, 0, name, "%s", p.Err)
+		pf.CB = CodePlan
+		return pf
 	}
 	if err := sendAll(&pb.Fin{Ok: true, Result: pj}); err != nil {
 		return err
@@ -358,12 +360,19 @@ func isLinkDown(err error) bool {
 	return errors.As(err, &f) && f.CB == CodeLinkDown
 }
 
+func isPlanErr(err error) bool {
+	var f *Fail
+	return errors.As(err, &f) && f.CB == CodePlan
+}
+
 func (r *ksRT) setPartial(v bool) { r.mu.Lock(); r.partial = v; r.mu.Unlock() }
 func (r *ksRT) isPartial() bool   { r.mu.Lock(); defer r.mu.Unlock(); return r.partial }
 
 func (s *Server) reconcileTWithFallback(ctx context.Context, id string) error {
 	err := s.reconcileAT(ctx, id)
-	if err == nil || !isLinkDown(err) {
+	// A member that is away, stale, or has lost its state must not stop the other two: they reconcile with each other when it is
+	// safe (the stale member is flagged with an ALERT and stays out until an operator restores it).
+	if err == nil || !(isLinkDown(err) || isPlanErr(err)) {
 		return err
 	}
 	var last error = err

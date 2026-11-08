@@ -91,8 +91,9 @@ second loss leaves nothing.
    recovery.private -file <that member's backup of the CURRENT generation>`. The config names its token (`qv-party-3` for C) and an
    empty data directory. The tool refuses a backup of another member, a non-empty directory, a wrong recovery key, a tampered file.
 3. Start the member. A reconciles all three and proves the keyset with the three-way self-test before it serves. If the backup is of an
-   older generation, A logs `party C is on generation 2 but another party is on 3 ... restore it from a backup of generation 3`, the
-   keyset stays unresolved (nothing signs) and you fetch the right backup and restore again into an empty directory.
+   older generation, A logs `party C is on generation 2 but another party is on 3 ... restore it from a backup of generation 3`.
+   The stale member stays out (it answers UNAVAILABLE and never signs) while the other two keep signing; fetch the right backup and
+   restore again into an empty directory.
 4. **Refresh the keyset** (operator-signed `Refresh` on A, all three online). The restored share becomes a new share on a new
    generation; the public key is unchanged. Refresh runs the self-test (every pair signs) before it commits.
 5. Take new backups of the new generation from all three members.

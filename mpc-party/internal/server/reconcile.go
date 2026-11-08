@@ -311,6 +311,7 @@ func (s *Server) reconcileB(ctx context.Context, stream pb.Peer_SessionServer, s
 // reconcileLoop (party A) reconciles every unresolved keyset as soon as party B is reachable, and keeps trying.
 func (s *Server) reconcileLoop(ctx context.Context) {
 	last := map[string]time.Time{}
+	planBackoff := map[string]time.Time{} // a partial keyset whose full reconciliation says "operator action needed" is retried slowly
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
 	for {
@@ -336,7 +337,8 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 			// (watchPeer catches a link coming up; this catches the case where B could not yet reach C at that moment).
 			partialRetry := rt.isResolved() && rt.isPartial() && s.peerConn.GetState() == connectivity.Ready &&
 				s.peerCConn != nil && s.peerCConn.GetState() == connectivity.Ready
-			if (rt.isResolved() && !partialRetry) || time.Since(last[id]) < time.Second || (partialRetry && time.Since(last[id]) < 2*time.Second) {
+			if (rt.isResolved() && !partialRetry) || time.Since(last[id]) < time.Second || (partialRetry && time.Since(last[id]) < 2*time.Second) ||
+				(partialRetry && time.Now().Before(planBackoff[id])) {
 				continue
 			}
 			last[id] = time.Now()
@@ -349,6 +351,9 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 				}
 			}
 			if err := rec(ctx, id); err != nil {
+				if partialRetry && isPlanErr(err) {
+					planBackoff[id] = time.Now().Add(30 * time.Second)
+				}
 				s.log.Warn("reconciliation pending", "keyset_id", id, "error", err.Error())
 			} else {
 				s.log.Info("reconciliation finished", "keyset_id", id, "duration_ms", time.Since(t0).Milliseconds())

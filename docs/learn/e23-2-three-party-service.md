@@ -77,9 +77,10 @@ restore it from a backup of the current generation, then refresh. Details: [runb
 
 ## Gaps and decisions for the lead
 
-- **A restarts while one member is down.** The strict three-way reconciliation cannot run then. Left as is, the keyset would answer
+- **A member that is away or stale does not stop the other two.** (A restart of A with one member down; a member restored from an
+  older backup; a member that lost its state.) The strict three-way reconciliation cannot succeed then. Left as is, the keyset would answer
   `UNAVAILABLE` for as long as the member is away, which is the availability 2-of-3 exists for. So when the three-way run fails
-  because a link is down, A reconciles with each reachable member alone (`reconcilePairWith`), but only when that is safe without the
+  because a link is down or a member is stale, A reconciles with each of the other two alone (`reconcilePairWith`); the stale or missing member is flagged (`ALERT keyset cannot be reconciled`) and stays out: unresolved, never signing, re-tried slowly, but only when that is safe without the
   third: both hold the same current generation, neither has a candidate, and A has recorded no decision. They prove the keyset with a
   signature between the two and serve; the keyset is marked partial, and the moment the missing member's link comes up A reconciles
   all three, so the returning member never serves unreconciled. This goes beyond the letter of the spec ("reconciled across the

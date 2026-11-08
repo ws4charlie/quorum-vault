@@ -178,12 +178,17 @@ func TestThresholdBackupRestoreLostMember(t *testing.T) {
 	cl.start(t, "C")
 	cl.waitReady(t)
 	waitLogText(t, cl.procs["A"].stderr, "party C is on generation 2 but another party is on 3", 30*time.Second)
-	if s := statusOf(cl.health(t)["A"], "k"); s == nil || s.Resolved {
-		t.Fatalf("a stale restore must leave the keyset unresolved, got %+v", s)
+	// the stale member is out (unresolved, never signs); the other two keep signing; with B down A has nobody to use
+	if s := statusOf(cl.health(t)["C"], "k"); s == nil || s.Resolved {
+		t.Fatalf("a stale restore must leave the restored member unresolved, got %+v", s)
 	}
-	if _, err := cl.signRaw("A", "k", "stale", 1); err == nil {
-		t.Fatal("signed with an unresolved keyset")
+	cl.signUntil(t, "A", "k", "stale-ab", 1, pub)
+	cl.stop("B")
+	if _, err := cl.signRaw("A", "k", "stale-needs-c", 4); err == nil {
+		t.Fatal("signed with a stale member")
 	}
+	cl.start(t, "B")
+	cl.waitUp(t, "B")
 	cl.stop("C")
 	must(t, os.RemoveAll(cl.cfgs["C"].DataDir))
 	mustCLI(t, "restore", "-config", cl.paths["C"], "-recovery-private", priv, "-file", g3["C"])

@@ -576,9 +576,21 @@ func TestThresholdMixedGenerationsNeverSign(t *testing.T) {
 	if !strings.Contains(cl.procs["A"].stderr.String(), "restore it from a backup of generation 2") {
 		t.Fatal("the alert does not say which member to restore from which generation")
 	}
-	// A+B still sign? The keyset is unresolved on A (it cannot be proven across the three), so nothing signs: UNAVAILABLE.
-	_, err := cl.signRaw("A", "k", "mixed", 2)
-	wantKind(t, err, pb.ErrorKind_ERROR_KIND_UNAVAILABLE)
+	// A stale member does not stop the other two: A+B keep signing (A reconciled with B alone). The stale member itself is
+	// out: it is unresolved and never signs, and with B down A has nobody it can use.
+	cl.signUntil(t, "A", "k", "ab-still", 2, pub)
+	hc := statusOf(cl.health(t)["C"], "k")
+	if hc == nil || hc.Resolved || hc.Generation != 1 {
+		t.Fatalf("the stale member must stay unresolved on its old generation, got %v", hc)
+	}
+	cl.stop("B")
+	_, err := cl.signRaw("A", "k", "needs-c", 3)
+	if err == nil {
+		t.Fatal("A signed with the stale member")
+	}
+	if k, ok := kindOf(err); !ok || k != pb.ErrorKind_ERROR_KIND_UNAVAILABLE {
+		t.Fatalf("want UNAVAILABLE with B down and C stale, got kind %v: %v", k, err)
+	}
 	_ = syscall.SIGSTOP
 }
 
