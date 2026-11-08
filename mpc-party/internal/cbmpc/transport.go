@@ -73,6 +73,7 @@ var ErrRecvTimeout = errors.New("timeout waiting for peer message")
 type session struct {
 	ctx  context.Context
 	tr   Transport
+	mesh Mesh // threshold sessions: one link per peer instead of tr
 	opts options
 
 	mu    sync.Mutex
@@ -120,11 +121,15 @@ func guard(ctx context.Context, f func(context.Context) result) result {
 }
 
 func (s *session) send(msg []byte) error {
+	return s.sendVia(func(ctx context.Context) error { return s.tr.Send(ctx, msg) })
+}
+
+func (s *session) sendVia(f func(context.Context) error) error {
 	if err := s.ctx.Err(); err != nil {
 		s.setFailure(KindTransport, ctxErr(s.ctx))
 		return err
 	}
-	r := guard(s.ctx, func(ctx context.Context) result { return result{err: s.tr.Send(ctx, msg)} })
+	r := guard(s.ctx, func(ctx context.Context) result { return result{err: f(ctx)} })
 	if r.err != nil {
 		s.setFailure(KindTransport, r.err)
 	}
@@ -132,6 +137,10 @@ func (s *session) send(msg []byte) error {
 }
 
 func (s *session) recv() ([]byte, error) {
+	return s.recvVia(s.tr.Recv)
+}
+
+func (s *session) recvVia(recvf func(context.Context) ([]byte, error)) ([]byte, error) {
 	if err := s.ctx.Err(); err != nil {
 		s.setFailure(KindTransport, ctxErr(s.ctx))
 		return nil, err
@@ -145,7 +154,7 @@ func (s *session) recv() ([]byte, error) {
 		timedOut = func() bool { return errors.Is(context.Cause(ctx), ErrRecvTimeout) }
 	}
 	r := guard(ctx, func(c context.Context) result {
-		b, err := s.tr.Recv(c)
+		b, err := recvf(c)
 		return result{b, err}
 	})
 	if r.err != nil {
@@ -190,6 +199,56 @@ func qv_go_recv(h C.uintptr_t, out *unsafe.Pointer, outn *C.size_t) (rv C.int) {
 		}
 	}()
 	b, err := s.recv()
+	if err != nil {
+		return 1
+	}
+	p := C.malloc(C.size_t(len(b)) + 1)
+	if p == nil {
+		s.setFailure(KindInternal, errors.New("malloc failed"))
+		return 1
+	}
+	if len(b) > 0 {
+		C.memcpy(p, unsafe.Pointer(&b[0]), C.size_t(len(b)))
+	}
+	*out = p
+	*outn = C.size_t(len(b))
+	return 0
+}
+
+//export qv_go_send_peer
+func qv_go_send_peer(h C.uintptr_t, peer C.int, msg unsafe.Pointer, n C.size_t) (rv C.int) {
+	s := sessionOf(h)
+	defer func() {
+		if r := recover(); r != nil {
+			s.setFailure(KindInternal, fmt.Errorf("panic in send: %v", r))
+			rv = 1
+		}
+	}()
+	if s.mesh == nil || peer < 0 || peer >= NumMembers {
+		s.setFailure(KindInternal, fmt.Errorf("no link to member %d", int(peer)))
+		return 1
+	}
+	b := C.GoBytes(msg, C.int(n))
+	if err := s.sendVia(func(ctx context.Context) error { return s.mesh.Send(ctx, Member(peer), b) }); err != nil {
+		return 1
+	}
+	return 0
+}
+
+//export qv_go_recv_peer
+func qv_go_recv_peer(h C.uintptr_t, peer C.int, out *unsafe.Pointer, outn *C.size_t) (rv C.int) {
+	s := sessionOf(h)
+	defer func() {
+		if r := recover(); r != nil {
+			s.setFailure(KindInternal, fmt.Errorf("panic in recv: %v", r))
+			rv = 1
+		}
+	}()
+	if s.mesh == nil || peer < 0 || peer >= NumMembers {
+		s.setFailure(KindInternal, fmt.Errorf("no link to member %d", int(peer)))
+		return 1
+	}
+	b, err := s.recvVia(func(ctx context.Context) ([]byte, error) { return s.mesh.Recv(ctx, Member(peer)) })
 	if err != nil {
 		return 1
 	}

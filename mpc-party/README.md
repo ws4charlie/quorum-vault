@@ -42,7 +42,8 @@ go test -run '^$' -fuzz FuzzEntryPoints -fuzztime 60s ./internal/cbmpc
 | HD keyset (ECDSA, Ed25519) | `DKG`, `(*Keyset).Refresh`, `.Derive`, `.NodeExport` (public key + chain code), `.RootPublicKey`, `.SelfTest`, `LoadKeyset` |
 | Signing | `(*SignKey).Sign` (ECDSA 2PC DER low-S, Ed25519 2PC), `DKGBIP340` + `Sign` + `XOnlyPublicKey` + `Refresh` (non-HD) |
 | Backup | `(*Keyset).Split`, `NewKeysetSplit`, `Join`, `GeneratePVEKeys`, `(*KeysetSplit).PVEExport`, `PVEVerify`, `PVERestore`, `BackupLabel` |
-| Transport | `Transport` interface (`Send/Recv(ctx, ...)`), `NewMemPair`, `ConnTransport`, `ReadFrame/WriteFrame`; options `WithRecvTimeout`, `WithMaxFrame` |
+| Threshold 2-of-3 ECDSA (EVM, not HD) | `TDKG`, `(*TKey).Refresh`, `.Sign(ctx, mesh, peer, receiver, digest)`, `.SelfTest(ctx, mesh, label)`, `.PublicKey`, `.SharePoint`, `LoadTKey`; backup `.Split`, `TBackupLabel`, `(*TKeySplit).PVEExport`, `TPVEVerify`, `TRestoreScalar`, `TJoin` |
+| Transport | `Transport` interface (`Send/Recv(ctx, ...)`), `NewMemPair`, `ConnTransport`, `ReadFrame/WriteFrame`; threshold sessions use a `Mesh` (`Send(ctx, to, msg)`, `Recv(ctx, from)`), built from one `Transport` per peer with `NewLinkMesh` / `NewMemMesh`; options `WithRecvTimeout`, `WithMaxFrame` |
 | Errors | `*Error{Kind, Op, Code}`; `IsTransport`, `IsCryptographic`, `IsInternal` |
 | Secrets | `Secret` (C memory, mlock, `Wipe`), `WipeBytes` |
 
@@ -93,6 +94,26 @@ not secret). Public data (public keys, chain codes, signatures, PVE ciphertexts)
 5. Only the public cb-mpc `sign()` is used (full proof mode). The internal global-abort variant is not reachable.
 6. `NodeExport`, the keyset split/join and `qv_hd_info` use cb-mpc internals. Golden tests pin them.
 
+## Threshold ECDSA, 2-of-3 (E23-1)
+
+cb-mpc's `ecdsa_mp` with the access structure `Threshold(2, {qv-t0, qv-t1, qv-t2})`, secp256k1, no HD. Members are 0, 1, 2.
+Go/no-go, numbers and the review: [docs/spikes/e23-threshold.md](../docs/spikes/e23-threshold.md), [UPSTREAM_REVIEW.md](UPSTREAM_REVIEW.md).
+
+- `TDKG`, `Refresh` and `SelfTest` need all three members online; `Sign` needs two. Signing: both signers pass the same digest, the same peer and
+  receiver; only the receiver gets the DER signature (low-S, checked by cb-mpc and again by btcec); the other gets `(nil, nil)`.
+- **Mesh.** A call talks to up to two peers through a `Mesh`. Build one from a `Transport` per peer. cb-mpc names a message's
+  sender only by the link it came in on, so each link must be authenticated (mTLS pinned to that peer). A member that fails
+  closes its links; the others get `Transport` errors.
+- **After every `TDKG` and `Refresh` run `SelfTest` on all three** (same label, e.g. keyset id and generation) and accept the new
+  shares only when all three return nil. nil means "both pairs I am in signed and the counterpart confirmed"; it says nothing about
+  the third pair.
+- Old and new generations do not mix: both sides of a mixed pair get `Cryptographic`, no signature.
+- The share blob is bound to the party names `qv-t0..2` and does not record the access structure (this package always passes the
+  same constant one). Never change either. `TestGoldenThreshold` pins the layout (`testdata/golden_tecdsa.json`, TEST-ONLY).
+- Backup: per member and generation, `TKey.Split` then `PVEExport` under `TBackupLabel(keyset, member, generation)`. A share is one
+  scalar (no Paillier key, no x over q). Restore: `TRestoreScalar` + `TJoin`, then refresh and self-test.
+- Measure: `go test ./internal/cbmpc -run TestMeasure -measure` (see [docs/measurements/mpc.md](../docs/measurements/mpc.md)).
+
 ## Upgrade procedure (changing `cbmpc.pin`)
 
 1. Read the upstream diff between the old and new commit: everything under `src/cbmpc/protocol/ecdsa_2p.cpp`,
@@ -105,6 +126,8 @@ not secret). Public data (public keys, chain codes, signatures, PVE ciphertexts)
      (`hd_tree_bip32.cpp`);
    - `TestBIP32VectorECDSA`, `TestBIP32StyleVectorEd25519`: node export diverged from `Derive`;
    - `TestBackupRestoreBothParties`: split/join no longer matches the blob;
+   - `TestGoldenThreshold`: the `ecdsa_mp` access-structure blob (`key_blob_v1_t` in `src/cbmpc/api/ecdsa_mp.cpp`, version 2), the party names,
+     detach/attach of the scalar; then re-read `src/cbmpc/protocol/ecdsa_mp.cpp` and `ec_dkg.cpp` and redo the review in UPSTREAM_REVIEW.md;
    - compile errors in `shim.cpp`: internal headers moved.
 4. Fix `shim.cpp` to mirror the new internals. Only after that regenerate the fixtures
    (`go test ./internal/cbmpc -run TestGoldenUpdate -update-golden`) and review the diff of `testdata/golden.json`:

@@ -15,6 +15,8 @@ import (
 //
 //	0 frame reader        1 ECDSA keyset blob   2 Ed25519 keyset blob   3 sign-key blobs (3 algs)
 //	4 stripped-blob join  5 PVE verify          6 PVE restore            7 a peer that sends the fuzz data as protocol messages
+//	8 threshold share blob  9 threshold backup join  10 threshold PVE verify/restore
+//	11 a peer (or two) that sends the fuzz data as messages in threshold DKG / sign / refresh / self-test
 //
 // Contract: never crash, never hang, always return an error (or a well-formed result) of the documented classes.
 // Run: go test ./internal/cbmpc -run '^$' -fuzz FuzzEntryPoints -fuzztime 60s
@@ -30,6 +32,11 @@ var (
 		spEd                   *KeysetSplit
 		k                      *Keyset
 		edk                    *Keyset
+		tk                     *TKey // threshold fixture, member 0
+		tshare                 []byte
+		tpub, tx, tpubX, tct   []byte
+		tlabel                 []byte
+		tdkSecret              *Secret
 	}
 )
 
@@ -52,6 +59,18 @@ func fuzzSetup(t testing.TB) {
 		fz.label = BackupLabel("fuzz", ECDSA, P1)
 		fz.ct, err = fz.sp.PVEExport(fz.ek, fz.label)
 		must(t, err)
+		_, tblobs := readGoldenT(t)
+		fz.tshare = tblobs[0]
+		fz.tk, err = LoadTKey(0, append([]byte(nil), tblobs[0]...))
+		must(t, err)
+		tsp, err := fz.tk.Split()
+		must(t, err)
+		fz.tpub, fz.tpubX = tsp.Public, tsp.PubX
+		fz.tx = secretBytes(t, tsp.X)
+		fz.tlabel = TBackupLabel("fuzz", 0, 1)
+		fz.tct, err = tsp.PVEExport(fz.ek, fz.tlabel)
+		must(t, err)
+		tsp.Wipe()
 	})
 }
 
@@ -69,6 +88,27 @@ func (g *garbagePeer) Recv(ctx context.Context) ([]byte, error) {
 	return g.data, nil
 }
 
+// garbageMesh answers every Recv from any member with the fuzz data (a few times, then EOF) and swallows every Send.
+type garbageMesh struct {
+	data []byte
+	mu   sync.Mutex
+	n    map[Member]int
+}
+
+func (g *garbageMesh) Send(ctx context.Context, to Member, msg []byte) error { return nil }
+func (g *garbageMesh) Recv(ctx context.Context, from Member) ([]byte, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.n == nil {
+		g.n = map[Member]int{}
+	}
+	if g.n[from] >= 3 {
+		return nil, io.EOF
+	}
+	g.n[from]++
+	return g.data, nil
+}
+
 func FuzzEntryPoints(f *testing.F) {
 	fuzzSetup(f)
 	f.Add(byte(0), []byte{0, 0, 0, 3, 'a', 'b', 'c'})
@@ -83,6 +123,12 @@ func FuzzEntryPoints(f *testing.F) {
 	f.Add(byte(6), fz.ct)
 	f.Add(byte(7), []byte{1, 2, 3})
 	f.Add(byte(7), fz.ct[:64])
+	f.Add(byte(8), fz.tshare)
+	f.Add(byte(8), fz.tshare[:len(fz.tshare)/2])
+	f.Add(byte(9), fz.tpub)
+	f.Add(byte(10), fz.tct)
+	f.Add(byte(11), []byte{1, 2, 3})
+	f.Add(byte(11), fz.tct[:64])
 	f.Fuzz(func(t *testing.T, sel byte, data []byte) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -96,7 +142,7 @@ func FuzzEntryPoints(f *testing.F) {
 			}
 		}
 		cp := func() []byte { return append([]byte(nil), data...) }
-		switch sel % 8 {
+		switch sel % 12 {
 		case 0:
 			b, err := ReadFrame(bytes.NewReader(data), 1<<16)
 			checkErr(err)
@@ -177,6 +223,64 @@ func FuzzEntryPoints(f *testing.F) {
 			checkErr(err)
 			if err == nil {
 				t.Fatal("garbage peer completed a refresh")
+			}
+		case 8:
+			k, err := LoadTKey(Member(sel>>4%3), cp())
+			checkErr(err)
+			if err == nil {
+				k.PublicKey()
+				sp, err := k.Split()
+				checkErr(err)
+				sp.Wipe()
+				k.Wipe()
+			}
+		case 9:
+			x := SecretFromBytes(append([]byte(nil), fz.tx...))
+			k, err := TJoin(Member(sel>>4%3), cp(), x, fz.tpubX)
+			checkErr(err)
+			if err == nil {
+				k.Wipe()
+			}
+			x.Wipe()
+		case 10:
+			checkErr(TPVEVerify(fz.ek, cp(), fz.tlabel, fz.tpubX))
+			checkErr(TPVEVerify(cp(), fz.tct, fz.tlabel, fz.tpubX))
+			x, err := TRestoreScalar(fz.dk, fz.ek, cp(), fz.tlabel)
+			checkErr(err)
+			if err == nil {
+				x.Wipe()
+			}
+			x, err = TRestoreScalar(fz.dk, cp(), fz.tct, fz.tlabel)
+			checkErr(err)
+			if err == nil {
+				x.Wipe()
+			}
+		case 11:
+			// peers that answer every protocol message with fuzz data: the garbage must never complete a protocol
+			opt := WithRecvTimeout(5 * time.Second)
+			_, err := TDKG(ctx, &garbageMesh{data: cp()}, Member(sel>>4%3), opt)
+			checkErr(err)
+			if err == nil {
+				t.Fatal("garbage peers completed a threshold DKG")
+			}
+			peer := Member(1 + sel>>4%2)
+			sig, err := fz.tk.Sign(ctx, &garbageMesh{data: cp()}, peer, 0, digest32(1), opt)
+			checkErr(err)
+			if err == nil || sig != nil {
+				t.Fatal("garbage peer completed a threshold signature")
+			}
+			if IsInternal(err) {
+				t.Fatalf("garbage peer produced an internal error: %v", err)
+			}
+			_, err = fz.tk.Refresh(ctx, &garbageMesh{data: cp()}, opt)
+			checkErr(err)
+			if err == nil {
+				t.Fatal("garbage peers completed a threshold refresh")
+			}
+			err = fz.tk.SelfTest(ctx, &garbageMesh{data: cp()}, []byte("fuzz"), opt)
+			checkErr(err)
+			if err == nil {
+				t.Fatal("garbage peers passed the threshold self-test")
 			}
 		}
 	})
