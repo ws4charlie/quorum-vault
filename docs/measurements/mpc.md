@@ -1,5 +1,51 @@
 # MPC measurements
 
+## P8-1: cb-mpc threshold Ed25519 2-of-3 against 2-party Ed25519 and 2-of-3 ECDSA (2026-11-08)
+
+Same run, same machine, both schemes and both link kinds, from `mpc-party/internal/cbmpc/measure_test.go` (the harness of E23-1, now looping over both schemes). cb-mpc v0.2.2. Reading, caveats and the go/no-go: [p8-eddsa-threshold.md](../spikes/p8-eddsa-threshold.md).
+
+```bash
+cd mpc-party && go test ./internal/cbmpc -run TestMeasure -measure -measure-n 50 -v    # QV_MEASURE_OUT=file also writes the tables
+```
+
+Apple M3 Pro, 12 logical CPUs, darwin/arm64, Go 1.27.3, n=50 per row. All parties in one process; "in-process" is memory links, "loopback TCP" is real sockets on 127.0.0.1 (no network latency: add rounds x RTT). Latency is wall time of one ceremony, links excluded. CPU is user+system time per ceremony summed over all parties. Bytes are protocol payload sent by one party (mean). Rounds are the longest chain of messages that each wait for the previous one. The 2-party sign rows are on an already derived key. Sign p95, threshold Ed25519 / 2-party Ed25519: 5 / 7 in-process, 5 / 8 loopback (limit set by the task: 3x).
+
+#### in-process
+
+| Ceremony | N | p50 ms | p95 ms | rounds | bytes sent per party | CPU ms (all parties) |
+|---|---:|---:|---:|---:|---:|---:|
+| threshold ecdsa sign {0,1} | 50 | 101 | 109 | 9 | 124768 | 126 |
+| threshold ed25519 DKG (3 parties) | 50 | 9 | 9 | 8 | 6827 | 27 |
+| threshold ed25519 refresh (3 parties) | 50 | 9 | 9 | 8 | 6761 | 27 |
+| threshold ed25519 self-test (3 pairs) | 50 | 12 | 13 | 15 | 6650 | 24 |
+| threshold ed25519 sign {0,1} | 50 | 4 | 5 | 3 | 3291 | 8 |
+| threshold ed25519 sign {0,2} | 50 | 4 | 4 | 3 | 3291 | 8 |
+| threshold ed25519 sign {1,2} | 50 | 4 | 4 | 3 | 3293 | 8 |
+| 2-party ECDSA sign (key already derived) | 50 | 50 | 51 | 6 | 5198 | 52 |
+| 2-party Ed25519 DKG (HD keyset) | 50 | 13 | 13 | 3 | 4729 | 13 |
+| 2-party Ed25519 refresh | 50 | 0 | 0 | 3 | 121 | 0 |
+| 2-party Ed25519 sign (key already derived) | 50 | 7 | 7 | 4 | 3162 | 7 |
+
+#### loopback TCP
+
+| Ceremony | N | p50 ms | p95 ms | rounds | bytes sent per party | CPU ms (all parties) |
+|---|---:|---:|---:|---:|---:|---:|
+| threshold ecdsa sign {0,1} | 50 | 103 | 105 | 9 | 124768 | 127 |
+| threshold ed25519 DKG (3 parties) | 50 | 10 | 10 | 8 | 6830 | 28 |
+| threshold ed25519 refresh (3 parties) | 50 | 10 | 11 | 8 | 6763 | 28 |
+| threshold ed25519 self-test (3 pairs) | 50 | 13 | 15 | 15 | 6649 | 24 |
+| threshold ed25519 sign {0,1} | 50 | 5 | 5 | 3 | 3291 | 8 |
+| threshold ed25519 sign {0,2} | 50 | 5 | 5 | 3 | 3293 | 8 |
+| threshold ed25519 sign {1,2} | 50 | 5 | 5 | 3 | 3292 | 8 |
+| 2-party ECDSA sign (key already derived) | 50 | 50 | 52 | 6 | 5198 | 51 |
+| 2-party Ed25519 DKG (HD keyset) | 50 | 13 | 14 | 3 | 4728 | 13 |
+| 2-party Ed25519 refresh | 50 | 0 | 1 | 3 | 121 | 0 |
+| 2-party Ed25519 sign (key already derived) | 50 | 7 | 8 | 4 | 3160 | 7 |
+
+Reading: Ed25519 threshold signing is a three-message commit-and-reveal Schnorr with no oblivious transfer, so it is faster and about 40 times smaller than 2-of-3 ECDSA signing, and no slower than the 2-party Ed25519 path. The 2-party Ed25519 refresh row is nearly free in this harness (121 bytes); it was not investigated. DKG and refresh take longer than their ECDSA twins (cause not investigated) but are still milliseconds.
+
+---
+
 ## E23-1: cb-mpc threshold ECDSA 2-of-3 against the 2-party path (2026-11-08)
 
 Same run, same machine, both columns from `mpc-party/internal/cbmpc/measure_test.go`. cb-mpc v0.2.2.

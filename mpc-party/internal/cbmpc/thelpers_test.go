@@ -25,11 +25,13 @@ func trio(ctx context.Context, f func(ctx context.Context, m Member, mesh *LinkM
 	return
 }
 
-func tDKG(t testing.TB) (ks [NumMembers]*TKey) {
+func tDKG(t testing.TB) (ks [NumMembers]*TKey) { t.Helper(); return tDKGAlg(t, ECDSA) }
+
+func tDKGAlg(t testing.TB, alg Alg) (ks [NumMembers]*TKey) {
 	t.Helper()
 	ctx := ctx5(t)
 	errs := trio(ctx, func(ctx context.Context, m Member, mesh *LinkMesh) (err error) {
-		ks[m], err = TDKG(ctx, mesh, m)
+		ks[m], err = TDKGAlg(ctx, mesh, m, alg)
 		return
 	})
 	for _, e := range errs {

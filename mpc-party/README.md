@@ -43,6 +43,7 @@ go test -run '^$' -fuzz FuzzEntryPoints -fuzztime 60s ./internal/cbmpc
 | Signing | `(*SignKey).Sign` (ECDSA 2PC DER low-S, Ed25519 2PC), `DKGBIP340` + `Sign` + `XOnlyPublicKey` + `Refresh` (non-HD) |
 | Backup | `(*Keyset).Split`, `NewKeysetSplit`, `Join`, `GeneratePVEKeys`, `(*KeysetSplit).PVEExport`, `PVEVerify`, `PVERestore`, `BackupLabel` |
 | Threshold 2-of-3 ECDSA (EVM, not HD) | `TDKG`, `(*TKey).Refresh`, `.Sign(ctx, mesh, peer, receiver, digest)`, `.SelfTest(ctx, mesh, label)`, `.PublicKey`, `.SharePoint`, `LoadTKey`; backup `.Split`, `TBackupLabel`, `(*TKeySplit).PVEExport`, `TPVEVerify`, `TRestoreScalar`, `TJoin` |
+| Threshold 2-of-3 Ed25519 (Solana, not HD, P8-1) | the same type and methods as ECDSA, with the scheme as a parameter: `TDKGAlg(ctx, mesh, self, Ed25519)`, `LoadTKeyAlg`, `TBackupLabelAlg`, `TRestoreScalarAlg`; `.Sign` takes the whole message and returns a 64-byte signature; `TPVEVerify` / `TJoin` follow the point length (32 bytes = Ed25519) |
 | Transport | `Transport` interface (`Send/Recv(ctx, ...)`), `NewMemPair`, `ConnTransport`, `ReadFrame/WriteFrame`; threshold sessions use a `Mesh` (`Send(ctx, to, msg)`, `Recv(ctx, from)`), built from one `Transport` per peer with `NewLinkMesh` / `NewMemMesh`; options `WithRecvTimeout`, `WithMaxFrame` |
 | Errors | `*Error{Kind, Op, Code}`; `IsTransport`, `IsCryptographic`, `IsInternal` |
 | Secrets | `Secret` (C memory, mlock, `Wipe`), `WipeBytes` |
@@ -114,6 +115,13 @@ Go/no-go, numbers and the review: [docs/spikes/e23-threshold.md](../docs/spikes/
   scalar (no Paillier key, no x over q). Restore: `TRestoreScalar` + `TJoin`, then refresh and self-test.
 - Measure: `go test ./internal/cbmpc -run TestMeasure -measure` (see [docs/measurements/mpc.md](../docs/measurements/mpc.md)).
 
+### Threshold Ed25519, 2-of-3 (P8-1)
+
+The same wrapper serves cb-mpc's `eddsa_mp` with the same access structure and party names; one shim path, the scheme is a parameter.
+Signatures are standard Ed25519 but randomized: sign a message once, store the signature, rebroadcast it. Go/no-go and review:
+[docs/spikes/p8-eddsa-threshold.md](../docs/spikes/p8-eddsa-threshold.md), [UPSTREAM_REVIEW.md](UPSTREAM_REVIEW.md). `TestGoldenEdThreshold`
+pins the layout (`testdata/golden_teddsa.json`, TEST-ONLY); the upgrade procedure's golden step covers both fixtures.
+
 ## Upgrade procedure (changing `cbmpc.pin`)
 
 1. Read the upstream diff between the old and new commit: everything under `src/cbmpc/protocol/ecdsa_2p.cpp`,
@@ -128,6 +136,7 @@ Go/no-go, numbers and the review: [docs/spikes/e23-threshold.md](../docs/spikes/
    - `TestBackupRestoreBothParties`: split/join no longer matches the blob;
    - `TestGoldenThreshold`: the `ecdsa_mp` access-structure blob (`key_blob_v1_t` in `src/cbmpc/api/ecdsa_mp.cpp`, version 2), the party names,
      detach/attach of the scalar; then re-read `src/cbmpc/protocol/ecdsa_mp.cpp` and `ec_dkg.cpp` and redo the review in UPSTREAM_REVIEW.md;
+   - `TestGoldenEdThreshold`: the same for `eddsa_mp` (`src/cbmpc/api/eddsa_mp.cpp`); then re-read `src/cbmpc/protocol/schnorr_mp.cpp` and redo the Ed25519 review;
    - compile errors in `shim.cpp`: internal headers moved.
 4. Fix `shim.cpp` to mirror the new internals. Only after that regenerate the fixtures
    (`go test ./internal/cbmpc -run TestGoldenUpdate -update-golden`) and review the diff of `testdata/golden.json`:
