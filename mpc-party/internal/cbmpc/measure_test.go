@@ -29,7 +29,7 @@ import (
 // round-trip's latency each on a real network.
 
 var (
-	measure  = flag.Bool("measure", false, "run the E23-1 measurements (slow)")
+	measure  = flag.Bool("measure", false, "run the E23-1 / P8-1 measurements (slow)")
 	measureN = flag.Int("measure-n", 30, "ceremonies per row")
 )
 
@@ -195,67 +195,69 @@ func TestMeasure(t *testing.T) {
 			}
 			return ms, ps
 		}
-		var ks [NumMembers]*TKey
-		rows = append(rows, bench("threshold DKG (3 parties)", n, func() []*party {
-			ms, ps := buildMesh()
-			defer closeAll(ms)
-			errs := trioOn(ctx, ms, func(ctx context.Context, m Member, mesh *LinkMesh) (err error) {
-				ks[m].Wipe()
-				ks[m], err = TDKG(ctx, mesh, m)
-				return
-			})
-			for _, e := range errs {
-				must(t, e)
-			}
-			return ps
-		}))
-		rows = append(rows, bench("threshold refresh (3 parties)", n, func() []*party {
-			ms, ps := buildMesh()
-			defer closeAll(ms)
-			var nk [NumMembers]*TKey
-			errs := trioOn(ctx, ms, func(ctx context.Context, m Member, mesh *LinkMesh) (err error) {
-				nk[m], err = ks[m].Refresh(ctx, mesh)
-				return
-			})
-			for _, e := range errs {
-				must(t, e)
-			}
-			for _, k := range nk {
-				k.Wipe()
-			}
-			return ps
-		}))
-		rows = append(rows, bench("threshold self-test (3 pairs)", n, func() []*party {
-			ms, ps := buildMesh()
-			defer closeAll(ms)
-			errs := trioOn(ctx, ms, func(ctx context.Context, m Member, mesh *LinkMesh) error {
-				return ks[m].SelfTest(ctx, mesh, []byte("m"))
-			})
-			for _, e := range errs {
-				must(t, e)
-			}
-			return ps
-		}))
-		for _, pr := range allPairs {
-			pr := pr
-			rows = append(rows, bench(fmt.Sprintf("threshold sign {%d,%d}", pr[0], pr[1]), n, func() []*party {
+		for _, alg := range []Alg{ECDSA, Ed25519} {
+			var ks [NumMembers]*TKey
+			rows = append(rows, bench("threshold "+alg.String()+" DKG (3 parties)", n, func() []*party {
 				ms, ps := buildMesh()
 				defer closeAll(ms)
-				a, b := pr[0], pr[1]
-				d := digest32(1)
-				var wg sync.WaitGroup
-				var ea, eb error
-				wg.Add(2)
-				go func() { defer wg.Done(); _, ea = ks[a].Sign(ctx, ms[a], b, a, d) }()
-				go func() { defer wg.Done(); _, eb = ks[b].Sign(ctx, ms[b], a, a, d) }()
-				wg.Wait()
-				must(t, ea)
-				must(t, eb)
-				return []*party{ps[a], ps[b]}
+				errs := trioOn(ctx, ms, func(ctx context.Context, m Member, mesh *LinkMesh) (err error) {
+					ks[m].Wipe()
+					ks[m], err = TDKGAlg(ctx, mesh, m, alg)
+					return
+				})
+				for _, e := range errs {
+					must(t, e)
+				}
+				return ps
 			}))
-		}
-		for _, k := range ks {
-			k.Wipe()
+			rows = append(rows, bench("threshold "+alg.String()+" refresh (3 parties)", n, func() []*party {
+				ms, ps := buildMesh()
+				defer closeAll(ms)
+				var nk [NumMembers]*TKey
+				errs := trioOn(ctx, ms, func(ctx context.Context, m Member, mesh *LinkMesh) (err error) {
+					nk[m], err = ks[m].Refresh(ctx, mesh)
+					return
+				})
+				for _, e := range errs {
+					must(t, e)
+				}
+				for _, k := range nk {
+					k.Wipe()
+				}
+				return ps
+			}))
+			rows = append(rows, bench("threshold "+alg.String()+" self-test (3 pairs)", n, func() []*party {
+				ms, ps := buildMesh()
+				defer closeAll(ms)
+				errs := trioOn(ctx, ms, func(ctx context.Context, m Member, mesh *LinkMesh) error {
+					return ks[m].SelfTest(ctx, mesh, []byte("m"))
+				})
+				for _, e := range errs {
+					must(t, e)
+				}
+				return ps
+			}))
+			for _, pr := range allPairs {
+				pr := pr
+				rows = append(rows, bench(fmt.Sprintf("threshold %s sign {%d,%d}", alg, pr[0], pr[1]), n, func() []*party {
+					ms, ps := buildMesh()
+					defer closeAll(ms)
+					a, b := pr[0], pr[1]
+					d := digest32(1) // 32 bytes for both schemes
+					var wg sync.WaitGroup
+					var ea, eb error
+					wg.Add(2)
+					go func() { defer wg.Done(); _, ea = ks[a].Sign(ctx, ms[a], b, a, d) }()
+					go func() { defer wg.Done(); _, eb = ks[b].Sign(ctx, ms[b], a, a, d) }()
+					wg.Wait()
+					must(t, ea)
+					must(t, eb)
+					return []*party{ps[a], ps[b]}
+				}))
+			}
+			for _, k := range ks {
+				k.Wipe()
+			}
 		}
 
 		// ---- 2-party (HD keyset, as the hot wallet uses it)
@@ -333,6 +335,48 @@ func TestMeasure(t *testing.T) {
 		s2.Wipe()
 		k1.Wipe()
 		k2.Wipe()
+
+		// ---- 2-party Ed25519 (HD keyset, as the Solana deposit keys use it)
+		var ek1, ek2 *Keyset
+		rows = append(rows, bench("2-party Ed25519 DKG (HD keyset)", n, two(func(a, b Transport) (e1, e2 error) {
+			var n1, n2 *Keyset
+			e1, e2 = bothOn(a, b,
+				func(tr Transport) (err error) { n1, err = DKG(ctx, tr, P1, Ed25519); return },
+				func(tr Transport) (err error) { n2, err = DKG(ctx, tr, P2, Ed25519); return })
+			if ek1 != nil {
+				ek1.Wipe()
+				ek2.Wipe()
+			}
+			ek1, ek2 = n1, n2
+			return
+		})))
+		rows = append(rows, bench("2-party Ed25519 refresh", n, two(func(a, b Transport) (e1, e2 error) {
+			var n1, n2 *Keyset
+			e1, e2 = bothOn(a, b,
+				func(tr Transport) (err error) { n1, err = ek1.Refresh(ctx, tr); return },
+				func(tr Transport) (err error) { n2, err = ek2.Refresh(ctx, tr); return })
+			if e1 == nil && e2 == nil {
+				ek1.Wipe()
+				ek2.Wipe()
+				ek1, ek2 = n1, n2
+			}
+			return
+		})))
+		eh, ep := []uint32{44, 501, 0}, []uint32{}
+		var es1, es2 *SignKey
+		e1, e2 = bothOn2(tr, func(a Transport) (err error) { es1, err = ek1.Derive(ctx, a, eh, ep); return },
+			func(b Transport) (err error) { es2, err = ek2.Derive(ctx, b, eh, ep); return })
+		must(t, e1)
+		must(t, e2)
+		rows = append(rows, bench("2-party Ed25519 sign (key already derived)", n, two(func(a, b Transport) (e1, e2 error) {
+			return bothOn(a, b,
+				func(tr Transport) (err error) { _, err = es1.Sign(ctx, tr, d); return },
+				func(tr Transport) (err error) { _, err = es2.Sign(ctx, tr, d); return })
+		})))
+		es1.Wipe()
+		es2.Wipe()
+		ek1.Wipe()
+		ek2.Wipe()
 
 		emit("")
 		emit("### " + tr.name)

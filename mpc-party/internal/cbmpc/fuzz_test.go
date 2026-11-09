@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +39,10 @@ var (
 		tpub, tx, tpubX, tct   []byte
 		tlabel                 []byte
 		tdkSecret              *Secret
+		etk                    *TKey // Ed25519 threshold fixture, member 0
+		eshare                 []byte
+		epub, ex, epubX, ect   []byte
+		elabel                 []byte
 	}
 )
 
@@ -71,6 +77,21 @@ func fuzzSetup(t testing.TB) {
 		fz.tct, err = tsp.PVEExport(fz.ek, fz.tlabel)
 		must(t, err)
 		tsp.Wipe()
+		raw, err := os.ReadFile(goldenTEdFile)
+		must(t, err)
+		var eg goldenT
+		must(t, json.Unmarshal(raw, &eg))
+		fz.eshare = dec(eg.Blobs[0])
+		fz.etk, err = LoadTKeyAlg(Ed25519, 0, append([]byte(nil), fz.eshare...))
+		must(t, err)
+		esp, err := fz.etk.Split()
+		must(t, err)
+		fz.epub, fz.epubX = esp.Public, esp.PubX
+		fz.ex = secretBytes(t, esp.X)
+		fz.elabel = TBackupLabelAlg(Ed25519, "fuzz", 0, 1)
+		fz.ect, err = esp.PVEExport(fz.ek, fz.elabel)
+		must(t, err)
+		esp.Wipe()
 	})
 }
 
@@ -129,6 +150,12 @@ func FuzzEntryPoints(f *testing.F) {
 	f.Add(byte(10), fz.tct)
 	f.Add(byte(11), []byte{1, 2, 3})
 	f.Add(byte(11), fz.tct[:64])
+	f.Add(byte(12), fz.eshare)
+	f.Add(byte(12), fz.eshare[:len(fz.eshare)/2])
+	f.Add(byte(13), fz.epub)
+	f.Add(byte(14), fz.ect)
+	f.Add(byte(15), []byte{1, 2, 3})
+	f.Add(byte(15), fz.ect[:64])
 	f.Fuzz(func(t *testing.T, sel byte, data []byte) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
@@ -142,7 +169,7 @@ func FuzzEntryPoints(f *testing.F) {
 			}
 		}
 		cp := func() []byte { return append([]byte(nil), data...) }
-		switch sel % 12 {
+		switch sel % 16 {
 		case 0:
 			b, err := ReadFrame(bytes.NewReader(data), 1<<16)
 			checkErr(err)
@@ -281,6 +308,63 @@ func FuzzEntryPoints(f *testing.F) {
 			checkErr(err)
 			if err == nil {
 				t.Fatal("garbage peers passed the threshold self-test")
+			}
+		case 12: // Ed25519 threshold share
+			k, err := LoadTKeyAlg(Ed25519, Member(sel>>4%3), cp())
+			checkErr(err)
+			if err == nil {
+				k.PublicKey()
+				sp, err := k.Split()
+				checkErr(err)
+				sp.Wipe()
+				k.Wipe()
+			}
+		case 13:
+			x := SecretFromBytes(append([]byte(nil), fz.ex...))
+			k, err := TJoin(Member(sel>>4%3), cp(), x, fz.epubX)
+			checkErr(err)
+			if err == nil {
+				k.Wipe()
+			}
+			x.Wipe()
+		case 14:
+			checkErr(TPVEVerify(fz.ek, cp(), fz.elabel, fz.epubX))
+			checkErr(TPVEVerify(cp(), fz.ect, fz.elabel, fz.epubX))
+			x, err := TRestoreScalarAlg(Ed25519, fz.dk, fz.ek, cp(), fz.elabel)
+			checkErr(err)
+			if err == nil {
+				x.Wipe()
+			}
+			x, err = TRestoreScalarAlg(Ed25519, fz.dk, cp(), fz.ect, fz.elabel)
+			checkErr(err)
+			if err == nil {
+				x.Wipe()
+			}
+		case 15:
+			opt := WithRecvTimeout(5 * time.Second)
+			_, err := TDKGAlg(ctx, &garbageMesh{data: cp()}, Member(sel>>4%3), Ed25519, opt)
+			checkErr(err)
+			if err == nil {
+				t.Fatal("garbage peers completed an Ed25519 threshold DKG")
+			}
+			peer := Member(1 + sel>>4%2)
+			sig, err := fz.etk.Sign(ctx, &garbageMesh{data: cp()}, peer, 0, edMsg(32, 1), opt)
+			checkErr(err)
+			if err == nil || sig != nil {
+				t.Fatal("garbage peer completed an Ed25519 threshold signature")
+			}
+			if IsInternal(err) {
+				t.Fatalf("garbage peer produced an internal error: %v", err)
+			}
+			_, err = fz.etk.Refresh(ctx, &garbageMesh{data: cp()}, opt)
+			checkErr(err)
+			if err == nil {
+				t.Fatal("garbage peers completed an Ed25519 threshold refresh")
+			}
+			err = fz.etk.SelfTest(ctx, &garbageMesh{data: cp()}, []byte("fuzz"), opt)
+			checkErr(err)
+			if err == nil {
+				t.Fatal("garbage peers passed the Ed25519 threshold self-test")
 			}
 		}
 	})

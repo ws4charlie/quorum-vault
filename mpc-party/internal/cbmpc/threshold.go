@@ -8,6 +8,7 @@ import "C"
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
@@ -17,8 +18,10 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 )
 
-// Threshold ECDSA, 2-of-3, secp256k1: cb-mpc's ecdsa_mp with the access structure Threshold(2, {m0, m1, m2}).
-// Not HD. DKG and Refresh need all three members online; Sign needs only two. See docs/spikes/e23-threshold.md.
+// Threshold signing, 2-of-3: cb-mpc's ecdsa_mp (secp256k1, E23-1) or eddsa_mp (Ed25519, P8-1) with the access structure
+// Threshold(2, {m0, m1, m2}). One type and one code path serve both: a TKey carries its Alg. Not HD. DKG and Refresh need
+// all three members online; Sign needs only two. See docs/spikes/e23-threshold.md and docs/spikes/p8-eddsa-threshold.md.
+// The ECDSA entry points (TDKG, LoadTKey, ...) keep their names and meaning; the Alg variants add Ed25519.
 //
 // Differences from the 2-party calls that matter to the caller:
 //   - A session talks to up to two peers, through a Mesh (mesh.go), not a Transport.
@@ -29,10 +32,30 @@ import (
 // TKey is one member's share of a 2-of-3 threshold key.
 type TKey struct {
 	*Secret
+	alg  Alg
 	self Member
-	pub  []byte // compressed Q, public
-	qi   []byte // this member's share point, public
+	pub  []byte // compressed Q (33 bytes ECDSA, 32 bytes Ed25519), public
+	qi   []byte // this member's share point, same encoding, public
 }
+
+// checkTAlg accepts the two schemes the threshold calls support.
+func checkTAlg(op string, alg Alg) error {
+	if alg != ECDSA && alg != Ed25519 {
+		return badArg(op, "threshold keys support ECDSA and Ed25519 only, not %s", alg)
+	}
+	return nil
+}
+
+// top names an operation: "tecdsa.dkg" or "teddsa.dkg".
+func top(alg Alg, what string) string {
+	if alg == Ed25519 {
+		return "teddsa." + what
+	}
+	return "tecdsa." + what
+}
+
+// Alg returns the signature scheme of the key.
+func (k *TKey) Alg() Alg { return k.alg }
 
 func (k *TKey) Self() Member { return k.self }
 
@@ -43,10 +66,10 @@ func (k *TKey) Wipe() {
 	}
 }
 
-// PublicKey returns the compressed (33 byte) group public key.
+// PublicKey returns the group public key: compressed (33 bytes) for ECDSA, the standard 32-byte encoding for Ed25519.
 func (k *TKey) PublicKey() []byte { return append([]byte(nil), k.pub...) }
 
-// SharePoint returns this member's public share point Qi = x_i * G (33 bytes).
+// SharePoint returns this member's public share point Qi = x_i * G (same encoding as PublicKey).
 func (k *TKey) SharePoint() []byte { return append([]byte(nil), k.qi...) }
 
 func checkMember(op string, m Member) error {
@@ -74,11 +97,11 @@ func runMesh(ctx context.Context, mesh Mesh, op string, opts []Option, f func(h 
 }
 
 // newTKey checks the blob, binds it to self and takes ownership of the C buffer.
-func newTKey(op string, self Member, sec *Secret) (*TKey, error) {
+func newTKey(op string, alg Alg, self Member, sec *Secret) (*TKey, error) {
 	var m C.int
-	q, qi := make([]byte, 33), make([]byte, 33)
+	q, qi := make([]byte, 33), make([]byte, 33) // room for the larger encoding
 	err := sec.use(func(p *C.uint8_t, n C.size_t) error {
-		return local(op, func() C.int { return C.qv_t_info(p, n, &m, bptr(q), bptr(qi)) })
+		return local(op, func() C.int { return C.qv_t_info(C.int(alg), p, n, &m, bptr(q), bptr(qi)) })
 	})
 	if err == nil && Member(m) != self {
 		err = badArg(op, "share belongs to %s, not %s", Member(m), self)
@@ -87,12 +110,20 @@ func newTKey(op string, self Member, sec *Secret) (*TKey, error) {
 		sec.Wipe()
 		return nil, wrapWiped(op, err)
 	}
-	return &TKey{Secret: sec, self: self, pub: q, qi: qi}, nil
+	n := alg.pointLen()
+	return &TKey{Secret: sec, alg: alg, self: self, pub: q[:n:n], qi: qi[:n:n]}, nil
 }
 
-// LoadTKey wraps a stored share after parsing it and checking that it belongs to self. blob is wiped.
-func LoadTKey(self Member, blob []byte) (*TKey, error) {
-	const op = "tecdsa.load"
+// LoadTKey wraps a stored 2-of-3 ECDSA share after parsing it and checking that it belongs to self. blob is wiped.
+func LoadTKey(self Member, blob []byte) (*TKey, error) { return LoadTKeyAlg(ECDSA, self, blob) }
+
+// LoadTKeyAlg is LoadTKey for either scheme. A share of the other scheme does not load.
+func LoadTKeyAlg(alg Alg, self Member, blob []byte) (*TKey, error) {
+	op := top(alg, "load")
+	if err := checkTAlg(op, alg); err != nil {
+		WipeBytes(blob)
+		return nil, err
+	}
 	if err := checkMember(op, self); err != nil {
 		WipeBytes(blob)
 		return nil, err
@@ -101,42 +132,50 @@ func LoadTKey(self Member, blob []byte) (*TKey, error) {
 		WipeBytes(blob)
 		return nil, badArg(op, "blob size %d out of range", len(blob))
 	}
-	return newTKey(op, self, SecretFromBytes(blob))
+	return newTKey(op, alg, self, SecretFromBytes(blob))
 }
 
 // TDKG generates a new 2-of-3 key with the other two members; all three must call it. Run SelfTest on the result before
 // the shares are accepted.
 func TDKG(ctx context.Context, mesh Mesh, self Member, opts ...Option) (*TKey, error) {
-	const op = "tecdsa.dkg"
+	return TDKGAlg(ctx, mesh, self, ECDSA, opts...)
+}
+
+// TDKGAlg is TDKG for either scheme (ECDSA or Ed25519); all three members must pass the same alg.
+func TDKGAlg(ctx context.Context, mesh Mesh, self Member, alg Alg, opts ...Option) (*TKey, error) {
+	op := top(alg, "dkg")
+	if err := checkTAlg(op, alg); err != nil {
+		return nil, err
+	}
 	if err := checkMember(op, self); err != nil {
 		return nil, err
 	}
 	var p *C.uint8_t
 	var n C.size_t
 	if err := runMesh(ctx, mesh, op, opts, func(h C.uintptr_t) C.int {
-		return C.qv_t_dkg(C.int(self), h, &p, &n)
+		return C.qv_t_dkg(C.int(alg), C.int(self), h, &p, &n)
 	}); err != nil {
 		return nil, err
 	}
-	return newTKey(op, self, takeSecret(p, n))
+	return newTKey(op, alg, self, takeSecret(p, n))
 }
 
 // Refresh re-randomizes all three shares without changing the public key; all three must call it. The old key stays
 // valid until you Wipe it. The result may be corrupt although every member returned nil (README point 1): run
 // SelfTest on the new shares and drop the old ones only after all three passed.
 func (k *TKey) Refresh(ctx context.Context, mesh Mesh, opts ...Option) (*TKey, error) {
-	const op = "tecdsa.refresh"
+	op := top(k.alg, "refresh")
 	var p *C.uint8_t
 	var n C.size_t
 	err := k.use(func(kp *C.uint8_t, kn C.size_t) error {
 		return runMesh(ctx, mesh, op, opts, func(h C.uintptr_t) C.int {
-			return C.qv_t_refresh(C.int(k.self), h, kp, kn, &p, &n)
+			return C.qv_t_refresh(C.int(k.alg), C.int(k.self), h, kp, kn, &p, &n)
 		})
 	})
 	if err != nil {
 		return nil, wrapWiped(op, err)
 	}
-	nk, err := newTKey(op, k.self, takeSecret(p, n))
+	nk, err := newTKey(op, k.alg, k.self, takeSecret(p, n))
 	if err != nil {
 		return nil, err
 	}
@@ -147,11 +186,15 @@ func (k *TKey) Refresh(ctx context.Context, mesh Mesh, opts ...Option) (*TKey, e
 	return nk, nil
 }
 
-// Sign runs 2-party-in-3 signing with peer; both call it with the same msg (a 32-byte digest) and the same receiver.
-// receiver is self or peer and is the only one that gets the signature (DER, low-S, checked by cb-mpc against the
-// public key and again here with btcec); the other gets (nil, nil) and learns nothing about success from it.
+// Sign runs 2-party-in-3 signing with peer; both call it with the same msg and the same receiver. receiver is self or
+// peer and is the only one that gets the signature; the other gets (nil, nil) and learns nothing about success from it.
+//   - ECDSA: msg is a 32-byte digest; the signature is DER, low-S, checked by cb-mpc against the public key and again
+//     here with btcec.
+//   - Ed25519: msg is the whole message (1 byte to MaxEdMessage); the signature is 64 bytes R||s, checked by cb-mpc and
+//     again here with crypto/ed25519 (RFC 8032 verification). R comes from fresh random nonces, so signing the same
+//     message twice gives two different valid signatures: store the first one and rebroadcast it, do not re-sign.
 func (k *TKey) Sign(ctx context.Context, mesh Mesh, peer, receiver Member, msg []byte, opts ...Option) ([]byte, error) {
-	const op = "tecdsa.sign"
+	op := top(k.alg, "sign")
 	if err := checkMember(op, peer); err != nil {
 		return nil, err
 	}
@@ -161,14 +204,17 @@ func (k *TKey) Sign(ctx context.Context, mesh Mesh, peer, receiver Member, msg [
 	if receiver != k.self && receiver != peer {
 		return nil, badArg(op, "receiver must be self or peer")
 	}
-	if len(msg) != 32 {
+	if k.alg == ECDSA && len(msg) != 32 {
 		return nil, badArg(op, "message must be a 32-byte digest, got %d bytes", len(msg))
+	}
+	if k.alg == Ed25519 && (len(msg) == 0 || len(msg) > MaxEdMessage) {
+		return nil, badArg(op, "message must be 1 to %d bytes, got %d", MaxEdMessage, len(msg))
 	}
 	var p *C.uint8_t
 	var n C.size_t
 	err := k.use(func(kp *C.uint8_t, kn C.size_t) error {
 		return runMesh(ctx, mesh, op, opts, func(h C.uintptr_t) C.int {
-			return C.qv_t_sign(C.int(k.self), h, C.int(peer), C.int(receiver), kp, kn, bptr(msg), C.size_t(len(msg)), &p, &n)
+			return C.qv_t_sign(C.int(k.alg), C.int(k.self), h, C.int(peer), C.int(receiver), kp, kn, bptr(msg), C.size_t(len(msg)), &p, &n)
 		})
 	})
 	if err != nil {
@@ -178,10 +224,27 @@ func (k *TKey) Sign(ctx context.Context, mesh Mesh, peer, receiver Member, msg [
 		return nil, nil
 	}
 	sig := takeBytes(p, n)
-	if err := verifyLowS(k.pub, msg, sig); err != nil {
+	if err := verifyT(k.alg, k.pub, msg, sig); err != nil {
 		return nil, &Error{Kind: KindCryptographic, Op: op, Msg: err.Error()}
 	}
 	return sig, nil
+}
+
+// MaxEdMessage bounds an Ed25519 message (a Solana transaction message is at most 1232 bytes).
+const MaxEdMessage = 1 << 16
+
+// verifyT checks a threshold signature independently of cb-mpc: btcec for ECDSA, crypto/ed25519 for Ed25519.
+func verifyT(alg Alg, pub, msg, sig []byte) error {
+	if alg == Ed25519 {
+		if len(pub) != ed25519.PublicKeySize || len(sig) != ed25519.SignatureSize {
+			return fmt.Errorf("bad Ed25519 public key or signature size")
+		}
+		if !ed25519.Verify(ed25519.PublicKey(pub), msg, sig) {
+			return fmt.Errorf("signature does not verify against the public key")
+		}
+		return nil
+	}
+	return verifyLowS(pub, msg, sig)
 }
 
 // verifyLowS checks a DER signature with btcec: parses, low-S, verifies against pub (compressed).
@@ -208,8 +271,16 @@ func verifyLowS(pub, digest, der []byte) error {
 // caller's label and the pair. It is derived from public data only, never from anything a peer sent, so a hostile
 // peer cannot use the self-test as a signing oracle for a digest of its choosing.
 func SelfTestDigest(pub, label []byte, a, b Member) []byte {
+	return selfTestDigest(ECDSA, pub, label, a, b)
+}
+
+func selfTestDigest(alg Alg, pub, label []byte, a, b Member) []byte {
 	h := sha256.New()
-	h.Write([]byte("quorum-vault/tecdsa-selftest/v1"))
+	if alg == Ed25519 {
+		h.Write([]byte("quorum-vault/teddsa-selftest/v1"))
+	} else {
+		h.Write([]byte("quorum-vault/tecdsa-selftest/v1"))
+	}
 	var l [4]byte
 	binary.BigEndian.PutUint32(l[:], uint32(len(label)))
 	h.Write(l[:])
@@ -230,7 +301,6 @@ func SelfTestDigest(pub, label []byte, a, b Member) []byte {
 // accepts new shares (DKG, Refresh) only when ALL THREE members report nil, and tells each other so (the service's
 // two-phase commit, E23-2). A failure is KindCryptographic when a check failed and KindTransport when a link did.
 func (k *TKey) SelfTest(ctx context.Context, mesh Mesh, label []byte, opts ...Option) error {
-	const op = "tecdsa.selftest"
 	for a := Member(0); a < NumMembers; a++ {
 		for b := a + 1; b < NumMembers; b++ {
 			if k.self != a && k.self != b {
@@ -249,8 +319,8 @@ func (k *TKey) SelfTest(ctx context.Context, mesh Mesh, label []byte, opts ...Op
 }
 
 func (k *TKey) selfTestPair(ctx context.Context, mesh Mesh, label []byte, a, b, peer Member, opts []Option) error {
-	const op = "tecdsa.selftest"
-	digest := SelfTestDigest(k.pub, label, a, b)
+	op := top(k.alg, "selftest")
+	digest := selfTestDigest(k.alg, k.pub, label, a, b)
 	sig, err := k.Sign(ctx, mesh, peer, a, digest, opts...)
 	if err != nil {
 		return err
@@ -273,7 +343,7 @@ func (k *TKey) selfTestPair(ctx context.Context, mesh Mesh, label []byte, a, b, 
 	if err != nil {
 		return &Error{Kind: KindTransport, Op: op, Err: err}
 	}
-	ok := len(got) <= 80 && verifyLowS(k.pub, digest, got) == nil
+	ok := len(got) <= 80 && verifyT(k.alg, k.pub, digest, got) == nil
 	verdict := byte(0)
 	if ok {
 		verdict = 1

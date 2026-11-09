@@ -20,6 +20,7 @@
 
 #include <cbmpc/api/ecdsa_2p.h>
 #include <cbmpc/api/ecdsa_mp.h>
+#include <cbmpc/api/eddsa_mp.h>
 #include <cbmpc/core/access_structure.h>
 #include <cbmpc/api/eddsa_2p.h>
 #include <cbmpc/api/hd_keyset_ecdsa_2p.h>
@@ -133,7 +134,11 @@ class go_mesh_transport : public api::data_transport_i {
 // Fixed party names: the share blobs are bound to them (name-bound, not index-bound), and so is every proof (pid = hash
 // of the name). Changing them makes every stored share unusable: golden-tested.
 const std::string_view kTNames[3] = {"qv-t0", "qv-t1", "qv-t2"};
-const int kTCurve = QV_CURVE_SECP256K1;
+
+bool t_alg_ok(int alg) { return alg == QV_ALG_ECDSA || alg == QV_ALG_EDDSA; }
+int t_curve(int alg) { return alg == QV_ALG_ECDSA ? QV_CURVE_SECP256K1 : QV_CURVE_ED25519; }
+ecurve_t t_ecurve(int alg) { return alg == QV_ALG_ECDSA ? crypto::curve_secp256k1 : crypto::curve_ed25519; }
+int t_point_len(int alg) { return alg == QV_ALG_ECDSA ? 33 : 32; }  // compressed secp256k1 point / Ed25519 point
 
 api::access_structure_t t_access() {
   return api::access_structure_t::Threshold(
@@ -141,8 +146,8 @@ api::access_structure_t t_access() {
           api::access_structure_t::leaf(kTNames[2])});
 }
 
-// Mirror of the ecdsa_mp key blob, src/cbmpc/api/ecdsa_mp.cpp key_blob_v1_t (access-structure blobs are version 2).
-// Field order is the wire order. Pinned by golden tests.
+// Mirror of the ecdsa_mp / eddsa_mp key blob, src/cbmpc/api/{ecdsa,eddsa}_mp.cpp key_blob_v1_t (the two structs are
+// identical; access-structure blobs are version 2). Field order is the wire order. Pinned by golden tests.
 struct tkey_blob_t {
   uint32_t version = 2, curve = 0;
   std::string party_name;
@@ -153,26 +158,31 @@ struct tkey_blob_t {
 };
 
 // Same checks as upstream's deserialize_ac_key_blob (self binding, ranges, x*G == Qi_self) plus the ones it leaves to
-// the caller: version, curve, the exact party set, point validity.
-error_t t_parse(mem_t in, tkey_blob_t& b, int& self) {
+// the caller: version, curve, the exact party set, point validity (for Ed25519 also the prime-order subgroup).
+error_t t_parse(int alg, mem_t in, tkey_blob_t& b, int& self) {
+  if (!t_alg_ok(alg)) return (error_t)QV_E_UNSUPPORTED;
   if (in.size <= 0 || in.size > (1 << 20)) return (error_t)QV_E_LAYOUT;
   if (error_t rv = convert(b, in)) return rv;
-  if (b.version != 2 || (int)b.curve != kTCurve) return (error_t)QV_E_LAYOUT;
+  if (b.version != 2 || (int)b.curve != t_curve(alg)) return (error_t)QV_E_LAYOUT;
   self = -1;
   for (int i = 0; i < 3; i++)
     if (b.party_name == kTNames[i]) self = i;
   if (self < 0 || b.Qis_compressed.size() != 3) return (error_t)QV_E_LAYOUT;
   for (int i = 0; i < 3; i++)
     if (!b.Qis_compressed.count(std::string(kTNames[i]))) return (error_t)QV_E_LAYOUT;
-  ecurve_t curve = crypto::curve_secp256k1;
+  ecurve_t curve = t_ecurve(alg);
   if (!curve.order().is_in_range(b.x_share)) return (error_t)QV_E_LAYOUT;
   ecc_point_t Q;
+  if (b.Q_compressed.size() != t_point_len(alg)) return (error_t)QV_E_LAYOUT;
   if (error_t rv = Q.from_bin(curve, b.Q_compressed)) return rv;
   if (error_t rv = curve.check(Q)) return rv;
+  if (alg == QV_ALG_EDDSA && !Q.is_in_subgroup()) return (error_t)QV_E_LAYOUT;
   for (auto& kv : b.Qis_compressed) {
     ecc_point_t P;
+    if (kv.second.size() != t_point_len(alg)) return (error_t)QV_E_LAYOUT;
     if (error_t rv = P.from_bin(curve, kv.second)) return rv;
     if (error_t rv = curve.check(P)) return rv;
+    if (alg == QV_ALG_EDDSA && !P.is_in_subgroup()) return (error_t)QV_E_LAYOUT;
     if (kv.first == b.party_name && b.x_share * curve.generator() != P) return (error_t)QV_E_LAYOUT;
   }
   return 0;
@@ -587,36 +597,41 @@ int qv_pve_decrypt(int curve, const uint8_t* dk, size_t dkl, const uint8_t* ek, 
   QV_CATCH
 }
 
-// ---- Threshold ECDSA (E23-1) ----
+// ---- Threshold ECDSA (E23-1) and threshold EdDSA (P8-1): the same 2-of-3 access structure, one code path ----
+// alg is QV_ALG_ECDSA (secp256k1, DER signature) or QV_ALG_EDDSA (Ed25519, 64-byte R||s). ecdsa_mp and eddsa_mp have
+// the same API and the same blob; only the namespace and the signature differ.
 
-int qv_t_dkg(int self, uintptr_t h, uint8_t** blob, size_t* bl) {
+int qv_t_dkg(int alg, int self, uintptr_t h, uint8_t** blob, size_t* bl) {
   QV_TRY
-  if (self < 0 || self > 2) return (int)E_BADARG;
+  if (!t_alg_ok(alg) || self < 0 || self > 2) return (int)E_BADARG;
   go_mesh_transport tr(h, {0, 1, 2});
   api::job_mp_t job{self, {kTNames[0], kTNames[1], kTNames[2]}, tr};
   buf_t sid, key;  // sid empty: derived jointly by the protocol
   std::vector<std::string_view> quorum = {kTNames[0], kTNames[1], kTNames[2]};  // all three contribute
-  error_t rv = api::ecdsa_mp::dkg_ac(job, curve_id::secp256k1, sid, t_access(), quorum, key);
+  error_t rv = alg == QV_ALG_ECDSA ? api::ecdsa_mp::dkg_ac(job, curve_id::secp256k1, sid, t_access(), quorum, key)
+                                   : api::eddsa_mp::dkg_ac(job, curve_id::ed25519, sid, t_access(), quorum, key);
   return rv ? rv : out(key, blob, bl);
   QV_CATCH
 }
 
-int qv_t_refresh(int self, uintptr_t h, const uint8_t* blob, size_t bl, uint8_t** nblob, size_t* nbl) {
+int qv_t_refresh(int alg, int self, uintptr_t h, const uint8_t* blob, size_t bl, uint8_t** nblob, size_t* nbl) {
   QV_TRY
-  if (self < 0 || self > 2) return (int)E_BADARG;
+  if (!t_alg_ok(alg) || self < 0 || self > 2) return (int)E_BADARG;
   go_mesh_transport tr(h, {0, 1, 2});
   api::job_mp_t job{self, {kTNames[0], kTNames[1], kTNames[2]}, tr};
   buf_t sid, key;
   std::vector<std::string_view> quorum = {kTNames[0], kTNames[1], kTNames[2]};
-  error_t rv = api::ecdsa_mp::refresh_ac(job, sid, M(blob, bl), t_access(), quorum, key);
+  error_t rv = alg == QV_ALG_ECDSA ? api::ecdsa_mp::refresh_ac(job, sid, M(blob, bl), t_access(), quorum, key)
+                                   : api::eddsa_mp::refresh_ac(job, sid, M(blob, bl), t_access(), quorum, key);
   return rv ? rv : out(key, nblob, nbl);
   QV_CATCH
 }
 
-int qv_t_sign(int self, uintptr_t h, int peer, int receiver, const uint8_t* blob, size_t bl, const uint8_t* msg,
-              size_t ml, uint8_t** sig, size_t* sl) {
+int qv_t_sign(int alg, int self, uintptr_t h, int peer, int receiver, const uint8_t* blob, size_t bl,
+              const uint8_t* msg, size_t ml, uint8_t** sig, size_t* sl) {
   QV_TRY
-  if (self < 0 || self > 2 || peer < 0 || peer > 2 || self == peer || (receiver != self && receiver != peer))
+  if (!t_alg_ok(alg) || self < 0 || self > 2 || peer < 0 || peer > 2 || self == peer ||
+      (receiver != self && receiver != peer))
     return (int)E_BADARG;
   // The signing set in ascending member order, the same on both sides (protocol roles follow the index).
   int lo = self < peer ? self : peer, hi = self < peer ? peer : self;
@@ -624,7 +639,9 @@ int qv_t_sign(int self, uintptr_t h, int peer, int receiver, const uint8_t* blob
   api::job_mp_t job{self == lo ? 0 : 1, {kTNames[lo], kTNames[hi]}, tr};
   buf_t s;
   // The access structure is not stored in the blob: it is always this constant one.
-  error_t rv = api::ecdsa_mp::sign_ac(job, M(blob, bl), t_access(), M(msg, ml), receiver == lo ? 0 : 1, s);
+  const int rcv = receiver == lo ? 0 : 1;
+  error_t rv = alg == QV_ALG_ECDSA ? api::ecdsa_mp::sign_ac(job, M(blob, bl), t_access(), M(msg, ml), rcv, s)
+                                   : api::eddsa_mp::sign_ac(job, M(blob, bl), t_access(), M(msg, ml), rcv, s);
   if (rv) return rv;
   if (receiver != self) {
     *sig = nullptr;
@@ -635,26 +652,29 @@ int qv_t_sign(int self, uintptr_t h, int peer, int receiver, const uint8_t* blob
   QV_CATCH
 }
 
-int qv_t_info(const uint8_t* blob, size_t bl, int* self, uint8_t Q[33], uint8_t Qi[33]) {
+int qv_t_info(int alg, const uint8_t* blob, size_t bl, int* self, uint8_t Q[33], uint8_t Qi[33]) {
   QV_TRY
   tkey_blob_t b;
   int s = -1;
-  if (error_t rv = t_parse(M(blob, bl), b, s)) return rv;
-  if (b.Q_compressed.size() != 33 || b.Qis_compressed.at(b.party_name).size() != 33) return (int)QV_E_LAYOUT;
-  memcpy(Q, b.Q_compressed.data(), 33);
-  memcpy(Qi, b.Qis_compressed.at(b.party_name).data(), 33);
+  if (error_t rv = t_parse(alg, M(blob, bl), b, s)) return rv;
+  const int pl = t_point_len(alg);
+  if (b.Q_compressed.size() != pl || b.Qis_compressed.at(b.party_name).size() != pl) return (int)QV_E_LAYOUT;
+  memcpy(Q, b.Q_compressed.data(), pl);
+  memcpy(Qi, b.Qis_compressed.at(b.party_name).data(), pl);
   *self = s;
   return 0;
   QV_CATCH
 }
 
-int qv_t_split(const uint8_t* blob, size_t bl, uint8_t** pub, size_t* pl, uint8_t** x32) {
+int qv_t_split(int alg, const uint8_t* blob, size_t bl, uint8_t** pub, size_t* pl, uint8_t** x32) {
   QV_TRY
   tkey_blob_t b;
   int s = -1;
-  if (error_t rv = t_parse(M(blob, bl), b, s)) return rv;
+  if (error_t rv = t_parse(alg, M(blob, bl), b, s)) return rv;
   buf_t pubb, x;
-  if (error_t rv = api::ecdsa_mp::detach_private_scalar(M(blob, bl), pubb, x)) return rv;
+  if (error_t rv = alg == QV_ALG_ECDSA ? api::ecdsa_mp::detach_private_scalar(M(blob, bl), pubb, x)
+                                       : api::eddsa_mp::detach_private_scalar(M(blob, bl), pubb, x))
+    return rv;
   if (x.size() != 32) return (int)QV_E_LAYOUT;
   uint8_t* xp = nullptr;
   size_t xn = 0;
@@ -669,13 +689,18 @@ int qv_t_split(const uint8_t* blob, size_t bl, uint8_t** pub, size_t* pl, uint8_
   QV_CATCH
 }
 
-int qv_t_join(const uint8_t* pub, size_t pl, const uint8_t* x32, const uint8_t* Qi, uint8_t** blob, size_t* bl) {
+int qv_t_join(int alg, const uint8_t* pub, size_t pl, const uint8_t* x32, const uint8_t* Qi, uint8_t** blob,
+              size_t* bl) {
   QV_TRY
+  if (!t_alg_ok(alg)) return (int)E_BADARG;
   buf_t k;
-  if (error_t rv = api::ecdsa_mp::attach_private_scalar(M(pub, pl), mem_t(x32, 32), mem_t(Qi, 33), k)) return rv;
+  const mem_t qi(Qi, t_point_len(alg));
+  if (error_t rv = alg == QV_ALG_ECDSA ? api::ecdsa_mp::attach_private_scalar(M(pub, pl), mem_t(x32, 32), qi, k)
+                                       : api::eddsa_mp::attach_private_scalar(M(pub, pl), mem_t(x32, 32), qi, k))
+    return rv;
   tkey_blob_t b;
   int s = -1;
-  if (error_t rv = t_parse(mem_t(k.data(), k.size()), b, s)) return rv;
+  if (error_t rv = t_parse(alg, mem_t(k.data(), k.size()), b, s)) return rv;
   return out(k, blob, bl);
   QV_CATCH
 }
