@@ -46,10 +46,14 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 	if !validID(r.KeysetId) {
 		return nil, invalid("dkg", "keyset_id must match [A-Za-z0-9._-]{1,64}")
 	}
-	threshold := r.Scheme == pb.Scheme_SCHEME_ECDSA_2OF3
+	threshold := isTScheme(int32(r.Scheme))
+	tcurve := pb.Curve_CURVE_SECP256K1
+	if r.Scheme == pb.Scheme_SCHEME_ED25519_2OF3 {
+		tcurve = pb.Curve_CURVE_ED25519
+	}
 	if threshold {
-		if r.Curve != pb.Curve_CURVE_UNSPECIFIED && r.Curve != pb.Curve_CURVE_SECP256K1 {
-			return nil, invalid("dkg", "a 2-of-3 keyset is secp256k1 ECDSA")
+		if r.Curve != pb.Curve_CURVE_UNSPECIFIED && r.Curve != tcurve {
+			return nil, invalid("dkg", "%s is a %s keyset: the curve does not match", schemeName(r.Scheme), tcurve)
 		}
 	} else if r.Scheme != pb.Scheme_SCHEME_UNSPECIFIED {
 		return nil, invalid("dkg", "unknown scheme %v", r.Scheme)
@@ -73,7 +77,7 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "dkg", "%v", e)
 	}
 	if threshold {
-		res, err := s.coordinateGroup(ctx, "dkg", &pb.Open{Op: pb.Op_OP_DKG, KeysetId: r.KeysetId, Curve: pb.Curve_CURVE_SECP256K1, Admin: r.Admin})
+		res, err := s.coordinateGroup(ctx, "dkg", &pb.Open{Op: pb.Op_OP_DKG, KeysetId: r.KeysetId, Curve: tcurve, Scheme: r.Scheme, Admin: r.Admin})
 		if err != nil {
 			return nil, err
 		}
@@ -89,7 +93,7 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 func (s *Server) Refresh(ctx context.Context, r *pb.RefreshRequest) (_ *pb.RefreshResponse, err error) {
 	start := time.Now()
 	defer func() { s.logOp("refresh", start, err, "keyset_id", r.GetKeysetId()); err = toStatus("refresh", err) }()
-	if st, e := s.store.State(ctx, r.KeysetId); e == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+	if st, e := s.store.State(ctx, r.KeysetId); e == nil && isTScheme(st.Scheme) {
 		if _, _, e := s.tkey(ctx, r.KeysetId, 0); e != nil {
 			return nil, e
 		}
@@ -99,7 +103,7 @@ func (s *Server) Refresh(ctx context.Context, r *pb.RefreshRequest) (_ *pb.Refre
 		if _, e := s.admin.check("refresh", r.KeysetId, r.Admin); e != nil {
 			return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "refresh", "%v", e)
 		}
-		res, err := s.coordinateGroup(ctx, "refresh", &pb.Open{Op: pb.Op_OP_REFRESH, KeysetId: r.KeysetId, Admin: r.Admin})
+		res, err := s.coordinateGroup(ctx, "refresh", &pb.Open{Op: pb.Op_OP_REFRESH, KeysetId: r.KeysetId, Scheme: pb.Scheme(st.Scheme), Admin: r.Admin})
 		if err != nil {
 			return nil, err
 		}
@@ -199,7 +203,7 @@ func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthRes
 		ks := &pb.KeysetStatus{KeysetId: id, Generation: st.Current, Resolved: s.rt(id).isResolved(),
 			BackupGeneration: bk.Generation, BackupStale: st.Current != 0 && bk.Generation < st.Current, Frozen: frozen,
 			Scheme: pb.Scheme(st.Scheme)}
-		if st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) && st.PubKey != "" {
+		if isTScheme(st.Scheme) && st.PubKey != "" {
 			ks.PublicKey, _ = hex.DecodeString(st.PubKey)
 		}
 		h.Keysets = append(h.Keysets, ks)
@@ -234,9 +238,15 @@ func (s *Server) Sign(ctx context.Context, r *pb.SignRequest) (resp *pb.SignResp
 	tkeyset := false
 	if validID(r.KeyId) {
 		// A 2-of-3 keyset IS the key: Sign names the keyset as key_id.
-		if st, e := s.store.State(ctx, r.KeyId); e == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) && st.Current != 0 {
+		if st, e := s.store.State(ctx, r.KeyId); e == nil && isTScheme(st.Scheme) && st.Current != 0 {
 			tkeyset = true
-			meta = KeyMeta{KeyID: r.KeyId, KeysetID: r.KeyId, Alg: cbmpc.ECDSA, PublicKey: st.PubKey}
+			meta = KeyMeta{KeyID: r.KeyId, KeysetID: r.KeyId, Alg: schemeAlg(pb.Scheme(st.Scheme)), PublicKey: st.PubKey}
+			if meta.Alg != alg { // an ECDSA keyset asked for an Ed25519 signature or the reverse
+				return nil, invalid("sign", "keyset %q is %s but the request asks for a %s signature", r.KeyId, schemeName(pb.Scheme(st.Scheme)), r.Algorithm)
+			}
+			if alg == cbmpc.Ed25519 && len(r.Digest) > cbmpc.MaxEdMessage {
+				return nil, invalid("sign", "a 2-of-3 Ed25519 message is at most %d bytes", cbmpc.MaxEdMessage)
+			}
 		}
 	}
 	if !tkeyset {
@@ -340,7 +350,7 @@ func (s *Server) Unfreeze(ctx context.Context, r *pb.UnfreezeRequest) (_ *pb.Unf
 	if e != nil {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "unfreeze", "%v", e)
 	}
-	if st, e := s.store.State(ctx, r.KeysetId); e == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+	if st, e := s.store.State(ctx, r.KeysetId); e == nil && isTScheme(st.Scheme) {
 		// all three accept the operator signature or nothing is lifted
 		if e := s.unfreezeGroup(ctx, r.KeysetId, r.Admin); e != nil {
 			return nil, e

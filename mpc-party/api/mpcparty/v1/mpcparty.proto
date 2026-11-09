@@ -48,11 +48,12 @@ message AdminAuth {
 enum Scheme {
   SCHEME_UNSPECIFIED = 0; // 2-party HD keyset (members A, B), Bitcoin and, until E23-3, EVM
   SCHEME_ECDSA_2OF3 = 1;  // 2-of-3 threshold ECDSA on secp256k1, not HD (members A, B, C); the keyset IS the key: Sign names it as key_id
+  SCHEME_ED25519_2OF3 = 2; // 2-of-3 threshold Ed25519, not HD (members A, B, C); the keyset IS the key; Sign carries the whole message in digest (P8-2)
 }
 
 message DKGRequest {
   string keyset_id = 1;
-  Curve curve = 2; // 2-of-3: CURVE_SECP256K1 or unspecified
+  Curve curve = 2; // 2-of-3: unspecified, or the curve of the scheme (secp256k1 for ECDSA_2OF3, ed25519 for ED25519_2OF3)
   AdminAuth admin = 3;
   Scheme scheme = 4;
 }

@@ -274,6 +274,11 @@ func SelfTestDigest(pub, label []byte, a, b Member) []byte {
 	return selfTestDigest(ECDSA, pub, label, a, b)
 }
 
+// SelfTestDigestAlg is SelfTestDigest for either scheme (the scheme is part of the hashed domain tag).
+func SelfTestDigestAlg(alg Alg, pub, label []byte, a, b Member) []byte {
+	return selfTestDigest(alg, pub, label, a, b)
+}
+
 func selfTestDigest(alg Alg, pub, label []byte, a, b Member) []byte {
 	h := sha256.New()
 	if alg == Ed25519 {

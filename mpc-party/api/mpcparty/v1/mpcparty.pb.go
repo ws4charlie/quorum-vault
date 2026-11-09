@@ -124,8 +124,9 @@ func (Algorithm) EnumDescriptor() ([]byte, []int) {
 type Scheme int32
 
 const (
-	Scheme_SCHEME_UNSPECIFIED Scheme = 0 // 2-party HD keyset (members A, B), Bitcoin and, until E23-3, EVM
-	Scheme_SCHEME_ECDSA_2OF3  Scheme = 1 // 2-of-3 threshold ECDSA on secp256k1, not HD (members A, B, C); the keyset IS the key: Sign names it as key_id
+	Scheme_SCHEME_UNSPECIFIED  Scheme = 0 // 2-party HD keyset (members A, B), Bitcoin and, until E23-3, EVM
+	Scheme_SCHEME_ECDSA_2OF3   Scheme = 1 // 2-of-3 threshold ECDSA on secp256k1, not HD (members A, B, C); the keyset IS the key: Sign names it as key_id
+	Scheme_SCHEME_ED25519_2OF3 Scheme = 2 // 2-of-3 threshold Ed25519, not HD (members A, B, C); the keyset IS the key; Sign carries the whole message in digest (P8-2)
 )
 
 // Enum value maps for Scheme.
@@ -133,10 +134,12 @@ var (
 	Scheme_name = map[int32]string{
 		0: "SCHEME_UNSPECIFIED",
 		1: "SCHEME_ECDSA_2OF3",
+		2: "SCHEME_ED25519_2OF3",
 	}
 	Scheme_value = map[string]int32{
-		"SCHEME_UNSPECIFIED": 0,
-		"SCHEME_ECDSA_2OF3":  1,
+		"SCHEME_UNSPECIFIED":  0,
+		"SCHEME_ECDSA_2OF3":   1,
+		"SCHEME_ED25519_2OF3": 2,
 	}
 )
 
@@ -422,7 +425,7 @@ func (x *AdminAuth) GetSignature() []byte {
 type DKGRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	KeysetId      string                 `protobuf:"bytes,1,opt,name=keyset_id,json=keysetId,proto3" json:"keyset_id,omitempty"`
-	Curve         Curve                  `protobuf:"varint,2,opt,name=curve,proto3,enum=qv.mpcparty.v1.Curve" json:"curve,omitempty"` // 2-of-3: CURVE_SECP256K1 or unspecified
+	Curve         Curve                  `protobuf:"varint,2,opt,name=curve,proto3,enum=qv.mpcparty.v1.Curve" json:"curve,omitempty"` // 2-of-3: unspecified, or the curve of the scheme (secp256k1 for ECDSA_2OF3, ed25519 for ED25519_2OF3)
 	Admin         *AdminAuth             `protobuf:"bytes,3,opt,name=admin,proto3" json:"admin,omitempty"`
 	Scheme        Scheme                 `protobuf:"varint,4,opt,name=scheme,proto3,enum=qv.mpcparty.v1.Scheme" json:"scheme,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1910,10 +1913,11 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\tAlgorithm\x12\x19\n" +
 	"\x15ALGORITHM_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19ALGORITHM_ECDSA_SECP256K1\x10\x01\x12\x15\n" +
-	"\x11ALGORITHM_ED25519\x10\x02*7\n" +
+	"\x11ALGORITHM_ED25519\x10\x02*P\n" +
 	"\x06Scheme\x12\x16\n" +
 	"\x12SCHEME_UNSPECIFIED\x10\x00\x12\x15\n" +
-	"\x11SCHEME_ECDSA_2OF3\x10\x01*\xd9\x01\n" +
+	"\x11SCHEME_ECDSA_2OF3\x10\x01\x12\x17\n" +
+	"\x13SCHEME_ED25519_2OF3\x10\x02*\xd9\x01\n" +
 	"\tErrorKind\x12\x1a\n" +
 	"\x16ERROR_KIND_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14ERROR_KIND_TRANSPORT\x10\x01\x12\x1c\n" +

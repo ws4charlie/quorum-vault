@@ -129,7 +129,7 @@ func cmdExport(args []string) error {
 		return err
 	}
 	var f *backup.File
-	if state.Scheme == 1 { // a 2-of-3 share: this party's own scalar
+	if state.Scheme == 1 || state.Scheme == 2 { // a 2-of-3 share (ECDSA or Ed25519): this party's own scalar
 		tk, err := st.GetTKey(ctx, *id, state.Current)
 		if err != nil {
 			return err
@@ -231,7 +231,7 @@ func cmdRestore(args []string) error {
 	if err != nil {
 		return err
 	}
-	if f.Scheme == backup.SchemeT2of3 {
+	if f.IsThreshold() {
 		tk, err := backup.RestoreT(f, priv)
 		if err != nil {
 			return err

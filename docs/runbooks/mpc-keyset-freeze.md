@@ -50,7 +50,7 @@ doubt, then watch the next signs.
 
 ## 2-of-3 keysets (A, B and C)
 
-Same meaning, three members. A cryptographic failure in a session between two members freezes the keyset on **both of them**; the
+Same meaning, three members, for both 2-of-3 schemes (ECDSA and Ed25519 keysets freeze, unfreeze and reconcile identically). A cryptographic failure in a session between two members freezes the keyset on **both of them**; the
 coordinator (A, or B when B+C signed) then tells the third member with a freeze notice. If the third was down or has no link to the
 coordinator (B cannot reach A, C reaches nobody), it learns it at its next contact: a frozen member answers every session with
 `FROZEN`, the one that hears it freezes too, and A's reconciliation carries the flag, so after A restarts or reconnects all three

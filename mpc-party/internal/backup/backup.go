@@ -134,8 +134,22 @@ type File struct {
 	Stripped       Stripped  `json:"stripped"`
 }
 
-// SchemeT2of3 is File.Scheme of a 2-of-3 threshold share.
-const SchemeT2of3 = "ecdsa-2of3"
+// SchemeT2of3 is File.Scheme of a 2-of-3 threshold ECDSA share; SchemeTEd2of3 is the Ed25519 one (P8-2). They share the
+// whole backup code: the scheme only chooses the curve of the proof and the label.
+const (
+	SchemeT2of3   = "ecdsa-2of3"
+	SchemeTEd2of3 = "ed25519-2of3"
+)
+
+// IsThreshold reports whether the file holds one member's share of a 2-of-3 keyset (either scheme).
+func (f *File) IsThreshold() bool { return f.Scheme == SchemeT2of3 || f.Scheme == SchemeTEd2of3 }
+
+func (f *File) tAlg() cbmpc.Alg {
+	if f.Scheme == SchemeTEd2of3 {
+		return cbmpc.Ed25519
+	}
+	return cbmpc.ECDSA
+}
 
 func (f *File) header() []byte {
 	h := fmt.Sprintf("qv-backup-v%d|%s|%d|%s|%s|%s|%s", f.V, f.KeysetID, f.Generation, f.Role, f.Alg, f.RootPublicKey, f.RecoveryKeyFpr)
@@ -146,8 +160,8 @@ func (f *File) header() []byte {
 }
 
 func (f *File) label() []byte {
-	if f.Scheme == SchemeT2of3 {
-		return cbmpc.TBackupLabel(f.KeysetID, memberOfRole(f.Role), f.Generation)
+	if f.IsThreshold() {
+		return cbmpc.TBackupLabelAlg(f.tAlg(), f.KeysetID, memberOfRole(f.Role), f.Generation)
 	}
 	return cbmpc.BackupLabel(fmt.Sprintf("%s#%d", f.KeysetID, f.Generation), algOf(f.Alg), roleOf(f.Role))
 }
@@ -205,8 +219,8 @@ func Parse(b []byte) (*File, error) {
 		if f.Role == "C" {
 			return nil, errors.New("backup file: party C holds 2-of-3 keysets only")
 		}
-	case SchemeT2of3:
-		if f.Alg != "ecdsa" || f.PubK != "" {
+	case SchemeT2of3, SchemeTEd2of3:
+		if f.Alg != map[bool]string{true: "ed25519", false: "ecdsa"}[f.Scheme == SchemeTEd2of3] || f.PubK != "" {
 			return nil, errors.New("backup file: malformed 2-of-3 header")
 		}
 	default:
@@ -269,7 +283,11 @@ func ExportT(k *cbmpc.TKey, id string, gen uint64, role string, recoveryPublic [
 	if err != nil {
 		return nil, err
 	}
-	f := &File{V: FileVersion, KeysetID: id, Generation: gen, Role: role, Alg: "ecdsa", Scheme: SchemeT2of3,
+	alg, scheme := "ecdsa", SchemeT2of3
+	if k.Alg() == cbmpc.Ed25519 {
+		alg, scheme = "ed25519", SchemeTEd2of3
+	}
+	f := &File{V: FileVersion, KeysetID: id, Generation: gen, Role: role, Alg: alg, Scheme: scheme,
 		RootPublicKey: hex.EncodeToString(k.PublicKey()), CreatedAt: time.Now().UTC(), RecoveryKeyFpr: pub.Fingerprint}
 	sp, err := k.Split()
 	if err != nil {
@@ -313,7 +331,7 @@ func Verify(f *File, recoveryPublic []byte) error {
 	if len(f.Stripped.WrappedKey) == 0 || len(f.Stripped.IV) != 12 || len(f.Stripped.CT) < 16 {
 		return errors.New("backup file: the encrypted stripped blob is malformed")
 	}
-	if f.Scheme == SchemeT2of3 {
+	if f.IsThreshold() {
 		if err := cbmpc.TPVEVerify(pub.PVEEk, f.PVE, f.label(), px); err != nil {
 			return fmt.Errorf("backup file: the PVE ciphertext does not verify (tampered, or for another keyset, generation or member): %w", err)
 		}
@@ -327,7 +345,7 @@ func Verify(f *File, recoveryPublic []byte) error {
 
 // RestoreT rebuilds one member's share of a 2-of-3 keyset. Offline: needs the recovery PRIVATE key file.
 func RestoreT(f *File, recoveryPrivate []byte) (*cbmpc.TKey, error) {
-	if f.Scheme != SchemeT2of3 {
+	if !f.IsThreshold() {
 		return nil, errors.New("this is not a 2-of-3 backup")
 	}
 	var priv RecoveryPrivate
@@ -369,7 +387,7 @@ func RestoreT(f *File, recoveryPrivate []byte) (*cbmpc.TKey, error) {
 	}
 	dk := cbmpc.SecretFromBytes(priv.PVEDk)
 	defer dk.Wipe()
-	x, err := cbmpc.TRestoreScalar(dk, priv.PVEEk, f.PVE, f.label())
+	x, err := cbmpc.TRestoreScalarAlg(f.tAlg(), dk, priv.PVEEk, f.PVE, f.label())
 	if err != nil {
 		return nil, fmt.Errorf("PVE restore failed (tampered backup or wrong recovery key): %w", err)
 	}

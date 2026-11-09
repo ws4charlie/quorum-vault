@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,7 +41,7 @@ type KeyMeta struct {
 // KeysetState is the durable state of one keyset on one party. Generations only grow. During a refresh there is one
 // candidate beside the current generation; the old generation's file stays until both parties confirmed the new one.
 type KeysetState struct {
-	Scheme    int32     `json:"scheme,omitempty"`  // 0 = 2-party HD keyset, 1 = 2-of-3 threshold ECDSA (pb.Scheme)
+	Scheme    int32     `json:"scheme,omitempty"`  // 0 = 2-party HD keyset, 1 = 2-of-3 threshold ECDSA, 2 = 2-of-3 threshold Ed25519 (pb.Scheme)
 	PubKey    string    `json:"pub_key,omitempty"` // 2-of-3: the group public key (hex, public data)
 	Alg       cbmpc.Alg `json:"alg"`
 	Current   uint64    `json:"current"`   // 0 while a DKG is still a candidate
@@ -186,7 +187,7 @@ func (s *FileStore) PutTCandidate(_ context.Context, id string, gen uint64, k *c
 	if err != nil {
 		return err
 	}
-	return s.putCandidate(id, gen, keysetFile{V: 3, Scheme: 1, Alg: cbmpc.ECDSA, Role: s.role, Gen: gen, Sealed: sealed}, 1, hex.EncodeToString(k.PublicKey()))
+	return s.putCandidate(id, gen, keysetFile{V: 3, Scheme: int32(algScheme(k.Alg())), Alg: k.Alg(), Role: s.role, Gen: gen, Sealed: sealed}, int32(algScheme(k.Alg())), hex.EncodeToString(k.PublicKey()))
 }
 
 func (s *FileStore) putCandidate(id string, gen uint64, f keysetFile, scheme int32, pub string) error {
@@ -205,7 +206,7 @@ func (s *FileStore) putCandidate(id string, gen uint64, f keysetFile, scheme int
 	if st.Scheme != scheme {
 		return fmt.Errorf("keyset %s: scheme %d does not match the stored scheme %d", id, scheme, st.Scheme)
 	}
-	if scheme == 1 && st.Current != 0 && st.PubKey != pub { // an orphaned DKG candidate (no current generation) may be replaced
+	if isTScheme(scheme) && st.Current != 0 && st.PubKey != pub { // an orphaned DKG candidate (no current generation) may be replaced
 		return fmt.Errorf("keyset %s: the public key of a threshold keyset cannot change", id)
 	}
 	if gen <= st.Current || (st.Candidate != 0 && st.Candidate != gen) {
@@ -231,14 +232,14 @@ func (s *FileStore) GetTKey(_ context.Context, id string, gen uint64) (*cbmpc.TK
 		return nil, err
 	}
 	var f keysetFile
-	if err := json.Unmarshal(raw, &f); err != nil || f.V != 3 || f.Scheme != 1 || f.Role != s.role || f.Gen != gen {
+	if err := json.Unmarshal(raw, &f); err != nil || f.V != 3 || !isTScheme(f.Scheme) || f.Role != s.role || f.Gen != gen {
 		return nil, fmt.Errorf("keyset %s generation %d: bad file", id, gen)
 	}
 	blob, err := s.sealer.Open(aadTKeyset(s.role, id, gen), f.Sealed)
 	if err != nil {
 		return nil, fmt.Errorf("keyset %s generation %d: cannot unseal: %w", id, gen, err)
 	}
-	return cbmpc.LoadTKey(memberOf(s.role), blob) // wipes blob
+	return cbmpc.LoadTKeyAlg(schemeAlg(pb.Scheme(f.Scheme)), memberOf(s.role), blob) // wipes blob
 }
 
 func (s *FileStore) GetKeyset(_ context.Context, id string, gen uint64) (*cbmpc.Keyset, error) {

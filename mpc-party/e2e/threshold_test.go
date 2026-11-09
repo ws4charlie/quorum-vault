@@ -30,12 +30,66 @@ type cluster3 struct {
 	procs  map[string]*proc
 	client map[string]pb.MpcPartyClient
 	bin    string
+	scheme pb.Scheme // the scheme the helpers make and use keysets in (zero value: ECDSA)
+}
+
+// threshold schemes the 2-of-3 tests run for. The two share every code path of the service; the tests that exercise a path
+// whose code does not look at the scheme run for ECDSA only (said in a comment at each).
+var tSchemes = []pb.Scheme{pb.Scheme_SCHEME_ECDSA_2OF3, pb.Scheme_SCHEME_ED25519_2OF3}
+
+func schemeName(sc pb.Scheme) string {
+	if sc == pb.Scheme_SCHEME_ED25519_2OF3 {
+		return "ed25519"
+	}
+	return "ecdsa"
+}
+
+// forSchemes runs f as a subtest for each threshold scheme.
+func forSchemes(t *testing.T, f func(t *testing.T, sc pb.Scheme)) {
+	for _, sc := range tSchemes {
+		sc := sc
+		t.Run(schemeName(sc), func(t *testing.T) { f(t, sc) })
+	}
+}
+
+func (cl *cluster3) isEd() bool { return cl.scheme == pb.Scheme_SCHEME_ED25519_2OF3 }
+
+func (cl *cluster3) algorithm() pb.Algorithm {
+	if cl.isEd() {
+		return pb.Algorithm_ALGORITHM_ED25519
+	}
+	return pb.Algorithm_ALGORITHM_ECDSA_SECP256K1
+}
+
+// msg is what a job signs: a 32-byte digest for ECDSA, a whole message (longer than a digest) for Ed25519.
+func (cl *cluster3) msg(seed int) []byte {
+	if cl.isEd() {
+		return edMessage(seed)
+	}
+	return dgst(seed)
+}
+
+func edMessage(seed int) []byte {
+	return append([]byte(fmt.Sprintf("solana-message-%d|", seed)), bytes.Repeat([]byte{byte(seed)}, 150)...)
+}
+
+func (cl *cluster3) verify(t testing.TB, pub, msg, sig []byte) {
+	t.Helper()
+	if cl.isEd() {
+		verifyEd25519(t, pub, msg, sig)
+		return
+	}
+	verifyECDSA(t, pub, msg, sig)
 }
 
 func newCluster3(t *testing.T, tweak func(role string, c *server.Config)) *cluster3 {
+	return newCluster3S(t, pb.Scheme_SCHEME_ECDSA_2OF3, tweak)
+}
+
+func newCluster3S(t *testing.T, sc pb.Scheme, tweak func(role string, c *server.Config)) *cluster3 {
 	t.Helper()
 	env := testenv.NewEnv(t)
-	cl := &cluster3{env: env, addrs: testenv.NewAddrs(t), cfgs: map[string]*server.Config{}, paths: map[string]string{},
+	cl := &cluster3{scheme: sc, env: env, addrs: testenv.NewAddrs(t), cfgs: map[string]*server.Config{}, paths: map[string]string{},
 		procs: map[string]*proc{}, client: map[string]pb.MpcPartyClient{}, bin: binDev}
 	for _, role := range []string{"A", "B", "C"} {
 		c := env.Config3(t, role, cl.addrs, cl.addrs.PeerB, cl.addrs.PeerC)
@@ -92,9 +146,16 @@ func (cl *cluster3) waitReady(t *testing.T) {
 	t.Fatalf("parties not ready.\nA: %s\nB: %s\nC: %s", cl.procs["A"].stderr, cl.procs["B"].stderr, cl.procs["C"].stderr)
 }
 
+func (cl *cluster3) sc() pb.Scheme {
+	if cl.scheme == pb.Scheme_SCHEME_UNSPECIFIED {
+		return pb.Scheme_SCHEME_ECDSA_2OF3
+	}
+	return cl.scheme
+}
+
 func (cl *cluster3) dkg(t *testing.T, id string) []byte {
 	t.Helper()
-	r, err := cl.client["A"].DKG(ctx(t, 60*time.Second), &pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: cl.env.Admin("dkg", id)})
+	r, err := cl.client["A"].DKG(ctx(t, 60*time.Second), &pb.DKGRequest{KeysetId: id, Scheme: cl.sc(), Admin: cl.env.Admin("dkg", id)})
 	must(t, err)
 	return r.RootPublicKey
 }
@@ -108,11 +169,11 @@ func (cl *cluster3) refresh(t *testing.T, id string) {
 // sign through coordinator `via` ("A" or "B") and verify the signature against pub.
 func (cl *cluster3) sign(t *testing.T, via, id, job string, seed int, pub []byte) {
 	t.Helper()
-	dg := dgst(seed)
-	r, err := cl.client[via].Sign(ctx(t, 60*time.Second), &pb.SignRequest{KeyId: id, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1,
+	dg := cl.msg(seed)
+	r, err := cl.client[via].Sign(ctx(t, 60*time.Second), &pb.SignRequest{KeyId: id, Algorithm: cl.algorithm(),
 		Digest: dg, JobId: job, IntentPackage: []byte("intent")})
 	must(t, err)
-	verifyECDSA(t, pub, dg, r.Signature)
+	cl.verify(t, pub, dg, r.Signature)
 }
 
 // signs counts the signing sessions a process served or started (log lines "op":"OP_SIGN" of followers).
@@ -205,12 +266,12 @@ func wantKind(t *testing.T, err error, want pb.ErrorKind) {
 func (cl *cluster3) signRaw(via, id, job string, seed int) (*pb.SignResponse, error) {
 	c, cancel := context5(60 * time.Second)
 	defer cancel()
-	return cl.client[via].Sign(c, &pb.SignRequest{KeyId: id, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: dgst(seed), JobId: job, IntentPackage: []byte("intent")})
+	return cl.client[via].Sign(c, &pb.SignRequest{KeyId: id, Algorithm: cl.algorithm(), Digest: cl.msg(seed), JobId: job, IntentPackage: []byte("intent")})
 }
 
 // followedSign counts the signing sessions a party served as follower.
 func (p *proc) followedSign() int {
-	return strings.Count(p.stderr.String(), `"op":"OP_SIGN","scheme":"ecdsa-2of3"`)
+	return strings.Count(p.stderr.String(), `"op":"OP_SIGN","scheme":"`)
 }
 
 // signUntil retries a signature while the typed kind is UNAVAILABLE (a party is reconciling or coming back).
@@ -218,7 +279,7 @@ func (cl *cluster3) signUntil(t *testing.T, via, id, job string, seed int, pub [
 	t.Helper()
 	var r *pb.SignResponse
 	retryUnavailable(t, 40*time.Second, func() (err error) { r, err = cl.signRaw(via, id, job, seed); return })
-	verifyECDSA(t, pub, dgst(seed), r.Signature)
+	cl.verify(t, pub, cl.msg(seed), r.Signature)
 }
 
 // signEveryPair signs with A+B, A+C (B down) and B+C (A down), restoring the parties after each.
@@ -240,171 +301,192 @@ func (cl *cluster3) signEveryPair(t *testing.T, id string, pub []byte, tag strin
 // ---- tests ----
 
 func TestThresholdDKGSignRefresh(t *testing.T) {
-	cl := newCluster3(t, nil)
-	pub := cl.dkg(t, "evm1")
-	if len(pub) != 33 {
-		t.Fatalf("public key %x", pub)
-	}
-	for role, h := range cl.health(t) {
-		ks := statusOf(h, "evm1")
-		if ks == nil || ks.Scheme != pb.Scheme_SCHEME_ECDSA_2OF3 || !bytes.Equal(ks.PublicKey, pub) || !ks.Resolved || ks.Generation != 1 {
-			t.Fatalf("party %s status %v", role, ks)
+	// Runs for both schemes: the paths it covers are scheme-specific in what they sign and verify.
+	forSchemes(t, func(t *testing.T, sc pb.Scheme) {
+		cl := newCluster3S(t, sc, nil)
+		pub := cl.dkg(t, "evm1")
+		if len(pub) != map[bool]int{true: 32, false: 33}[sc == pb.Scheme_SCHEME_ED25519_2OF3] {
+			t.Fatalf("public key %x", pub)
 		}
-	}
-	cl.sign(t, "A", "evm1", "j1", 1, pub)
-	if cl.procs["B"].followedSign() != 1 || cl.procs["C"].followedSign() != 0 {
-		t.Fatalf("A's first choice is B: B served %d, C served %d", cl.procs["B"].followedSign(), cl.procs["C"].followedSign())
-	}
-	cl.sign(t, "B", "evm1", "j2", 2, pub)
-	if cl.procs["C"].followedSign() != 1 {
-		t.Fatalf("B signs with C: C served %d", cl.procs["C"].followedSign())
-	}
-	// idempotency: the same job id returns the stored signature
-	r1, err := cl.signRaw("A", "evm1", "j1", 1)
-	must(t, err)
-	if !r1.Replayed {
-		t.Fatal("a repeated job id did not return the stored signature")
-	}
-	cl.refresh(t, "evm1")
-	if g := cl.waitConverged3(t, "evm1", true); g != 2 {
-		t.Fatalf("generation %d after a refresh", g)
-	}
-	// every pair signs after the refresh (the three-way self-test already proved it before the commit)
-	cl.signEveryPair(t, "evm1", pub, "after-refresh")
-	// Node/Derive are 2-party HD calls
-	_, err = cl.client["A"].Derive(ctx(t, 10*time.Second), &pb.DeriveRequest{KeysetId: "evm1", HardenedPath: []uint32{1}, Path: []uint32{0}})
-	wantKind(t, err, pb.ErrorKind_ERROR_KIND_INTERNAL)
-	// a second DKG of the same id is refused
-	_, err = cl.client["A"].DKG(ctx(t, 20*time.Second), &pb.DKGRequest{KeysetId: "evm1", Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: cl.env.Admin("dkg", "evm1")})
-	if err == nil {
-		t.Fatal("DKG of an existing keyset succeeded")
-	}
+		for role, h := range cl.health(t) {
+			ks := statusOf(h, "evm1")
+			if ks == nil || ks.Scheme != sc || !bytes.Equal(ks.PublicKey, pub) || !ks.Resolved || ks.Generation != 1 {
+				t.Fatalf("party %s status %v", role, ks)
+			}
+		}
+		cl.sign(t, "A", "evm1", "j1", 1, pub)
+		if cl.procs["B"].followedSign() != 1 || cl.procs["C"].followedSign() != 0 {
+			t.Fatalf("A's first choice is B: B served %d, C served %d", cl.procs["B"].followedSign(), cl.procs["C"].followedSign())
+		}
+		cl.sign(t, "B", "evm1", "j2", 2, pub)
+		if cl.procs["C"].followedSign() != 1 {
+			t.Fatalf("B signs with C: C served %d", cl.procs["C"].followedSign())
+		}
+		// idempotency: the same job id returns the stored signature
+		r1, err := cl.signRaw("A", "evm1", "j1", 1)
+		must(t, err)
+		if !r1.Replayed {
+			t.Fatal("a repeated job id did not return the stored signature")
+		}
+		cl.refresh(t, "evm1")
+		if g := cl.waitConverged3(t, "evm1", true); g != 2 {
+			t.Fatalf("generation %d after a refresh", g)
+		}
+		// every pair signs after the refresh (the three-way self-test already proved it before the commit)
+		cl.signEveryPair(t, "evm1", pub, "after-refresh")
+		// Node/Derive are 2-party HD calls
+		_, err = cl.client["A"].Derive(ctx(t, 10*time.Second), &pb.DeriveRequest{KeysetId: "evm1", HardenedPath: []uint32{1}, Path: []uint32{0}})
+		wantKind(t, err, pb.ErrorKind_ERROR_KIND_INTERNAL)
+		// a second DKG of the same id is refused
+		_, err = cl.client["A"].DKG(ctx(t, 20*time.Second), &pb.DKGRequest{KeysetId: "evm1", Scheme: sc, Admin: cl.env.Admin("dkg", "evm1")})
+		if err == nil {
+			t.Fatal("DKG of an existing keyset succeeded")
+		}
+	})
 }
 
 // Fallback happens only before any signing message and only on availability failures.
 func TestThresholdFallbackOrder(t *testing.T) {
-	cl := newCluster3(t, nil)
-	pub := cl.dkg(t, "k")
-	cl.sign(t, "A", "k", "a1", 1, pub)
+	// Runs for both schemes: the paths it covers are scheme-specific in what they sign and verify.
+	forSchemes(t, func(t *testing.T, sc pb.Scheme) {
+		cl := newCluster3S(t, sc, nil)
+		pub := cl.dkg(t, "k")
+		cl.sign(t, "A", "k", "a1", 1, pub)
 
-	// B down: A moves on to C
-	cl.stop("B")
-	start := time.Now()
-	cl.signUntil(t, "A", "k", "a2", 2, pub)
-	t.Logf("A with B down signed with C in %v", time.Since(start).Round(time.Millisecond))
-	if cl.procs["C"].followedSign() < 1 {
-		t.Fatal("C did not serve the fallback signature")
-	}
-	cl.start(t, "B")
-	cl.waitReady(t)
-	cl.waitConverged3(t, "k", true)
-	n := cl.procs["B"].followedSign()
-	cl.signUntil(t, "A", "k", "a3", 3, pub)
-	if cl.procs["B"].followedSign() != n+1 {
-		t.Fatal("with B back, A uses B again")
-	}
+		// B down: A moves on to C
+		cl.stop("B")
+		start := time.Now()
+		cl.signUntil(t, "A", "k", "a2", 2, pub)
+		t.Logf("A with B down signed with C in %v", time.Since(start).Round(time.Millisecond))
+		if cl.procs["C"].followedSign() < 1 {
+			t.Fatal("C did not serve the fallback signature")
+		}
+		cl.start(t, "B")
+		cl.waitReady(t)
+		cl.waitConverged3(t, "k", true)
+		n := cl.procs["B"].followedSign()
+		cl.signUntil(t, "A", "k", "a3", 3, pub)
+		if cl.procs["B"].followedSign() != n+1 {
+			t.Fatal("with B back, A uses B again")
+		}
 
-	// A down: B signs with C
-	cl.stop("A")
-	cl.signUntil(t, "B", "k", "b1", 4, pub)
-	// C down too: B has nobody
-	cl.stop("C")
-	_, err := cl.signRaw("B", "k", "b2", 5)
-	if err == nil {
-		t.Fatal("B signed without C")
-	}
-	if k, ok := kindOf(err); !ok || (k != pb.ErrorKind_ERROR_KIND_TRANSPORT && k != pb.ErrorKind_ERROR_KIND_UNAVAILABLE) {
-		t.Fatalf("B with C down: kind %v: %v", k, err)
-	}
+		// A down: B signs with C
+		cl.stop("A")
+		cl.signUntil(t, "B", "k", "b1", 4, pub)
+		// C down too: B has nobody
+		cl.stop("C")
+		_, err := cl.signRaw("B", "k", "b2", 5)
+		if err == nil {
+			t.Fatal("B signed without C")
+		}
+		if k, ok := kindOf(err); !ok || (k != pb.ErrorKind_ERROR_KIND_TRANSPORT && k != pb.ErrorKind_ERROR_KIND_UNAVAILABLE) {
+			t.Fatalf("B with C down: kind %v: %v", k, err)
+		}
+	})
 }
 
 // A refusal is final: no attempt with the next peer. Both B and C ask their own cosigner in every role.
 func TestThresholdCosignersEveryRole(t *testing.T) {
-	cl := newCluster3(t, func(role string, c *server.Config) {
-		if role == "B" || role == "C" {
-			c.Authorizer = server.AuthorizerConfig{Type: "deny-all"}
+	// Runs for both schemes: the paths it covers are scheme-specific in what they sign and verify.
+	forSchemes(t, func(t *testing.T, sc pb.Scheme) {
+		cl := newCluster3S(t, sc, func(role string, c *server.Config) {
+			if role == "B" || role == "C" {
+				c.Authorizer = server.AuthorizerConfig{Type: "deny-all"}
+			}
+		})
+		// DKG needs no authorizer; signing needs both cosigners, B and C both refuse everything
+		pub := cl.dkg(t, "k")
+		// A -> B: B's cosigner (follower role) refuses; no attempt with C
+		_, err := cl.signRaw("A", "k", "a1", 1)
+		wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
+		if n := cl.procs["C"].followedSign(); n != 0 {
+			t.Fatalf("C was contacted after B refused (%d sessions)", n)
 		}
+		if strings.Contains(cl.procs["C"].stderr.String(), `"op":"OP_SIGN"`) {
+			t.Fatal("C saw a signing session after B refused")
+		}
+		// B as coordinator: B asks its own cosigner before it opens anything
+		_, err = cl.signRaw("B", "k", "b1", 2)
+		wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
+		if strings.Contains(cl.procs["C"].stderr.String(), `"op":"OP_SIGN"`) {
+			t.Fatal("C saw a signing session although B's own cosigner refused")
+		}
+		_ = pub
 	})
-	// DKG needs no authorizer; signing needs both cosigners, B and C both refuse everything
-	pub := cl.dkg(t, "k")
-	// A -> B: B's cosigner (follower role) refuses; no attempt with C
-	_, err := cl.signRaw("A", "k", "a1", 1)
-	wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
-	if n := cl.procs["C"].followedSign(); n != 0 {
-		t.Fatalf("C was contacted after B refused (%d sessions)", n)
-	}
-	if strings.Contains(cl.procs["C"].stderr.String(), `"op":"OP_SIGN"`) {
-		t.Fatal("C saw a signing session after B refused")
-	}
-	// B as coordinator: B asks its own cosigner before it opens anything
-	_, err = cl.signRaw("B", "k", "b1", 2)
-	wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
-	if strings.Contains(cl.procs["C"].stderr.String(), `"op":"OP_SIGN"`) {
-		t.Fatal("C saw a signing session although B's own cosigner refused")
-	}
-	_ = pub
 }
 
 func TestThresholdCosignerOfC(t *testing.T) {
-	// only C refuses: A+B signs (the pair does not involve C); with B down A+C is refused by C; B+C is refused by C
-	cl := newCluster3(t, func(role string, c *server.Config) {
-		if role == "C" {
-			c.Authorizer = server.AuthorizerConfig{Type: "deny-all"}
-		}
+	// Runs for both schemes: the paths it covers are scheme-specific in what they sign and verify.
+	forSchemes(t, func(t *testing.T, sc pb.Scheme) {
+		// only C refuses: A+B signs (the pair does not involve C); with B down A+C is refused by C; B+C is refused by C
+		cl := newCluster3S(t, sc, func(role string, c *server.Config) {
+			if role == "C" {
+				c.Authorizer = server.AuthorizerConfig{Type: "deny-all"}
+			}
+		})
+		pub := cl.dkg(t, "k")
+		cl.sign(t, "A", "k", "a1", 1, pub)
+		_, err := cl.signRaw("B", "k", "b1", 2)
+		wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
+		cl.stop("B")
+		_, err = cl.signRaw("A", "k", "a2", 3)
+		wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
 	})
-	pub := cl.dkg(t, "k")
-	cl.sign(t, "A", "k", "a1", 1, pub)
-	_, err := cl.signRaw("B", "k", "b1", 2)
-	wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
-	cl.stop("B")
-	_, err = cl.signRaw("A", "k", "a2", 3)
-	wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
 }
 
 func TestThresholdCosignerOfBOnlyBC(t *testing.T) {
-	// only B refuses: A is refused by B (no fallback), B+C is refused by B's own cosigner in the coordinator role
-	cl := newCluster3(t, func(role string, c *server.Config) {
-		if role == "B" {
-			c.Authorizer = server.AuthorizerConfig{Type: "deny-all"}
+	// Runs for both schemes: the paths it covers are scheme-specific in what they sign and verify.
+	forSchemes(t, func(t *testing.T, sc pb.Scheme) {
+		// only B refuses: A is refused by B (no fallback), B+C is refused by B's own cosigner in the coordinator role
+		cl := newCluster3S(t, sc, func(role string, c *server.Config) {
+			if role == "B" {
+				c.Authorizer = server.AuthorizerConfig{Type: "deny-all"}
+			}
+		})
+		_ = cl.dkg(t, "k")
+		_, err := cl.signRaw("A", "k", "a1", 1)
+		wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
+		_, err = cl.signRaw("B", "k", "b1", 2)
+		wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
+		if cl.procs["C"].followedSign() != 0 {
+			t.Fatal("C was asked although B refused")
 		}
 	})
-	_ = cl.dkg(t, "k")
-	_, err := cl.signRaw("A", "k", "a1", 1)
-	wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
-	_, err = cl.signRaw("B", "k", "b1", 2)
-	wantKind(t, err, pb.ErrorKind_ERROR_KIND_REFUSED)
-	if cl.procs["C"].followedSign() != 0 {
-		t.Fatal("C was asked although B refused")
-	}
 }
 
 // A cosigner that is down is an outage, not a refusal: the coordinator moves on to the next peer.
 func TestThresholdFallbackOnCosignerOutage(t *testing.T) {
-	cl := newCluster3(t, func(role string, c *server.Config) {
-		if role == "B" {
-			c.Authorizer = server.AuthorizerConfig{Type: "cosigner", Socket: "/nonexistent/cosigner.sock", TimeoutMS: 500}
+	// Runs for both schemes: the paths it covers are scheme-specific in what they sign and verify.
+	forSchemes(t, func(t *testing.T, sc pb.Scheme) {
+		cl := newCluster3S(t, sc, func(role string, c *server.Config) {
+			if role == "B" {
+				c.Authorizer = server.AuthorizerConfig{Type: "cosigner", Socket: "/nonexistent/cosigner.sock", TimeoutMS: 500}
+			}
+		})
+		pub := cl.dkg(t, "k")
+		cl.signUntil(t, "A", "k", "a1", 1, pub)
+		if cl.procs["C"].followedSign() != 1 {
+			t.Fatalf("C should have signed after B's cosigner was unavailable (C served %d)", cl.procs["C"].followedSign())
 		}
 	})
-	pub := cl.dkg(t, "k")
-	cl.signUntil(t, "A", "k", "a1", 1, pub)
-	if cl.procs["C"].followedSign() != 1 {
-		t.Fatalf("C should have signed after B's cosigner was unavailable (C served %d)", cl.procs["C"].followedSign())
-	}
 }
 
 func TestThresholdEveryMemberRestart(t *testing.T) {
-	cl := newCluster3(t, nil)
-	pub := cl.dkg(t, "k")
-	for i, role := range []string{"C", "B", "A", "C", "A"} {
-		cl.restart(t, role)
-		cl.waitReady(t)
-		g := cl.waitConverged3(t, "k", true)
-		if g != 1 {
-			t.Fatalf("generation %d", g)
+	// Runs for both schemes: the paths it covers are scheme-specific in what they sign and verify.
+	forSchemes(t, func(t *testing.T, sc pb.Scheme) {
+		cl := newCluster3S(t, sc, nil)
+		pub := cl.dkg(t, "k")
+		for i, role := range []string{"C", "B", "A", "C", "A"} {
+			cl.restart(t, role)
+			cl.waitReady(t)
+			g := cl.waitConverged3(t, "k", true)
+			if g != 1 {
+				t.Fatalf("generation %d", g)
+			}
+			cl.signUntil(t, "A", "k", fmt.Sprintf("r%d", i), 20+i, pub)
+			t.Logf("restart of %s: reconciled and signing", role)
 		}
-		cl.signUntil(t, "A", "k", fmt.Sprintf("r%d", i), 20+i, pub)
-		t.Logf("restart of %s: reconciled and signing", role)
-	}
+	})
 }
 
 // Pins per pair: a certificate is refused on every listener that does not pin it.
