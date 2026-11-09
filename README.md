@@ -47,7 +47,7 @@ Components, data model, state machines and a sequence diagram of a withdrawal si
 | Crash safety: worker killed at every workflow boundary, gateway and relay restarted | [internal/workflow](internal/workflow) | `TestCrashAtEveryBoundary` (7 boundaries) |
 | Workflow watchdog: a loop that stops making progress is alerted, terminated and restarted | [internal/workflow/watchdog.go](internal/workflow/watchdog.go) | `TestWatchdog*` |
 | Signing gateway (zone 1) and cosigner (zone 2): approver signatures, policy, replay guard, each with its own database | [internal/gateway](internal/gateway), [internal/cosigner](internal/cosigner) | attack tests, rogue-party tests |
-| Two-party MPC signer: DKG, derive, sign, refresh, freeze, sealing in HSM tokens, backup and restore | [mpc-party](mpc-party), [internal/mpcsigner](internal/mpcsigner) | `make test-mpc`, the custody tests with `QV_CUSTODY_SIGNER=mpc` |
+| MPC signer (EVM: 2-of-3 on parties A, B, C; Bitcoin: two-party HD): DKG, sign, refresh, freeze, sealing in HSM tokens, backup and restore | [mpc-party](mpc-party), [internal/mpcsigner](internal/mpcsigner) | `make test-mpc`, the custody tests with `QV_CUSTODY_SIGNER=mpc` |
 | Failure tests on MPC: kill a party or the cosigner, partition, latency, refresh and freeze under live withdrawals | [e2e/custody/mpc_test.go](e2e/custody/mpc_test.go) | see [measurements](docs/measurements/mpc-service.md) |
 | Tamper-evident audit: a hash chain in each trust zone (core, gateway, cosigner), heads published to Kafka, verify commands | [internal/audit](internal/audit), [internal/auditchain](internal/auditchain) | `TestTamperingIsCaught`, `e2e/custody` audit checks |
 | Runbooks: MPC backup and restore, keyset freeze | [docs/runbooks](docs/runbooks) | `mpc-party/scripts/restore-drill.sh` |
@@ -58,11 +58,12 @@ Components, data model, state machines and a sequence diagram of a withdrawal si
   fee markets or a real network.
 - **SoftHSM.** The tokens are software: no tamper resistance, dev PINs. The structure (own token per party, PIN from the
   environment, non-exportable wrap key) is what a hardware HSM would need, not a substitute for one.
-- **Both parties run on one machine, run by one team.** The cryptographic and protocol separation is real; the operational
+- **All MPC parties run on one machine, run by one team.** The cryptographic and protocol separation is real; the operational
   separation is not.
 - **The cold tier is not built.** There is one hot tier. The design is in [DESIGN_SCALE.md](DESIGN_SCALE.md).
-- **2-of-2, not t-of-n.** Losing one party stops signing until it is restored from its backup.
-- **EVM only.** No Bitcoin, no Solana (the signer supports Ed25519 keysets; nothing uses them).
+- **2-of-3 for EVM only.** EVM keeps signing with any one of the three parties down. Bitcoin is still two-party: losing one
+  party stops Bitcoin signing until it is restored from its backup.
+- **EVM and Bitcoin only.** No Solana yet (the signer supports Ed25519 keysets; nothing uses them).
 - **`X-Actor` is not authentication.** It names the caller for dual control. No real identity, no UI.
 - **Measured on a laptop**, not on target hardware, and not under a real load-test yet (P4).
 - **cb-mpc has had no external review in this project**, and its soundness history is why the signer freezes a keyset on any
@@ -149,13 +150,15 @@ The `/v2` API (customers, deposit addresses, balances, withdrawals, approvals, `
 
 Apple M3 Pro, Go 1.27.3, SoftHSM 2.7.0, all processes on one machine. Sources:
 [docs/measurements/closed-loop.md](docs/measurements/closed-loop.md) (HSM), [docs/measurements/mpc-service.md](docs/measurements/mpc-service.md)
-(two-party MPC), [docs/spikes/p5a-cbmpc.md](docs/spikes/p5a-cbmpc.md) (the library).
+(MPC), [docs/spikes/p5a-cbmpc.md](docs/spikes/p5a-cbmpc.md) and [docs/measurements/mpc.md](docs/measurements/mpc.md) (the library).
+The whole-path rows were measured with the two-party signer, before EVM moved to 2-of-3.
 
-| | HSM signer | Two-party MPC signer |
+| | HSM signer | MPC signer |
 |---|---:|---:|
 | Withdrawal, request to confirmed, median | 412 ms | 409 ms |
 | 20 withdrawals at once, all confirmed | 1.18 s | 2.41 s |
-| One signature (library, no network) | — | 49 ms |
+| One signature (library, no network) | — | two-party 49 ms; 2-of-3 p95 103 ms |
+| One signature through the service, p50 / p95 | — | two-party 65 / 69 ms; 2-of-3 109 / 112 ms |
 | Soak: 50 signatures/s for 10 min, whole path | — | 30 000 of 30 000, 0 failed |
 | Added 100 ms per frame between the parties, sign job | — | 1.55 s |
 
@@ -167,7 +170,7 @@ Apple M3 Pro, Go 1.27.3, SoftHSM 2.7.0, all processes on one machine. Sources:
 - **Two gates.** The gateway and the cosigners of party B and party C each check approver signatures, policy and the replay guard from their own
   config and database. An attacker who owns party A, or the business database, cannot get a signature for a request that was not
   approved.
-- **Freeze.** A cryptographic failure freezes the keyset on both parties until an operator signs an unfreeze.
+- **Freeze.** A cryptographic failure freezes the keyset on every party that holds it until an operator signs an unfreeze.
 - **Ledger.** Money moves only through balanced entries; a withdrawal's hold is released only when its nonce is settled or
   provably cancelled.
 - **No secrets in the repo**; the PINs and database password are public dev defaults.
