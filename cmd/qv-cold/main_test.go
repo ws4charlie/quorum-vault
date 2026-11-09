@@ -21,7 +21,7 @@ import (
 // request for 1 ETH, inspect, two approvals, sign; then the refusals the tool must give.
 func TestCeremonyThroughTheCommandLine(t *testing.T) {
 	hsmtest.Token(t, "qv-cold") // skips (or fails under QV_REQUIRE_HSM) when the token is missing
-	t.Setenv("QV_HSM_PIN", hsmtest.PIN())
+	t.Setenv("QV_HSM_PIN", hsmtest.PIN(t))
 	dir := t.TempDir()
 	runOK := func(args ...string) string {
 		t.Helper()

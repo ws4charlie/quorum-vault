@@ -11,8 +11,8 @@ Go and building cb-mpc in every job.
 | `run-in-image.sh` | Runs a command in the image, in the checkout, on the host network, with the Docker socket. `ci/run-in-image.sh make test-e2e-btc-recovery` |
 | `infra.sh` | Starts anvil, Temporal, Redpanda and bitcoind in the background (`start`) and waits for them right before the tests (`wait`). |
 
-**No secrets in the image.** The SoftHSM tokens are created at job time by `scripts/setup-softhsm.sh`, in the checkout; the dev PINs are the ones in
-that script. The image is public like the repository.
+**No secrets in the image.** The SoftHSM tokens are created at job time by `scripts/setup-softhsm.sh`, in the checkout; the PINs are generated
+at job time by `scripts/dev-env.sh` into the checkout's `.env`. The image is public like the repository.
 
 **Same-repository pull requests and pushes** push a new tag from the `image` job (`packages: write` on that job only). **Fork pull requests** cannot
 push: their jobs pull the tag if `main` has it, and otherwise build the image themselves from the same Dockerfile (a few minutes, once per job).

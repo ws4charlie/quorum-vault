@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -374,13 +372,7 @@ func TestRecoveryNodeRestartedWithAnEmptyMempool(t *testing.T) {
 		t.Fatalf("the transaction is not in the mempool: %v", err)
 	}
 	s.worker.stop() // so that the cell cannot send it again before we have seen that the node forgot it
-	cmd := exec.Command("docker", "compose", "--profile", "btc", "restart", "bitcoind")
-	cmd.Dir = filepath.Join("..", "..")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("restart bitcoind: %v\n%s", err, out)
-	}
-	s.waitFor(60*time.Second, "bitcoind is back", func() bool { return s.node.root.Call(s.ctx, nil, "getblockcount") == nil })
-	_ = s.node.root.Call(s.ctx, nil, "loadwallet", s.node.walletName)
+	s.restartNode()
 	var again struct{ Txid string }
 	if err := s.node.root.Call(s.ctx, &again, "getrawtransaction", got.Tx, true); err == nil {
 		t.Fatal("the node still knows the transaction: its mempool was not emptied")

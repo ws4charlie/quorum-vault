@@ -138,8 +138,9 @@ services:
       retries: 40
 
   # ---- Bitcoin (profile "btc"; `make btc-up`) ----
-  # bitcoind in regtest, RPC on 18443. Dev only: the RPC password is a throwaway for a node that exists on this machine for
-  # the tests. -txindex=1: the cell reads its own confirmed transactions with getrawtransaction. Pinned: bitcoin/bitcoin 29.0 (the official image, Bitcoin Core 29.0).
+  # bitcoind in regtest, RPC on 18443, cookie authentication: bitcoind writes a new user and password to /home/bitcoin/.bitcoin/regtest/.cookie
+  # at every start, and the tests read it with `docker compose exec` (so every compose project, one per lane, has its own). No credential is
+  # committed. -txindex=1: the cell reads its own confirmed transactions with getrawtransaction. Pinned: bitcoin/bitcoin 29.0 (the official image, Bitcoin Core 29.0).
   bitcoind:
     profiles: ["btc"]
     image: bitcoin/bitcoin:29.0
@@ -149,15 +150,13 @@ services:
       - -rpcbind=0.0.0.0
       - -rpcallowip=0.0.0.0/0
       - -rpcport=18443
-      - -rpcuser=qv
-      - -rpcpassword=qv-regtest-only
       - -fallbackfee=0.0002
       - -txindex=1
       - -persistmempool=0 # a restarted node starts with an empty mempool, as a crash or eviction leaves it
     ports:
       - "127.0.0.1:${QV_BTC_PORT:-18443}:18443"
     healthcheck:
-      test: ["CMD-SHELL", "bitcoin-cli -regtest -rpcport=18443 -rpcuser=qv -rpcpassword=qv-regtest-only getblockcount"]
+      test: ["CMD-SHELL", "bitcoin-cli -datadir=/home/bitcoin/.bitcoin -regtest -rpcport=18443 getblockcount"]
       interval: 2s
       timeout: 3s
       retries: 30

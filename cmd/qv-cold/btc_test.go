@@ -20,7 +20,7 @@ import (
 // network, operators, a request, inspect, approvals, sign; the online check of the signed file; then the refusals and the fee attack.
 func TestBitcoinCeremonyThroughTheCommandLine(t *testing.T) {
 	hsmtest.Token(t, "qv-cold")
-	t.Setenv("QV_HSM_PIN", hsmtest.PIN())
+	t.Setenv("QV_HSM_PIN", hsmtest.PIN(t))
 	dir := t.TempDir()
 	runOK := func(args ...string) string {
 		t.Helper()

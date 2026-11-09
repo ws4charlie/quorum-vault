@@ -43,9 +43,11 @@ runs:
         path: ~/.cache/qv-go
         key: qv-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum') }}
         restore-keys: qv-go-${{ runner.os }}-${{ runner.arch }}-
-    - name: Create the SoftHSM2 tokens (quorumvault, qv-party-1, qv-party-2, qv-party-3, qv-cold)
+    - name: Generate the PINs (.env) and create the SoftHSM2 tokens (quorumvault, qv-party-1, qv-party-2, qv-party-3, qv-cold)
       shell: bash
-      run: ci/run-in-image.sh ./scripts/setup-softhsm.sh
+      run: |
+        ./scripts/dev-env.sh
+        ci/run-in-image.sh ./scripts/setup-softhsm.sh
     - name: Wait for the services
       shell: bash
       run: ci/infra.sh wait

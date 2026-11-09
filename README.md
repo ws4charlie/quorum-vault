@@ -1,7 +1,7 @@
 # quorum-vault
 
 > **Testnet and local chains only.** Everything runs against a local anvil node that impersonates Sepolia
-> (chain id 11155111). All PINs and passwords in this repo are dev-only defaults. Never point this code at
+> (chain id 11155111). Test PINs are generated on your machine (`make dev-env`), and bitcoind uses a cookie. Never point this code at
 > real funds or real keys.
 
 quorum-vault is a working model of how an institution holds customer crypto.
@@ -79,6 +79,7 @@ brew install softhsm           # Ubuntu: apt-get install softhsm2
 ```
 
 ```bash
+make dev-env      # first: writes .env (gitignored) with random SoftHSM PINs; never overwrites an existing one
 make setup        # SoftHSM tokens in ./data/softhsm + Postgres 16 on localhost:55432 + anvil on 127.0.0.1:18545
 ```
 
@@ -151,7 +152,7 @@ All optional; see [.env.example](.env.example).
 |---|---|---|
 | `DATABASE_URL` | `postgres://qv@localhost:55432/quorumvault?sslmode=disable` | Postgres (dev only: trust auth, bound to 127.0.0.1) |
 | `SOFTHSM2_CONF` | `./data/softhsm/softhsm2.conf` | repo-local token store |
-| `QV_HSM_PIN` | `user-dev-1234` (dev only) | user PIN of all tokens |
+| `QV_HSM_PIN` | none; `make dev-env` generates it | user PIN of all tokens (no PIN is committed; a test that needs it fails and names `make dev-env`) |
 | `QV_PKCS11_LIB` | the SoftHSM2 library of the OS | PKCS#11 module |
 | `QV_CUSTODY_SIGNER` | `hsm` | `e2e/custody`: `hsm` or `mpc` |
 | `QV_E2E_TIMEOUT_SCALE` | `1` | stretches the limit of every condition wait in the e2e tests (CI sets 3); a slow runner gets longer before a test calls it stuck |
@@ -189,7 +190,7 @@ The whole-path rows were measured with the two-party signer, before EVM moved to
 - **Freeze.** A cryptographic failure freezes the keyset on every party that holds it until an operator signs an unfreeze.
 - **Ledger.** Money moves only through balanced entries; a withdrawal's hold is released only when its nonce is settled or
   provably cancelled.
-- **No secrets in the repo**; the PINs and database password are public dev defaults.
+- **No secrets in the repo**; test PINs are generated at run time (`make dev-env`) and bitcoind uses cookie authentication.
 
 ## Documentation
 

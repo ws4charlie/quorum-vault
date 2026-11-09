@@ -85,7 +85,7 @@ func (s *system) runCold(args ...string) string {
 
 func (s *system) runColdErr(args ...string) (string, error) {
 	cmd := exec.Command(filepath.Join(binDir, "qv-cold"), args...)
-	cmd.Env = append(os.Environ(), "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf(), "QV_HSM_PIN="+hsmtest.PIN())
+	cmd.Env = append(os.Environ(), "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf(), "QV_HSM_PIN="+hsmtest.PIN(s.t))
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	err := cmd.Run()

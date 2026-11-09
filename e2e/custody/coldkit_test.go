@@ -102,7 +102,7 @@ func newColdKit(t *testing.T, s *system) *coldKit {
 // run executes qv-cold with the repo-local SoftHSM config and the dev PIN.
 func (k *coldKit) run(args ...string) (string, error) {
 	cmd := exec.Command(filepath.Join(binDir, "qv-cold"), args...)
-	cmd.Env = append(os.Environ(), "QV_HSM_PIN="+hsmtest.PIN())
+	cmd.Env = append(os.Environ(), "QV_HSM_PIN="+hsmtest.PIN(k.t))
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
