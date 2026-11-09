@@ -8,7 +8,7 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-.PHONY: test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
+.PHONY: test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
 
 setup: softhsm db-up chain-up
 
@@ -176,9 +176,16 @@ mpc-build:
 	cd mpc-party && scripts/fetch-build-cbmpc.sh
 
 test-mpc:
-	QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=http://127.0.0.1:18545 go test -count=1 -p 1 -timeout 20m -v ./e2e/mpcsign/...
+	QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=$${QV_ANVIL_RPC:-http://127.0.0.1:18545} go test -count=1 -p 1 -timeout 20m -v ./e2e/mpcsign/...
 
 # Soak: 50 signatures per second for 10 minutes through the whole path, with RSS and thread counts of every process.
 # QV_MPC_SOAK_MINUTES and QV_MPC_SOAK_RATE change the length and the rate.
 test-mpc-soak:
-	QV_MPC_SOAK=1 QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=http://127.0.0.1:18545 go test -count=1 -p 1 -timeout 40m -v -run TestSoakWholePath ./e2e/mpcsign/...
+	QV_MPC_SOAK=1 QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=$${QV_ANVIL_RPC:-http://127.0.0.1:18545} go test -count=1 -p 1 -timeout 40m -v -run TestSoakWholePath ./e2e/mpcsign/...
+
+# Every CI test group at the same time, each lane with its own Postgres, anvil, bitcoind and SoftHSM tokens (scripts/e2e-all.sh; needs `make softhsm mpc-build`).
+#   make test-e2e-all                        all groups
+#   make test-e2e-all GROUPS=e2e-btc-cold,test   some groups (CI job names; evm and btc stand for all of theirs)
+#   make test-e2e-all LANES=4                another number of lanes
+test-e2e-all:
+	QV_E2E_GROUPS='$(GROUPS)' $(if $(LANES),LANES=$(LANES)) scripts/e2e-all.sh

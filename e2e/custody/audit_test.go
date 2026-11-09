@@ -99,7 +99,7 @@ func (s *system) requireGatewayAudit(want ...string) {
 // binaries: the anchors of this system's core chain and gateway chain must all agree with their databases.
 func (s *system) requireAnchors() {
 	s.t.Helper()
-	cl, err := kgo.NewClient(kgo.SeedBrokers("127.0.0.1:19092"), kgo.ConsumeTopics(outbox.TopicAuditHeads),
+	cl, err := kgo.NewClient(kgo.SeedBrokers(kafkaBrokers()), kgo.ConsumeTopics(outbox.TopicAuditHeads),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
 	if err != nil {
 		s.t.Fatal(err)

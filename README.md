@@ -78,7 +78,7 @@ brew install softhsm           # Ubuntu: apt-get install softhsm2
 ```
 
 ```bash
-make setup        # SoftHSM tokens in ./data/softhsm + Postgres 16 on localhost:55432 + anvil on 127.0.0.1:8545
+make setup        # SoftHSM tokens in ./data/softhsm + Postgres 16 on localhost:55432 + anvil on 127.0.0.1:18545
 ```
 
 ```bash
@@ -121,6 +121,22 @@ Pull requests run the light tests in three parallel CI jobs (`make test-e2e-evm-
 heavy ones (every crash boundary, a component killed at each custody boundary, freeze, partition, latency) run nightly or on
 demand from the Actions tab (`nightly` > Run workflow), and locally with `make test-e2e-evm-failure`. Crash boundaries can be
 picked with `QV_CRASH_BOUNDARIES=withdrawal.after_broadcast,sweep.after_settle`.
+
+### Every CI test group at once
+
+`make test-e2e-all` runs all thirteen groups of the CI workflow (the `test` job, `make test-mpc`, three EVM groups, eight Bitcoin groups) at the same
+time and takes about 8 minutes on a 12-core laptop, instead of 45 to 60 minutes one after the other. Run `make softhsm mpc-build` once first, and have
+Docker running; nothing else needs to be up, and the ports and containers of `make setup` and `make infra-up` are left alone.
+
+The groups run in six lanes. A lane has its own Postgres, anvil, bitcoind and SoftHSM tokens, because the tests change those (they mine and reorg a chain,
+restart bitcoind, switch a database role on and off, and write to the token files). Temporal and Redpanda are one shared pair. A lane runs its groups
+one after another. Each group writes `data/e2e-all/<time>/<group>.log`; the script prints one line per group when it finishes, then a summary, and exits
+non-zero if any group failed. Ctrl-C stops the tests and removes every container the run started. Two options:
+
+```bash
+make test-e2e-all GROUPS=e2e-btc-cold,test    # some groups; "evm" and "btc" stand for all of theirs
+make test-e2e-all LANES=4                     # another number of lanes
+```
 
 Soak: `make test-mpc-soak` (50 signatures per second for 10 minutes; `QV_MPC_SOAK_MINUTES` and `QV_MPC_SOAK_RATE` change it). The
 `mpc-party` module has its own tests: `cd mpc-party && go test ./...`, and `mpc-party/scripts/restore-drill.sh` destroys a party
