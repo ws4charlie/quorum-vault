@@ -35,7 +35,7 @@ func TestOpenTokenByLabel(t *testing.T) {
 
 func TestUnknownLabel(t *testing.T) {
 	lib := hsmtest.Lib(t)
-	_, err := lib.OpenToken("no-such-token", hsmtest.PIN())
+	_, err := lib.OpenToken("no-such-token", hsmtest.PIN(t))
 	if !errors.Is(err, hsm.ErrTokenNotFound) {
 		t.Fatalf("err = %v, want ErrTokenNotFound", err)
 	}
@@ -50,18 +50,18 @@ func TestLibSharedAcrossTokens(t *testing.T) {
 	if a != b {
 		t.Fatal("LoadLib returned different *Lib for the same path")
 	}
-	t1, err := a.OpenToken("qv-party-1", hsmtest.PIN())
+	t1, err := a.OpenToken("qv-party-1", hsmtest.PIN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer t1.Close()
-	t2, err := b.OpenToken("qv-party-2", hsmtest.PIN())
+	t2, err := b.OpenToken("qv-party-2", hsmtest.PIN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer t2.Close()
 	// Same label twice: second login hits CKR_USER_ALREADY_LOGGED_IN, tolerated.
-	t1b, err := a.OpenToken("qv-party-1", hsmtest.PIN())
+	t1b, err := a.OpenToken("qv-party-1", hsmtest.PIN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestWithSessionConcurrent(t *testing.T) {
 
 func TestClosedToken(t *testing.T) {
 	lib := hsmtest.Lib(t)
-	tok, err := lib.OpenToken("qv-party-2", hsmtest.PIN())
+	tok, err := lib.OpenToken("qv-party-2", hsmtest.PIN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

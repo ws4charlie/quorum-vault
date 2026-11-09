@@ -37,10 +37,63 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
 
-const (
-	rpcUser = "qv"
-	rpcPass = "qv-regtest-only"
+// bitcoind runs with cookie authentication: it writes a fresh user and password into its data directory every time it starts. The tests read the
+// cookie from the container (docker compose exec, in the compose project of this lane), or from the file QV_BTC_COOKIE_FILE names.
+var (
+	credsMu    sync.Mutex
+	credsCache *[2]string
 )
+
+// readCookie reads the cookie of bitcoind now.
+func readCookie() (user, pass string, err error) {
+	var b []byte
+	if f := os.Getenv("QV_BTC_COOKIE_FILE"); f != "" {
+		b, err = os.ReadFile(f)
+	} else {
+		cmd := exec.Command("docker", "compose", "--profile", "btc", "exec", "-T", "bitcoind", "cat", "/home/bitcoin/.bitcoin/regtest/.cookie")
+		cmd.Dir = filepath.Join("..", "..")
+		b, err = cmd.Output()
+	}
+	if err != nil {
+		return "", "", err
+	}
+	u, p, ok := strings.Cut(strings.TrimSpace(string(b)), ":")
+	if !ok {
+		return "", "", fmt.Errorf("no user:password in the cookie")
+	}
+	return u, p, nil
+}
+
+// rpcCreds returns the current RPC user and password of bitcoind. The answer is cached until forgetRPCCreds (bitcoind was restarted).
+func rpcCreds(t testing.TB) (user, pass string) {
+	t.Helper()
+	credsMu.Lock()
+	defer credsMu.Unlock()
+	if credsCache == nil {
+		u, p, err := readCookie()
+		if err != nil {
+			t.Fatalf("bitcoind cookie: %v (make btc-up)", err)
+		}
+		credsCache = &[2]string{u, p}
+	}
+	return credsCache[0], credsCache[1]
+}
+
+// forgetRPCCreds drops the cached cookie: the next rpcCreds reads the one of the restarted bitcoind.
+func forgetRPCCreds() {
+	credsMu.Lock()
+	credsCache = nil
+	credsMu.Unlock()
+}
+
+func newRPCWith(rawurl, user, pass string) *btc.RPC { return btc.NewRPC(rawurl, user, pass) }
+
+// newRPC is a client of bitcoind (or of one of its wallets, by the path in rawurl) with the current cookie.
+func newRPC(t testing.TB, rawurl string) *btc.RPC {
+	t.Helper()
+	u, p := rpcCreds(t)
+	return btc.NewRPC(rawurl, u, p)
+}
 
 var (
 	binDir   string
@@ -132,7 +185,7 @@ const (
 func faucet(t *testing.T) (*btc.RPC, string) {
 	t.Helper()
 	ctx := context.Background()
-	root := btc.NewRPC(nodeURL(), rpcUser, rpcPass)
+	root := newRPC(t, nodeURL())
 	var loaded []string
 	if err := root.Call(ctx, &loaded, "listwallets"); err != nil {
 		t.Fatal(err)
@@ -148,7 +201,7 @@ func faucet(t *testing.T) (*btc.RPC, string) {
 			}
 		}
 	}
-	f := btc.NewRPC(nodeURL()+"/wallet/"+faucetWallet, rpcUser, rpcPass)
+	f := newRPC(t, nodeURL()+"/wallet/"+faucetWallet)
 	var bal float64
 	if err := f.Call(ctx, &bal, "getbalance"); err != nil {
 		t.Fatal(err)
@@ -179,7 +232,7 @@ func faucet(t *testing.T) (*btc.RPC, string) {
 func newNode(t *testing.T) *node {
 	t.Helper()
 	ctx := context.Background()
-	n := &node{t: t, root: btc.NewRPC(nodeURL(), rpcUser, rpcPass)}
+	n := &node{t: t, root: newRPC(t, nodeURL())}
 	var info struct{ Chain string }
 	if err := n.root.Call(ctx, &info, "getblockchaininfo"); err != nil {
 		t.Fatalf("bitcoind: %v (make btc-up)", err)
@@ -193,7 +246,7 @@ func newNode(t *testing.T) *node {
 		t.Fatal(err)
 	}
 	n.walletName = name
-	n.w = btc.NewRPC(nodeURL()+"/wallet/"+name, rpcUser, rpcPass)
+	n.w = newRPC(t, nodeURL()+"/wallet/"+name)
 	var addr string
 	if err := n.w.Call(ctx, &addr, "getnewaddress"); err != nil {
 		t.Fatal(err)
@@ -252,7 +305,7 @@ func (n *node) fresh() string {
 // coinbaseTo is the amount, in satoshis, that the coinbase of the block at height pays to addr.
 func (n *node) coinbaseTo(height int64, addr string) int64 {
 	n.t.Helper()
-	blk, err := btc.NewRPC(nodeURL(), rpcUser, rpcPass).GetBlock(context.Background(), n.blockHash(height))
+	blk, err := newRPC(n.t, nodeURL()).GetBlock(context.Background(), n.blockHash(height))
 	if err != nil {
 		n.t.Fatal(err)
 	}
@@ -529,6 +582,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.xpub = accountXpub(t, s.mpc, "regtest")
 	tm.Phase("xpub")
 	s.start = s.node.height() + 1
+	cookieUser, cookiePass := rpcCreds(t)
 	rpcURL := nodeURL()
 	if o.noEstimate {
 		rpcURL = noEstimateProxy(t)
@@ -539,7 +593,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.cf = custody.File{
 		Entity: "qv-us",
 		Chain: custody.ChainFile{Family: "btc", Name: s.chain,
-			BTC:    &custody.BTCFile{Network: "regtest", RPCURL: rpcURL, RPCUser: rpcUser, RPCPassword: rpcPass, Confirmations: o.conf, AccountXpub: s.xpub},
+			BTC:    &custody.BTCFile{Network: "regtest", RPCURL: rpcURL, RPCUser: cookieUser, RPCPassword: cookiePass, Confirmations: o.conf, AccountXpub: s.xpub},
 			Assets: map[string]custody.AssetFile{"BTC": {Decimals: 8, MinDeposit: o.minDeposit}}},
 		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: "20s", ActivityTimeout: "5s"},
 		Scan:       custody.ScanFile{Interval: "300ms", StartHeight: uint64(s.start)},

@@ -831,7 +831,7 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 }
 
 func (s *system) startGateway() {
-	s.gateway = s.spawn("qv-gateway", []string{"QV_HSM_PIN=" + hsmtest.PIN()},
+	s.gateway = s.spawn("qv-gateway", []string{"QV_HSM_PIN=" + hsmtest.PIN(s.t)},
 		"-config", s.gwPath, "-jobs-dsn", s.gatewayJobsDSN(), "-guard-dsn", s.guardDSN, "-interval", "200ms", "-lease", gatewayLease(s.o),
 		"-worker-id", "gw-"+uuid.NewString()[:6], "-brokers", kafkaBrokers(), "-audit-source", s.auditSrc+"-gateway", "-anchor-interval", "2s")
 }

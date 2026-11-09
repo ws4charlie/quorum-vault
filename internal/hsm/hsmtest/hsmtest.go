@@ -8,20 +8,47 @@ package hsmtest
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 )
 
-// DefaultPIN is the documented dev-only user PIN (see .env.example).
-const DefaultPIN = "user-dev-1234"
+// ErrNoPIN says where the PIN comes from. There is no default PIN anywhere.
+var ErrNoPIN = errors.New("QV_HSM_PIN is not set: run `make dev-env` (it writes random PINs to .env)")
 
-// PIN returns QV_HSM_PIN or DefaultPIN.
-func PIN() string {
+// LookupPIN returns the user PIN of the test tokens: QV_HSM_PIN from the environment, else from the .env at the repo root (written by
+// `make dev-env`). It returns ErrNoPIN when neither has one.
+func LookupPIN() (string, error) {
 	if p := os.Getenv("QV_HSM_PIN"); p != "" {
-		return p
+		return p, nil
 	}
-	return DefaultPIN
+	b, err := os.ReadFile(filepath.Join(repoRoot(), ".env"))
+	if err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "QV_HSM_PIN="); ok && v != "" {
+				return v, nil
+			}
+		}
+	}
+	return "", ErrNoPIN
+}
+
+func repoRoot() string {
+	_, f, _, _ := runtime.Caller(0)
+	return filepath.Clean(filepath.Join(filepath.Dir(f), "..", "..", ".."))
+}
+
+// PIN returns the user PIN (see LookupPIN). Without one the test is skipped, or fails under QV_REQUIRE_HSM=1, with a message naming `make dev-env`.
+func PIN(t testing.TB) string {
+	t.Helper()
+	p, err := LookupPIN()
+	if err != nil {
+		unavailable(t, "%v", err)
+	}
+	return p
 }
 
 // Lib loads the PKCS#11 library from hsm.DefaultLibPath and closes it on cleanup.
@@ -42,12 +69,12 @@ func Lib(t testing.TB) *hsm.Lib {
 	return lib
 }
 
-// Token opens the token with the given label (logged in with PIN()) and closes
+// Token opens the token with the given label (logged in with PIN(t)) and closes
 // it on cleanup.
 func Token(t testing.TB, label string) *hsm.Token {
 	t.Helper()
 	lib := Lib(t)
-	tok, err := lib.OpenToken(label, PIN())
+	tok, err := lib.OpenToken(label, PIN(t))
 	if errors.Is(err, hsm.ErrTokenNotFound) {
 		unavailable(t, "%v: run `make setup`", err)
 	}

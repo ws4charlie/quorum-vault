@@ -65,7 +65,9 @@ jobs:
       - name: Install SoftHSM2
         run: sudo apt-get update && sudo apt-get install -y softhsm2
       - name: Set up tokens
-        run: ./scripts/setup-softhsm.sh
+        run: |
+          ./scripts/dev-env.sh
+          ./scripts/setup-softhsm.sh
       - run: go vet ./...
       # -p 1: test binaries share the SoftHSM token files; a process that
       # C_Initialize's while another writes a token object can miss that
@@ -93,6 +95,7 @@ jobs:
       - name: Install SoftHSM2 and create the tokens
         run: |
           sudo apt-get install -y softhsm2
+          ./scripts/dev-env.sh
           ./scripts/setup-softhsm.sh
       # Key: pinned cb-mpc commit + build script. Changing either rebuilds OpenSSL and the library (about 2 minutes).
       - name: Cache cb-mpc build

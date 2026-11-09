@@ -151,6 +151,8 @@ set -m # each lane in its own process group, so one kill reaches the group's go 
 # ---- go ----
 for t in docker go softhsm2-util; do command -v "$t" >/dev/null || die "$t not found"; done
 docker info >/dev/null 2>&1 || die "docker is not running"
+. "$ROOT/scripts/lib-pins.sh"
+qv_load_pins --so || die "no SoftHSM PINs"
 [ -d mpc-party/.deps ] || die "cb-mpc is not built: run make mpc-build first"
 mkdir -p "$OUT"
 check_ports

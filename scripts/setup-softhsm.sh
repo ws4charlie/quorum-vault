@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Creates the repo-local SoftHSM2 token store (./data/softhsm) and initialises
 # the project's tokens. Idempotent: existing tokens are left untouched.
-# PINs are DEV-ONLY defaults (see .env.example); never use them for anything real.
+# The PINs come from the environment or ./.env (`make dev-env` generates them); there is no default.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOFTHSM_DIR="${QV_SOFTHSM_DIR:-$ROOT/data/softhsm}" # QV_SOFTHSM_DIR: another token store (scripts/e2e-all.sh gives each lane its own)
 TOKEN_DIR="$SOFTHSM_DIR/tokens"
 CONF="$SOFTHSM_DIR/softhsm2.conf"
-SO_PIN="${QV_HSM_SO_PIN:-so-dev-1234}"
-USER_PIN="${QV_HSM_PIN:-user-dev-1234}"
+# shellcheck source=lib-pins.sh
+. "$ROOT/scripts/lib-pins.sh"
+qv_load_pins --so || exit 1
+SO_PIN="$QV_HSM_SO_PIN"
+USER_PIN="$QV_HSM_PIN"
 TOKENS=(quorumvault qv-party-1 qv-party-2 qv-party-3 qv-cold)
 
 command -v softhsm2-util >/dev/null || {

@@ -338,7 +338,9 @@ func TestRefillTheLostSignedFileBroadcastByHandIsNamedByReconcile(t *testing.T) 
 	}
 }
 
-// restartNode restarts the compose bitcoind (it runs with -persistmempool=0, so it comes back with an empty mempool) and waits for it.
+// restartNode restarts the compose bitcoind (it runs with -persistmempool=0, so it comes back with an empty mempool) and waits for it. A restarted
+// bitcoind has a new cookie: the harness's clients and the system's config get the new one (the processes read the config when they start, so the
+// caller starts the worker again; a running core would still hold the old cookie, see restartCore).
 func (s *system) restartNode() {
 	s.t.Helper()
 	cmd := exec.Command("docker", "compose", "--profile", "btc", "restart", "bitcoind")
@@ -346,8 +348,22 @@ func (s *system) restartNode() {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		s.t.Fatalf("restart bitcoind: %v\n%s", err, out)
 	}
-	s.waitFor(90*time.Second, "bitcoind is back", func() bool { return s.node.root.Call(s.ctx, nil, "getblockcount") == nil })
+	s.waitFor(90*time.Second, "bitcoind is back", func() bool {
+		u, p, err := readCookie() // fails while the container is down; may still be the old cookie until bitcoind has started
+		if err != nil {
+			return false
+		}
+		s.node.root = newRPCWith(nodeURL(), u, p)
+		return s.node.root.Call(s.ctx, nil, "getblockcount") == nil
+	})
+	forgetRPCCreds()
+	s.node.w = newRPC(s.t, nodeURL()+"/wallet/"+s.node.walletName)
 	_ = s.node.root.Call(s.ctx, nil, "loadwallet", s.node.walletName)
+	u, p := rpcCreds(s.t)
+	s.cf.Chain.BTC.RPCUser, s.cf.Chain.BTC.RPCPassword = u, p
+	s.writeConfig(s.cf)
+	s.core.stop() // the running core holds the old cookie
+	s.startCore()
 }
 
 func (s *system) nodeKnows(txid string) bool {

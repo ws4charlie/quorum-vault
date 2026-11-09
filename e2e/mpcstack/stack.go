@@ -42,6 +42,8 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
+
+	"github.com/ws4charlie/quorum-vault/internal/hsm/hsmtest"
 )
 
 // ---- binaries ----
@@ -76,20 +78,18 @@ func RepoRoot() string {
 	return filepath.Clean(filepath.Join(filepath.Dir(f), "..", ".."))
 }
 
-// SoftHSMEnv is the environment the parties need to open their tokens: the repo-local SoftHSM config and the dev PIN.
+// SoftHSMEnv is the environment the parties need to open their tokens: the repo-local SoftHSM config and the PIN (QV_HSM_PIN, or the .env that
+// `make dev-env` writes). There is no default PIN: without one it panics with a message naming `make dev-env`.
 func SoftHSMEnv() []string {
-	env := []string{"QV_HSM_PIN=" + pin()}
+	pin, err := hsmtest.LookupPIN()
+	if err != nil {
+		panic(err)
+	}
+	env := []string{"QV_HSM_PIN=" + pin}
 	if os.Getenv("SOFTHSM2_CONF") == "" {
 		env = append(env, "SOFTHSM2_CONF="+filepath.Join(RepoRoot(), "data", "softhsm", "softhsm2.conf"))
 	}
 	return env
-}
-
-func pin() string {
-	if p := os.Getenv("QV_HSM_PIN"); p != "" {
-		return p
-	}
-	return "user-dev-1234"
 }
 
 // SealerConfig is the sealer section of a party config: the party's own SoftHSM token (A: qv-party-1, B: qv-party-2).
