@@ -32,7 +32,7 @@ func (s *system) checkKafka(timeout time.Duration) {
 	}
 	rows.Close()
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers("127.0.0.1:19092"),
+	cl, err := kgo.NewClient(kgo.SeedBrokers(kafkaBrokers()),
 		kgo.ConsumeTopics(outbox.TopicDeposits, outbox.TopicWithdrawals, outbox.TopicSweeps, outbox.TopicAudit),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
 	if err != nil {

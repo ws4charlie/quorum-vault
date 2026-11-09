@@ -65,6 +65,14 @@ var (
 	mpcBin   mpcstack.Binaries
 )
 
+// kafkaBrokers is the Redpanda address: QV_KAFKA_BROKERS, default 127.0.0.1:19092 (a parallel local run gives each its own).
+func kafkaBrokers() string {
+	if v := os.Getenv("QV_KAFKA_BROKERS"); v != "" {
+		return v
+	}
+	return "127.0.0.1:19092"
+}
+
 // mpcMode reports whether the hot keys are two-party MPC keys (QV_CUSTODY_SIGNER=mpc) instead of HSM keys (hsm, the default).
 func mpcMode() bool { return os.Getenv("QV_CUSTODY_SIGNER") == "mpc" }
 
@@ -825,11 +833,11 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 func (s *system) startGateway() {
 	s.gateway = s.spawn("qv-gateway", []string{"QV_HSM_PIN=" + hsmtest.PIN()},
 		"-config", s.gwPath, "-jobs-dsn", s.gatewayJobsDSN(), "-guard-dsn", s.guardDSN, "-interval", "200ms", "-lease", gatewayLease(s.o),
-		"-worker-id", "gw-"+uuid.NewString()[:6], "-brokers", "127.0.0.1:19092", "-audit-source", s.auditSrc+"-gateway", "-anchor-interval", "2s")
+		"-worker-id", "gw-"+uuid.NewString()[:6], "-brokers", kafkaBrokers(), "-audit-source", s.auditSrc+"-gateway", "-anchor-interval", "2s")
 }
 
 func (s *system) startRelay() {
-	s.relay = s.spawn("qv-relay", nil, "-dsn", s.bizDSN, "-brokers", "127.0.0.1:19092", "-idle", "200ms",
+	s.relay = s.spawn("qv-relay", nil, "-dsn", s.bizDSN, "-brokers", kafkaBrokers(), "-idle", "200ms",
 		"-audit-source", s.auditSrc+"-core", "-anchor-interval", "2s")
 }
 

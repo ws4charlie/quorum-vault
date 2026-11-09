@@ -53,7 +53,7 @@ ln -sfn "$(basename "$SSL")" "$D/openssl"   # relative: the cache can move
 
 GEN=()
 command -v ninja >/dev/null 2>&1 && GEN=(-G Ninja)
-cmake -S "$SRC" -B "$SRC/build/Release" "${GEN[@]}" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
+cmake -S "$SRC" -B "$SRC/build/Release" ${GEN[@]+"${GEN[@]}"} -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF \
   -DCBMPC_OPENSSL_ROOT="$SSL" >/dev/null
 cmake --build "$SRC/build/Release" -j"$( (nproc || sysctl -n hw.ncpu) 2>/dev/null || echo 2)" >/dev/null
 test -f "$SRC/lib/Release/libcbmpc.a"

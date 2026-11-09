@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOFTHSM_DIR="$ROOT/data/softhsm"
+SOFTHSM_DIR="${QV_SOFTHSM_DIR:-$ROOT/data/softhsm}" # QV_SOFTHSM_DIR: another token store (scripts/e2e-all.sh gives each lane its own)
 TOKEN_DIR="$SOFTHSM_DIR/tokens"
 CONF="$SOFTHSM_DIR/softhsm2.conf"
 SO_PIN="${QV_HSM_SO_PIN:-so-dev-1234}"
