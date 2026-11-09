@@ -43,6 +43,9 @@ type btcEnv struct {
 	part1   string
 	partS   string
 	xpubStr string // the account xpub
+	// notAfter is the expiry of every withdrawal intent of this env, fixed once: a clock read per request would put a second boundary between two
+	// requests of one job and give them different intent hashes.
+	notAfter int64
 }
 
 func newBTCEnv(t *testing.T) *btcEnv {
@@ -57,7 +60,7 @@ func newBTCEnv(t *testing.T) *btcEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &btcEnv{t: t, acct: acct, priv: k, part: "qv-us/btc-cos/BTC/hot/omnibus/0", part1: "qv-us/btc-cos/BTC/hot/segregated:beta/0", partS: "qv-us/btc-cos/BTC/hot/segregated:acme/0"}
+	e := &btcEnv{t: t, notAfter: time.Now().Add(time.Hour).Unix(), acct: acct, priv: k, part: "qv-us/btc-cos/BTC/hot/omnibus/0", part1: "qv-us/btc-cos/BTC/hot/segregated:beta/0", partS: "qv-us/btc-cos/BTC/hot/segregated:acme/0"}
 	e.xpubStr = xpub.String()
 	e.hot0, _ = acct.Address([]uint32{1, 0})
 	e.hot1, _ = acct.Address([]uint32{1, 1})
@@ -122,7 +125,7 @@ func (e *btcEnv) request(id string, in signjob.Intent, p btc.Payload, i int, key
 	}
 	in.Chain, in.Asset = btcChain, "BTC"
 	if in.Kind == "withdrawal" {
-		in.NotAfter = time.Now().Add(time.Hour).Unix()
+		in.NotAfter = e.notAfter
 	}
 	u, err := btc.BuildUnsigned(p, e.acct)
 	if err != nil {
