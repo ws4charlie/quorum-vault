@@ -57,7 +57,13 @@ func (s *Server) openGroup(ctx context.Context, name string, open *pb.Open, with
 	if withLink {
 		open.Group = newSID()
 	}
-	open.Scheme, open.Initiator = pb.Scheme_SCHEME_ECDSA_2OF3, "A"
+	if open.Scheme == pb.Scheme_SCHEME_UNSPECIFIED { // DKG names its scheme; every other operation follows the stored keyset
+		open.Scheme = pb.Scheme_SCHEME_ECDSA_2OF3
+		if st, err := s.store.State(ctx, open.KeysetId); err == nil && isTScheme(st.Scheme) {
+			open.Scheme = pb.Scheme(st.Scheme)
+		}
+	}
+	open.Initiator = "A"
 	out := map[string]*groupSess{}
 	abort := func(why string) {
 		for _, g := range out {
@@ -220,7 +226,7 @@ func (s *Server) execGroup(ctx context.Context, open *pb.Open, me string, mesh c
 	case pb.Op_OP_DKG:
 		opn, gen = "dkg", 1
 		var err error
-		k, err = cbmpc.TDKG(ctx, mesh, self, s.keygenOpts()...)
+		k, err = cbmpc.TDKGAlg(ctx, mesh, self, schemeAlg(open.Scheme), s.keygenOpts()...)
 		if err != nil {
 			return nil, nil, fromWrapper("dkg", err)
 		}
@@ -229,6 +235,9 @@ func (s *Server) execGroup(ctx context.Context, open *pb.Open, me string, mesh c
 		old, g, err := s.tkey(ctx, id, open.Generation)
 		if err != nil {
 			return nil, nil, err
+		}
+		if open.Scheme != algScheme(old.Alg()) {
+			return nil, nil, invalid("refresh", "keyset %q is %s, the request names %s", id, schemeName(algScheme(old.Alg())), schemeName(open.Scheme))
 		}
 		gen = g + 1
 		k, err = old.Refresh(ctx, mesh, s.keygenOpts()...)
@@ -240,13 +249,13 @@ func (s *Server) execGroup(ctx context.Context, open *pb.Open, me string, mesh c
 	}
 	// Mandatory: the three-way SelfTest proves that every pair signs with the new shares. Refresh and DKG can report
 	// success on every member and still leave shares that do not sign together.
-	if err := k.SelfTest(ctx, mesh, selfTestLabel(id, gen), s.opts()...); err != nil {
+	if err := k.SelfTest(ctx, mesh, selfTestLabel(k.Alg(), id, gen), s.opts()...); err != nil {
 		k.Wipe() // the old shares stay in force
 		return nil, nil, fromWrapper(opn+".selftest", err)
 	}
 	if fi := s.fi; fi != nil && fi.FailSelfTest != nil && fi.FailSelfTest(opn, me) {
 		k.Wipe()
-		return nil, nil, &cbmpc.Error{Kind: cbmpc.KindCryptographic, Op: "tecdsa.selftest", Msg: "injected self-test failure"}
+		return nil, nil, &cbmpc.Error{Kind: cbmpc.KindCryptographic, Op: "selftest", Msg: "injected self-test failure"}
 	}
 	failpoint("after_selftest")
 	return &candidateT{id: id, gen: gen, k: k}, k.PublicKey(), nil
@@ -310,7 +319,7 @@ func (s *Server) commitAT(ctx context.Context, name string, open *pb.Open, sess 
 	s.store.DeleteGenerationsBelow(ctx, c.id, c.gen)
 	failpoint("a_after_delete_old")
 	rt.setResolved(true)
-	s.log.Warn("keyset moved to a new generation: existing backups are STALE, export new backups", "role", "A", "scheme", "ecdsa-2of3", "keyset_id", c.id, "generation", c.gen)
+	s.log.Warn("keyset moved to a new generation: existing backups are STALE, export new backups", "role", "A", "scheme", s.schemeLog(c.id), "keyset_id", c.id, "generation", c.gen)
 	// Keep the gate until both followers took the confirmation (their handlers returning end the streams).
 	for _, r := range roles {
 		select {
@@ -337,6 +346,8 @@ func (s *Server) groupPrecheck(ctx context.Context, open *pb.Open) (kind pb.Erro
 		}
 		if st, err := s.store.State(ctx, id); err == nil && st.Current != 0 {
 			return pb.ErrorKind_ERROR_KIND_INTERNAL, "keyset already exists on this party", false
+		} else if err == nil && st.Scheme != int32(open.Scheme) {
+			return pb.ErrorKind_ERROR_KIND_REFUSED, "keyset " + id + " exists on this party with another scheme", false
 		} else if err != nil && !errors.Is(err, ErrNotFound) {
 			return pb.ErrorKind_ERROR_KIND_INTERNAL, "keyset store error", false
 		}
@@ -347,6 +358,9 @@ func (s *Server) groupPrecheck(ctx context.Context, open *pb.Open) (kind pb.Erro
 				return pb.ErrorKind_ERROR_KIND_UNAVAILABLE, f.Msg, false
 			}
 			return pb.ErrorKind_ERROR_KIND_INTERNAL, "unknown 2-of-3 keyset on this party", false
+		}
+		if st, err := s.store.State(ctx, id); err == nil && st.Scheme != int32(open.Scheme) {
+			return pb.ErrorKind_ERROR_KIND_REFUSED, "keyset " + id + " is " + schemeName(pb.Scheme(st.Scheme)) + ", the request names " + schemeName(open.Scheme), false
 		}
 		if !s.rt(id).isResolved() {
 			return pb.ErrorKind_ERROR_KIND_UNAVAILABLE, "keyset is not reconciled with the peers yet (after a restart or restore)", false
@@ -370,7 +384,7 @@ func (s *Server) runGroupFollower(ctx context.Context, open *pb.Open, me string,
 	outcome := "ok"
 	var ferr *Fail
 	defer func() {
-		s.log.Info("session", "role", me, "op", opName, "scheme", "ecdsa-2of3", "session", sid, "keyset_id", open.KeysetId,
+		s.log.Info("session", "role", me, "op", opName, "scheme", schemeName(open.Scheme), "session", sid, "keyset_id", open.KeysetId,
 			"duration_ms", time.Since(start).Milliseconds(), "outcome", outcome,
 			"kind", func() string {
 				if ferr != nil {
@@ -457,7 +471,7 @@ func (s *Server) runGroupFollower(ctx context.Context, open *pb.Open, me string,
 	failpoint(strings.ToLower(me) + "_after_confirm_recv")
 	s.store.DeleteGenerationsBelow(ctx, cand.id, cand.gen)
 	rt.setResolved(true)
-	s.log.Warn("keyset moved to a new generation: existing backups are STALE, export new backups", "role", me, "scheme", "ecdsa-2of3", "keyset_id", cand.id, "generation", cand.gen)
+	s.log.Warn("keyset moved to a new generation: existing backups are STALE, export new backups", "role", me, "scheme", s.schemeLog(cand.id), "keyset_id", cand.id, "generation", cand.gen)
 	return nil
 }
 
@@ -504,7 +518,7 @@ func (s *Server) unfreezeFollow(ctx context.Context, stream pb.Peer_SessionServe
 	if from != "A" || open.Initiator != "A" || !validID(open.KeysetId) {
 		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "unfreeze only from party A")
 	}
-	if st, err := s.store.State(ctx, open.KeysetId); err != nil || st.Scheme != int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+	if st, err := s.store.State(ctx, open.KeysetId); err != nil || !isTScheme(st.Scheme) || st.Scheme != int32(open.Scheme) {
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "unknown 2-of-3 keyset on this party")
 	}
 	key, err := s.admin.check("unfreeze", open.KeysetId, open.Admin)
@@ -527,7 +541,7 @@ func (s *Server) unfreezeFollow(ctx context.Context, stream pb.Peer_SessionServe
 		tr.sendFin(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_INTERNAL, Message: "cannot unfreeze: " + err.Error()})
 		return nil
 	}
-	s.log.Warn("AUDIT keyset unfrozen", "role", s.cfg.Role, "scheme", "ecdsa-2of3", "keyset_id", open.KeysetId, "admin_key", key, "session", sid)
+	s.log.Warn("AUDIT keyset unfrozen", "role", s.cfg.Role, "scheme", s.schemeLog(open.KeysetId), "keyset_id", open.KeysetId, "admin_key", key, "session", sid)
 	tr.sendFin(&pb.Fin{Ok: true})
 	return nil
 }

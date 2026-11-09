@@ -63,7 +63,7 @@ func (s *Server) coordinateSignT(ctx context.Context, open *pb.Open, rateKey str
 	if err != nil {
 		return nil, err
 	}
-	open.Generation, open.Scheme, open.Initiator = gen, pb.Scheme_SCHEME_ECDSA_2OF3, s.cfg.Role
+	open.Generation, open.Scheme, open.Initiator = gen, algScheme(tk.Alg()), s.cfg.Role
 	open.ExpectedPublicKey = tk.PublicKey()
 	if !s.rl.allow(rateKey) {
 		return nil, limitFail("sign", "rate limit of %.0f sessions/s exceeded for %q", s.cfg.Limits.SessionsPerSecKey, rateKey)
@@ -182,7 +182,7 @@ func (s *Server) signViaPeer(ctx context.Context, open *pb.Open, tk *cbmpc.TKey,
 		return nil, started, fail(err)
 	}
 	pub := tk.PublicKey()
-	if err := verifySignature(cbmpc.ECDSA, pub, open.Digest, sig); err != nil {
+	if err := verifySignature(tk.Alg(), pub, open.Digest, sig); err != nil {
 		return nil, started, fail(failf(pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, codes.Aborted, name, "signature failed local verification: %v", err))
 	}
 	finCtx, c4 := context.WithTimeout(ctx, s.cfg.Limits.RecvTimeout())
@@ -247,7 +247,14 @@ func (s *Server) signFollowT(ctx context.Context, stream pb.Peer_SessionServer, 
 	if len(open.ExpectedPublicKey) == 0 {
 		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "sign without an expected public key: this party cannot tell which key it would sign with")
 	}
-	if open.Algorithm != pb.Algorithm_ALGORITHM_ECDSA_SECP256K1 || len(open.Digest) != 32 {
+	if open.Scheme != algScheme(tk.Alg()) {
+		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "the request is for "+schemeName(open.Scheme)+", this keyset is "+schemeName(algScheme(tk.Alg())))
+	}
+	if tk.Alg() == cbmpc.Ed25519 {
+		if open.Algorithm != pb.Algorithm_ALGORITHM_ED25519 || len(open.Digest) == 0 || len(open.Digest) > cbmpc.MaxEdMessage {
+			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "a 2-of-3 Ed25519 keyset signs a whole message of 1 to 65536 bytes")
+		}
+	} else if open.Algorithm != pb.Algorithm_ALGORITHM_ECDSA_SECP256K1 || len(open.Digest) != 32 {
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "a 2-of-3 keyset signs 32-byte ECDSA digests")
 	}
 	// The party re-verifies what it is asked to sign BEFORE it joins: its own cosigner, in every role. The cosigner judges the key the
@@ -273,7 +280,7 @@ func (s *Server) signFollowT(ctx context.Context, stream pb.Peer_SessionServer, 
 	outcome := "ok"
 	var ferr *Fail
 	defer func() {
-		s.log.Info("session", "role", s.cfg.Role, "op", opName, "scheme", "ecdsa-2of3", "from", from, "session", sid, "job_id", open.JobId,
+		s.log.Info("session", "role", s.cfg.Role, "op", opName, "scheme", s.schemeLog(id), "from", from, "session", sid, "job_id", open.JobId,
 			"keyset_id", id, "duration_ms", time.Since(start).Milliseconds(), "outcome", outcome,
 			"kind", func() string {
 				if ferr != nil {

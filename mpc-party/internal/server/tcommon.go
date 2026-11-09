@@ -32,7 +32,38 @@ const (
 	CodePlan           uint32 = 0xff0c0004 // reconciliation found a member that is stale or has lost its state: operator action needed
 )
 
-func isT(open *pb.Open) bool { return open.GetScheme() == pb.Scheme_SCHEME_ECDSA_2OF3 }
+func isT(open *pb.Open) bool { return isTScheme(int32(open.GetScheme())) }
+
+// isTScheme reports whether a stored or requested scheme is a 2-of-3 threshold scheme. The two threshold schemes share every
+// code path (links, coordinator order, fallback, DKG and refresh with the three-way commit, self-test, freeze, reconcile,
+// backup); they differ only in the wrapper algorithm, what Sign carries and how a signature is checked (see schemeAlg).
+func isTScheme(sc int32) bool {
+	return sc == int32(pb.Scheme_SCHEME_ECDSA_2OF3) || sc == int32(pb.Scheme_SCHEME_ED25519_2OF3)
+}
+
+// schemeAlg is the wrapper algorithm of a threshold scheme.
+func schemeAlg(sc pb.Scheme) cbmpc.Alg {
+	if sc == pb.Scheme_SCHEME_ED25519_2OF3 {
+		return cbmpc.Ed25519
+	}
+	return cbmpc.ECDSA
+}
+
+// algScheme is the inverse of schemeAlg.
+func algScheme(a cbmpc.Alg) pb.Scheme {
+	if a == cbmpc.Ed25519 {
+		return pb.Scheme_SCHEME_ED25519_2OF3
+	}
+	return pb.Scheme_SCHEME_ECDSA_2OF3
+}
+
+// schemeName is the scheme as written in logs and backup files.
+func schemeName(sc pb.Scheme) string {
+	if sc == pb.Scheme_SCHEME_ED25519_2OF3 {
+		return "ed25519-2of3"
+	}
+	return "ecdsa-2of3"
+}
 
 // memberRole maps a role letter to the wrapper's member number.
 func roleMember(r string) cbmpc.Member { return memberOf(r) }
@@ -61,7 +92,7 @@ func (c *tkeyCache) get(ctx context.Context, s *Server, id string, wantGen uint6
 	if err != nil {
 		return nil, 0, fromWrapper("keyset", err)
 	}
-	if st.Scheme != int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+	if !isTScheme(st.Scheme) {
 		return nil, 0, invalid("keyset", "keyset %q is not a 2-of-3 keyset", id)
 	}
 	if wantGen != 0 && st.Current != wantGen {
@@ -228,8 +259,11 @@ func meshOf(self string, links map[string]*sessTransport) *cbmpc.LinkMesh {
 	return cbmpc.NewLinkMesh(roleMember(self), m)
 }
 
-// selfTestLabel binds a self-test to a keyset and generation.
-func selfTestLabel(id string, gen uint64) []byte {
+// selfTestLabel binds a self-test to a scheme, a keyset and a generation. The ECDSA label is what it always was.
+func selfTestLabel(alg cbmpc.Alg, id string, gen uint64) []byte {
+	if alg == cbmpc.Ed25519 {
+		return []byte("qv-mpc|teddsa-selftest|" + id + "|" + itoa(gen))
+	}
 	return []byte("qv-mpc|tecdsa-selftest|" + id + "|" + itoa(gen))
 }
 
@@ -248,3 +282,19 @@ func itoa(u uint64) string {
 }
 
 var _ = time.Second
+
+// schemeLog names the scheme of a stored keyset for log lines.
+func (s *Server) schemeLog(id string) string {
+	if st, err := s.store.State(context.Background(), id); err == nil && isTScheme(st.Scheme) {
+		return schemeName(pb.Scheme(st.Scheme))
+	}
+	return "2of3"
+}
+
+// keysetScheme is the stored scheme of a threshold keyset (ECDSA when it is not one, which cannot reach the callers).
+func (s *Server) keysetScheme(id string) pb.Scheme {
+	if st, err := s.store.State(context.Background(), id); err == nil && isTScheme(st.Scheme) {
+		return pb.Scheme(st.Scheme)
+	}
+	return pb.Scheme_SCHEME_ECDSA_2OF3
+}

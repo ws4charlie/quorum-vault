@@ -33,6 +33,30 @@ var crashSteps3 = []crashStep{
 	{"a_after_delete_old", "A", "all done on A, the response to the caller is lost"},
 }
 
+// crashCase is one step of the matrix for one scheme. ECDSA runs every step. The durable two-phase commit, its recovery and
+// reconciliation do not look at the scheme (they handle a sealed share and a public key), so Ed25519 runs the steps that
+// cover each distinct kind of recovery: the candidate only in memory, a candidate stored on a follower, A's durable
+// decision, a follower that switched, and the final deletion. Together about a third of the matrix.
+type crashCase struct {
+	crashStep
+	sc pb.Scheme
+}
+
+var edCrashSteps = map[string]bool{
+	"after_selftest@B": true, "c_after_candidate_stored@C": true, "a_after_decision@A": true,
+	"b_after_promote@B": true, "a_after_delete_old@A": true,
+}
+
+func crashCases() (out []crashCase) {
+	for _, st := range crashSteps3 {
+		out = append(out, crashCase{st, pb.Scheme_SCHEME_ECDSA_2OF3})
+		if edCrashSteps[st.name+"@"+st.role] {
+			out = append(out, crashCase{st, pb.Scheme_SCHEME_ED25519_2OF3})
+		}
+	}
+	return
+}
+
 func (cl *cluster3) armed(t *testing.T, role, failpoint string) {
 	t.Helper()
 	cl.restart(t, role, "QV_FAILPOINT="+failpoint)
@@ -49,10 +73,10 @@ func (cl *cluster3) diedAt(t *testing.T, role string) {
 }
 
 func TestCrashMatrixThresholdRefresh(t *testing.T) {
-	for _, st := range crashSteps3 {
+	for _, st := range crashCases() {
 		st := st
-		t.Run(fmt.Sprintf("%s@%s", st.name, st.role), func(t *testing.T) {
-			cl := newCluster3(t, nil)
+		t.Run(fmt.Sprintf("%s/%s@%s", schemeName(st.sc), st.name, st.role), func(t *testing.T) {
+			cl := newCluster3S(t, st.sc, nil)
 			pub := cl.dkg(t, "k")
 			g0 := cl.waitConverged3(t, "k", true)
 			cl.armed(t, st.role, st.name)
@@ -82,12 +106,12 @@ func TestCrashMatrixThresholdRefresh(t *testing.T) {
 func bytes_equal(a, b []byte) bool { return string(a) == string(b) }
 
 func TestCrashMatrixThresholdDKG(t *testing.T) {
-	for _, st := range crashSteps3 {
+	for _, st := range crashCases() {
 		st := st
-		t.Run(fmt.Sprintf("%s@%s", st.name, st.role), func(t *testing.T) {
-			cl := newCluster3(t, nil)
+		t.Run(fmt.Sprintf("%s/%s@%s", schemeName(st.sc), st.name, st.role), func(t *testing.T) {
+			cl := newCluster3S(t, st.sc, nil)
 			cl.armed(t, st.role, st.name)
-			_, derr := cl.client["A"].DKG(ctx(t, 3*time.Minute), &pb.DKGRequest{KeysetId: "k", Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: cl.env.Admin("dkg", "k")})
+			_, derr := cl.client["A"].DKG(ctx(t, 3*time.Minute), &pb.DKGRequest{KeysetId: "k", Scheme: st.sc, Admin: cl.env.Admin("dkg", "k")})
 			cl.diedAt(t, st.role)
 			t.Logf("died at %s (%s); DKG returned: %v", st.name, st.what, derr)
 			cl.restart(t, st.role)
@@ -131,108 +155,110 @@ func TestCrashMatrixThresholdDKG(t *testing.T) {
 // ---- backup and restore of one lost member ----
 
 func TestThresholdBackupRestoreLostMember(t *testing.T) {
-	cl := newCluster3(t, pkcs11Tweak(t))
-	pub := cl.dkg(t, "k")
-	cl.refresh(t, "k")
-	cl.waitConverged3(t, "k", true) // generation 2
+	forSchemes(t, func(t *testing.T, sc pb.Scheme) {
+		cl := newCluster3S(t, sc, pkcs11Tweak(t))
+		pub := cl.dkg(t, "k")
+		cl.refresh(t, "k")
+		cl.waitConverged3(t, "k", true) // generation 2
 
-	dir := t.TempDir()
-	priv, rpub := filepath.Join(dir, "recovery.private"), filepath.Join(dir, "recovery.public")
-	mustCLI(t, "gen-recovery-key", "-private", priv, "-public", rpub)
-	export := func(suffix string) map[string]string {
-		files := map[string]string{}
-		for _, role := range []string{"A", "B", "C"} {
-			f := filepath.Join(dir, strings.ToLower(role)+"-"+suffix+".bk")
-			out := mustCLI(t, "export", "-config", cl.paths[role], "-keyset", "k", "-recovery-public", rpub, "-out", f)
-			if !strings.Contains(out, "VERIFIED") {
-				t.Fatalf("export did not verify:\n%s", out)
+		dir := t.TempDir()
+		priv, rpub := filepath.Join(dir, "recovery.private"), filepath.Join(dir, "recovery.public")
+		mustCLI(t, "gen-recovery-key", "-private", priv, "-public", rpub)
+		export := func(suffix string) map[string]string {
+			files := map[string]string{}
+			for _, role := range []string{"A", "B", "C"} {
+				f := filepath.Join(dir, strings.ToLower(role)+"-"+suffix+".bk")
+				out := mustCLI(t, "export", "-config", cl.paths[role], "-keyset", "k", "-recovery-public", rpub, "-out", f)
+				if !strings.Contains(out, "VERIFIED") {
+					t.Fatalf("export did not verify:\n%s", out)
+				}
+				mustCLI(t, "verify", "-file", f, "-recovery-public", rpub)
+				files[role] = f
 			}
-			mustCLI(t, "verify", "-file", f, "-recovery-public", rpub)
-			files[role] = f
+			return files
 		}
-		return files
-	}
-	g2 := export("g2")
-	for role, h := range cl.health(t) {
-		if s := statusOf(h, "k"); s.BackupGeneration != 2 || s.BackupStale {
-			t.Fatalf("party %s health after export: %+v", role, s)
+		g2 := export("g2")
+		for role, h := range cl.health(t) {
+			if s := statusOf(h, "k"); s.BackupGeneration != 2 || s.BackupStale {
+				t.Fatalf("party %s health after export: %+v", role, s)
+			}
 		}
-	}
-	cl.refresh(t, "k") // generation 3: the backups are stale
-	cl.waitConverged3(t, "k", true)
-	for role, h := range cl.health(t) {
-		if s := statusOf(h, "k"); s.Generation != 3 || s.BackupGeneration != 2 || !s.BackupStale {
-			t.Fatalf("party %s health after the refresh: %+v", role, s)
+		cl.refresh(t, "k") // generation 3: the backups are stale
+		cl.waitConverged3(t, "k", true)
+		for role, h := range cl.health(t) {
+			if s := statusOf(h, "k"); s.Generation != 3 || s.BackupGeneration != 2 || !s.BackupStale {
+				t.Fatalf("party %s health after the refresh: %+v", role, s)
+			}
 		}
-	}
-	for _, role := range []string{"A", "B", "C"} {
-		waitLogText(t, cl.procs[role].stderr, "backups are STALE", 5*time.Second)
-	}
-	g3 := export("g3")
+		for _, role := range []string{"A", "B", "C"} {
+			waitLogText(t, cl.procs[role].stderr, "backups are STALE", 5*time.Second)
+		}
+		g3 := export("g3")
 
-	// C is lost: process gone, data directory gone. A stale (generation 2) backup is refused by the others, the
-	// current one is accepted; then a refresh moves all three on and every pair signs.
-	cl.stop("C")
-	must(t, os.RemoveAll(cl.cfgs["C"].DataDir))
-	mustCLI(t, "restore", "-config", cl.paths["C"], "-recovery-private", priv, "-file", g2["C"])
-	cl.start(t, "C")
-	cl.waitReady(t)
-	waitLogText(t, cl.procs["A"].stderr, "party C is on generation 2 but another party is on 3", 30*time.Second)
-	// the stale member is out (unresolved, never signs); the other two keep signing; with B down A has nobody to use
-	if s := statusOf(cl.health(t)["C"], "k"); s == nil || s.Resolved {
-		t.Fatalf("a stale restore must leave the restored member unresolved, got %+v", s)
-	}
-	cl.signUntil(t, "A", "k", "stale-ab", 1, pub)
-	cl.stop("B")
-	if _, err := cl.signRaw("A", "k", "stale-needs-c", 4); err == nil {
-		t.Fatal("signed with a stale member")
-	}
-	cl.start(t, "B")
-	cl.waitUp(t, "B")
-	cl.stop("C")
-	must(t, os.RemoveAll(cl.cfgs["C"].DataDir))
-	mustCLI(t, "restore", "-config", cl.paths["C"], "-recovery-private", priv, "-file", g3["C"])
-	cl.start(t, "C")
-	cl.waitReady(t)
-	cl.waitConverged3(t, "k", true)
-	cl.signUntil(t, "A", "k", "after-restore", 2, pub)
-	cl.refresh(t, "k") // the documented step after a restore
-	if g := cl.waitConverged3(t, "k", true); g != 4 {
-		t.Fatalf("generation %d", g)
-	}
-	cl.signEveryPair(t, "k", pub, "restored-c")
-
-	// B is lost as well (one at a time): restore from a fresh backup and sign with every pair again
-	g4 := export("g4")
-	cl.stop("B")
-	must(t, os.RemoveAll(cl.cfgs["B"].DataDir))
-	mustCLI(t, "restore", "-config", cl.paths["B"], "-recovery-private", priv, "-file", g4["B"])
-	cl.start(t, "B")
-	cl.waitReady(t)
-	cl.waitConverged3(t, "k", true)
-	cl.refresh(t, "k")
-	cl.waitConverged3(t, "k", true)
-	cl.signEveryPair(t, "k", pub, "restored-b")
-
-	// CLI refusals: a share restored into the wrong slot, a tampered file, another recovery key
-	otherPriv, otherPub := filepath.Join(dir, "other.private"), filepath.Join(dir, "other.public")
-	mustCLI(t, "gen-recovery-key", "-private", otherPriv, "-public", otherPub)
-	bad := func(what, wantIn string, args ...string) {
-		t.Helper()
-		out, err := cli(t, binProd, args...)
-		if err == nil || !strings.Contains(out, wantIn) {
-			t.Errorf("%s: want failure containing %q, got err=%v out=%s", what, wantIn, err, out)
+		// C is lost: process gone, data directory gone. A stale (generation 2) backup is refused by the others, the
+		// current one is accepted; then a refresh moves all three on and every pair signs.
+		cl.stop("C")
+		must(t, os.RemoveAll(cl.cfgs["C"].DataDir))
+		mustCLI(t, "restore", "-config", cl.paths["C"], "-recovery-private", priv, "-file", g2["C"])
+		cl.start(t, "C")
+		cl.waitReady(t)
+		waitLogText(t, cl.procs["A"].stderr, "party C is on generation 2 but another party is on 3", 30*time.Second)
+		// the stale member is out (unresolved, never signs); the other two keep signing; with B down A has nobody to use
+		if s := statusOf(cl.health(t)["C"], "k"); s == nil || s.Resolved {
+			t.Fatalf("a stale restore must leave the restored member unresolved, got %+v", s)
 		}
-		if strings.Contains(out, "panic") || strings.Contains(out, "goroutine") {
-			t.Errorf("%s: crashed:\n%s", what, out)
+		cl.signUntil(t, "A", "k", "stale-ab", 1, pub)
+		cl.stop("B")
+		if _, err := cl.signRaw("A", "k", "stale-needs-c", 4); err == nil {
+			t.Fatal("signed with a stale member")
 		}
-	}
-	bad("C's share with B's config", "wrong slot", "restore", "-config", cl.paths["B"], "-recovery-private", priv, "-file", g4["C"])
-	bad("verify with another recovery key", "recovery key", "verify", "-file", g4["C"], "-recovery-public", otherPub)
-	bad("restore with another recovery key", "not the recovery key", "restore", "-config", cl.paths["C"], "-recovery-private", otherPriv, "-file", g4["C"])
-	raw, _ := os.ReadFile(g4["C"])
-	tam := filepath.Join(dir, "tampered.bk")
-	raw[len(raw)/2] ^= 1
-	os.WriteFile(tam, raw, 0o600)
-	bad("verify a tampered backup", "", "verify", "-file", tam, "-recovery-public", rpub)
+		cl.start(t, "B")
+		cl.waitUp(t, "B")
+		cl.stop("C")
+		must(t, os.RemoveAll(cl.cfgs["C"].DataDir))
+		mustCLI(t, "restore", "-config", cl.paths["C"], "-recovery-private", priv, "-file", g3["C"])
+		cl.start(t, "C")
+		cl.waitReady(t)
+		cl.waitConverged3(t, "k", true)
+		cl.signUntil(t, "A", "k", "after-restore", 2, pub)
+		cl.refresh(t, "k") // the documented step after a restore
+		if g := cl.waitConverged3(t, "k", true); g != 4 {
+			t.Fatalf("generation %d", g)
+		}
+		cl.signEveryPair(t, "k", pub, "restored-c")
+
+		// B is lost as well (one at a time): restore from a fresh backup and sign with every pair again
+		g4 := export("g4")
+		cl.stop("B")
+		must(t, os.RemoveAll(cl.cfgs["B"].DataDir))
+		mustCLI(t, "restore", "-config", cl.paths["B"], "-recovery-private", priv, "-file", g4["B"])
+		cl.start(t, "B")
+		cl.waitReady(t)
+		cl.waitConverged3(t, "k", true)
+		cl.refresh(t, "k")
+		cl.waitConverged3(t, "k", true)
+		cl.signEveryPair(t, "k", pub, "restored-b")
+
+		// CLI refusals: a share restored into the wrong slot, a tampered file, another recovery key
+		otherPriv, otherPub := filepath.Join(dir, "other.private"), filepath.Join(dir, "other.public")
+		mustCLI(t, "gen-recovery-key", "-private", otherPriv, "-public", otherPub)
+		bad := func(what, wantIn string, args ...string) {
+			t.Helper()
+			out, err := cli(t, binProd, args...)
+			if err == nil || !strings.Contains(out, wantIn) {
+				t.Errorf("%s: want failure containing %q, got err=%v out=%s", what, wantIn, err, out)
+			}
+			if strings.Contains(out, "panic") || strings.Contains(out, "goroutine") {
+				t.Errorf("%s: crashed:\n%s", what, out)
+			}
+		}
+		bad("C's share with B's config", "wrong slot", "restore", "-config", cl.paths["B"], "-recovery-private", priv, "-file", g4["C"])
+		bad("verify with another recovery key", "recovery key", "verify", "-file", g4["C"], "-recovery-public", otherPub)
+		bad("restore with another recovery key", "not the recovery key", "restore", "-config", cl.paths["C"], "-recovery-private", otherPriv, "-file", g4["C"])
+		raw, _ := os.ReadFile(g4["C"])
+		tam := filepath.Join(dir, "tampered.bk")
+		raw[len(raw)/2] ^= 1
+		os.WriteFile(tam, raw, 0o600)
+		bad("verify a tampered backup", "", "verify", "-file", tam, "-recovery-public", rpub)
+	})
 }

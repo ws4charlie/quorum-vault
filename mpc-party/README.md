@@ -250,9 +250,18 @@ duration, outcome, kind); no secrets.
 
 ## E23-2: 2-of-3 keysets and party C
 
-A keyset has a **scheme**: today's 2-party HD keyset (members A and B; Bitcoin, and EVM until E23-3) or a **2-of-3 threshold ECDSA**
-keyset (members A, B and C; secp256k1, not HD; the keyset IS the key, `Sign` names it as `key_id`). Both kinds live in the same
-processes; a process refuses an operation on a keyset whose scheme it does not hold (party C holds 2-of-3 keysets only).
+A keyset has a **scheme**: today's 2-party HD keyset (members A and B; Bitcoin and the Solana deposit keys), a **2-of-3 threshold
+ECDSA** keyset (members A, B and C; secp256k1, not HD; EVM hot keys) or, since P8-2, a **2-of-3 threshold Ed25519** keyset (the same
+members; Solana hot keys). A 2-of-3 keyset IS the key: `Sign` names it as `key_id`. All kinds live in the same processes; a process
+refuses an operation on a keyset whose scheme it does not hold (party C holds 2-of-3 keysets only).
+
+The two 2-of-3 schemes run through the same code, with the scheme as a parameter: links, coordinator order and fallback, DKG and
+refresh with the three-way commit and self-test, freeze, reconciliation and backup are identical. They differ in three things.
+`Sign` on an Ed25519 keyset carries the whole message (up to 64 KiB) in `digest` and the algorithm `ED25519`, and the coordinator
+checks the 64-byte signature with `crypto/ed25519` against the 32-byte key; an ECDSA keyset takes a 32-byte digest. Ed25519
+signatures are randomized, so the first signature stored under a job id is final: a repeat of the job returns it unchanged and starts
+no session, and the same job id with another message is refused. A request for one scheme on the other scheme's keyset is refused
+with an error that names both, and a DKG, refresh or reconcile that names the wrong scheme is refused by the followers.
 Wrapper, review and numbers: [docs/spikes/e23-threshold.md](../docs/spikes/e23-threshold.md). Learn page:
 [docs/learn/e23-2-three-party-service.md](../docs/learn/e23-2-three-party-service.md).
 

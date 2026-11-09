@@ -197,7 +197,7 @@ func (s *Server) reconcileAT(ctx context.Context, id string) (err error) {
 	pj, _ := json.Marshal(p)
 	if p.Err != "" {
 		sendAll(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_INTERNAL, Message: p.Err})
-		s.log.Error("ALERT keyset cannot be reconciled with the peers: operator action needed", "role", "A", "scheme", "ecdsa-2of3", "keyset_id", id, "reason", p.Err)
+		s.log.Error("ALERT keyset cannot be reconciled with the peers: operator action needed", "role", "A", "scheme", s.schemeLog(id), "keyset_id", id, "reason", p.Err)
 		pf := failf(pb.ErrorKind_ERROR_KIND_INTERNAL, 0, name, "%s", p.Err)
 		pf.CB = CodePlan
 		return pf
@@ -230,9 +230,9 @@ func (s *Server) reconcileAT(ctx context.Context, id string) (err error) {
 		return err
 	}
 	mesh := meshOf("A", map[string]*sessTransport{"B": sess["B"].tr, "C": sess["C"].tr})
-	if err := tk.SelfTest(ctx, mesh, selfTestLabel(id, p.Target), s.opts()...); err != nil {
+	if err := tk.SelfTest(ctx, mesh, selfTestLabel(tk.Alg(), id, p.Target), s.opts()...); err != nil {
 		sendAll(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, Message: "self-test after reconciliation failed"})
-		s.log.Error("ALERT self-test after reconciliation failed", "role", "A", "scheme", "ecdsa-2of3", "keyset_id", id, "generation", p.Target, "error", err.Error())
+		s.log.Error("ALERT self-test after reconciliation failed", "role", "A", "scheme", s.schemeLog(id), "keyset_id", id, "generation", p.Target, "error", err.Error())
 		return err
 	}
 	pub := tk.PublicKey()
@@ -257,7 +257,7 @@ func (s *Server) reconcileAT(ctx context.Context, id string) (err error) {
 	s.store.DeleteGenerationsBelow(ctx, id, p.Target)
 	rt.setResolved(true)
 	rt.setPartial(false)
-	s.log.Info("keyset reconciled and proven", "role", "A", "scheme", "ecdsa-2of3", "keyset_id", id, "generation", p.Target)
+	s.log.Info("keyset reconciled and proven", "role", "A", "scheme", s.schemeLog(id), "keyset_id", id, "generation", p.Target)
 	return nil
 }
 
@@ -286,6 +286,9 @@ func (s *Server) reconcileFollowT(ctx context.Context, open *pb.Open, me string,
 	st, ex, fz, err := s.localStateT(ctx, id)
 	if err != nil {
 		return bail(fromWrapper("reconcile", err))
+	}
+	if ex && st.Scheme != int32(open.Scheme) {
+		return bail(failf(pb.ErrorKind_ERROR_KIND_REFUSED, 0, "reconcile", "keyset %q is %s here, the request names %s", id, schemeName(pb.Scheme(st.Scheme)), schemeName(open.Scheme)))
 	}
 	rb, _ := json.Marshal(stateT{peerKS: stateOf(st, ex), Frozen: fz})
 	if err := control.sendFin(&pb.Fin{Ok: true, Result: rb}); err != nil {
@@ -325,7 +328,7 @@ func (s *Server) reconcileFollowT(ctx context.Context, open *pb.Open, me string,
 		return bail(fromWrapper("reconcile", err))
 	}
 	mesh := meshOf(me, links)
-	if err := tk.SelfTest(ctx, mesh, selfTestLabel(id, p.Target), s.opts()...); err != nil {
+	if err := tk.SelfTest(ctx, mesh, selfTestLabel(tk.Alg(), id, p.Target), s.opts()...); err != nil {
 		return bail(fromWrapper("reconcile.selftest", err))
 	}
 	if err := control.sendFin(&pb.Fin{Ok: true, Result: tk.PublicKey()}); err != nil {
@@ -338,7 +341,7 @@ func (s *Server) reconcileFollowT(ctx context.Context, open *pb.Open, me string,
 	s.store.DeleteGenerationsBelow(ctx, id, p.Target)
 	rt.setResolved(true)
 	rt.setPartial(false)
-	s.log.Info("keyset reconciled and proven", "role", me, "scheme", "ecdsa-2of3", "keyset_id", id, "generation", p.Target)
+	s.log.Info("keyset reconciled and proven", "role", me, "scheme", s.schemeLog(id), "keyset_id", id, "generation", p.Target)
 	return nil
 }
 
@@ -408,7 +411,7 @@ func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 	defer stream.CloseSend()
 	tr := newSessTransport(sid, stream, s.cfg.Limits.MaxFrameBytes, &s.stats)
 	go tr.pump()
-	open := &pb.Open{Op: pb.Op_OP_RECONCILE, KeysetId: id, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Initiator: "A", Reason: "pair"}
+	open := &pb.Open{Op: pb.Op_OP_RECONCILE, KeysetId: id, Scheme: s.keysetScheme(id), Initiator: "A", Reason: "pair"}
 	b, _ := proto.Marshal(open)
 	if err := stream.Send(&pb.Frame{SessionId: sid, Kind: pb.FrameKind_FRAME_KIND_OPEN, Payload: b}); err != nil {
 		return err
@@ -475,11 +478,11 @@ func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 	if err != nil {
 		return err
 	}
-	digest := cbmpc.SelfTestDigest(tk.PublicKey(), append(selfTestLabel(id, as.Current), []byte("|pair")...), 0, roleMember(role))
+	digest := cbmpc.SelfTestDigestAlg(tk.Alg(), tk.PublicKey(), append(selfTestLabel(tk.Alg(), id, as.Current), []byte("|pair")...), 0, roleMember(role))
 	mesh := meshOf("A", map[string]*sessTransport{role: tr})
 	if _, err := tk.Sign(ctx, mesh, roleMember(role), 0, digest, s.opts()...); err != nil {
 		tr.sendFin(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, Message: "pair self-test after reconciliation failed"})
-		s.log.Error("ALERT self-test after reconciliation failed", "role", "A", "scheme", "ecdsa-2of3", "keyset_id", id, "generation", as.Current, "pair", "A+"+role, "error", err.Error())
+		s.log.Error("ALERT self-test after reconciliation failed", "role", "A", "scheme", s.schemeLog(id), "keyset_id", id, "generation", as.Current, "pair", "A+"+role, "error", err.Error())
 		return err
 	}
 	fin, err := step()
@@ -498,7 +501,7 @@ func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 	rt.setResolved(true)
 	rt.setPartial(true)
 	s.log.Warn("keyset reconciled with one member only: the third is unreachable; it is reconciled when it returns", "role", "A",
-		"scheme", "ecdsa-2of3", "keyset_id", id, "generation", as.Current, "with", role)
+		"scheme", s.schemeLog(id), "keyset_id", id, "generation", as.Current, "with", role)
 	return nil
 }
 
@@ -520,6 +523,9 @@ func (s *Server) reconcilePairFollow(ctx context.Context, open *pb.Open, me stri
 	st, ex, fz, err := s.localStateT(ctx, id)
 	if err != nil {
 		return bail(fromWrapper("reconcile", err))
+	}
+	if ex && st.Scheme != int32(open.Scheme) {
+		return bail(failf(pb.ErrorKind_ERROR_KIND_REFUSED, 0, "reconcile", "keyset %q is %s here, the request names %s", id, schemeName(pb.Scheme(st.Scheme)), schemeName(open.Scheme)))
 	}
 	rb, _ := json.Marshal(stateT{peerKS: stateOf(st, ex), Frozen: fz})
 	if err := control.sendFin(&pb.Fin{Ok: true, Result: rb}); err != nil {
@@ -552,7 +558,7 @@ func (s *Server) reconcilePairFollow(ctx context.Context, open *pb.Open, me stri
 		return bail(fromWrapper("reconcile", err))
 	}
 	mesh := meshOf(me, map[string]*sessTransport{"A": control})
-	if _, err := tk.Sign(ctx, mesh, 0, 0, cbmpc.SelfTestDigest(tk.PublicKey(), append(selfTestLabel(id, p.Target), []byte("|pair")...), 0, roleMember(me)), s.opts()...); err != nil {
+	if _, err := tk.Sign(ctx, mesh, 0, 0, cbmpc.SelfTestDigestAlg(tk.Alg(), tk.PublicKey(), append(selfTestLabel(tk.Alg(), id, p.Target), []byte("|pair")...), 0, roleMember(me)), s.opts()...); err != nil {
 		return bail(fromWrapper("reconcile.selftest", err))
 	}
 	if err := control.sendFin(&pb.Fin{Ok: true, Result: tk.PublicKey()}); err != nil {
@@ -564,6 +570,6 @@ func (s *Server) reconcilePairFollow(ctx context.Context, open *pb.Open, me stri
 	}
 	rt.setResolved(true)
 	rt.setPartial(true)
-	s.log.Info("keyset reconciled with party A alone (the third member is unreachable)", "role", me, "scheme", "ecdsa-2of3", "keyset_id", id, "generation", p.Target)
+	s.log.Info("keyset reconciled with party A alone (the third member is unreachable)", "role", me, "scheme", s.schemeLog(id), "keyset_id", id, "generation", p.Target)
 	return nil
 }

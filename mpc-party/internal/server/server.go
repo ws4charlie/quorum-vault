@@ -349,7 +349,7 @@ func (b bCaller) Health(ctx context.Context, r *pb.HealthRequest) (*pb.HealthRes
 
 func (b bCaller) Sign(ctx context.Context, r *pb.SignRequest) (*pb.SignResponse, error) {
 	if validID(r.GetKeyId()) {
-		if st, err := b.s.store.State(ctx, r.KeyId); err == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) && st.Current != 0 {
+		if st, err := b.s.store.State(ctx, r.KeyId); err == nil && isTScheme(st.Scheme) && st.Current != 0 {
 			return b.s.Sign(ctx, r)
 		}
 	}

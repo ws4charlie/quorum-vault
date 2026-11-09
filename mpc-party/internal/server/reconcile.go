@@ -344,7 +344,7 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 			last[id] = time.Now()
 			t0 := time.Now()
 			rec := s.reconcileA
-			if st, e := s.store.State(ctx, id); e == nil && st.Scheme == int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+			if st, e := s.store.State(ctx, id); e == nil && isTScheme(st.Scheme) {
 				rec = s.reconcileTWithFallback
 				if partialRetry {
 					rec = s.reconcileAT
@@ -382,7 +382,7 @@ func (s *Server) watchPeer(ctx context.Context, conn *grpc.ClientConn, name stri
 			n := 0
 			for _, id := range ids {
 				if !allKeysets {
-					if st, err := s.store.State(ctx, id); err != nil || st.Scheme != int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+					if st, err := s.store.State(ctx, id); err != nil || !isTScheme(st.Scheme) {
 						continue
 					}
 				}

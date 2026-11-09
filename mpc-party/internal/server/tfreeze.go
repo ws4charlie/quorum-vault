@@ -46,7 +46,7 @@ func (s *Server) freezeT(id, reason, except, op, job string, peerReported bool) 
 	if already {
 		return
 	}
-	s.log.Error("ALERT keyset frozen after a cryptographic failure", "role", s.cfg.Role, "keyset_id", id, "scheme", "ecdsa-2of3", "op", op,
+	s.log.Error("ALERT keyset frozen after a cryptographic failure", "role", s.cfg.Role, "keyset_id", id, "scheme", s.schemeLog(id), "op", op,
 		"job_id", job, "session_peer", except, "peer_reported", peerReported, "message", reason,
 		"note", "the protocol aborts without blame: the session peer is where the failed message came in, not proven guilty")
 	go s.notifyFreeze(id, reason, except)
@@ -77,7 +77,7 @@ func (s *Server) sendFreezeNotice(role, id, reason string) error {
 	defer stream.CloseSend()
 	tr := newSessTransport(sid, stream, s.cfg.Limits.MaxFrameBytes, &s.stats)
 	go tr.pump()
-	b, _ := proto.Marshal(&pb.Open{Op: pb.Op_OP_FREEZE_NOTICE, KeysetId: id, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Initiator: s.cfg.Role, Reason: reason})
+	b, _ := proto.Marshal(&pb.Open{Op: pb.Op_OP_FREEZE_NOTICE, KeysetId: id, Scheme: s.keysetScheme(id), Initiator: s.cfg.Role, Reason: reason})
 	if err := stream.Send(&pb.Frame{SessionId: sid, Kind: pb.FrameKind_FRAME_KIND_OPEN, Payload: b}); err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func (s *Server) freezeNoticeFollow(stream pb.Peer_SessionServer, sid string, op
 	if from != "A" && from != "B" || open.Initiator != from || !validID(open.KeysetId) {
 		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "freeze notice from an unexpected sender")
 	}
-	if st, err := s.store.State(context.Background(), open.KeysetId); err != nil || st.Scheme != int32(pb.Scheme_SCHEME_ECDSA_2OF3) {
+	if st, err := s.store.State(context.Background(), open.KeysetId); err != nil || !isTScheme(st.Scheme) || st.Scheme != int32(open.Scheme) {
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "unknown 2-of-3 keyset on this party")
 	}
 	reason := open.Reason

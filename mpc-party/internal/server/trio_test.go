@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"net"
 	"sync/atomic"
@@ -23,6 +24,7 @@ type trioOpts struct {
 	auth                      map[string]server.Authorizer
 	fi                        map[string]*server.FaultInjection
 	recvMS                    int
+	scheme                    pb.Scheme // zero value: ECDSA
 }
 
 type trio struct {
@@ -189,13 +191,39 @@ func (tr *trio) waitReady(t *testing.T) {
 
 func (tr *trio) dkg(t *testing.T, id string) []byte {
 	t.Helper()
-	r, err := tr.Client["A"].DKG(ctx30(t), &pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: tr.Env.Admin("dkg", id)})
+	r, err := tr.Client["A"].DKG(ctx30(t), &pb.DKGRequest{KeysetId: id, Scheme: tr.sc(), Admin: tr.Env.Admin("dkg", id)})
 	mustOK(t, err)
 	return r.RootPublicKey
 }
 
+func (tr *trio) sc() pb.Scheme {
+	if tr.opts.scheme == pb.Scheme_SCHEME_UNSPECIFIED {
+		return pb.Scheme_SCHEME_ECDSA_2OF3
+	}
+	return tr.opts.scheme
+}
+
+func (tr *trio) algorithm() pb.Algorithm {
+	if tr.sc() == pb.Scheme_SCHEME_ED25519_2OF3 {
+		return pb.Algorithm_ALGORITHM_ED25519
+	}
+	return pb.Algorithm_ALGORITHM_ECDSA_SECP256K1
+}
+
+// verify checks a signature over digest(seed) for the trio's scheme with independent code.
+func (tr *trio) verify(t *testing.T, pub []byte, seed byte, sig []byte) {
+	t.Helper()
+	if tr.sc() == pb.Scheme_SCHEME_ED25519_2OF3 {
+		if !ed25519.Verify(ed25519.PublicKey(pub), digest(seed), sig) {
+			t.Fatal("Ed25519 signature does not verify")
+		}
+		return
+	}
+	verifyECDSA(t, pub, digest(seed), sig)
+}
+
 func (tr *trio) sign(via, id, job string, seed byte) (*pb.SignResponse, error) {
-	return tr.Client[via].Sign(context.Background(), &pb.SignRequest{KeyId: id, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: digest(seed), JobId: job})
+	return tr.Client[via].Sign(context.Background(), &pb.SignRequest{KeyId: id, Algorithm: tr.algorithm(), Digest: digest(seed), JobId: job})
 }
 
 func (tr *trio) frozen(t *testing.T, role, id string) bool {
@@ -226,64 +254,70 @@ func (tr *trio) waitFrozen(t *testing.T, role, id string, want bool) {
 // Tampering between two members freezes both; the third is told and freezes; nothing signs, through any path, until the
 // operator's signature is accepted by all three. The third member's cosigner is never asked after the failure (no fallback).
 func TestTrioTamperFreezesAllThree(t *testing.T) {
-	cAuth := &countAuth{}
-	tr := startTrio(t, trioOpts{proxyAB: true, auth: map[string]server.Authorizer{"C": cAuth}})
-	pub := tr.dkg(t, "k")
-	px := tr.Proxy["AB"]
-	outcomes := map[string]int{}
-	for _, dir := range []int{0, 1} {
-		for _, n := range []int{0, 2, 4} {
-			px.set(dir, n)
-			job := fmt.Sprintf("tamper-%d-%d", dir, n)
-			cAuth.n.Store(0)
-			r, err := tr.sign("A", "k", job, byte(n+1))
-			if !px.hit.Load() {
-				mustOK(t, err)
-				continue
-			}
-			if err == nil {
-				verifyECDSA(t, pub, digest(byte(n+1)), r.Signature)
-				outcomes["tolerated"]++
-				continue
-			}
-			if r != nil && len(r.GetSignature()) > 0 {
-				t.Fatalf("%s: error and signature together", job)
-			}
-			wantKind(t, err, codes.Aborted, pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC)
-			outcomes["cryptographic"]++
-			if cAuth.n.Load() != 0 {
-				t.Fatalf("%s: C's cosigner was asked after a cryptographic failure (fallback)", job)
-			}
-			for _, role := range []string{"A", "B", "C"} {
-				tr.waitFrozen(t, role, "k", true)
-			}
-			// frozen on all three: nothing signs, whoever is asked
-			px.set(0, -1)
-			for _, via := range []string{"A", "B"} {
-				_, ferr := tr.sign(via, "k", job+"-after-"+via, 9)
-				wantKind(t, ferr, codes.FailedPrecondition, pb.ErrorKind_ERROR_KIND_FROZEN)
-			}
-			// a forged unfreeze is refused and changes nothing; the real one lifts it on all three
-			_, uerr := tr.Client["A"].Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: "k", Admin: server.SignAdmin(tr.Env.CertCallerKey(), "unfreeze", "k", time.Now())})
-			wantKind(t, uerr, codes.PermissionDenied, pb.ErrorKind_ERROR_KIND_REFUSED)
-			for _, role := range []string{"A", "B", "C"} {
-				if !tr.frozen(t, role, "k") {
-					t.Fatalf("a refused unfreeze lifted the freeze on %s", role)
+	// Both schemes: freeze, unfreeze and the fallback rule run the same code, the test proves it for each.
+	for _, sc := range []pb.Scheme{pb.Scheme_SCHEME_ECDSA_2OF3, pb.Scheme_SCHEME_ED25519_2OF3} {
+		sc := sc
+		t.Run(sc.String(), func(t *testing.T) {
+			cAuth := &countAuth{}
+			tr := startTrio(t, trioOpts{scheme: sc, proxyAB: true, auth: map[string]server.Authorizer{"C": cAuth}})
+			pub := tr.dkg(t, "k")
+			px := tr.Proxy["AB"]
+			outcomes := map[string]int{}
+			for _, dir := range []int{0, 1} {
+				for _, n := range []int{0, 2, 4} {
+					px.set(dir, n)
+					job := fmt.Sprintf("tamper-%d-%d", dir, n)
+					cAuth.n.Store(0)
+					r, err := tr.sign("A", "k", job, byte(n+1))
+					if !px.hit.Load() {
+						mustOK(t, err)
+						continue
+					}
+					if err == nil {
+						verifyECDSA(t, pub, digest(byte(n+1)), r.Signature)
+						outcomes["tolerated"]++
+						continue
+					}
+					if r != nil && len(r.GetSignature()) > 0 {
+						t.Fatalf("%s: error and signature together", job)
+					}
+					wantKind(t, err, codes.Aborted, pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC)
+					outcomes["cryptographic"]++
+					if cAuth.n.Load() != 0 {
+						t.Fatalf("%s: C's cosigner was asked after a cryptographic failure (fallback)", job)
+					}
+					for _, role := range []string{"A", "B", "C"} {
+						tr.waitFrozen(t, role, "k", true)
+					}
+					// frozen on all three: nothing signs, whoever is asked
+					px.set(0, -1)
+					for _, via := range []string{"A", "B"} {
+						_, ferr := tr.sign(via, "k", job+"-after-"+via, 9)
+						wantKind(t, ferr, codes.FailedPrecondition, pb.ErrorKind_ERROR_KIND_FROZEN)
+					}
+					// a forged unfreeze is refused and changes nothing; the real one lifts it on all three
+					_, uerr := tr.Client["A"].Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: "k", Admin: server.SignAdmin(tr.Env.CertCallerKey(), "unfreeze", "k", time.Now())})
+					wantKind(t, uerr, codes.PermissionDenied, pb.ErrorKind_ERROR_KIND_REFUSED)
+					for _, role := range []string{"A", "B", "C"} {
+						if !tr.frozen(t, role, "k") {
+							t.Fatalf("a refused unfreeze lifted the freeze on %s", role)
+						}
+					}
+					_, uerr = tr.Client["A"].Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: "k", Admin: tr.Env.Admin("unfreeze", "k")})
+					mustOK(t, uerr)
+					for _, role := range []string{"A", "B", "C"} {
+						tr.waitFrozen(t, role, "k", false)
+					}
+					r, err = tr.sign("A", "k", job+"-resumed", 10)
+					mustOK(t, err)
+					tr.verify(t, pub, 10, r.Signature)
 				}
 			}
-			_, uerr = tr.Client["A"].Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: "k", Admin: tr.Env.Admin("unfreeze", "k")})
-			mustOK(t, uerr)
-			for _, role := range []string{"A", "B", "C"} {
-				tr.waitFrozen(t, role, "k", false)
+			t.Logf("outcomes: %v", outcomes)
+			if outcomes["cryptographic"] == 0 {
+				t.Fatal("no tampering produced a failure")
 			}
-			r, err = tr.sign("A", "k", job+"-resumed", 10)
-			mustOK(t, err)
-			verifyECDSA(t, pub, digest(10), r.Signature)
-		}
-	}
-	t.Logf("outcomes: %v", outcomes)
-	if outcomes["cryptographic"] == 0 {
-		t.Fatal("no tampering produced a failure")
+		})
 	}
 }
 
@@ -320,48 +354,60 @@ func TestTrioFreezeReachesAMemberThatWasDown(t *testing.T) {
 }
 
 func TestTrioUnfreezeNeedsAllThree(t *testing.T) {
-	tr := startTrio(t, trioOpts{proxyAB: true})
-	tr.dkg(t, "k")
-	px := tr.Proxy["AB"]
-	for n := 0; n < 6; n++ {
-		px.set(1, n)
-		if _, err := tr.sign("A", "k", fmt.Sprintf("t%d", n), byte(n+1)); px.hit.Load() && err != nil {
-			break
-		}
-	}
-	px.set(0, -1)
-	tr.waitFrozen(t, "C", "k", true)
-	tr.stop("C")
-	_, uerr := tr.Client["A"].Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: "k", Admin: tr.Env.Admin("unfreeze", "k")})
-	if uerr == nil {
-		t.Fatal("unfreeze succeeded with C down")
-	}
-	if !tr.frozen(t, "A", "k") || !tr.frozen(t, "B", "k") {
-		t.Fatal("a failed unfreeze lifted the freeze on A or B")
+	// Both schemes: freeze, unfreeze and the fallback rule run the same code, the test proves it for each.
+	for _, sc := range []pb.Scheme{pb.Scheme_SCHEME_ECDSA_2OF3, pb.Scheme_SCHEME_ED25519_2OF3} {
+		sc := sc
+		t.Run(sc.String(), func(t *testing.T) {
+			tr := startTrio(t, trioOpts{scheme: sc, proxyAB: true})
+			tr.dkg(t, "k")
+			px := tr.Proxy["AB"]
+			for n := 0; n < 6; n++ {
+				px.set(1, n)
+				if _, err := tr.sign("A", "k", fmt.Sprintf("t%d", n), byte(n+1)); px.hit.Load() && err != nil {
+					break
+				}
+			}
+			px.set(0, -1)
+			tr.waitFrozen(t, "C", "k", true)
+			tr.stop("C")
+			_, uerr := tr.Client["A"].Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: "k", Admin: tr.Env.Admin("unfreeze", "k")})
+			if uerr == nil {
+				t.Fatal("unfreeze succeeded with C down")
+			}
+			if !tr.frozen(t, "A", "k") || !tr.frozen(t, "B", "k") {
+				t.Fatal("a failed unfreeze lifted the freeze on A or B")
+			}
+		})
 	}
 }
 
 // A failure in the middle of the protocol that is not cryptographic (a stalled follower) is a plain transport error: the
 // coordinator does NOT move on to the next peer and nothing is frozen.
 func TestTrioNoFallbackMidProtocol(t *testing.T) {
-	cAuth := &countAuth{}
-	tr := startTrio(t, trioOpts{recvMS: 700,
-		auth: map[string]server.Authorizer{"C": cAuth},
-		fi:   map[string]*server.FaultInjection{"B": {BeforeSign: func(role string) { time.Sleep(3 * time.Second) }}}})
-	pub := tr.dkg(t, "k")
-	_ = pub
-	_, err := tr.sign("A", "k", "stall", 1)
-	if err == nil {
-		t.Fatal("signed although B stalled")
-	}
-	if k, ok := server.KindOfStatus(err); !ok || k != pb.ErrorKind_ERROR_KIND_TRANSPORT {
-		t.Fatalf("want TRANSPORT, got %v (typed=%v): %v", k, ok, err)
-	}
-	if cAuth.n.Load() != 0 {
-		t.Fatal("C was asked after a mid-protocol failure")
-	}
-	if tr.frozen(t, "A", "k") || tr.frozen(t, "B", "k") {
-		t.Fatal("a stall froze the keyset")
+	// Both schemes: freeze, unfreeze and the fallback rule run the same code, the test proves it for each.
+	for _, sc := range []pb.Scheme{pb.Scheme_SCHEME_ECDSA_2OF3, pb.Scheme_SCHEME_ED25519_2OF3} {
+		sc := sc
+		t.Run(sc.String(), func(t *testing.T) {
+			cAuth := &countAuth{}
+			tr := startTrio(t, trioOpts{scheme: sc, recvMS: 700,
+				auth: map[string]server.Authorizer{"C": cAuth},
+				fi:   map[string]*server.FaultInjection{"B": {BeforeSign: func(role string) { time.Sleep(3 * time.Second) }}}})
+			pub := tr.dkg(t, "k")
+			_ = pub
+			_, err := tr.sign("A", "k", "stall", 1)
+			if err == nil {
+				t.Fatal("signed although B stalled")
+			}
+			if k, ok := server.KindOfStatus(err); !ok || k != pb.ErrorKind_ERROR_KIND_TRANSPORT {
+				t.Fatalf("want TRANSPORT, got %v (typed=%v): %v", k, ok, err)
+			}
+			if cAuth.n.Load() != 0 {
+				t.Fatal("C was asked after a mid-protocol failure")
+			}
+			if tr.frozen(t, "A", "k") || tr.frozen(t, "B", "k") {
+				t.Fatal("a stall froze the keyset")
+			}
+		})
 	}
 }
 

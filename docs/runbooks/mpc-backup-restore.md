@@ -75,7 +75,7 @@ token for one party on a non-production keyset. Record the date, who attended, a
 
 ## 2-of-3 keysets (A, B and C)
 
-Each member backs up its **own** share: a file per member per generation (`"scheme":"ecdsa-2of3"`), the member's one secret scalar
+Each member backs up its **own** share: a file per member per generation (`"scheme":"ecdsa-2of3"`, or `"ed25519-2of3"` for a Solana hot keyset; everything below is the same for both), the member's one secret scalar
 under PVE to the same recovery key plus the share blob with the scalar wiped. **Any one member's backup is useless alone; two
 members' backups of one generation plus the recovery private key equal the whole signing key.** Keep the three members' backups in
 three different places, held by three different people, never two together. The routine is the same as above on all three hosts
