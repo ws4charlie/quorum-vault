@@ -110,6 +110,14 @@ func TestDropConnection(t *testing.T) {
 	for i := 0; i < 20 && err2 == nil; i++ {
 		go func() { time.Sleep(15 * time.Millisecond); f.cl.proxy.drop() }()
 		_, err2 = f.sign(t, 15*time.Second)
+		// A drop that landed after the previous signature finished (or before this one started) is a re-established link: party A
+		// marks the keyset unresolved and reconciles it before it serves again (P5b-4), and until then Sign answers UNAVAILABLE.
+		// That attempt did not land a drop inside a signature; wait for the reconciliation and try again. Any other kind is
+		// still checked below.
+		if k, _ := kindOf(err2); err2 != nil && k == pb.ErrorKind_ERROR_KIND_UNAVAILABLE {
+			retryUnavailable(t, 30*time.Second, func() error { _, err := f.sign(t, 10*time.Second); return err })
+			err2 = nil
+		}
 	}
 	if err2 == nil {
 		t.Skip("could not land a drop inside a signature (timing)")
