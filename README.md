@@ -50,6 +50,7 @@ Components, data model, state machines and a sequence diagram of a withdrawal si
 | MPC signer (EVM: 2-of-3 on parties A, B, C; Bitcoin: two-party HD): DKG, sign, refresh, freeze, sealing in HSM tokens, backup and restore | [mpc-party](mpc-party), [internal/mpcsigner](internal/mpcsigner) | `make test-mpc`, the custody tests with `QV_CUSTODY_SIGNER=mpc` |
 | Failure tests on MPC: kill a party or the cosigner, partition, latency, refresh and freeze under live withdrawals | [e2e/custody/mpc_test.go](e2e/custody/mpc_test.go) | see [measurements](docs/measurements/mpc-service.md) |
 | Tamper-evident audit: a hash chain in each trust zone (core, gateway, cosigner), heads published to Kafka, verify commands | [internal/audit](internal/audit), [internal/auditchain](internal/auditchain) | `TestTamperingIsCaught`, `e2e/custody` audit checks |
+| Solana deposits (SOL and one SPL token): addresses from a two-party HD Ed25519 keyset, scan at finalized commitment, `Reconcile`; see [docs/learn/solana.md](docs/learn/solana.md) | [internal/chain/sol](internal/chain/sol) | `e2e/sol` on a local validator, clean `Reconcile` at the end of every test |
 | Runbooks: MPC backup and restore, keyset freeze | [docs/runbooks](docs/runbooks) | `mpc-party/scripts/restore-drill.sh` |
 
 ## Limits, honestly
@@ -63,7 +64,7 @@ Components, data model, state machines and a sequence diagram of a withdrawal si
 - **The cold tier is not built.** There is one hot tier. The design is in [DESIGN_SCALE.md](DESIGN_SCALE.md).
 - **2-of-3 for EVM only.** EVM keeps signing with any one of the three parties down. Bitcoin is still two-party: losing one
   party stops Bitcoin signing until it is restored from its backup.
-- **EVM and Bitcoin only.** No Solana yet (the signer supports Ed25519 keysets; nothing uses them).
+- **Solana takes deposits only.** Addresses, SOL and SPL deposits and `Reconcile` work on a local validator; nothing signs or sends a Solana transaction yet (no sweeps, no withdrawals). Hot shards on 2-of-3 Ed25519 exist in the signer and are not used yet.
 - **`X-Actor` is not authentication.** It names the caller for dual control. No real identity, no UI.
 - **Measured on a laptop**, not on target hardware, and not under a real load-test yet (P4).
 - **cb-mpc has had no external review in this project**, and its soundness history is why the signer freezes a keyset on any
@@ -126,17 +127,17 @@ picked with `QV_CRASH_BOUNDARIES=withdrawal.after_broadcast,sweep.after_settle`.
 
 ### Every CI test group at once
 
-`make test-e2e-all` runs all thirteen groups of the CI workflow (the `test` job, `make test-mpc`, three EVM groups, eight Bitcoin groups) at the same
+`make test-e2e-all` runs all fourteen groups of the CI workflow (the `test` job, `make test-mpc`, three EVM groups, eight Bitcoin groups, one Solana group) at the same
 time and takes about 8 minutes on a 12-core laptop, instead of 45 to 60 minutes one after the other. Run `make softhsm mpc-build` once first, and have
 Docker running; nothing else needs to be up, and the ports and containers of `make setup` and `make infra-up` are left alone.
 
-The groups run in six lanes. A lane has its own Postgres, anvil, bitcoind and SoftHSM tokens, because the tests change those (they mine and reorg a chain,
+The groups run in six lanes. A lane has its own Postgres, anvil, bitcoind, Solana validator and SoftHSM tokens, because the tests change those (they mine and reorg a chain,
 restart bitcoind, switch a database role on and off, and write to the token files). Temporal and Redpanda are one shared pair. A lane runs its groups
 one after another. Each group writes `data/e2e-all/<time>/<group>.log`; the script prints one line per group when it finishes, then a summary, and exits
 non-zero if any group failed. Ctrl-C stops the tests and removes every container the run started. Two options:
 
 ```bash
-make test-e2e-all GROUPS=e2e-btc-cold,test    # some groups; "evm" and "btc" stand for all of theirs
+make test-e2e-all GROUPS=e2e-btc-cold,test    # some groups; "evm", "btc" and "sol" stand for all of theirs
 make test-e2e-all LANES=4                     # another number of lanes
 ```
 

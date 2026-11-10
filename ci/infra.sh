@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # The services a CI job's tests talk to, started in the background so the job can do its other set-up meanwhile, and waited for right before the tests.
-#   ci/infra.sh start [--anvil] [--infra] [--bitcoind]   returns at once
+#   ci/infra.sh start [--anvil] [--infra] [--bitcoind] [--solana]   returns at once
 #   ci/infra.sh wait                                      blocks until everything started is ready (5 minutes at most); logs on failure
 #     --anvil     anvil, chain id 11155111, on 127.0.0.1:18545 (EVM jobs and the signing job)
 #     --infra     Temporal and Redpanda (docker compose profile infra)
 #     --bitcoind  bitcoind in regtest on 127.0.0.1:18443 (docker compose profile btc)
+#     --solana    solana-test-validator on 127.0.0.1:18899 (docker compose profile solana; the image is built from ci/solana)
 # Run from the checkout, on the host (compose reads docker-compose.yml). State is in $QV_INFRA_DIR (default $RUNNER_TEMP/qv-infra).
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -27,6 +28,20 @@ start_anvil() {
   return 1
 }
 
+compose_up() { # compose_up <profile flags...> -- <services...>: the Solana validator image is pulled (built once by the `image` job), not built here
+  local flags=()
+  while [ "$1" != "--" ]; do flags+=("$1"); shift; done
+  shift
+  for s in "$@"; do
+    if [ "$s" = solana ]; then
+      QV_SOLANA_IMAGE="$(cd "$(dirname "$0")/.." && ci/image-tag.sh solana)"
+      export QV_SOLANA_IMAGE
+      "$(dirname "$0")/ensure-image.sh" use solana || return 1
+    fi
+  done
+  docker compose "${flags[@]}" up -d --wait "$@"
+}
+
 case "${1:-}" in
 start)
   shift
@@ -37,12 +52,13 @@ start)
       --anvil) anvil=1 ;;
       --infra) profiles+=(--profile infra); services+=(temporal-db temporal redpanda) ;;
       --bitcoind) profiles+=(--profile btc); services+=(bitcoind) ;;
+      --solana) profiles+=(--profile solana); services+=(solana) ;;
       *) echo "unknown flag $a" >&2; exit 2 ;;
     esac
   done
   [ "$anvil" = 1 ] && bg anvil start_anvil
   # One compose command for everything it starts: two at once would race to create the project's network.
-  [ "${#services[@]}" -gt 0 ] && bg compose docker compose "${profiles[@]}" up -d --wait "${services[@]}"
+  [ "${#services[@]}" -gt 0 ] && bg compose compose_up "${profiles[@]}" -- "${services[@]}"
   echo "started in the background; logs in $DIR"
   ;;
 wait)
@@ -60,13 +76,13 @@ wait)
   done
   if [ "$failed" != 0 ]; then
     docker ps -a || true
-    docker compose --profile infra --profile btc logs --tail 80 || true
+    docker compose --profile infra --profile btc --profile solana logs --tail 80 || true
     exit 1
   fi
   echo "services are ready"
   ;;
 *)
-  echo "usage: $0 start [--anvil] [--infra] [--bitcoind] | wait" >&2
+  echo "usage: $0 start [--anvil] [--infra] [--bitcoind] [--solana] | wait" >&2
   exit 2
   ;;
 esac

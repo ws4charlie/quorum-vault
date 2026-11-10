@@ -9,7 +9,8 @@ Go and building cb-mpc in every job.
 | `image-tag.sh` | The tag: a hash of the Dockerfile, its two scripts, the pin and go.mod's Go version. An image can never be stale. |
 | `ensure-image.sh` | `publish` (the `image` job): build and push when the tag is missing. `use` (every other job): pull it, or build it locally from the same Dockerfile. |
 | `run-in-image.sh` | Runs a command in the image, in the checkout, on the host network, with the Docker socket. `ci/run-in-image.sh make test-e2e-btc-recovery` |
-| `infra.sh` | Starts anvil, Temporal, Redpanda and bitcoind in the background (`start`) and waits for them right before the tests (`wait`). |
+| `solana/Dockerfile` | The local Solana validator (Agave, pinned by version and checksum) for the Solana tests. Built once per change of this file by the `image` job (`ensure-image.sh publish solana`, tag from `image-tag.sh solana`, `ghcr.io/ws4charlie/qv-solana:<hash>`); the Solana job pulls it. On a laptop compose builds it. |
+| `infra.sh` | Starts anvil, Temporal, Redpanda, bitcoind and the Solana validator in the background (`start`) and waits for them right before the tests (`wait`). |
 
 **No secrets in the image.** The SoftHSM tokens are created at job time by `scripts/setup-softhsm.sh`, in the checkout; the PINs are generated
 at job time by `scripts/dev-env.sh` into the checkout's `.env`. The image is public like the repository.

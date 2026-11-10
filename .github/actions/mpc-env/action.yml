@@ -14,20 +14,32 @@ inputs:
   bitcoind:
     description: "'true' starts bitcoind in regtest on 18443 (the Bitcoin jobs)"
     default: "false"
+  solana:
+    description: "'true' starts solana-test-validator on 18899, built from ci/solana (the Solana jobs)"
+    default: "false"
 runs:
   using: composite
   steps:
+    # The Solana validator image is pulled from ghcr (it may be a private package), so log in before the services start.
+    - name: Log in to ghcr.io
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || echo "no login, pulling anonymously"
     - name: Start the services in the background
       shell: bash
       env:
         INFRA: ${{ inputs.infra }}
         ANVIL: ${{ inputs.anvil }}
         BITCOIND: ${{ inputs.bitcoind }}
+        SOLANA: ${{ inputs.solana }}
       run: |
         flags=()
         [ "$ANVIL" = true ] && flags+=(--anvil)
         [ "$INFRA" = true ] && flags+=(--infra)
         [ "$BITCOIND" = true ] && flags+=(--bitcoind)
+        [ "$SOLANA" = true ] && flags+=(--solana)
         ci/infra.sh start "${flags[@]}"
     - name: Pull the CI image
       shell: bash
