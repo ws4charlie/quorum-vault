@@ -405,3 +405,47 @@ func (s *Stack3) Party(role string) *Proc {
 	}
 	return s.C
 }
+
+// ---- Ed25519 (Solana, P8-4) ----
+
+// Client is the caller client of a party ("A", "B" or "C") with the gateway's identity.
+func (s *Stack3) Client(role string) pb.MpcPartyClient { return s.client[role] }
+
+// DKGEd25519 makes a 2-of-3 Ed25519 hot-shard keyset (an admin signature is checked by all three) and returns its 32-byte public key.
+func (s *Stack3) DKGEd25519(id string) []byte {
+	s.t.Helper()
+	x, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	r, err := s.client["A"].DKG(x, &pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ED25519_2OF3, Admin: s.AdminAuth("dkg", id)})
+	if err != nil {
+		s.t.Fatalf("DKG %s: %v\nA: %s\nB: %s\nC: %s", id, err, tail(s.A.Output()), tail(s.B.Output()), tail(s.C.Output()))
+	}
+	s.ids = append(s.ids, id)
+	return r.RootPublicKey
+}
+
+// DKGHDEd25519 makes a 2-party Ed25519 HD keyset on A and B (the deposit keys come from it).
+func (s *Stack3) DKGHDEd25519(id string) {
+	s.t.Helper()
+	x, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if _, err := s.client["A"].DKG(x, &pb.DKGRequest{KeysetId: id, Curve: pb.Curve_CURVE_ED25519, Admin: s.AdminAuth("dkg", id)}); err != nil {
+		s.t.Fatalf("HD DKG %s: %v", id, err)
+	}
+}
+
+// GatewaySignerEd is the gateway's signer entry of a Solana hot shard: the 2-of-3 Ed25519 keyset, coordinators A then B, and when depositKeyset is
+// not empty the 2-party HD keyset the deposit keys come from.
+func (s *Stack3) GatewaySignerEd(keyset string, pub32 []byte, depositKeyset string, depositPath []uint32) gateway.SignerFile {
+	crt, key := s.CertGW.Write(s.t, s.Dir)
+	sf := gateway.SignerFile{Backend: "mpc", Scheme: "ed25519-2of3", KeysetID: keyset, PublicKey: hex.EncodeToString(pub32),
+		Coordinators: []gateway.MPCSignerFile{
+			{Name: "A", Address: s.CallerA, CertFile: crt, KeyFile: key, ServerPin: s.CertA.Pin},
+			{Name: "B", Address: s.CallerB, CertFile: crt, KeyFile: key, ServerPin: s.CertB.Pin},
+		}}
+	if depositKeyset != "" {
+		sf.Deposit = &gateway.SignerFile{KeysetID: depositKeyset, HardenedPath: depositPath,
+			MPC: &gateway.MPCSignerFile{Address: s.CallerA, CertFile: crt, KeyFile: key, ServerPin: s.CertA.Pin}}
+	}
+	return sf
+}

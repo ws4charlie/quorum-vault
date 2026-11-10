@@ -31,6 +31,7 @@ e2e-btc-withdrawals|pbi|153|3|make test-e2e-btc-withdrawals
 e2e-evm-tx-failures|pai|148|3|make test-e2e-evm-tx-failures
 e2e-btc-deposits|pbi|96|3|make test-e2e-btc-deposits
 e2e-sol-deposits|psi|150|3|make test-e2e-sol-deposits
+e2e-sol-signing|ps|60|3|make test-e2e-sol-signing
 test|p|90|1|go vet ./... && QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -short -count=1 -p 1 ./...
 mpc-signing|pa|74|1|make test-mpc
 "
@@ -82,6 +83,16 @@ i=1; while [ "$i" -le "$LANES" ]; do load[$i]=0; lane_groups[$i]=""; lane_svc[$i
 for g in $selected; do
   best=1; i=2
   while [ "$i" -le "$LANES" ]; do [ "${load[$i]}" -lt "${load[$best]}" ] && best=$i; i=$((i + 1)); done
+  # A group that needs the Solana validator goes to a lane that already has one: the validator is the heaviest container (an x86_64 binary,
+  # emulated on Apple silicon), so a run starts as few as it can.
+  case "$(field "$g" 2)" in *s*)
+    sbest=""; i=1
+    while [ "$i" -le "$LANES" ]; do
+      case "${lane_svc[$i]}" in *s*) if [ -z "$sbest" ] || [ "${load[$i]}" -lt "${load[$sbest]}" ]; then sbest=$i; fi ;; esac
+      i=$((i + 1))
+    done
+    [ -n "$sbest" ] && best=$sbest ;;
+  esac
   load[$best]=$((${load[$best]} + $(field "$g" 3)))
   lane_groups[$best]="${lane_groups[$best]} $g"
   svc="$(field "$g" 2)"
@@ -191,7 +202,7 @@ i=1; while [ "$i" -le "$LANES" ]; do
 done
 # warm the Go caches once (the e2e test binaries build the qv-* and mpc-party binaries in TestMain), so the lanes do not all compile at once
 ( QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 QV_REQUIRE_CUSTODY=1 QV_REQUIRE_BTC=1 QV_CUSTODY_SIGNER=mpc QV_MPC_E2E=1 \
-    go test -count=1 -run '^$' ./e2e/custody/ ./e2e/btc/ ./e2e/sol/ ./e2e/mpcsign/ >"$OUT/warm-build.log" 2>&1 ) & pids="$pids $!"; names="$names go-build"
+    go test -count=1 -run '^$' ./e2e/custody/ ./e2e/btc/ ./e2e/sol/ ./e2e/solsign/ ./e2e/mpcsign/ >"$OUT/warm-build.log" 2>&1 ) & pids="$pids $!"; names="$names go-build"
 failed=""
 set -- $names
 for p in $pids; do wait "$p" || failed="$failed $1"; shift; done

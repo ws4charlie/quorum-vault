@@ -88,6 +88,14 @@ func run(log *slog.Logger) error {
 	if err := gateway.CheckSigners(cfg, signers); err != nil {
 		return err
 	}
+	hotMsg, depositMsg, closeMsg, err := gateway.MPCMessageSigners(cfg)
+	if err != nil {
+		return err
+	}
+	defer closeMsg()
+	if err := gateway.CheckMessageSigners(cfg, hotMsg, depositMsg); err != nil {
+		return err
+	}
 
 	jobs, err := pgxpool.New(ctx, *jobsDSN)
 	if err != nil {
@@ -120,11 +128,11 @@ func run(log *slog.Logger) error {
 		h, _ := os.Hostname()
 		id = fmt.Sprintf("%s-%d", h, os.Getpid())
 	}
-	gw, err := gateway.New(cfg, nil, signers, guard, jobs, gateway.Options{WorkerID: id, Lease: *lease, Logger: log})
+	gw, err := gateway.New(cfg, nil, signers, guard, jobs, gateway.Options{WorkerID: id, Lease: *lease, Logger: log, MessageSigners: hotMsg, DepositSigners: depositMsg})
 	if err != nil {
 		return err
 	}
-	log.Info("qv-gateway started", "worker", id, "chains", len(cfg.Chains), "partitions", len(signers))
+	log.Info("qv-gateway started", "worker", id, "chains", len(cfg.Chains), "partitions", len(signers)+len(hotMsg))
 	if err := gw.Run(ctx, *interval); err != nil {
 		return err
 	}

@@ -48,8 +48,15 @@ func EncodePackage(job signjob.Job) ([]byte, error) {
 	return b, nil
 }
 
-// DecodePackage is the strict inverse of EncodePackage.
-func DecodePackage(b []byte) (signjob.Job, error) {
+// DecodePackage is the strict inverse of EncodePackage for a 32-byte digest (ECDSA chains).
+func DecodePackage(b []byte) (signjob.Job, error) { return decodePackage(b, 32, 32) }
+
+// DecodePackageMessage is DecodePackage for a package whose "digest" is a whole message (Ed25519 chains): 1 to maxMessage bytes.
+func DecodePackageMessage(b []byte, maxMessage int) (signjob.Job, error) {
+	return decodePackage(b, 1, maxMessage)
+}
+
+func decodePackage(b []byte, minDigest, maxDigest int) (signjob.Job, error) {
 	var j signjob.Job
 	if len(b) == 0 || len(b) > MaxIntentPackage {
 		return j, errors.New("intent package: empty or too large")
@@ -66,8 +73,11 @@ func DecodePackage(b []byte) (signjob.Job, error) {
 	if p.V != IntentPackageVersion {
 		return j, fmt.Errorf("intent package: version %q, want %q", p.V, IntentPackageVersion)
 	}
-	if len(p.Digest) != 32 {
-		return j, errors.New("intent package: digest must be 32 bytes")
+	if len(p.Digest) < minDigest || len(p.Digest) > maxDigest {
+		if minDigest == maxDigest {
+			return j, fmt.Errorf("intent package: digest must be %d bytes", minDigest)
+		}
+		return j, fmt.Errorf("intent package: message must be %d to %d bytes", minDigest, maxDigest)
 	}
 	return signjob.Job{ID: p.JobID, Chain: p.Chain, PartitionID: p.PartitionID, KeyRef: p.KeyRef, Intent: p.Intent,
 		Payload: p.Payload, Digest: p.Digest, Approvals: p.Approvals}, nil

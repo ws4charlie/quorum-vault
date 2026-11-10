@@ -63,6 +63,7 @@ type ChainCodec interface {
 const (
 	FamilyEVM = "evm"
 	FamilyBTC = "btc"
+	FamilySOL = "sol"
 )
 
 func familyOf(f string) (string, error) {
@@ -71,8 +72,10 @@ func familyOf(f string) (string, error) {
 		return FamilyEVM, nil
 	case FamilyBTC:
 		return FamilyBTC, nil
+	case FamilySOL:
+		return FamilySOL, nil
 	}
-	return "", fmt.Errorf("unknown chain family %q (known: %s, %s)", f, FamilyEVM, FamilyBTC)
+	return "", fmt.Errorf("unknown chain family %q (known: %s, %s, %s)", f, FamilyEVM, FamilyBTC, FamilySOL)
 }
 
 // NewCodec is the one place a family picks its codec. qv-gateway and qv-cosigner reach it through NewCodecs.
@@ -82,6 +85,8 @@ func NewCodec(cc *ChainConfig) (ChainCodec, error) {
 		return NewEVMCodec(cc.EVM)
 	case FamilyBTC:
 		return NewBTCCodec(cc.BTC)
+	case FamilySOL:
+		return NewSOLCodec(cc.SOL)
 	}
 	return nil, fmt.Errorf("gateway: chain %q: unknown chain family %q", cc.Name, cc.Family)
 }

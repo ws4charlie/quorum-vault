@@ -22,6 +22,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
+	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 )
 
 // File is the on-disk signing-zone config (JSON). See config.example.json.
@@ -58,6 +59,9 @@ type SignerFile struct {
 	// gateway moves to the next coordinator only when the party says nothing had been exchanged yet (see internal/mpcsigner).
 	Scheme       string          `json:"scheme,omitempty"`
 	Coordinators []MPCSignerFile `json:"coordinators,omitempty"`
+	// Deposit (scheme "ed25519-2of3" only, Solana): the 2-party HD Ed25519 keyset the deposit addresses come from. A sweep needs its deposit
+	// key's signature next to the hot shard's: keyset_id, hardened_path (the account path m/44'/501'/0') and mpc, as for a Bitcoin key tree.
+	Deposit *SignerFile `json:"deposit,omitempty"`
 }
 
 // MPCSignerFile is how the gateway reaches party A (the caller port of mpc-party).
@@ -84,6 +88,8 @@ type ChainFile struct {
 	EVM    *EVMFile `json:"evm"`
 	// BTC is the section of the btc family.
 	BTC *BTCFile `json:"btc,omitempty"`
+	// SOL is the section of the sol family.
+	SOL *SOLFile `json:"sol,omitempty"`
 	// Assets maps asset symbol to its withdrawal policy. Every asset the chain
 	// verifier knows (including the native one) needs an entry.
 	Assets        map[string]AssetFile `json:"assets"`
@@ -216,9 +222,10 @@ type Approver struct {
 // ChainConfig is one chain's trust root.
 type ChainConfig struct {
 	Name           string
-	Family         string // FamilyEVM or FamilyBTC
+	Family         string // FamilyEVM, FamilyBTC or FamilySOL
 	EVM            evm.Config
 	BTC            btc.SigningConfig
+	SOL            sol.SigningConfig
 	Assets         map[string]AssetPolicy
 	SweepsPerHour  int
 	CancelsPerHour int
@@ -315,8 +322,15 @@ func (f File) build() (*Config, error) {
 			}
 		case "mpc":
 			if sf.Scheme != "" {
-				if sf.Scheme != "ecdsa-2of3" {
+				if sf.Scheme != "ecdsa-2of3" && sf.Scheme != "ed25519-2of3" {
 					return nil, fmt.Errorf("gateway: config: signer %q: unknown scheme %q", p, sf.Scheme)
+				}
+				if sf.Scheme == "ed25519-2of3" {
+					if err := checkDepositSigner(p, sf); err != nil {
+						return nil, err
+					}
+				} else if sf.Deposit != nil {
+					return nil, fmt.Errorf("gateway: config: signer %q: deposit is for ed25519-2of3 signers only", p)
 				}
 				if sf.KeysetID == "" || sf.PublicKey == "" || sf.KeyID != "" || len(sf.HardenedPath) > 0 || sf.MPC != nil || len(sf.Coordinators) == 0 {
 					return nil, fmt.Errorf("gateway: config: signer %q: a 2-of-3 signer needs keyset_id, public_key and coordinators (party A, then party B), and no key_id, hardened_path or mpc", p)
@@ -398,6 +412,9 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	}
 	if family == FamilyBTC {
 		return cf.buildBTC(name, enabledApprovers)
+	}
+	if family == FamilySOL {
+		return cf.buildSOL(name, enabledApprovers)
 	}
 	canon := (&EVMCodec{}).Canonical
 	if cf.EVM == nil {
@@ -539,4 +556,93 @@ func (af AssetFile) build(where string, enabledApprovers int, canon func(string)
 		prevMin, prevAppr = min, t.Approvals
 	}
 	return p, nil
+}
+
+// SOLFile is the signing-zone config of a Solana chain. Everything the zone trusts about keys and addresses is here.
+type SOLFile struct {
+	// AccountPublicKey and AccountChainCode (hex): the account node m/44'/501'/0' of the 2-party HD keyset. Deposit keys derive from it.
+	AccountPublicKey string `json:"account_public_key"`
+	AccountChainCode string `json:"account_chain_code"`
+	// HotShards maps a partition ID to the address of its hot shard (the SOL partition and the token partitions of one shard share it).
+	HotShards map[string]string       `json:"hot_shards"`
+	Tokens    map[string]SOLTokenFile `json:"tokens"`
+	// Caps on what a transaction may pay beyond the signature fee.
+	MaxComputeUnits         uint32 `json:"max_compute_units"`
+	MaxMicroLamportsPerUnit uint64 `json:"max_micro_lamports_per_unit"`
+	MaxPriorityFeeLamports  uint64 `json:"max_priority_fee_lamports"`
+}
+
+// SOLTokenFile is a configured classic SPL token.
+type SOLTokenFile struct {
+	Mint     string `json:"mint"`
+	Decimals uint8  `json:"decimals"`
+}
+
+// buildSOL reads a sol chain: its verifier config, one asset policy per asset (SOL and each token) and the rate limits.
+func (cf ChainFile) buildSOL(name string, enabledApprovers int) (*ChainConfig, error) {
+	s := cf.SOL
+	if s == nil {
+		return nil, fmt.Errorf("gateway: config: chain %q has no sol section", name)
+	}
+	if cf.WithdrawalsPerHour <= 0 {
+		return nil, fmt.Errorf("gateway: config: chain %q: withdrawals_per_hour is required and must be > 0", name)
+	}
+	if cf.SweepsPerHour < 0 || cf.CancelsPerHour < 0 || cf.ToColdPerHour < 0 || cf.RebalancePerHour < 0 || cf.ConsolidationsPerHour < 0 {
+		return nil, fmt.Errorf("gateway: config: chain %q: rate limits must be >= 0", name)
+	}
+	pub, err1 := hex.DecodeString(s.AccountPublicKey)
+	cc, err2 := hex.DecodeString(s.AccountChainCode)
+	if err1 != nil || err2 != nil || len(pub) != 32 || len(cc) != 32 {
+		return nil, fmt.Errorf("gateway: config: chain %q: account_public_key and account_chain_code are 32 bytes of hex", name)
+	}
+	sc := sol.SigningConfig{Chain: name, HotShards: s.HotShards, Tokens: map[string]sol.Token{}, MaxComputeUnits: s.MaxComputeUnits,
+		MaxMicroLamportsPerUnit: s.MaxMicroLamportsPerUnit, MaxPriorityFeeLamports: s.MaxPriorityFeeLamports}
+	copy(sc.AccountPublicKey[:], pub)
+	copy(sc.AccountChainCode[:], cc)
+	for sym, t := range s.Tokens {
+		sc.Tokens[sym] = sol.Token{Mint: t.Mint, Decimals: t.Decimals}
+	}
+	v, err := sol.NewVerifier(sc)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: config: chain %q: %w", name, err)
+	}
+	want := map[string]bool{sol.Native: true}
+	for sym := range s.Tokens {
+		want[sym] = true
+	}
+	if len(cf.Assets) != len(want) {
+		return nil, fmt.Errorf("gateway: config: chain %q: a sol chain has exactly the assets %s and its tokens, each with a policy", name, sol.Native)
+	}
+	assets := map[string]AssetPolicy{}
+	for sym := range want {
+		af, ok := cf.Assets[sym]
+		if !ok {
+			return nil, fmt.Errorf("gateway: config: chain %q: asset %q has no policy", name, sym)
+		}
+		pol, err := af.build(name+"/"+sym, enabledApprovers, v.Canonical)
+		if err != nil {
+			return nil, err
+		}
+		assets[sym] = pol
+	}
+	return &ChainConfig{Name: name, Family: FamilySOL, SOL: sc, Assets: assets,
+		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour,
+		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour, ConsolidationsPerHour: cf.ConsolidationsPerHour}, nil
+}
+
+// checkDepositSigner validates an ed25519-2of3 signer entry: the hot keyset's 32-byte public key and the optional deposit key tree.
+func checkDepositSigner(p string, sf SignerFile) error {
+	if pk, err := hex.DecodeString(sf.PublicKey); err != nil || len(pk) != 32 {
+		return fmt.Errorf("gateway: config: signer %q: an ed25519-2of3 signer's public_key is 32 bytes of hex", p)
+	}
+	if d := sf.Deposit; d != nil {
+		if d.KeysetID == "" || len(d.HardenedPath) == 0 || d.MPC == nil || d.MPC.Address == "" || d.MPC.CertFile == "" || d.MPC.KeyFile == "" || d.MPC.ServerPin == "" ||
+			d.KeyID != "" || d.PublicKey != "" || d.Scheme != "" || len(d.Coordinators) > 0 || d.Deposit != nil {
+			return fmt.Errorf("gateway: config: signer %q: deposit needs keyset_id, hardened_path and mpc.{address,cert_file,key_file,server_pin}, and nothing else", p)
+		}
+		if fmt.Sprint(d.HardenedPath) != fmt.Sprint(sol.AccountPath()) {
+			return fmt.Errorf("gateway: config: signer %q: deposit hardened_path %v is not the account path %v", p, d.HardenedPath, sol.AccountPath())
+		}
+	}
+	return nil
 }

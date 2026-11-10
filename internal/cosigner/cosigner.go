@@ -7,7 +7,7 @@ package cosigner
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 	wire "github.com/ws4charlie/quorum-vault/mpc-party/api/cosigner"
@@ -65,22 +66,39 @@ func (c *Cosigner) decide(ctx context.Context, r wire.Request) wire.Response {
 		}
 		return wire.Response{Reason: reason}
 	}
-	if pb.Algorithm(r.Algorithm) != pb.Algorithm_ALGORITHM_ECDSA_SECP256K1 {
-		return no("cosigner: only secp256k1 ECDSA signing is supported")
-	}
-	if len(r.Digest) != 32 {
-		return no("cosigner: digest must be 32 bytes")
-	}
 	if r.JobID == "" {
 		return no("cosigner: no job id")
 	}
-	pub, err := crypto.DecompressPubkey(r.PublicKey)
-	if err != nil || len(r.PublicKey) != 33 {
-		return no("cosigner: the key to sign with is missing or not a secp256k1 point")
-	}
-	job, err := gateway.DecodePackage(r.IntentPackage)
-	if err != nil {
-		return no("%s: %v", gateway.ReasonIntent, err)
+	var key gateway.SignerKey
+	var job signjob.Job
+	var err error
+	switch pb.Algorithm(r.Algorithm) {
+	case pb.Algorithm_ALGORITHM_ECDSA_SECP256K1:
+		if len(r.Digest) != 32 {
+			return no("cosigner: digest must be 32 bytes")
+		}
+		pub, err := crypto.DecompressPubkey(r.PublicKey)
+		if err != nil || len(r.PublicKey) != 33 {
+			return no("cosigner: the key to sign with is missing or not a secp256k1 point")
+		}
+		key.ECDSA = pub
+		if job, err = gateway.DecodePackage(r.IntentPackage); err != nil {
+			return no("%s: %v", gateway.ReasonIntent, err)
+		}
+	case pb.Algorithm_ALGORITHM_ED25519:
+		// Ed25519 signs the whole message: the "digest" is the message (Solana, at most a transaction's size).
+		if len(r.Digest) == 0 || len(r.Digest) > sol.MaxMessage {
+			return no("cosigner: a message to sign is 1 to %d bytes", sol.MaxMessage)
+		}
+		if len(r.PublicKey) != 32 {
+			return no("cosigner: the key to sign with is missing or not an Ed25519 public key")
+		}
+		key.Ed25519 = ed25519.PublicKey(append([]byte(nil), r.PublicKey...))
+		if job, err = gateway.DecodePackageMessage(r.IntentPackage, sol.MaxMessage); err != nil {
+			return no("%s: %v", gateway.ReasonIntent, err)
+		}
+	default:
+		return no("cosigner: only secp256k1 ECDSA and Ed25519 signing are supported")
 	}
 	// The package must be about exactly what party A asked B to sign.
 	if job.ID != r.JobID {
@@ -89,11 +107,11 @@ func (c *Cosigner) decide(ctx context.Context, r wire.Request) wire.Response {
 	if !bytes.Equal(job.Digest, r.Digest) {
 		return no("%s: intent package digest differs from the digest to sign", gateway.ReasonTx)
 	}
-	return c.verdict(ctx, job, pub)
+	return c.verdict(ctx, job, key)
 }
 
-func (c *Cosigner) verdict(ctx context.Context, job signjob.Job, pub *ecdsa.PublicKey) wire.Response {
-	v, err := c.dec.Decide(ctx, job, pub)
+func (c *Cosigner) verdict(ctx context.Context, job signjob.Job, key gateway.SignerKey) wire.Response {
+	v, err := c.dec.DecideKey(ctx, job, key)
 	if err != nil {
 		if why, ok := gateway.IsRejection(err); ok {
 			return wire.Response{Reason: why}

@@ -1,7 +1,8 @@
 # Solana
 
 A customer gets a Solana address, pays it in SOL or in one SPL token, and is credited once, after the payment is final, through the same
-ledger as EVM and Bitcoin. Nothing leaves the address yet. Family `sol`, package [internal/chain/sol](../../internal/chain/sol).
+ledger as EVM and Bitcoin. Family `sol`, package [internal/chain/sol](../../internal/chain/sol). The signing zone can sign Solana
+transactions (see "How signing is checked"); nothing in the product sends one yet.
 
 ```mermaid
 flowchart LR
@@ -54,9 +55,47 @@ puts them beside the books, and waits when the cell reports finalized activity t
 during the read. If that keeps happening the comparison is skipped and the report says so and is not clean. Anything left after that is a real
 difference, in lamports or token base units.
 
+## How signing is checked
+
+Ed25519 signs the whole message, so the signing zone does not see a digest of a transaction: it sees the transaction. The gateway and the
+cosigner of each of parties B and C decode every message themselves, from their own config, and accept it only if it is exactly one of a few
+shapes built from the approved intent. Nothing else can be in it: no other program, no extra signer, no extra account, no instruction that
+changes who owns or may spend a token account. Each judges alone, so a refusal does not depend on the others being up.
+
+| What | The message must be |
+|---|---|
+| SOL withdrawal | a transfer from the hot shard to the approved destination, the approved amount |
+| Token withdrawal | a checked transfer from the hot shard's token account to the destination's, with the configured mint and decimals, and optionally the creation of the destination's account, paid by the hot shard |
+| Sweep of SOL | a transfer from the deposit address to the hot shard, which pays the fee |
+| Sweep of a token | a checked transfer from the deposit address's token account to the hot shard's, and optionally closing the deposit account with its rent going to the hot shard |
+
+A message may begin with a compute-budget limit (required) and price (optional), both under caps in the zone's config. Versioned messages
+are refused, because the tables they use hide who is paid.
+
+**Two keys, two jobs.** A withdrawal has one signature, the hot shard's, made by the 2-of-3 keyset on A, B and C. A sweep has two over the
+same message: the hot shard pays the fee, and the deposit key signs as owner. The deposit key comes from the two-party HD keyset; the zone
+derives its public key from its own copy of the account node and requires the signer to be that key. The replay guard keeps one record per
+message and signer, so the two jobs of one sweep do not collide.
+
+**One message per intent.** A second message for an intent already signed, say with a fresher blockhash, is refused. The zone cannot tell
+that the first one is dead, and both could land. A retry of the same job returns the stored signature. When a withdrawal may be signed again
+after its blockhash expired is a rule for the withdrawal task, which has to prove the old message dead first.
+
+**The blockhash.** Its age cannot be checked offline, and the zone does not try. A stale blockhash only makes the network refuse the
+transaction. What keeps a message from meaning something else is the shape list: there is no way to ask for a durable-nonce advance.
+
+**Rent on a sweep.** The zone checks the amount the intent names, not what the account keeps: it cannot see balances. The core decides the
+amount, and the chain refuses a transfer that would leave a system account between zero and the minimum.
+
+**Why a second signature does not matter.** The randomized signing of the two-party and three-party Ed25519 means a job that failed on one
+coordinator and was signed through another could produce two different valid signatures of one message. The validator runs one: its
+duplicate check keys on the hash of the message, not on the signature, so the second is refused as already processed, also when both are sent
+at once. This is tested on the local validator and does not depend on the gateway. The gateway still never hands out a second signature for a
+job, and a coordinator that failed after signing began keeps the job.
+
 ## Limits
 
-- **Deposits only.** Building, signing and sending Solana transactions come later; so do sweeps, withdrawals and cold storage.
+- **Deposits and signing only.** Building and sending Solana transactions come later; so do sweeps, withdrawals and cold storage. Cold, to-cold and rebalance intents are refused by the signing zone on this chain.
 - **One token program.** The classic SPL Token program only.
 - **A token's decimals are checked at start** against the mint; a mismatch refuses to start.
 - **The account node is fetched with a small helper** (`sol.AccountNode`); there is no operator command for it yet.
