@@ -274,7 +274,7 @@ func TestGuardDatabaseDownIsUnavailableNotRefused(t *testing.T) {
 	}
 	// A refusal needs its audit record first: with the guard database gone it cannot be recorded, so it is an outage too
 	// (the answer is still "no"). With the database up, a refusal is a decision.
-	got = c.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: int32(pb.Algorithm_ALGORITHM_ED25519)})
+	got = c.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: 99})
 	if got.Allow || !got.Unavailable {
 		t.Fatalf("a refusal that cannot be recorded is unavailable, got %+v", got)
 	}
@@ -287,7 +287,7 @@ func TestGuardDatabaseDownIsUnavailableNotRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got = c2.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: int32(pb.Algorithm_ALGORITHM_ED25519)})
+	got = c2.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: 99})
 	if got.Allow || got.Unavailable {
 		t.Fatalf("a malformed request is a refusal, got %+v", got)
 	}
@@ -357,7 +357,7 @@ func TestCosignerAuditsEveryDecision(t *testing.T) {
 	e := &env{t: t, h: h, c: c, pub: crypto.CompressPubkey(&key.PublicKey), hot: hot}
 	e.allow(h.Withdrawal("ok", gatewaytest.AddrUser, 100, 0, "alice"))
 	e.refuse(e.req(h.Withdrawal("noapp", gatewaytest.AddrUser, 100, 1)), gateway.ReasonApprovals)
-	if r := c.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: int32(pb.Algorithm_ALGORITHM_ED25519)}); r.Allow || r.Unavailable {
+	if r := c.Decide(context.Background(), wire.Request{JobID: "x", Algorithm: 99}); r.Allow || r.Unavailable {
 		t.Fatalf("got %+v", r)
 	}
 	rows, err := pool.Query(context.Background(), `SELECT actor, type, coalesce(payload->>'reason', '') FROM audit_log ORDER BY seq`)
@@ -377,7 +377,7 @@ func TestCosignerAuditsEveryDecision(t *testing.T) {
 		got = append(got, ty+":"+reason)
 	}
 	if len(got) != 3 || got[0] != "sign.allowed:" || !strings.HasPrefix(got[1], "sign.refused:"+gateway.ReasonApprovals) ||
-		!strings.HasPrefix(got[2], "sign.refused:cosigner: only secp256k1") {
+		!strings.HasPrefix(got[2], "sign.refused:cosigner: only secp256k1 ECDSA and Ed25519") {
 		t.Fatalf("audit = %q", got)
 	}
 }

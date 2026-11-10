@@ -68,6 +68,29 @@ type Verdict struct {
 	NeedSign  bool // the digest is reserved: the caller may sign it now
 	Intent    signjob.Intent
 	Info      TxInfo
+	// GuardKey is what the replay guard recorded this job under: the job's digest, or what the chain's codec says (GuardKeyCodec). Finish stores the
+	// signature under it.
+	GuardKey []byte
+}
+
+// SignerKey is the public key that would sign a job: a secp256k1 key or an Ed25519 key. The zero value is "no signer".
+type SignerKey struct {
+	ECDSA   *ecdsa.PublicKey
+	Ed25519 ed25519.PublicKey
+}
+
+func (k SignerKey) none() bool { return k.ECDSA == nil && len(k.Ed25519) == 0 }
+
+// checkSigner asks the codec whether the key is the one this job needs.
+func checkSigner(codec ChainCodec, info TxInfo, k SignerKey) error {
+	if len(k.Ed25519) > 0 {
+		ec, ok := codec.(EdSignerCodec)
+		if !ok {
+			return errors.New("this chain does not use Ed25519 keys")
+		}
+		return ec.CheckEd25519Signer(info, k.Ed25519)
+	}
+	return codec.CheckSigner(info, k.ECDSA)
 }
 
 // ErrSigner marks an operational signer problem (not a policy refusal).
@@ -85,8 +108,13 @@ func IsRejection(err error) (string, bool) {
 // Decide runs steps 1 to 5 for job and, if everything passes, reserves its digest. signerPub is the public key that
 // would sign (nil: no signer). A policy refusal is returned as a rejection (see IsRejection).
 func (d *Decider) Decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.PublicKey) (*Verdict, error) {
+	return d.DecideKey(ctx, job, SignerKey{ECDSA: signerPub})
+}
+
+// DecideKey is Decide for either kind of signer key.
+func (d *Decider) DecideKey(ctx context.Context, job signjob.Job, key SignerKey) (*Verdict, error) {
 	arec := &auditRecord{mode: d.mode, job: job}
-	v, err := d.decide(ctx, job, signerPub, arec)
+	v, err := d.decide(ctx, job, key, arec)
 	if err != nil {
 		// A refusal is recorded before it is reported. If the record cannot be written, that is an outage, not a refusal:
 		// the caller retries, and nothing is answered without a record.
@@ -101,7 +129,7 @@ func (d *Decider) Decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 	return v, nil
 }
 
-func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.PublicKey, arec *auditRecord) (*Verdict, error) {
+func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, arec *auditRecord) (*Verdict, error) {
 	// 1. Intent.
 	intent, err := parseIntent(job)
 	if err != nil {
@@ -119,9 +147,18 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 	if err := codec.Verify(u, intent); err != nil {
 		return nil, reject(ReasonTx, "%v", err)
 	}
-	info, err := codec.Decode(u)
+	var info TxInfo
+	if idc, ok := codec.(IntentDecoder); ok {
+		info, err = idc.DecodeFor(u, intent)
+	} else {
+		info, err = codec.Decode(u)
+	}
 	if err != nil {
 		return nil, reject(ReasonTx, "%v", err)
+	}
+	guardKey := job.Digest
+	if gk, ok := codec.(GuardKeyCodec); ok {
+		guardKey = gk.GuardKey(u, info)
 	}
 	amount, ok := new(big.Int).SetString(intent.Amount, 10)
 	if !ok {
@@ -143,7 +180,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 	// so a second instance sees our records before it decides. The transaction
 	// ends with the digest reserved (caps and nonce taken) and no signature
 	// yet: the lock is never held while anything signs.
-	v := &Verdict{Intent: intent, Info: info}
+	v := &Verdict{Intent: intent, Info: info, GuardKey: guardKey}
 	err = d.guard.Do(ctx, intent.Chain, func(gt *GuardTx) error {
 		now := d.now()
 		rec, err := gt.Intent(ctx, intent.ID)
@@ -160,7 +197,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 
 		// 5. Replay guard.
 		rel := Release{IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
-			Sender: info.Sender, PartitionID: intent.PartitionID, Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: job.Digest, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
+			Sender: info.Sender, PartitionID: intent.PartitionID, Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: guardKey, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
 		prior, err := d.replay(ctx, gt, intent, rec, codec, &rel)
 		if err != nil {
 			return err
@@ -174,17 +211,17 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, signerPub *ecdsa.
 				return errInProgress // another worker is signing this digest
 			}
 			v.NeedSign = true // a stale reservation (gateway) or a retry of the same digest (cosigner)
-			if err := gt.Touch(ctx, job.Digest, now); err != nil {
+			if err := gt.Touch(ctx, guardKey, now); err != nil {
 				return err
 			}
 			return gt.audit(ctx, *arec, EventSignAllowed)
 		}
 
 		// 6a. Reserve.
-		if signerPub == nil {
+		if key.none() {
 			return fmt.Errorf("%w: no signer for partition %q", errSigner, job.PartitionID)
 		}
-		if err := codec.CheckSigner(info, signerPub); err != nil {
+		if err := checkSigner(codec, info, key); err != nil {
 			return fmt.Errorf("%w: %v", errSigner, err)
 		}
 		v.NeedSign = true

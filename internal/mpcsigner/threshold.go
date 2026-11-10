@@ -60,8 +60,15 @@ type ThresholdConfig struct {
 // coordinator is possible after an A failure that left no trace: harmless (same transaction, same nonce), and the gateway's guard
 // still refuses a different digest under one job.
 type ThresholdSigner struct {
+	*thresholdCore
+	pub *ecdsa.PublicKey
+}
+
+// thresholdCore is what every 2-of-3 signer shares, whatever the curve: the connections to the coordinators, the fallback rule, the retry
+// composition and the degraded-state alerts. ECDSA (ThresholdSigner) and Ed25519 (EdThresholdSigner, ed.go) differ only in the request
+// they send and the signature they parse.
+type thresholdCore struct {
 	cfg   ThresholdConfig
-	pub   *ecdsa.PublicKey
 	log   *slog.Logger
 	conns []*grpc.ClientConn
 	cls   []pb.MpcPartyClient
@@ -95,6 +102,14 @@ func NewThreshold(cfg ThresholdConfig) (*ThresholdSigner, error) {
 	if err != nil {
 		return nil, err
 	}
+	core, err := newThresholdCore(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &ThresholdSigner{thresholdCore: core, pub: pub}, nil
+}
+
+func newThresholdCore(cfg ThresholdConfig) (*thresholdCore, error) {
 	if cfg.KeysetID == "" || len(cfg.Coordinators) == 0 {
 		return nil, errors.New("keyset id and at least one coordinator are required")
 	}
@@ -108,7 +123,7 @@ func NewThreshold(cfg ThresholdConfig) (*ThresholdSigner, error) {
 	if lg == nil {
 		lg = slog.Default()
 	}
-	t := &ThresholdSigner{cfg: cfg, pub: pub, log: lg}
+	t := &thresholdCore{cfg: cfg, log: lg}
 	dial := cfg.Dial
 	if dial == nil {
 		dial = func(addr string, c credentials.TransportCredentials) (*grpc.ClientConn, error) {
@@ -140,7 +155,7 @@ func NewThreshold(cfg ThresholdConfig) (*ThresholdSigner, error) {
 	return t, nil
 }
 
-func (t *ThresholdSigner) Close() {
+func (t *thresholdCore) Close() {
 	for _, c := range t.conns {
 		c.Close()
 	}
@@ -169,29 +184,38 @@ func (t *ThresholdSigner) SignDigest(ctx context.Context, digest [32]byte, opts 
 	req := &pb.SignRequest{KeyId: t.cfg.KeysetID, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: digest[:],
 		JobId: opts.JobID, IntentPackage: opts.IntentPackage}
 	start := time.Now()
+	resp, i, calls, err := t.call(ctx, req)
+	if err != nil {
+		return signer.Result{}, err
+	}
+	sig, perr := parseDER(resp.Signature)
+	if perr != nil {
+		return signer.Result{}, &Error{Kind: KindCryptographic, Message: "bad signature from party " + t.cfg.Coordinators[i].Name + ": " + perr.Error()}
+	}
+	t.note(i)
+	return signer.Result{Sig: sig, Participants: []string{"mpc-" + strings.ToLower(t.cfg.Coordinators[i].Name), "mpc-2of3"},
+		Meta: map[string]any{"duration_ms": time.Since(start).Milliseconds(), "calls": calls, "coordinator": t.cfg.Coordinators[i].Name, "replayed": resp.Replayed}}, nil
+}
+
+// call runs req through the coordinators by the fallback rule and the retry composition above. It returns the first answer, the index of the
+// coordinator that gave it and how many calls were made; on failure the last classified error. The caller bounds ctx.
+func (t *thresholdCore) call(ctx context.Context, req *pb.SignRequest) (resp *pb.SignResponse, from, calls int, _ error) {
 	var last error
 	pinned := -1 // set after an availability failure that happened once signing had started
-	calls := 0
 	for round := 0; round <= t.cfg.MaxRetries; round++ {
 		for i := range t.cls {
 			if pinned >= 0 && i != pinned {
 				continue
 			}
 			calls++
-			resp, err := t.cls[i].Sign(ctx, req)
+			r, err := t.cls[i].Sign(ctx, req)
 			if err == nil {
-				sig, perr := parseDER(resp.Signature)
-				if perr != nil {
-					return signer.Result{}, &Error{Kind: KindCryptographic, Message: "bad signature from party " + t.cfg.Coordinators[i].Name + ": " + perr.Error()}
-				}
-				t.note(i)
-				return signer.Result{Sig: sig, Participants: []string{"mpc-" + strings.ToLower(t.cfg.Coordinators[i].Name), "mpc-2of3"},
-					Meta: map[string]any{"duration_ms": time.Since(start).Milliseconds(), "calls": calls, "coordinator": t.cfg.Coordinators[i].Name, "replayed": resp.Replayed}}, nil
+				return r, i, calls, nil
 			}
 			last = classify(err)
 			var e *Error
 			if !errors.As(last, &e) || !e.SignerUnavailable() {
-				return signer.Result{}, last // refused, cryptographic, frozen, internal: final, nobody else is asked
+				return nil, 0, calls, last // refused, cryptographic, frozen, internal: final, nobody else is asked
 			}
 			if fallbackOK(e) {
 				if i+1 < len(t.cls) {
@@ -204,16 +228,16 @@ func (t *ThresholdSigner) SignDigest(ctx context.Context, digest [32]byte, opts 
 		}
 		select {
 		case <-ctx.Done():
-			return signer.Result{}, last
+			return nil, 0, calls, last
 		case <-time.After(time.Duration(100*(round+1)) * time.Millisecond):
 		}
 	}
-	return signer.Result{}, last
+	return nil, 0, calls, last
 }
 
 // note records which coordinator signed and logs the transitions: one ALERT when the second coordinator starts being used, one INFO
 // when the first is back. Per transition, not per job.
-func (t *ThresholdSigner) note(i int) {
+func (t *thresholdCore) note(i int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch {

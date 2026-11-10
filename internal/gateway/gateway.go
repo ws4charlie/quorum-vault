@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -80,6 +81,10 @@ type Options struct {
 	Lease    time.Duration // how long a claimed job stays ours before others may reclaim it
 	Logger   *slog.Logger
 	Now      func() time.Time // default time.Now
+	// MessageSigners and DepositSigners are the Ed25519 signers of the chains whose codec is a MessageCodec (Solana): per partition, the hot shard's
+	// signer and the signer of the deposit key tree. ECDSA chains use the signers argument of New.
+	MessageSigners map[string]signer.MessageSigner
+	DepositSigners map[string]signer.MessageDeriver
 }
 
 // Gateway claims sign jobs and signs the ones it independently approves.
@@ -219,6 +224,9 @@ var errSigner = errors.New("signer failed")
 var errUnavailable = errors.New("signer unavailable")
 
 func (g *Gateway) evaluate(ctx context.Context, job signjob.Job) (sig []byte, replayed bool, err error) {
+	if mc, ok := g.codecs[job.Chain].(MessageCodec); ok {
+		return g.evaluateMessage(ctx, job, mc)
+	}
 	var pub *ecdsa.PublicKey
 	s := g.signers[job.PartitionID]
 	if d, ok := s.(signer.Deriver); ok {
@@ -314,24 +322,7 @@ func (g *Gateway) signWith(ctx context.Context, s signer.Signer, digest []byte, 
 	select {
 	case r := <-ch:
 		if r.err != nil {
-			// An availability failure (link down, limit, a dependency of the signer down) never finishes the job: nothing
-			// was signed or refused. Return a retry; the job stays "signing" and is reclaimed when its lease ends.
-			var un interface{ SignerUnavailable() bool }
-			if errors.As(r.err, &un) && un.SignerUnavailable() {
-				return nil, fmt.Errorf("%w: %v", errUnavailable, r.err)
-			}
-			// A signer may say that the other party refused (cb-mpc: party B's cosigner), or that an operator must look.
-			var ref interface{ SignerRefusal() (string, bool) }
-			if errors.As(r.err, &ref) {
-				if why, ok := ref.SignerRefusal(); ok {
-					return nil, reject(ReasonSignerRefused, "%s", why)
-				}
-			}
-			var al interface{ SignerAlert() bool }
-			if errors.As(r.err, &al) && al.SignerAlert() {
-				g.opt.Logger.Error("ALERT signer failure: an operator must look (keyset may be frozen)", "error", r.err.Error())
-			}
-			return nil, fmt.Errorf("%w: %v", errSigner, r.err)
+			return nil, g.signerError(r.err)
 		}
 		if !signer.Verify(s.PublicKey(), dg, r.res.Sig) {
 			return nil, fmt.Errorf("%w: signature does not verify", errSigner)
@@ -340,6 +331,107 @@ func (g *Gateway) signWith(ctx context.Context, s signer.Signer, digest []byte, 
 		r.res.Sig.R.FillBytes(raw[:32])
 		r.res.Sig.S.FillBytes(raw[32:])
 		return raw, nil
+	case <-sctx.Done():
+		if rt, ok := s.(interface{ RetryOnTimeout() bool }); ok && rt.RetryOnTimeout() {
+			return nil, fmt.Errorf("%w: sign timed out after %s", errUnavailable, g.cfg.SignTimeout)
+		}
+		return nil, fmt.Errorf("%w: sign timed out after %s", errSigner, g.cfg.SignTimeout)
+	}
+}
+
+// signerError maps a failure of a signer to the gateway's outcomes: an availability failure never finishes the job (a retry: nothing was signed or
+// refused; the job stays "signing" and is reclaimed when its lease ends), a refusal by the other party (cb-mpc: a cosigner) is a rejection, and
+// anything else is a signer failure, with an ALERT when an operator must look.
+func (g *Gateway) signerError(err error) error {
+	var un interface{ SignerUnavailable() bool }
+	if errors.As(err, &un) && un.SignerUnavailable() {
+		return fmt.Errorf("%w: %v", errUnavailable, err)
+	}
+	var ref interface{ SignerRefusal() (string, bool) }
+	if errors.As(err, &ref) {
+		if why, ok := ref.SignerRefusal(); ok {
+			return reject(ReasonSignerRefused, "%s", why)
+		}
+	}
+	var al interface{ SignerAlert() bool }
+	if errors.As(err, &al) && al.SignerAlert() {
+		g.opt.Logger.Error("ALERT signer failure: an operator must look (keyset may be frozen)", "error", err.Error())
+	}
+	return fmt.Errorf("%w: %v", errSigner, err)
+}
+
+// evaluateMessage is evaluate for a chain whose jobs are signed with Ed25519 over the whole message (Solana): the same steps, with the key picked
+// by the job's key reference (the partition's hot signer, or a deposit key below the deposit tree) and a signature checked by crypto/ed25519.
+func (g *Gateway) evaluateMessage(ctx context.Context, job signjob.Job, mc MessageCodec) (sig []byte, replayed bool, err error) {
+	deposit, path, err := mc.SignerFor(job.KeyRef)
+	if err != nil {
+		return nil, false, reject(ReasonTx, "key reference: %v", err)
+	}
+	var s signer.MessageSigner
+	if !deposit {
+		s = g.opt.MessageSigners[job.PartitionID]
+	} else if d := g.opt.DepositSigners[job.PartitionID]; d != nil {
+		ks, err := d.At(ctx, path)
+		if err != nil {
+			var un interface{ SignerUnavailable() bool }
+			if errors.As(err, &un) && un.SignerUnavailable() {
+				return nil, false, fmt.Errorf("%w: derive %v: %v", errUnavailable, path, err)
+			}
+			return nil, false, fmt.Errorf("%w: derive %v: %v", errSigner, path, err)
+		}
+		s = ks
+	}
+	var key SignerKey
+	if s != nil {
+		key.Ed25519 = s.PublicKey()
+	}
+	v, err := g.dec.DecideKey(ctx, job, key)
+	if err != nil {
+		return nil, false, err
+	}
+	if !v.NeedSign {
+		return v.Signature, v.Replayed, nil
+	}
+	pkg, err := EncodePackage(job)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", errSigner, err)
+	}
+	raw, err := g.signMessage(ctx, s, job.Digest, signer.SignOptions{JobID: job.ID, IntentPackage: pkg})
+	if err != nil {
+		if errors.Is(err, errUnavailable) {
+			g.outage(job.Chain, err)
+		}
+		return nil, false, err
+	}
+	g.resumed(job.Chain)
+	stored, err := g.guard.Finish(ctx, v.GuardKey, raw, g.opt.Now())
+	return stored, false, err
+}
+
+// signMessage is signWith for a MessageSigner.
+func (g *Gateway) signMessage(ctx context.Context, s signer.MessageSigner, msg []byte, opts signer.SignOptions) ([]byte, error) {
+	sctx, cancel := context.WithTimeout(ctx, g.cfg.SignTimeout)
+	defer cancel()
+	type result struct {
+		res signer.MessageResult
+		err error
+	}
+	ch := make(chan result, 1)
+	g.inflight.Add(1)
+	go func() {
+		defer g.inflight.Done()
+		res, err := s.SignMessage(sctx, msg, opts)
+		ch <- result{res, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, g.signerError(r.err)
+		}
+		if len(r.res.Signature) != ed25519.SignatureSize || !ed25519.Verify(ed25519.PublicKey(s.PublicKey()), msg, r.res.Signature) {
+			return nil, fmt.Errorf("%w: signature does not verify", errSigner)
+		}
+		return r.res.Signature, nil
 	case <-sctx.Done():
 		if rt, ok := s.(interface{ RetryOnTimeout() bool }); ok && rt.RetryOnTimeout() {
 			return nil, fmt.Errorf("%w: sign timed out after %s", errUnavailable, g.cfg.SignTimeout)
