@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -263,7 +264,7 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 		return i, reject(ReasonIntent, "intent has no id")
 	}
 	switch i.Kind {
-	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate":
+	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate", sol.KindNonceSetup:
 	default:
 		return i, reject(ReasonIntent, "intent kind %q", i.Kind)
 	}
@@ -426,6 +427,15 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 			if total := new(big.Int).Add(sum, amount); total.Cmp(p.RebalanceDailyCap) > 0 {
 				return reject(ReasonRebalanceCap, "%s already rebalanced in 24h plus %s exceeds the cap %s", sum, amount, p.RebalanceDailyCap)
 			}
+		}
+	case sol.KindNonceSetup:
+		// An operator creates nonce accounts on a hot shard: at least one approval of a configured approver, and the shard must be ours. The
+		// shape (the pool's own addresses, the rent the config names) is the chain verifier's; what an approval cannot widen is the pool size.
+		if valid == 0 {
+			return reject(ReasonApprovals, "a nonce setup needs an operator approval")
+		}
+		if !codec.OwnsSender(info.Sender) {
+			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
 		}
 	case "cancel":
 		if !codec.OwnsSender(info.Sender) {

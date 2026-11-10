@@ -30,7 +30,7 @@ func TestSOLWithdrawalFromTheHotShardLands(t *testing.T) {
 	dest := st.NewKey()
 	const amount = 2_000_000
 	in := s.intent("withdrawal", "w1", "SOL", partSOL, "", dest.Address(), amount)
-	msg := s.msgFromHot(st.SetLimit(10_000), st.SetPrice(1000), st.Transfer(s.hotPub, dest.Pub, amount))
+	msg := s.wdMsg(st.SetLimit(10_000), st.SetPrice(1000), st.Transfer(s.hotPub, dest.Pub, amount))
 	sig := s.sign("j1", in, msg, sol.PathHot, nil)
 	s.n.land(st.Assemble(msg, sig))
 	if got := s.n.lamports(dest.Pub); got != amount {
@@ -54,7 +54,7 @@ func TestSPLWithdrawalFromTheHotShardLands(t *testing.T) {
 	const amount = 2_500_000
 	in := s.intent("withdrawal", "w1", "TKN", partTKN, "", dest.Address(), amount)
 	destATA := s.ata(dest.Pub, s.mint.Pub)
-	msg := s.msgFromHot(st.SetLimit(80_000), st.CreateATA(s.hotPub, destATA, dest.Pub, s.mint.Pub), st.CheckedTransfer(hotATA, s.mint.Pub, destATA, s.hotPub, amount, 6))
+	msg := s.wdMsg(st.SetLimit(80_000), st.CreateATA(s.hotPub, destATA, dest.Pub, s.mint.Pub), st.CheckedTransfer(hotATA, s.mint.Pub, destATA, s.hotPub, amount, 6))
 	sig := s.sign("j1", in, msg, sol.PathHot, nil)
 	s.n.land(st.Assemble(msg, sig))
 	if got := s.n.tokens(dest.Pub, s.mint.Pub); got != amount {
@@ -72,7 +72,7 @@ func TestWithdrawalWithPartyADownLands(t *testing.T) {
 	dest := st.NewKey()
 	const amount = 1_500_000
 	in := s.intent("withdrawal", "w1", "SOL", partSOL, "", dest.Address(), amount)
-	msg := s.msgFromHot(st.SetLimit(10_000), st.Transfer(s.hotPub, dest.Pub, amount))
+	msg := s.wdMsg(st.SetLimit(10_000), st.Transfer(s.hotPub, dest.Pub, amount))
 	sig := s.sign("j1", in, msg, sol.PathHot, nil)
 	s.n.land(st.Assemble(msg, sig))
 	if got := s.n.lamports(dest.Pub); got != amount {
@@ -146,9 +146,9 @@ func TestRoguePayloadsAreRefusedByTheCosigners(t *testing.T) {
 	dest, evil := st.NewKey(), st.NewKey()
 	const amount = 2_000_000
 	in := s.intent("withdrawal", "w-rogue", "SOL", partSOL, "", dest.Address(), amount)
-	good := s.msgFromHot(st.SetLimit(10_000), st.Transfer(s.hotPub, dest.Pub, amount))
-	bad := s.msgFromHot(st.SetLimit(10_000), st.Transfer(s.hotPub, evil.Pub, amount))
-	other := s.msgFromHot(st.SetLimit(10_000), st.Transfer(s.hotPub, dest.Pub, amount*100))
+	good := s.wdMsg(st.SetLimit(10_000), st.Transfer(s.hotPub, dest.Pub, amount))
+	bad := s.wdMsg(st.SetLimit(10_000), st.Transfer(s.hotPub, evil.Pub, amount))
+	other := s.wdMsg(st.SetLimit(10_000), st.Transfer(s.hotPub, dest.Pub, amount*100))
 	pkgFor := func(id string, msg []byte, in2 interface{}) []byte { return nil }
 	_ = pkgFor
 	type ask struct {
@@ -204,13 +204,13 @@ func TestGatewayRefusesBeforeAskingTheParties(t *testing.T) {
 	s := newStack(t, optsT{})
 	dest := st.NewKey()
 	in := s.intent("withdrawal", "w1", "SOL", partSOL, "", dest.Address(), 2_000_000)
-	before := s.mpc.A.CountLog(`"op":"sign"`)
-	bad := s.msgFromHot(st.SetLimit(10_000), st.SetPrice(100_001), st.Transfer(s.hotPub, dest.Pub, 2_000_000))
+	bad := s.wdMsg(st.SetLimit(10_000), st.SetPrice(100_001), st.Transfer(s.hotPub, dest.Pub, 2_000_000))
+	v0 := append([]byte{0x80}, s.wdMsg(st.SetLimit(10_000), st.Transfer(s.hotPub, dest.Pub, 2_000_000))...)
+	before := s.mpc.A.CountLog(`"op":"sign"`) // the nonce account was created through A above; from here on nothing may be signed
 	if why := s.refused("g1", in, bad, sol.PathHot, nil); !contains(why, "tx_mismatch") {
 		t.Fatalf("reason %q", why)
 	}
 	// a v0 message
-	v0 := append([]byte{0x80}, s.msgFromHot(st.SetLimit(10_000), st.Transfer(s.hotPub, dest.Pub, 2_000_000))...)
 	if why := s.refused("g2", in, v0, sol.PathHot, nil); !contains(why, "tx_mismatch") {
 		t.Fatalf("reason %q", why)
 	}

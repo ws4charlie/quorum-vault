@@ -312,6 +312,8 @@ type stack struct {
 	gw      *mpcstack.Proc
 	appr    ed25519.PrivateKey
 	seq     int
+
+	noncesMade bool
 }
 
 func ctxT(t testing.TB, d time.Duration) context.Context {
@@ -357,7 +359,7 @@ func newStack(t *testing.T, o optsT) *stack {
 			SOL: &gateway.SOLFile{AccountPublicKey: hex.EncodeToString(node.PublicKey[:]), AccountChainCode: hex.EncodeToString(node.ChainCode[:]),
 				HotShards:       map[string]string{partSOL: hotAddr, partTKN: hotAddr},
 				Tokens:          map[string]gateway.SOLTokenFile{"TKN": {Mint: s.mint.Address(), Decimals: 6}},
-				MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: 100_000, MaxPriorityFeeLamports: 15_000},
+				MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: 100_000, MaxPriorityFeeLamports: 15_000, NoncePool: 3, NonceRentLamports: sol.DefaultNonceRent},
 			Assets: map[string]gateway.AssetFile{
 				"SOL": {AnyDestination: true, PerTxCap: "50000000000", DailyCap: "100000000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}},
 				"TKN": {AnyDestination: true, PerTxCap: "1000000000", DailyCap: "2000000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}}}}},
@@ -426,7 +428,7 @@ func (s *stack) job(id string, in signjob.Intent, msg []byte, keyPath string, de
 	p, _ := json.Marshal(sol.Payload{Message: msg, DepositIndex: dep})
 	ib, _ := json.Marshal(in)
 	apps := []signjob.Approval{}
-	if in.Kind == "withdrawal" {
+	if in.Kind == "withdrawal" || in.Kind == sol.KindNonceSetup {
 		h := in.Hash()
 		apps = append(apps, signjob.Approval{Actor: "alice", Signature: ed25519.Sign(s.appr, h[:])})
 	}
@@ -492,6 +494,35 @@ func (s *stack) refused(id string, in signjob.Intent, msg []byte, keyPath string
 		s.t.Fatalf("job %s was signed", id)
 	}
 	return j.RejectReason
+}
+
+// wdMsg is a withdrawal message on durable-nonce account 0 of the hot shard: it creates the account through the signing zone the first time, then
+// signs the value it holds and advances it first. Each test lands at most one withdrawal, so one account is enough.
+func (s *stack) wdMsg(ixs ...st.Ix) []byte {
+	s.t.Helper()
+	acct := sol.NonceAddress(s.hotPub, 0)
+	if !s.noncesMade {
+		s.noncesMade = true
+		create := sol.CreateNonceIxs(s.hotPub, 0, sol.DefaultNonceRent)
+		var sx []st.Ix
+		for _, c := range append([]sol.Ix{sol.SetLimitIx(30_000)}, create...) {
+			x := st.Ix{Program: c.Program, Data: c.Data}
+			for _, m := range c.Accts {
+				x.Accts = append(x.Accts, st.Meta{Key: m.Key, Signer: m.Signer, Writable: m.Writable})
+			}
+			sx = append(sx, x)
+		}
+		msg := s.msgFromHot(sx...)
+		in := signjob.Intent{Kind: sol.KindNonceSetup, ID: "nonce-setup", PartitionID: partSOL, Chain: chainName, Asset: "SOL", To: sol.Address(s.hotPub), Amount: fmt.Sprint(sol.DefaultNonceRent)}
+		sig := s.sign("nonce-setup", in, msg, sol.PathHot, nil)
+		s.n.land(st.Assemble(msg, sig))
+	}
+	nc, err := s.n.rpc.GetNonce(context.Background(), sol.Address(acct), sol.Confirmed)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	adv := st.AdvanceNonce(acct, s.hotPub)
+	return st.Compile(s.hotPub, nc.Value, append([]st.Ix{adv}, ixs...)...)
 }
 
 func (s *stack) msgFromHot(ixs ...st.Ix) []byte { return st.Compile(s.hotPub, s.n.blockhash(), ixs...) }

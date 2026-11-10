@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
@@ -15,6 +16,11 @@ import (
 // activity at or above the scan cursor (it reads balances first and activity after); those are waited for, and the read is repeated when the
 // books or the scan cursor moved during it. Only if that keeps happening is the comparison skipped, and then the report says so and is not
 // Clean. What is left after that is a real difference, in the base unit.
+//
+// The hot shards are compared the same way: the books' side is minus the hot account of each partition, the chain side the shard's balance at
+// finalized commitment. A withdrawal whose transaction has finalized and that the books have not settled yet has already changed the chain: it is
+// explained from the cell's own records of the transaction (what it sent and what it cost), and the comparison is repeated if the set of such
+// withdrawals, or the books, changed while it ran.
 //
 // The books' side is the dep account of each asset: every deposit, credited or in suspense, is booked into it, and nothing leaves a deposit
 // address yet (sweeps are a later task), so minus its posted amount is what the deposit addresses must hold.
@@ -40,6 +46,10 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 			}
 		}
 		before, err := s.solStamp(ctx)
+		if err != nil {
+			return err
+		}
+		landed, err := s.solLanded(ctx)
 		if err != nil {
 			return err
 		}
@@ -73,11 +83,23 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 			}
 			posted[sym] = p
 		}
+		hotChain, err := s.solHotBalances(ctx)
+		if err != nil {
+			return err
+		}
+		hotBooks, err := s.solHotBooks(ctx)
+		if err != nil {
+			return err
+		}
 		after, err := s.solStamp(ctx)
 		if err != nil {
 			return err
 		}
-		if before != after || len(view.Pending) > 0 {
+		landedAfter, err := s.solLanded(ctx)
+		if err != nil {
+			return err
+		}
+		if before != after || len(view.Pending) > 0 || landed.key != landedAfter.key {
 			continue // the books or the chain moved during the read: read again
 		}
 		rep.ScanCursor = cur
@@ -91,8 +113,17 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 			rep.add(Check{Name: "deposit_addresses", Asset: sym, Ledger: want.String(), Chain: sum.String(), OK: want.Cmp(sum) == 0,
 				Detail: fmt.Sprintf("%d deposit addresses, finalized balances; the ledger side is every deposit booked, in the asset's base unit", len(addrs))})
 		}
+		for _, hc := range hotChain {
+			want := new(big.Int).Set(hotBooks[hc.partition])
+			if adj := landed.out[hc.partition]; adj != nil {
+				want.Sub(want, adj) // already left the chain, not yet booked
+			}
+			rep.add(Check{Name: "hot_balance", Asset: hc.asset, Subject: hc.partition, Ledger: want.String(), Chain: hc.balance.String(), OK: want.Cmp(hc.balance) == 0,
+				Detail: fmt.Sprintf("hot shard %s at finalized commitment; %d finalized withdrawal(s) not settled yet are accounted for", hc.address, landed.n)})
+		}
 		s.ledgerInvariants(ctx, rep)
-		// Nothing is swept, withdrawn or moved to cold on this family yet, so every clearing account must be empty.
+		// Nothing is swept or moved to cold on this family yet, and a withdrawal posts its hold and moves it on in one transaction, so every
+		// clearing account must be empty.
 		for _, sym := range c.AssetList {
 			for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), rebalAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
 				p, err := s.posted(ctx, id)
@@ -115,6 +146,109 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 func (s *Service) solStamp(ctx context.Context) (string, error) {
 	var st string
 	err := s.Pool.QueryRow(ctx, `SELECT concat_ws('|', (SELECT count(*)::text FROM deposits WHERE chain=$1), (SELECT COALESCE(next_height,0)::text FROM chain_cursors WHERE chain=$1),
-		(SELECT count(*)::text FROM deposit_addresses WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
+		(SELECT count(*)::text FROM deposit_addresses WHERE chain=$1),
+		(SELECT COALESCE(string_agg(posted::text, ',' ORDER BY id), '') FROM ledger_accounts WHERE chain=$1),
+		(SELECT count(*)::text FROM withdrawals WHERE chain=$1 AND status IN ('confirmed','failed')))`, s.Cfg.Chain).Scan(&st)
 	return st, err
+}
+
+type solHot struct {
+	partition, asset, address string
+	balance                   *big.Int
+}
+
+// solHotBalances reads the finalized balance of every hot shard and asset.
+func (s *Service) solHotBalances(ctx context.Context) ([]solHot, error) {
+	c := s.Cfg
+	var out []solHot
+	for i, addr := range c.SOLHot {
+		for _, sym := range c.AssetList {
+			b, err := s.Reader.Balance(ctx, addr, sym, 0)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, solHot{partition: c.PartitionKey(sym, i).String(), asset: sym, address: addr, balance: b})
+		}
+	}
+	return out, nil
+}
+
+// solHotBooks is, per hot partition, what the books say the shard holds: minus the hot account.
+func (s *Service) solHotBooks(ctx context.Context) (map[string]*big.Int, error) {
+	c := s.Cfg
+	out := map[string]*big.Int{}
+	for i := range c.SOLHot {
+		for _, sym := range c.AssetList {
+			p := c.PartitionKey(sym, i).String()
+			posted, err := s.posted(ctx, hotAcct(p))
+			if err != nil {
+				return nil, err
+			}
+			out[p] = new(big.Int).Neg(posted)
+		}
+	}
+	return out, nil
+}
+
+// solLandedSet is what the finalized transactions of withdrawals that are not settled yet have already taken off the hot shards.
+type solLandedSet struct {
+	out map[string]*big.Int // partition -> amount
+	n   int
+	key string
+}
+
+// solLanded asks the chain cell about every withdrawal that has a transaction out and is not settled in the books. A transaction that landed
+// moved its amount (when it succeeded) and cost its fee, which the books record at settlement or void.
+func (s *Service) solLanded(ctx context.Context) (solLandedSet, error) {
+	res := solLandedSet{out: map[string]*big.Int{}}
+	rows, err := s.Pool.Query(ctx, `SELECT id, asset, amount::text, partition_id FROM withdrawals WHERE chain=$1 AND status IN ('signing','broadcast') ORDER BY id`, s.Cfg.Chain)
+	if err != nil {
+		return res, err
+	}
+	type wd struct{ id, asset, amount, part string }
+	var ws []wd
+	for rows.Next() {
+		var w wd
+		if err := rows.Scan(&w.id, &w.asset, &w.amount, &w.part); err != nil {
+			rows.Close()
+			return res, err
+		}
+		ws = append(ws, w)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return res, err
+	}
+	var key []string
+	add := func(part string, n *big.Int) {
+		if res.out[part] == nil {
+			res.out[part] = new(big.Int)
+		}
+		res.out[part].Add(res.out[part], n)
+	}
+	for _, w := range ws {
+		oc, err := s.Chain.Outcome(ctx, "withdrawal", w.id)
+		if err != nil {
+			return res, err
+		}
+		if oc.State != chain.OutcomeConfirmed {
+			continue
+		}
+		fee, err := s.Chain.TxFee(ctx, oc.Hash)
+		if err != nil {
+			return res, err
+		}
+		nativePart, err := s.nativePartitionOf(w.part)
+		if err != nil {
+			return res, err
+		}
+		add(nativePart, fee)
+		if oc.Kind == chain.AttemptSend && !oc.Failed {
+			add(w.part, parseBig(w.amount))
+		}
+		res.n++
+		key = append(key, w.id+":"+oc.Hash)
+	}
+	res.key = strings.Join(key, ",")
+	return res, nil
 }

@@ -570,6 +570,10 @@ type SOLFile struct {
 	MaxComputeUnits         uint32 `json:"max_compute_units"`
 	MaxMicroLamportsPerUnit uint64 `json:"max_micro_lamports_per_unit"`
 	MaxPriorityFeeLamports  uint64 `json:"max_priority_fee_lamports"`
+	// NoncePool is the number of durable-nonce accounts each hot shard owns, and NonceRentLamports the rent-exempt minimum each is created with.
+	// Withdrawals sign the nonce of one of these accounts; the zone derives every address from the hot shard.
+	NoncePool         int    `json:"nonce_pool"`
+	NonceRentLamports uint64 `json:"nonce_rent_lamports"`
 }
 
 // SOLTokenFile is a configured classic SPL token.
@@ -596,7 +600,8 @@ func (cf ChainFile) buildSOL(name string, enabledApprovers int) (*ChainConfig, e
 		return nil, fmt.Errorf("gateway: config: chain %q: account_public_key and account_chain_code are 32 bytes of hex", name)
 	}
 	sc := sol.SigningConfig{Chain: name, HotShards: s.HotShards, Tokens: map[string]sol.Token{}, MaxComputeUnits: s.MaxComputeUnits,
-		MaxMicroLamportsPerUnit: s.MaxMicroLamportsPerUnit, MaxPriorityFeeLamports: s.MaxPriorityFeeLamports}
+		MaxMicroLamportsPerUnit: s.MaxMicroLamportsPerUnit, MaxPriorityFeeLamports: s.MaxPriorityFeeLamports,
+		NoncePool: s.NoncePool, NonceRent: s.NonceRentLamports}
 	copy(sc.AccountPublicKey[:], pub)
 	copy(sc.AccountChainCode[:], cc)
 	for sym, t := range s.Tokens {

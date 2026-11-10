@@ -60,6 +60,9 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 			return nil, fmt.Errorf("sol: token %s: the mint has %d decimals, the config says %d", m.symbol, d, v.TokenDecimals[m.symbol])
 		}
 	}
+	if err := a.ensurePool(ctx); err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 
@@ -108,46 +111,20 @@ func (a *Adapter) watched(ctx context.Context) ([]string, error) {
 
 var errLater = fmt.Errorf("sol: %w (a later P8 task)", chain.ErrNotSupported)
 
-func (a *Adapter) BuildWithdrawal(context.Context, pgx.Tx, chain.WithdrawalIntent) (chain.UnsignedTx, error) {
-	return chain.UnsignedTx{}, errLater
-}
 func (a *Adapter) BuildSweep(context.Context, pgx.Tx, chain.SweepIntent) (chain.UnsignedTx, error) {
 	return chain.UnsignedTx{}, errLater
-}
-func (a *Adapter) BuildReplacement(context.Context, pgx.Tx, string, string) (chain.UnsignedTx, error) {
-	return chain.UnsignedTx{}, chain.ErrNotSupported
-}
-func (a *Adapter) BuildCancel(context.Context, pgx.Tx, string, string) (chain.UnsignedTx, error) {
-	return chain.UnsignedTx{}, chain.ErrNotSupported
-}
-func (a *Adapter) Assemble(chain.UnsignedTx, []chain.Signature) (chain.SignedTx, error) {
-	return chain.SignedTx{}, errLater
-}
-func (a *Adapter) Broadcast(context.Context, chain.SignedTx) (string, error) { return "", errLater }
-func (a *Adapter) Status(context.Context, string) (chain.TxStatus, error) {
-	return "", errLater
 }
 func (a *Adapter) EstimateSweepFee(context.Context, chain.SweepIntent) (*big.Int, error) {
 	return nil, errLater
 }
-func (a *Adapter) TxFee(context.Context, string) (*big.Int, error) { return nil, errLater }
 func (a *Adapter) MovedAssets(context.Context, string) ([]chain.MovedAsset, error) {
 	return nil, errLater
-}
-func (a *Adapter) Outcome(context.Context, string, string) (chain.Outcome, error) {
-	return chain.Outcome{}, errLater
-}
-func (a *Adapter) Reservation(context.Context, chain.Querier, string, string) (chain.Reservation, error) {
-	return chain.Reservation{}, nil // nothing is reserved until transactions are built
 }
 
 // ---- the custody.Reader of the chain ----
 
 // SafeHead is the highest finalized slot.
 func (a *Adapter) SafeHead(ctx context.Context) (uint64, error) { return a.rpc.Slot(ctx, Finalized) }
-
-// TxBlock is not supported until transactions of ours exist.
-func (a *Adapter) TxBlock(context.Context, string) (uint64, error) { return 0, errLater }
 
 func (a *Adapter) mintOf(symbol string) (mint, bool) {
 	for _, m := range a.cfg.mints {
