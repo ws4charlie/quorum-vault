@@ -127,6 +127,8 @@ type fx struct {
 	depAddr                [32]byte
 	depIdx                 uint32
 	bh                     [32]byte
+	nv                     [32]byte // the value of the nonce account the withdrawals sign
+	nonce0                 [32]byte
 }
 
 func pub(t *testing.T) [32]byte {
@@ -151,7 +153,7 @@ func newFx(t *testing.T) *fx {
 	f.cfg = SigningConfig{Chain: "sol-1", AccountPublicKey: f.node.PublicKey, AccountChainCode: f.node.ChainCode,
 		HotShards:       map[string]string{f.partSOL: Address(f.hot), f.partTKN: Address(f.hot)},
 		Tokens:          map[string]Token{"TKN": {Mint: Address(f.mint), Decimals: 6}},
-		MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: 100_000, MaxPriorityFeeLamports: 15_000}
+		MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: 100_000, MaxPriorityFeeLamports: 15_000, NoncePool: 3, NonceRent: DefaultNonceRent}
 	var err error
 	if f.v, err = NewVerifier(f.cfg); err != nil {
 		t.Fatal(err)
@@ -162,7 +164,15 @@ func newFx(t *testing.T) *fx {
 	}
 	f.depAddr = dk
 	f.bh = pub(t)
+	f.nv = pub(t)
+	f.nonce0 = NonceAddress(f.hot, 0)
 	return f
+}
+
+func (f *fx) adv() tix { return f.advOn(f.nonce0, f.hot) }
+func (f *fx) advOn(nonce, auth [32]byte) tix {
+	bh, _ := ParseAddress(SysvarRecentBlockhashes)
+	return tix{prog: f.sys, accts: []tmeta{{nonce, false, true}, {bh, false, false}, {auth, true, false}}, data: AdvanceNonceData()}
 }
 
 func (f *fx) cbLimit(n uint32) tix {
@@ -220,16 +230,16 @@ func TestAllowedShapes(t *testing.T) {
 	f := newFx(t)
 	idx := f.depIdx
 	// SOL withdrawal, with and without a price
-	m := compile(f.hot, f.bh, f.cbLimit(10_000), f.cbPrice(1000), f.sysTransfer(f.hot, f.dest, 5_000_000))
+	m := compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.cbPrice(1000), f.sysTransfer(f.hot, f.dest, 5_000_000))
 	f.mustPass("SOL withdrawal", f.job(m, f.partSOL, PathHot, nil), f.wIntent("SOL", f.partSOL, "5000000"))
-	m = compile(f.hot, f.bh, f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_000))
+	m = compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_000))
 	f.mustPass("SOL withdrawal, no price", f.job(m, f.partSOL, PathHot, nil), f.wIntent("SOL", f.partSOL, "5000000"))
 
 	// token withdrawal, destination account exists / is created
 	src, dst := f.ata(f.hot), f.ata(f.dest)
-	m = compile(f.hot, f.bh, f.cbLimit(50_000), f.checked(src, dst, f.hot, 777, 6, f.mint))
+	m = compile(f.hot, f.nv, f.adv(), f.cbLimit(50_000), f.checked(src, dst, f.hot, 777, 6, f.mint))
 	f.mustPass("token withdrawal", f.job(m, f.partTKN, PathHot, nil), f.wIntent("TKN", f.partTKN, "777"))
-	m = compile(f.hot, f.bh, f.cbLimit(50_000), f.create(f.hot, dst, f.dest, f.mint), f.checked(src, dst, f.hot, 777, 6, f.mint))
+	m = compile(f.hot, f.nv, f.adv(), f.cbLimit(50_000), f.create(f.hot, dst, f.dest, f.mint), f.checked(src, dst, f.hot, 777, 6, f.mint))
 	f.mustPass("token withdrawal with create", f.job(m, f.partTKN, PathHot, nil), f.wIntent("TKN", f.partTKN, "777"))
 
 	// SOL sweep: both jobs (fee payer, deposit owner) pass
@@ -273,27 +283,27 @@ func TestAllowedShapes(t *testing.T) {
 
 func TestWithdrawalAttacks(t *testing.T) {
 	f := newFx(t)
-	good := func() []tix { return []tix{f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_000)} }
+	good := func() []tix { return []tix{f.adv(), f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_000)} }
 	in := f.wIntent("SOL", f.partSOL, "5000000")
-	pass := func(ixs []tix) chain.UnsignedTx { return f.job(compile(f.hot, f.bh, ixs...), f.partSOL, PathHot, nil) }
+	pass := func(ixs []tix) chain.UnsignedTx { return f.job(compile(f.hot, f.nv, ixs...), f.partSOL, PathHot, nil) }
 	f.mustPass("baseline", pass(good()), in)
 
-	f.mustFail("wrong destination", pass([]tix{f.cbLimit(10_000), f.sysTransfer(f.hot, f.other, 5_000_000)}), in, "not a system transfer")
-	f.mustFail("wrong amount", pass([]tix{f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_001)}), in, "not a system transfer")
+	f.mustFail("wrong destination", pass([]tix{f.adv(), f.cbLimit(10_000), f.sysTransfer(f.hot, f.other, 5_000_000)}), in, "not a system transfer")
+	f.mustFail("wrong amount", pass([]tix{f.adv(), f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_001)}), in, "not a system transfer")
 	f.mustFail("extra instruction", pass(append(good(), f.sysTransfer(f.hot, f.other, 1))), in, "one system transfer")
-	f.mustFail("drain to self is not the transfer", pass([]tix{f.cbLimit(10_000), f.sysTransfer(f.other, f.dest, 5_000_000)}), in, "not a system transfer")
+	f.mustFail("drain to self is not the transfer", pass([]tix{f.adv(), f.cbLimit(10_000), f.sysTransfer(f.other, f.dest, 5_000_000)}), in, "not a system transfer")
 	// different fee payer
-	f.mustFail("different fee payer", f.job(compile(f.other, f.bh, f.cbLimit(10_000), f.sysTransfer(f.other, f.dest, 5_000_000)), f.partSOL, PathHot, nil), in, "fee payer")
+	f.mustFail("different fee payer", f.job(compile(f.other, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.other, f.dest, 5_000_000)), f.partSOL, PathHot, nil), in, "fee payer")
 	// extra signer: the destination also signs
 	extra := tix{prog: f.sys, accts: []tmeta{{f.hot, true, true}, {f.dest, true, true}}, data: append(le32(2), le64(5_000_000)...)}
-	f.mustFail("extra signer", pass([]tix{f.cbLimit(10_000), extra}), in, "required signers")
+	f.mustFail("extra signer", pass([]tix{f.adv(), f.cbLimit(10_000), extra}), in, "required signers")
 	// compute budget
-	f.mustFail("price above the cap", pass([]tix{f.cbLimit(10_000), f.cbPrice(100_001), f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "price")
-	f.mustFail("limit above the cap", pass([]tix{f.cbLimit(200_001), f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "limit")
-	f.mustFail("priority fee above the cap", pass([]tix{f.cbLimit(200_000), f.cbPrice(100_000), f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "priority fee")
-	f.mustFail("no limit", pass([]tix{f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "no compute unit limit")
-	f.mustFail("limit twice", pass([]tix{f.cbLimit(1), f.cbLimit(2), f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "twice")
-	f.mustFail("heap frame request", pass([]tix{f.cbLimit(10_000), {prog: f.cb, data: append([]byte{1}, le32(65536)...)}, f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "not allowed")
+	f.mustFail("price above the cap", pass([]tix{f.adv(), f.cbLimit(10_000), f.cbPrice(100_001), f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "price")
+	f.mustFail("limit above the cap", pass([]tix{f.adv(), f.cbLimit(200_001), f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "limit")
+	f.mustFail("priority fee above the cap", pass([]tix{f.adv(), f.cbLimit(200_000), f.cbPrice(100_000), f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "priority fee")
+	f.mustFail("no limit", pass([]tix{f.adv(), f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "no compute unit limit")
+	f.mustFail("limit twice", pass([]tix{f.adv(), f.cbLimit(1), f.cbLimit(2), f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "twice")
+	f.mustFail("heap frame request", pass([]tix{f.adv(), f.cbLimit(10_000), {prog: f.cb, data: append([]byte{1}, le32(65536)...)}, f.sysTransfer(f.hot, f.dest, 5_000_000)}), in, "not allowed")
 	// intent mismatch
 	in2 := in
 	in2.To = Address(f.other)
@@ -311,9 +321,9 @@ func TestWithdrawalAttacks(t *testing.T) {
 	in6.Kind = "to-cold"
 	f.mustFail("another kind", pass(good()), in6, "not signed on this chain")
 	// partition / chain
-	f.mustFail("unknown partition", f.job(compile(f.hot, f.bh, good()...), "qv-us/sol-1/SOL/hot/omnibus/9", PathHot, nil), func() signjob.Intent { x := in; x.PartitionID = "qv-us/sol-1/SOL/hot/omnibus/9"; return x }(), "no hot shard")
+	f.mustFail("unknown partition", f.job(compile(f.hot, f.nv, good()...), "qv-us/sol-1/SOL/hot/omnibus/9", PathHot, nil), func() signjob.Intent { x := in; x.PartitionID = "qv-us/sol-1/SOL/hot/omnibus/9"; return x }(), "no hot shard")
 	// the account list carries something no instruction uses
-	unused := compile(f.hot, f.bh, f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_000))
+	unused := compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_000))
 	unused = append([]byte(nil), unused...)
 	// bump the key count and add a key before the blockhash
 	dec, _ := DecodeMessage(unused)
@@ -327,7 +337,7 @@ func TestWithdrawalAttacks(t *testing.T) {
 	with = append(with, unused[3+1+32*len(dec.Keys):]...)
 	f.mustFail("unused account", f.job(with, f.partSOL, PathHot, nil), in, "used by no instruction")
 	// v0 message
-	v0 := append([]byte{0x80}, compile(f.hot, f.bh, good()...)...)
+	v0 := append([]byte{0x80}, compile(f.hot, f.nv, good()...)...)
 	f.mustFail("v0 message", f.job(v0, f.partSOL, PathHot, nil), in, "versioned")
 	// digest is not the message
 	u := pass(good())
@@ -335,9 +345,9 @@ func TestWithdrawalAttacks(t *testing.T) {
 	u.Digest[len(u.Digest)-1] ^= 1
 	f.mustFail("digest differs from the message", u, in, "digest")
 	// trailing bytes
-	f.mustFail("trailing bytes", f.job(append(compile(f.hot, f.bh, good()...), 0), f.partSOL, PathHot, nil), in, "trailing")
+	f.mustFail("trailing bytes", f.job(append(compile(f.hot, f.nv, good()...), 0), f.partSOL, PathHot, nil), in, "trailing")
 	// a duplicate account key
-	d := compile(f.hot, f.bh, f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_000))
+	d := compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.hot, f.dest, 5_000_000))
 	dm, _ := DecodeMessage(d)
 	dupKeys := []byte{d[0], d[1], d[2] + 1}
 	dupKeys = append(dupKeys, cu16(len(dm.Keys)+1)...)
@@ -348,8 +358,8 @@ func TestWithdrawalAttacks(t *testing.T) {
 	dupKeys = append(dupKeys, d[3+1+32*len(dm.Keys):]...)
 	f.mustFail("duplicate account", f.job(dupKeys, f.partSOL, PathHot, nil), in, "twice")
 	// the key reference of a withdrawal job must be the hot shard
-	f.mustFail("deposit key on a withdrawal", f.job(compile(f.hot, f.bh, good()...), f.partSOL, DepositPath(1), nil), in, "not the deposit key")
-	f.mustFail("garbage key reference", f.job(compile(f.hot, f.bh, good()...), f.partSOL, "x", nil), in, "neither")
+	f.mustFail("deposit key on a withdrawal", f.job(compile(f.hot, f.nv, good()...), f.partSOL, DepositPath(1), nil), in, "not the deposit key")
+	f.mustFail("garbage key reference", f.job(compile(f.hot, f.nv, good()...), f.partSOL, "x", nil), in, "neither")
 }
 
 func TestTokenWithdrawalAttacks(t *testing.T) {
@@ -357,7 +367,7 @@ func TestTokenWithdrawalAttacks(t *testing.T) {
 	src, dst := f.ata(f.hot), f.ata(f.dest)
 	in := f.wIntent("TKN", f.partTKN, "777")
 	mk := func(ixs ...tix) chain.UnsignedTx {
-		return f.job(compile(f.hot, f.bh, append([]tix{f.cbLimit(50_000)}, ixs...)...), f.partTKN, PathHot, nil)
+		return f.job(compile(f.hot, f.nv, append([]tix{f.adv(), f.cbLimit(50_000)}, ixs...)...), f.partTKN, PathHot, nil)
 	}
 	f.mustPass("baseline", mk(f.checked(src, dst, f.hot, 777, 6, f.mint)), in)
 	f.mustFail("wrong mint", mk(f.checked(src, dst, f.hot, 777, 6, f.other)), in, "transferChecked")
@@ -384,8 +394,8 @@ func TestTokenWithdrawalAttacks(t *testing.T) {
 	f.mustFail("non-idempotent create", mk(nonIdem, f.checked(src, dst, f.hot, 777, 6, f.mint)), in, "create")
 	// the same account in two roles: the destination account is also the source
 	f.mustFail("source = destination", mk(f.checked(src, src, f.hot, 777, 6, f.mint)), in, "transferChecked")
-	f.mustFail("SOL instruction for a token intent", f.job(compile(f.hot, f.bh, f.cbLimit(50_000), f.sysTransfer(f.hot, f.dest, 777)), f.partTKN, PathHot, nil), in, "transferChecked")
-	f.mustFail("token asset on the SOL partition", f.job(compile(f.hot, f.bh, f.cbLimit(50_000), f.checked(src, dst, f.hot, 777, 6, f.mint)), f.partSOL, PathHot, nil), in, "intent partition")
+	f.mustFail("SOL instruction for a token intent", f.job(compile(f.hot, f.nv, f.adv(), f.cbLimit(50_000), f.sysTransfer(f.hot, f.dest, 777)), f.partTKN, PathHot, nil), in, "transferChecked")
+	f.mustFail("token asset on the SOL partition", f.job(compile(f.hot, f.nv, f.adv(), f.cbLimit(50_000), f.checked(src, dst, f.hot, 777, 6, f.mint)), f.partSOL, PathHot, nil), in, "intent partition")
 }
 
 func TestSweepAttacks(t *testing.T) {
@@ -503,4 +513,106 @@ func TestVerifierConfigRefusals(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+}
+
+// ---- durable nonces ----
+
+func (f *fx) cancelIntent() signjob.Intent {
+	return signjob.Intent{Kind: "cancel", ID: "cancel:withdrawal:w1", PartitionID: f.partSOL, Chain: "sol-1", Asset: "SOL", To: Address(f.hot), Amount: "0"}
+}
+
+func (f *fx) setupIntent(n int) signjob.Intent {
+	return signjob.Intent{Kind: KindNonceSetup, ID: "setup-1", PartitionID: f.partSOL, Chain: "sol-1", Asset: "SOL", To: Address(f.hot), Amount: strconvU(uint64(n) * DefaultNonceRent)}
+}
+
+func strconvU(n uint64) string { return jsonNum(n) }
+
+func jsonNum(n uint64) string { b, _ := json.Marshal(n); return string(b) }
+
+func TestNonceShapes(t *testing.T) {
+	f := newFx(t)
+	in := f.wIntent("SOL", f.partSOL, "5000000")
+	wd := func(ixs ...tix) chain.UnsignedTx { return f.job(compile(f.hot, f.nv, ixs...), f.partSOL, PathHot, nil) }
+	xfer := f.sysTransfer(f.hot, f.dest, 5_000_000)
+
+	// The claim is the nonce account and the value; two versions of one withdrawal share it and the fees [price, limit] differ in the price only.
+	a, err := f.v.Decode(wd(f.adv(), f.cbLimit(10_000), f.cbPrice(1000), xfer), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := f.v.Decode(wd(f.adv(), f.cbLimit(10_000), f.cbPrice(1500), xfer), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Address(f.nonce0) + "#" + Address(f.nv)
+	if len(a.Claims) != 1 || a.Claims[0] != want || b.Claims[0] != want {
+		t.Fatalf("claims %v %v, want %s", a.Claims, b.Claims, want)
+	}
+	if len(a.Fees) != 2 || a.Fees[0].Int64() != 1000 || a.Fees[1].Int64() != 10_000 || b.Fees[0].Int64() != 1500 {
+		t.Fatalf("fees %v %v", a.Fees, b.Fees)
+	}
+
+	// nothing but a nonce account of THIS shard's pool, and nothing but the authority being the shard
+	other := NonceAddress(pub(t), 0)
+	f.mustFail("a nonce account that is not in the pool", wd(f.advOn(other, f.hot), f.cbLimit(10_000), xfer), in, "not in the pool")
+	f.mustFail("nonce account of pool index beyond the pool", wd(f.advOn(NonceAddress(f.hot, 3), f.hot), f.cbLimit(10_000), xfer), in, "not in the pool")
+	f.mustFail("another authority", wd(f.advOn(f.nonce0, f.other), f.cbLimit(10_000), xfer), in, "authority")
+	f.mustFail("the advance is not first", wd(f.cbLimit(10_000), f.adv(), xfer), in, "first instruction")
+	f.mustFail("no advance", wd(f.cbLimit(10_000), xfer), in, "first instruction")
+	f.mustFail("advance twice", wd(f.adv(), f.adv(), f.cbLimit(10_000), xfer), in, "compute")
+	// attacks on the nonce account itself, next to a withdrawal
+	f.mustFail("withdraw from the nonce account", wd(f.adv(), f.cbLimit(10_000), xfer, WithdrawNonceIx(f)), in, "one system transfer")
+	f.mustFail("authorize a new authority", wd(f.adv(), f.cbLimit(10_000), xfer, AuthorizeNonceIx(f)), in, "one system transfer")
+	f.mustFail("a transfer out of the nonce account", wd(f.adv(), f.cbLimit(10_000), f.sysTransfer(f.nonce0, f.dest, 5_000_000)), in, "not a system transfer")
+	// a sweep is not a nonce message, and a nonce message is not a sweep
+	f.mustFail("a sweep with an advance", f.job(compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000)), f.partSOL, PathHot, &f.depIdx), f.sIntent("SOL", f.partSOL, "3000000"), "")
+
+	// cancel: the advance and the compute budget, nothing else, amount 0, paid in SOL
+	c := func(ixs ...tix) chain.UnsignedTx { return f.job(compile(f.hot, f.nv, ixs...), f.partSOL, PathHot, nil) }
+	f.mustPass("cancel", c(f.adv(), f.cbLimit(5_000), f.cbPrice(2000)), f.cancelIntent())
+	f.mustFail("cancel with a transfer", c(f.adv(), f.cbLimit(5_000), xfer), f.cancelIntent(), "nothing else")
+	ci := f.cancelIntent()
+	ci.Amount = "1"
+	f.mustFail("cancel with an amount", c(f.adv(), f.cbLimit(5_000)), ci, "moves nothing")
+	ci = f.cancelIntent()
+	ci.Asset = "TKN"
+	f.mustFail("cancel in a token", c(f.adv(), f.cbLimit(5_000)), ci, "in SOL")
+	f.mustFail("cancel without the advance", c(f.cbLimit(5_000)), f.cancelIntent(), "first instruction")
+	f.mustFail("cancel over the price cap", c(f.adv(), f.cbLimit(5_000), f.cbPrice(100_001)), f.cancelIntent(), "price")
+	d, err := f.v.Decode(c(f.adv(), f.cbLimit(5_000)), f.cancelIntent())
+	if err != nil || d.Claims[0] != want || d.Destination != Address(f.hot) {
+		t.Fatalf("cancel decode: %+v %v", d, err)
+	}
+}
+
+func WithdrawNonceIx(f *fx) tix {
+	bh, _ := ParseAddress(SysvarRecentBlockhashes)
+	rent, _ := ParseAddress(SysvarRent)
+	return tix{prog: f.sys, accts: []tmeta{{f.nonce0, false, true}, {f.dest, false, true}, {bh, false, false}, {rent, false, false}, {f.hot, true, false}}, data: append(le32(5), le64(1_000_000)...)}
+}
+
+func AuthorizeNonceIx(f *fx) tix {
+	return tix{prog: f.sys, accts: []tmeta{{f.nonce0, false, true}, {f.hot, true, false}}, data: append(le32(7), f.other[:]...)}
+}
+
+func TestNonceSetupShapes(t *testing.T) {
+	f := newFx(t)
+	mk := func(ixs ...tix) chain.UnsignedTx { return f.job(compile(f.hot, f.bh, ixs...), f.partSOL, PathHot, nil) }
+	create := func(i int, lamports uint64) tix {
+		return tix{prog: f.sys, accts: []tmeta{{f.hot, true, true}, {NonceAddress(f.hot, i), false, true}}, data: CreateWithSeedData(f.hot, NonceSeed(i), lamports, NonceAccountSize)}
+	}
+	bh, _ := ParseAddress(SysvarRecentBlockhashes)
+	rent, _ := ParseAddress(SysvarRent)
+	init := func(i int, auth [32]byte) tix {
+		return tix{prog: f.sys, accts: []tmeta{{NonceAddress(f.hot, i), false, true}, {bh, false, false}, {rent, false, false}}, data: InitNonceData(auth)}
+	}
+	f.mustPass("two accounts", mk(f.cbLimit(20_000), create(0, DefaultNonceRent), init(0, f.hot), create(2, DefaultNonceRent), init(2, f.hot)), f.setupIntent(2))
+	f.mustFail("authority is not the hot shard", mk(f.cbLimit(20_000), create(0, DefaultNonceRent), init(0, f.other)), f.setupIntent(1), "authority")
+	f.mustFail("more rent than the config says", mk(f.cbLimit(20_000), create(0, DefaultNonceRent+1), init(0, f.hot)), f.setupIntent(1), "seed")
+	f.mustFail("the intent amount is not the rent", mk(f.cbLimit(20_000), create(0, DefaultNonceRent), init(0, f.hot)), f.setupIntent(2), "rent of")
+	f.mustFail("same account twice", mk(f.cbLimit(20_000), create(0, DefaultNonceRent), init(0, f.hot), create(0, DefaultNonceRent), init(0, f.hot)), f.setupIntent(2), "not (or not again)")
+	f.mustFail("an account beyond the pool", mk(f.cbLimit(20_000), create(3, DefaultNonceRent), init(3, f.hot)), f.setupIntent(1), "not (or not again)")
+	f.mustFail("create without initialize", mk(f.cbLimit(20_000), create(0, DefaultNonceRent)), f.setupIntent(1), "pairs")
+	f.mustFail("a transfer next to the setup", mk(f.cbLimit(20_000), create(0, DefaultNonceRent), init(0, f.hot), f.sysTransfer(f.hot, f.other, 1)), f.setupIntent(1), "pairs")
+	f.mustFail("setup in a token", mk(f.cbLimit(20_000), create(0, DefaultNonceRent), init(0, f.hot)), func() signjob.Intent { i := f.setupIntent(1); i.Asset = "TKN"; return i }(), "in SOL")
 }

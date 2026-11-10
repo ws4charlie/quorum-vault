@@ -1,8 +1,8 @@
 # Solana
 
 A customer gets a Solana address, pays it in SOL or in one SPL token, and is credited once, after the payment is final, through the same
-ledger as EVM and Bitcoin. Family `sol`, package [internal/chain/sol](../../internal/chain/sol). The signing zone can sign Solana
-transactions (see "How signing is checked"); nothing in the product sends one yet.
+ledger as EVM and Bitcoin. Family `sol`, package [internal/chain/sol](../../internal/chain/sol). Customers withdraw SOL and the token from the hot shards, each
+withdrawal on a durable nonce (see "Withdrawals sign a nonce, not a blockhash").
 
 ```mermaid
 flowchart LR
@@ -64,8 +64,10 @@ changes who owns or may spend a token account. Each judges alone, so a refusal d
 
 | What | The message must be |
 |---|---|
-| SOL withdrawal | a transfer from the hot shard to the approved destination, the approved amount |
-| Token withdrawal | a checked transfer from the hot shard's token account to the destination's, with the configured mint and decimals, and optionally the creation of the destination's account, paid by the hot shard |
+| SOL withdrawal | the nonce advance, then a transfer from the hot shard to the approved destination, the approved amount |
+| Token withdrawal | the nonce advance, then a checked transfer from the hot shard's token account to the destination's, with the configured mint and decimals, and optionally the creation of the destination's account, paid by the hot shard |
+| Cancel | the nonce advance alone |
+| Nonce setup | pairs of "create" and "initialize" for accounts of the shard's own pool, rent from the shard; needs an operator's approval |
 | Sweep of SOL | a transfer from the deposit address to the hot shard, which pays the fee |
 | Sweep of a token | a checked transfer from the deposit address's token account to the hot shard's, and optionally closing the deposit account with its rent going to the hot shard |
 
@@ -77,12 +79,9 @@ same message: the hot shard pays the fee, and the deposit key signs as owner. Th
 derives its public key from its own copy of the account node and requires the signer to be that key. The replay guard keeps one record per
 message and signer, so the two jobs of one sweep do not collide.
 
-**One message per intent.** A second message for an intent already signed, say with a fresher blockhash, is refused. The zone cannot tell
-that the first one is dead, and both could land. A retry of the same job returns the stored signature. When a withdrawal may be signed again
-after its blockhash expired is a rule for the withdrawal task, which has to prove the old message dead first.
-
-**The blockhash.** Its age cannot be checked offline, and the zone does not try. A stale blockhash only makes the network refuse the
-transaction. What keeps a message from meaning something else is the shape list: there is no way to ask for a durable-nonce advance.
+**Versions of one intent.** A sweep still gets one message per intent: a second one, with a fresher blockhash, is refused, because the zone
+cannot tell the first is dead. A withdrawal may get more than one, under the nonce rule below. A retry of the same job returns the stored
+signature.
 
 **Rent on a sweep.** The zone checks the amount the intent names, not what the account keeps: it cannot see balances. The core decides the
 amount, and the chain refuses a transfer that would leave a system account between zero and the minimum.
@@ -93,9 +92,48 @@ duplicate check keys on the hash of the message, not on the signature, so the se
 at once. This is tested on the local validator and does not depend on the gateway. The gateway still never hands out a second signature for a
 job, and a coordinator that failed after signing began keeps the job.
 
+## Withdrawals sign a nonce, not a blockhash
+
+A blockhash expires in about a minute, and the signing zone cannot check its age. So a withdrawal signs the value held by a nonce account
+instead, an account of the system program whose authority is the hot shard, and its first instruction advances that nonce. Whichever version
+of the withdrawal lands first uses the value up; every other version, signed or not, is refused by the network from then on. This is the
+Solana form of an EVM nonce, and the outcomes are the same.
+
+Each hot shard owns a small pool of these accounts, and one account carries one withdrawal at a time. Their addresses are not random keys: each
+is made from the shard's address and a fixed seed, so the creation needs no signature but the shard's, there is no key to keep or lose, and
+the zone knows every address of every pool from its own config. An operator command creates the pool through the signing zone, which signs it
+only under an operator's approval and only for the pool's own addresses with the configured rent. The rent leaves the shard and is booked as a
+cost. Closing a nonce account or changing its authority is not signed at all.
+
+A withdrawal takes a free account when it is built, in the transaction that enqueues its signing, and reads the nonce at finalized
+commitment: the account was freed only after its last user finalized, so the value cannot change under a fork. With every account busy, the
+withdrawal waits, as it does for hot liquidity.
+
+| What happens | Result |
+|---|---|
+| Not landed | the stored signed transaction is sent again; after the stuck time a version with a higher priority price, same nonce |
+| Landed and succeeded | settled at finalized |
+| Landed and failed | the nonce still advanced and the fee was paid: the hold is released, the fee booked as a cost, the account free |
+| The nonce moved and none of our versions landed | the withdrawal is parked with one alert, as an EVM nonce used by a stranger |
+| Cancelled | a message that advances the nonce alone; once it is final no version can ever land, and the hold is released |
+| Refused by the zone before anything was signed | the account is given back unused |
+
+**What the zone enforces.** The replay guard holds one claim per intent: the nonce account and its value. A second message for the intent is
+signed only if it has the same claim, the same compute-unit limit and a higher price; a different account, a different value, a lower price or
+anything else is refused, whatever the business zone says. The cosigners of B and C apply the same rule from their own records. A cancel is
+signed only for a nonce that a signed intent of the same shard holds, and after it that intent gets no further version.
+
+**What Reconcile does with it.** The hot shards are compared with the books too. A withdrawal that has finalized and is not settled yet has
+already left the chain, so it is explained from the cell's own records of the transaction, and the comparison is repeated if those, or the
+books, change while it runs.
+
 ## Limits
 
-- **Deposits and signing only.** Building and sending Solana transactions come later; so do sweeps, withdrawals and cold storage. Cold, to-cold and rebalance intents are refused by the signing zone on this chain.
+- **Withdrawals only, from the hot shards.** Sweeps, cold storage, refills and rebalancing for Solana come later; the zone refuses those intents on this chain.
+- **Hot funding is booked by an operator call**, not found by the scan.
+- **The pool has a fixed size** set in config; a shard that needs more accounts than that waits for a free one.
+- **Rent paid for nonce accounts and for token accounts opened for customers is booked as a cost** and is not recovered.
+- **"Something else advanced the nonce" is tested by changing the books' record of the nonce**, since only the shard's key can advance it on a local validator.
 - **One token program.** The classic SPL Token program only.
 - **A token's decimals are checked at start** against the mint; a mismatch refuses to start.
 - **The account node is fetched with a small helper** (`sol.AccountNode`); there is no operator command for it yet.

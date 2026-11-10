@@ -18,15 +18,22 @@ import (
 // The signing zone's judgement of a Solana transaction. Ed25519 signs the whole message, so the message IS the digest: the payload carries
 // it, and Verify decodes it and requires it to be exactly one of the shapes below, built from the approved intent and the zone's own
 // config, and nothing else. The recent blockhash is not part of the judgement: its age cannot be checked offline, and a stale one only
-// makes the network refuse the transaction. What bounds the damage instead is that the zone signs a message once (one message per intent,
-// see FeesRaised in the gateway codec) and that no instruction other than the listed ones can be in it, so no blockhash can be
-// made to mean something else, in particular no durable-nonce advance.
+// makes the network refuse the transaction.
 //
-// Allowed shapes (compute-budget instructions first: one limit, required; one price, optional):
+// What bounds a withdrawal is its nonce. A withdrawal (and the cancel that frees it) signs the value of a nonce account of the hot shard's own
+// pool as its blockhash and advances that nonce first, so at most one message of all the versions of one withdrawal can ever land. The zone
+// signs a second message for an intent only when it has the same nonce account and value and a higher priority price (see FeesRaised in the
+// gateway codec). A sweep still signs a recent blockhash, and the zone signs one message per intent for it.
 //
-//	withdrawal SOL    system transfer hot shard -> destination                     signers: hot shard
-//	withdrawal token  [create destination ATA, idempotent, paid by the hot shard]  signers: hot shard
+// Allowed shapes (a withdrawal or cancel starts with AdvanceNonceAccount; then compute-budget instructions: one limit, required; one price,
+// optional):
+//
+//	withdrawal SOL    advance nonce; system transfer hot shard -> destination      signers: hot shard
+//	withdrawal token  advance nonce; [create destination ATA, idempotent, paid by the hot shard]
 //	                  transferChecked hot ATA -> destination ATA (mint, decimals)
+//	cancel            advance nonce, nothing else (frees the nonce of a withdrawal that must not land)
+//	nonce setup       pairs of CreateAccountWithSeed + InitializeNonceAccount for pool accounts i of the hot shard, rent from the hot shard
+//	                  (a normal recent blockhash; needs an operator approval)
 //	sweep SOL         system transfer deposit address -> hot shard                 signers: hot shard (fee payer), deposit address
 //	sweep token       [create hot ATA, idempotent] transferChecked deposit ATA -> hot ATA
 //	                  [closeAccount deposit ATA, rent to the hot shard]            signers: hot shard (fee payer), deposit address
@@ -69,6 +76,10 @@ type SigningConfig struct {
 	MaxComputeUnits         uint32
 	MaxMicroLamportsPerUnit uint64
 	MaxPriorityFeeLamports  uint64
+	// NoncePool is how many nonce accounts each hot shard owns (accounts 0..NoncePool-1, at NonceAddress); NonceRent is the lamports a nonce
+	// account is created with (the rent-exempt minimum of 80 bytes). Both required.
+	NoncePool int
+	NonceRent uint64
 }
 
 // Payload is what the core puts in a job: the message to sign and, for a sweep, the index of the deposit address that signs as owner.
@@ -113,6 +124,10 @@ type Verifier struct {
 	sys  [32]byte
 	tokp [32]byte
 	atap [32]byte
+	bh   [32]byte // RecentBlockhashes sysvar
+	rent [32]byte // Rent sysvar
+	// nonces maps a hot shard key to the index of each account of its pool.
+	nonces map[[32]byte]map[[32]byte]int
 }
 
 type tokenInfo struct {
@@ -132,7 +147,8 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 	for _, p := range []struct {
 		dst *[32]byte
 		id  string
-	}{{&v.cb, ComputeBudgetProgram}, {&v.sys, SystemProgram}, {&v.tokp, TokenProgram}, {&v.atap, AssociatedTokenProg}} {
+	}{{&v.cb, ComputeBudgetProgram}, {&v.sys, SystemProgram}, {&v.tokp, TokenProgram}, {&v.atap, AssociatedTokenProg},
+		{&v.bh, SysvarRecentBlockhashes}, {&v.rent, SysvarRent}} {
 		if *p.dst, err = ParseAddress(p.id); err != nil {
 			return nil, err
 		}
@@ -143,6 +159,10 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 	if len(cfg.HotShards) == 0 {
 		return nil, errors.New("sol: no hot shards")
 	}
+	if cfg.NoncePool < 1 || cfg.NoncePool > 64 || cfg.NonceRent == 0 {
+		return nil, errors.New("sol: nonce_pool (1 to 64 accounts per hot shard) and nonce_rent_lamports are required")
+	}
+	v.nonces = map[[32]byte]map[[32]byte]int{}
 	for sym, t := range cfg.Tokens {
 		raw, err := ParseAddress(t.Mint)
 		if err != nil || sym == "" || sym == Native {
@@ -167,6 +187,12 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 		}
 		v.hot[part] = raw
 		v.own[addr] = true
+		if v.nonces[raw] == nil {
+			v.nonces[raw] = map[[32]byte]int{}
+			for i := 0; i < cfg.NoncePool; i++ {
+				v.nonces[raw][NonceAddress(raw, i)] = i
+			}
+		}
 	}
 	return v, nil
 }
@@ -204,6 +230,9 @@ type Info struct {
 	Claims    []string
 	// Fee is the most the transaction can cost in lamports: base fee for its signatures plus the priority fee.
 	Fee *big.Int
+	// Fees are what the guard compares between versions of one intent: [price, limit] for a nonce message (a version may raise the price and
+	// nothing else), [Fee] alone for a sweep (never replaced).
+	Fees []*big.Int
 }
 
 func parsePayload(raw []byte) (Payload, error) {
@@ -230,6 +259,8 @@ type shape struct {
 	amount    uint64
 	asset     string
 	signerKey [32]byte
+	claims    []string
+	fees      []*big.Int
 }
 
 func u64(n *big.Int) (uint64, bool) {
@@ -252,8 +283,10 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 	if err != nil {
 		return nil, reject("%v", err)
 	}
-	if i.Kind != "withdrawal" && i.Kind != "sweep" {
-		return nil, reject("intent kind %q is not signed on this chain yet", i.Kind)
+	switch i.Kind {
+	case "withdrawal", "sweep", "cancel", KindNonceSetup:
+	default:
+		return nil, reject("intent kind %q is not signed on this chain", i.Kind)
 	}
 	if i.Chain != v.cfg.Chain || u.Chain != v.cfg.Chain {
 		return nil, reject("chain %q/%q, this zone signs %q", i.Chain, u.Chain, v.cfg.Chain)
@@ -266,24 +299,41 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		return nil, reject("partition %q has no hot shard in this zone", i.PartitionID)
 	}
 	pk, _ := partition.Parse(i.PartitionID)
-	if pk.Asset != i.Asset {
+	if i.Kind == "cancel" || i.Kind == KindNonceSetup {
+		// Both move no asset: they are about the shard, whichever of its partitions the owner is in. They are paid in SOL.
+		if i.Asset != Native {
+			return nil, reject("a %s is in SOL, the intent says %q", i.Kind, i.Asset)
+		}
+	} else if pk.Asset != i.Asset {
 		return nil, reject("intent asset %q, partition asset %q", i.Asset, pk.Asset)
 	}
 	amt, ok := new(big.Int).SetString(i.Amount, 10)
 	if !ok || i.Amount != amt.String() {
 		return nil, reject("amount %q is not a canonical decimal", i.Amount)
 	}
-	amount, ok := u64(amt)
-	if !ok {
+	var amount uint64
+	if i.Kind == "cancel" {
+		if amt.Sign() != 0 {
+			return nil, reject("a cancel moves nothing: its amount is 0, not %s", i.Amount)
+		}
+	} else if amount, ok = u64(amt); !ok {
 		return nil, reject("amount %s is not between 1 and 2^64-1", i.Amount)
 	}
 	s := &shape{msg: m, hot: hot, hotAddr: Address(hot), kind: i.Kind, amount: amount, asset: i.Asset}
 
-	// Compute budget first: one limit (required), one price (optional), within the caps.
+	// A withdrawal and its cancel start by advancing the nonce of one account of the hot shard's pool, and sign the value that nonce holds.
+	idx := 0
+	if i.Kind == "withdrawal" || i.Kind == "cancel" {
+		if err := v.advance(s, m); err != nil {
+			return nil, err
+		}
+		idx = 1
+	}
+
+	// Compute budget next: one limit (required), one price (optional), within the caps.
 	var limit uint32
 	var price uint64
 	haveLimit, havePrice := false, false
-	idx := 0
 	for ; idx < len(m.Instructions); idx++ {
 		in := m.Instructions[idx]
 		if in.Program != v.cb {
@@ -321,7 +371,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		return nil, reject("priority fee %s lamports is above the cap %d", prio, v.cfg.MaxPriorityFeeLamports)
 	}
 	rest := m.Instructions[idx:]
-	if len(rest) == 0 {
+	if len(rest) == 0 && i.Kind != "cancel" {
 		return nil, reject("no instruction besides the compute budget")
 	}
 
@@ -336,6 +386,15 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 	switch i.Kind {
 	case "withdrawal":
 		if err := v.withdrawal(s, rest, i); err != nil {
+			return nil, err
+		}
+	case "cancel":
+		if len(rest) != 0 {
+			return nil, reject("a cancel is the nonce advance and the compute budget, nothing else")
+		}
+		s.dest = s.hotAddr
+	case KindNonceSetup:
+		if err := v.nonceSetup(s, rest, amount); err != nil {
 			return nil, err
 		}
 	case "sweep":
@@ -366,6 +425,11 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		}
 	}
 	s.feeLamp = new(big.Int).Add(prio, big.NewInt(5000*int64(wantSigners)))
+	if s.fees == nil { // a sweep: never replaced
+		s.fees = []*big.Int{s.feeLamp}
+	} else {
+		s.fees = []*big.Int{new(big.Int).SetUint64(price), new(big.Int).SetUint64(uint64(limit))}
+	}
 
 	// Which key does THIS job ask for?
 	dep, di, err := ParseKeyPath(u.KeyRef.Path)
@@ -381,6 +445,61 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		s.signerKey = s.deposit
 	}
 	return s, nil
+}
+
+// KindNonceSetup is the intent kind of the creation of nonce accounts.
+const KindNonceSetup = "nonce-setup"
+
+// advance requires the first instruction of m to be AdvanceNonceAccount on an account of the hot shard's pool, authority the hot shard, and
+// takes the claim from it: the nonce account and the value the message signs.
+func (v *Verifier) advance(s *shape, m *Message) error {
+	in := m.Instructions[0]
+	pool := v.nonces[s.hot]
+	if in.Program != v.sys || !bytes.Equal(in.Data, AdvanceNonceData()) || len(in.Accts) != 3 {
+		return reject("the first instruction is not AdvanceNonceAccount: a %s signs a durable nonce, never a recent blockhash", s.kind)
+	}
+	if _, ok := pool[in.Accts[0]]; !ok {
+		return reject("the nonce account %s is not in the pool of hot shard %s", Address(in.Accts[0]), s.hotAddr)
+	}
+	if in.Accts[1] != v.bh || in.Accts[2] != s.hot {
+		return reject("the nonce advance names the wrong sysvar or an authority other than the hot shard")
+	}
+	s.claims = []string{Address(in.Accts[0]) + "#" + Address(m.Blockhash)}
+	s.fees = []*big.Int{} // set below, a nonce message
+	return nil
+}
+
+// nonceSetup requires pairs of CreateAccountWithSeed and InitializeNonceAccount, each for another account of the hot shard's pool, the rent the
+// config names, the hot shard as base, payer and authority; and the amount of the intent to be the sum of the rent.
+func (v *Verifier) nonceSetup(s *shape, rest []MsgInstruction, amount uint64) error {
+	if len(rest)%2 != 0 || len(rest) == 0 || len(rest)/2 > v.cfg.NoncePool {
+		return reject("a nonce setup is pairs of create and initialize for 1 to %d accounts, the message has %d instructions after the compute budget", v.cfg.NoncePool, len(rest))
+	}
+	pool := v.nonces[s.hot]
+	seen := map[[32]byte]bool{}
+	for k := 0; k < len(rest); k += 2 {
+		cr, in := rest[k], rest[k+1]
+		if cr.Program != v.sys || len(cr.Accts) != 2 || cr.Accts[0] != s.hot {
+			return reject("instruction %d is not a CreateAccountWithSeed paid by the hot shard (the shard is its own base)", k)
+		}
+		acct := cr.Accts[1]
+		i, ok := pool[acct]
+		if !ok || seen[acct] {
+			return reject("instruction %d creates %s, which is not (or not again) an account of the hot shard's pool", k, Address(acct))
+		}
+		seen[acct] = true
+		if !bytes.Equal(cr.Data, CreateWithSeedData(s.hot, NonceSeed(i), v.cfg.NonceRent, NonceAccountSize)) {
+			return reject("instruction %d is not a creation of pool account %d with seed %s, %d lamports, %d bytes, owned by the system program", k, i, NonceSeed(i), v.cfg.NonceRent, NonceAccountSize)
+		}
+		if in.Program != v.sys || !bytes.Equal(in.Data, InitNonceData(s.hot)) || !eqAccts(in.Accts, acct, v.bh, v.rent) {
+			return reject("instruction %d is not an InitializeNonceAccount of %s with the hot shard as authority", k+1, Address(acct))
+		}
+	}
+	if want := uint64(len(rest)/2) * v.cfg.NonceRent; amount != want {
+		return reject("the intent amount %d is not the rent of %d accounts (%d)", amount, len(rest)/2, want)
+	}
+	s.dest = s.hotAddr
+	return nil
 }
 
 func eqAccts(got [][32]byte, want ...[32]byte) bool {
@@ -528,6 +647,10 @@ func (v *Verifier) Decode(u chain.UnsignedTx, i signjob.Intent) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
+	claims := s.claims
+	if i.Kind == "sweep" { // one message per intent
+		claims = []string{s.hotAddr + "#" + i.ID}
+	}
 	return Info{Sender: s.hotAddr, Destination: s.dest, SignerKey: append([]byte(nil), s.signerKey[:]...),
-		Claims: []string{s.hotAddr + "#" + i.ID}, Fee: s.feeLamp}, nil
+		Claims: claims, Fee: s.feeLamp, Fees: s.fees}, nil
 }

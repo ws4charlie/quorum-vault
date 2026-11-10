@@ -83,11 +83,11 @@ func newSOLHarness(t *testing.T, tweak func(*ChainFile)) *solH {
 	pol := func(per, daily string) AssetFile {
 		return AssetFile{AnyDestination: true, PerTxCap: per, DailyCap: daily, Tiers: []TierFile{{"0", 1}, {"50000000000", 2}}}
 	}
-	cf := ChainFile{Family: "sol", WithdrawalsPerHour: 1000, SweepsPerHour: 1000,
+	cf := ChainFile{Family: "sol", WithdrawalsPerHour: 1000, SweepsPerHour: 1000, CancelsPerHour: 1000,
 		SOL: &SOLFile{AccountPublicKey: hex.EncodeToString(s.acct.Pub[:]), AccountChainCode: hex.EncodeToString(s.acct.ChainCode[:]),
 			HotShards:       map[string]string{solPartSOL: s.hot.k.Address(), solPartTKN: s.hot.k.Address()},
 			Tokens:          map[string]SOLTokenFile{"TKN": {Mint: sol.Address(s.mint), Decimals: 6}},
-			MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: 100_000, MaxPriorityFeeLamports: 15_000},
+			MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: 100_000, MaxPriorityFeeLamports: 15_000, NoncePool: 3, NonceRentLamports: sol.DefaultNonceRent},
 		Assets: map[string]AssetFile{"SOL": pol("10000000000", "20000000000"), "TKN": pol("1000000", "2000000")}}
 	if tweak != nil {
 		tweak(&cf)
@@ -227,6 +227,11 @@ func (s *solH) transfer(from, to [32]byte, n uint64) mx {
 
 func (s *solH) newBlockhash() { s.bh = soltest.NewKey().Pub }
 
+// adv is AdvanceNonceAccount on pool account i of the hot shard; s.bh plays the value that account holds.
+func (s *solH) adv(i int) mx {
+	return mx{prog: s.sys, accts: []solMeta{{sol.NonceAddress(s.hot.k.Pub, i), false, true}, {raw32(sol.SysvarRecentBlockhashes), false, false}, {s.hot.k.Pub, true, false}}, data: sol.AdvanceNonceData()}
+}
+
 // job builds the sign job of one signer of a message. keyPath is sol.PathHot or sol.DepositPath(...).
 func (s *solH) job(id string, in signjob.Intent, msg []byte, part, keyPath string, dep *uint32, approvers ...string) signjob.Job {
 	if in.Chain == "" {
@@ -245,8 +250,19 @@ func (s *solH) job(id string, in signjob.Intent, msg []byte, part, keyPath strin
 func (s *solH) run(j signjob.Job) Decision { return s.harness.runWith(s.gw, j) }
 
 func (s *solH) wd(id string, amount uint64) (signjob.Intent, []byte) {
+	return s.wdAt(id, amount, 1000, 0)
+}
+
+// wdAt is a withdrawal message on pool account nonceIdx with a compute unit price.
+func (s *solH) wdAt(id string, amount, price uint64, nonceIdx int) (signjob.Intent, []byte) {
 	in := signjob.Intent{Kind: "withdrawal", ID: id, Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(s.dest), Amount: fmt.Sprint(amount)}
-	return in, s.compile(s.hot.k.Pub, s.limit(10_000), s.price(1000), s.transfer(s.hot.k.Pub, s.dest, amount))
+	return in, s.compile(s.hot.k.Pub, s.adv(nonceIdx), s.limit(10_000), s.price(price), s.transfer(s.hot.k.Pub, s.dest, amount))
+}
+
+// cancelAt is the cancel of a message on pool account nonceIdx.
+func (s *solH) cancelAt(id string, price uint64, nonceIdx int) (signjob.Intent, []byte) {
+	in := signjob.Intent{Kind: "cancel", ID: id, Asset: "SOL", PartitionID: solPartSOL, To: s.hot.k.Address(), Amount: "0"}
+	return in, s.compile(s.hot.k.Pub, s.adv(nonceIdx), s.limit(5_000), s.price(price))
 }
 
 func (s *solH) sweepIntent(id string, amount uint64) (signjob.Intent, []byte) {
@@ -319,20 +335,20 @@ func TestSOLRefusals(t *testing.T) {
 	// no approval
 	s.mustRefuse(s.job("a1", in, msg, solPartSOL, sol.PathHot, nil), ReasonApprovals)
 	// the transaction pays someone else than the approved intent says
-	bad := s.compile(s.hot.k.Pub, s.limit(10_000), s.transfer(s.hot.k.Pub, s.other, 5_000_000))
+	bad := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.transfer(s.hot.k.Pub, s.other, 5_000_000))
 	s.mustRefuse(s.job("a2", in, bad, solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
 	// more than approved
-	more := s.compile(s.hot.k.Pub, s.limit(10_000), s.transfer(s.hot.k.Pub, s.dest, 6_000_000))
+	more := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.transfer(s.hot.k.Pub, s.dest, 6_000_000))
 	s.mustRefuse(s.job("a3", in, more, solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
 	// an extra instruction next to the right one
-	extra := s.compile(s.hot.k.Pub, s.limit(10_000), s.transfer(s.hot.k.Pub, s.dest, 5_000_000), s.transfer(s.hot.k.Pub, s.other, 1))
+	extra := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.transfer(s.hot.k.Pub, s.dest, 5_000_000), s.transfer(s.hot.k.Pub, s.other, 1))
 	s.mustRefuse(s.job("a4", in, extra, solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
 	// a price above the cap
-	pricey := s.compile(s.hot.k.Pub, s.limit(10_000), s.price(100_001), s.transfer(s.hot.k.Pub, s.dest, 5_000_000))
+	pricey := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.price(100_001), s.transfer(s.hot.k.Pub, s.dest, 5_000_000))
 	s.mustRefuse(s.job("a5", in, pricey, solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
 	// over the per-transaction cap of the policy
 	big := signjob.Intent{Kind: "withdrawal", ID: "wbig", Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(s.dest), Amount: "10000000001"}
-	bigMsg := s.compile(s.hot.k.Pub, s.limit(10_000), s.transfer(s.hot.k.Pub, s.dest, 10_000_000_001))
+	bigMsg := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.transfer(s.hot.k.Pub, s.dest, 10_000_000_001))
 	s.mustRefuse(s.job("a6", big, bigMsg, solPartSOL, sol.PathHot, nil, "alice", "bob"), ReasonPerTxCap)
 	// a v0 message
 	s.mustRefuse(s.job("a7", in, append([]byte{0x80}, msg...), solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
@@ -357,26 +373,125 @@ func TestSOLRefusals(t *testing.T) {
 	}
 }
 
-// One message per intent: a second message (a new blockhash) for an intent that was already signed is refused. The first message's signature
-// is what a retry gets back.
-func TestSOLOneMessagePerIntent(t *testing.T) {
+// The versions of one withdrawal share one nonce account and value; a version may raise the price and nothing else.
+func TestSOLVersionsOfAWithdrawalShareOneNonce(t *testing.T) {
 	s := newSOLHarness(t, nil)
-	in, msg := s.wd("w1", 5_000_000)
+	in, msg := s.wdAt("w1", 5_000_000, 1000, 0)
 	first := s.mustSign(s.job("j1", in, msg, solPartSOL, sol.PathHot, nil, "alice"), s.hot.k.Pub[:])
+	calls := s.hot.calls.Load()
+
+	// a retry of the first message gets the stored signature
+	if d := s.run(s.job("j1b", in, msg, solPartSOL, sol.PathHot, nil, "alice")); d.Outcome != OutcomeReplayed || !bytes.Equal(d.Sig, first.Sig) {
+		t.Fatalf("retry: %s %s", d.Outcome, d.Reason)
+	}
+	// the same message with a lower or the same price is not a new version
+	_, same := s.wdAt("w1", 5_000_000, 1000, 0)
+	if !bytes.Equal(same, msg) {
+		t.Fatal("same inputs, different message")
+	}
+	_, lower := s.wdAt("w1", 5_000_000, 999, 0)
+	s.mustRefuse(s.job("lower", in, lower, solPartSOL, sol.PathHot, nil, "alice"), ReasonFeeNotHigher)
+	// a higher price, same nonce account and value: signed, once, and its own retry replays
+	_, higher := s.wdAt("w1", 5_000_000, 1500, 0)
+	v2 := s.mustSign(s.job("v2", in, higher, solPartSOL, sol.PathHot, nil, "alice"), s.hot.k.Pub[:])
+	if v2.Outcome != OutcomeSigned || s.hot.calls.Load() != calls+1 {
+		t.Fatalf("the raised version: %s, %d signatures", v2.Outcome, s.hot.calls.Load()-calls)
+	}
+	if d := s.run(s.job("v2b", in, higher, solPartSOL, sol.PathHot, nil, "alice")); d.Outcome != OutcomeReplayed || !bytes.Equal(d.Sig, v2.Sig) {
+		t.Fatalf("retry of the raised version: %s %s", d.Outcome, d.Reason)
+	}
+	// and the first version still replays its own signature
+	if d := s.run(s.job("j1c", in, msg, solPartSOL, sol.PathHot, nil, "alice")); d.Outcome != OutcomeReplayed || !bytes.Equal(d.Sig, first.Sig) {
+		t.Fatalf("the first version again: %s %s", d.Outcome, d.Reason)
+	}
+	// a version on another nonce account of the pool, or another value of the same account: refused
+	_, otherAcct := s.wdAt("w1", 5_000_000, 2000, 1)
+	s.mustRefuse(s.job("acct", in, otherAcct, solPartSOL, sol.PathHot, nil, "alice"), ReasonNonceChanged)
+	was := s.bh
 	s.newBlockhash()
-	_, msg2 := s.wd("w1", 5_000_000)
-	if bytes.Equal(msg, msg2) {
-		t.Fatal("same message")
-	}
-	s.mustRefuse(s.job("j2", in, msg2, solPartSOL, sol.PathHot, nil, "alice"), ReasonFeeNotHigher)
-	// and the first message still returns the stored signature
-	d := s.run(s.job("j3", in, msg, solPartSOL, sol.PathHot, nil, "alice"))
-	if d.Outcome != OutcomeReplayed || !bytes.Equal(d.Sig, first.Sig) {
-		t.Fatalf("retry of the first: %s %s", d.Outcome, d.Reason)
-	}
-	// another intent cannot reuse the first message
+	_, otherValue := s.wdAt("w1", 5_000_000, 2000, 0)
+	s.mustRefuse(s.job("value", in, otherValue, solPartSOL, sol.PathHot, nil, "alice"), ReasonNonceChanged)
+	s.bh = was
+	// a different limit with a higher price is not "the price only"
+	diffLimit := s.compile(s.hot.k.Pub, s.adv(0), s.limit(20_000), s.price(3000), s.transfer(s.hot.k.Pub, s.dest, 5_000_000))
+	s.mustRefuse(s.job("limit", in, diffLimit, solPartSOL, sol.PathHot, nil, "alice"), ReasonFeeNotHigher)
+	// another destination or amount is no version of this intent
+	elsewhere := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.price(3000), s.transfer(s.hot.k.Pub, s.other, 5_000_000))
+	s.mustRefuse(s.job("dest", in, elsewhere, solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
+	more := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.price(3000), s.transfer(s.hot.k.Pub, s.dest, 5_000_001))
+	s.mustRefuse(s.job("amount", in, more, solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
+	// no price at all (a lower fee than the first) is not a version
+	nop := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.transfer(s.hot.k.Pub, s.dest, 5_000_000))
+	s.mustRefuse(s.job("noprice", in, nop, solPartSOL, sol.PathHot, nil, "alice"), ReasonFeeNotHigher)
+	// another intent cannot take the nonce that w1 holds
 	other := signjob.Intent{Kind: "withdrawal", ID: "w2", Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(s.dest), Amount: "5000000"}
-	s.mustRefuse(s.job("j4", other, msg, solPartSOL, sol.PathHot, nil, "alice"), ReasonIntentChanged)
+	_, otherMsg := s.wdAt("w2", 5_000_000, 7000, 0)
+	s.mustRefuse(s.job("w2", other, otherMsg, solPartSOL, sol.PathHot, nil, "alice"), ReasonNonceTaken)
+	s.mustRefuse(s.job("w2b", other, msg, solPartSOL, sol.PathHot, nil, "alice"), ReasonIntentChanged)
+	// and the nonce attacks that move the account itself
+	for name, ix := range map[string]mx{
+		"withdraw": {prog: s.sys, accts: []solMeta{{sol.NonceAddress(s.hot.k.Pub, 0), false, true}, {s.other, false, true}, {raw32(sol.SysvarRecentBlockhashes), false, false}, {raw32(sol.SysvarRent), false, false}, {s.hot.k.Pub, true, false}},
+			data: binary.LittleEndian.AppendUint64(binary.LittleEndian.AppendUint32(nil, 5), 1_000_000)},
+		"authorize": {prog: s.sys, accts: []solMeta{{sol.NonceAddress(s.hot.k.Pub, 0), false, true}, {s.hot.k.Pub, true, false}}, data: append(binary.LittleEndian.AppendUint32(nil, 7), s.other[:]...)},
+	} {
+		evil := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.price(9000), s.transfer(s.hot.k.Pub, s.dest, 5_000_000), ix)
+		s.mustRefuse(s.job("evil-"+name, in, evil, solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
+	}
+}
+
+// A cancel advances exactly the nonce of an intent that was signed; it takes the claim, after which no version of the withdrawal is signed.
+func TestSOLCancelTakesTheNonce(t *testing.T) {
+	s := newSOLHarness(t, nil)
+	in, msg := s.wdAt("w1", 5_000_000, 1000, 0)
+	s.mustSign(s.job("j1", in, msg, solPartSOL, sol.PathHot, nil, "alice"), s.hot.k.Pub[:])
+
+	// a cancel of a nonce nothing was signed at, or of another value: refused (it could burn any nonce)
+	cin, cmsg := s.cancelAt("cancel-1", 1100, 1)
+	s.mustRefuse(s.job("c0", cin, cmsg, solPartSOL, sol.PathHot, nil), ReasonCancelClaims)
+	was := s.bh
+	s.newBlockhash()
+	cin, cmsg = s.cancelAt("cancel-1", 1100, 0)
+	s.mustRefuse(s.job("c1", cin, cmsg, solPartSOL, sol.PathHot, nil), ReasonCancelClaims)
+	s.bh = was
+	// the cancel of the signed nonce is signed, without an approval
+	cin, cmsg = s.cancelAt("cancel-1", 1100, 0)
+	s.mustSign(s.job("c2", cin, cmsg, solPartSOL, sol.PathHot, nil), s.hot.k.Pub[:])
+	// after it no version of the withdrawal is signed, not even a higher price
+	_, higher := s.wdAt("w1", 5_000_000, 5000, 0)
+	s.mustRefuse(s.job("late", in, higher, solPartSOL, sol.PathHot, nil, "alice"), ReasonNonceCancel)
+	// a cancel that carries a transfer is not a cancel
+	evil := s.compile(s.hot.k.Pub, s.adv(0), s.limit(5_000), s.transfer(s.hot.k.Pub, s.other, 1))
+	s.mustRefuse(s.job("c3", cin, evil, solPartSOL, sol.PathHot, nil), ReasonTx)
+	// a cancel for a withdrawal of another shard's partition cannot be made out of this one: the cancel is for the partition of the claim
+	tkn := cin
+	tkn.ID, tkn.PartitionID = "cancel-2", solPartTKN
+	_, m4 := s.cancelAt("cancel-2", 1200, 0)
+	s.mustRefuse(s.job("c4", tkn, m4, solPartTKN, sol.PathHot, nil), ReasonCancelClaims)
+}
+
+// Nonce accounts are created only under an operator's approval, only the pool's own addresses, only with the rent the config names.
+func TestSOLNonceSetupNeedsAnOperator(t *testing.T) {
+	s := newSOLHarness(t, nil)
+	hot := s.hot.k.Pub
+	mk := func(idxs ...int) []byte {
+		ixs := []mx{s.limit(30_000)}
+		for _, i := range idxs {
+			n := sol.NonceAddress(hot, i)
+			ixs = append(ixs,
+				mx{prog: s.sys, accts: []solMeta{{hot, true, true}, {n, false, true}}, data: sol.CreateWithSeedData(hot, sol.NonceSeed(i), sol.DefaultNonceRent, sol.NonceAccountSize)},
+				mx{prog: s.sys, accts: []solMeta{{n, false, true}, {raw32(sol.SysvarRecentBlockhashes), false, false}, {raw32(sol.SysvarRent), false, false}}, data: sol.InitNonceData(hot)})
+		}
+		return s.compile(hot, ixs...)
+	}
+	in := signjob.Intent{Kind: sol.KindNonceSetup, ID: "setup-1", Asset: "SOL", PartitionID: solPartSOL, To: s.hot.k.Address(), Amount: fmt.Sprint(2 * sol.DefaultNonceRent)}
+	msg := mk(0, 1)
+	s.mustRefuse(s.job("n0", in, msg, solPartSOL, sol.PathHot, nil), ReasonApprovals)
+	s.mustSign(s.job("n1", in, msg, solPartSOL, sol.PathHot, nil, "alice"), s.hot.k.Pub[:])
+	// an account outside the pool, more rent than the config says
+	s.newBlockhash()
+	in2 := in
+	in2.ID, in2.Amount = "setup-2", fmt.Sprint(sol.DefaultNonceRent)
+	s.mustRefuse(s.job("n2", in2, mk(3), solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
 }
 
 // A signer whose key is not the pinned hot address, or not the derived deposit key, is never asked.
@@ -406,7 +521,7 @@ func TestSOLConfigRefusals(t *testing.T) {
 	base := func() ChainFile {
 		return ChainFile{Family: "sol", WithdrawalsPerHour: 1, SOL: &SOLFile{AccountPublicKey: hex.EncodeToString(acctPub[:]), AccountChainCode: hex.EncodeToString(make([]byte, 32)),
 			HotShards: map[string]string{solPartSOL: sol.Address(soltest.NewKey().Pub)}, Tokens: map[string]SOLTokenFile{"TKN": {Mint: sol.Address(soltest.NewKey().Pub), Decimals: 6}},
-			MaxComputeUnits: 1, MaxMicroLamportsPerUnit: 1, MaxPriorityFeeLamports: 1},
+			MaxComputeUnits: 1, MaxMicroLamportsPerUnit: 1, MaxPriorityFeeLamports: 1, NoncePool: 1, NonceRentLamports: 1},
 			Assets: map[string]AssetFile{"SOL": {AnyDestination: true, PerTxCap: "1", DailyCap: "1", Tiers: []TierFile{{"0", 1}}}, "TKN": {AnyDestination: true, PerTxCap: "1", DailyCap: "1", Tiers: []TierFile{{"0", 1}}}}}
 	}
 	if _, err := base().build(solChain, 4); err != nil {
@@ -426,4 +541,30 @@ func TestSOLConfigRefusals(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+}
+
+// A different intent on a nonce account and value another open intent holds is refused before anything is signed, whatever else differs.
+func TestSOLAnotherIntentOnAHeldNonceIsRefused(t *testing.T) {
+	s := newSOLHarness(t, nil)
+	in, msg := s.wdAt("w1", 5_000_000, 1000, 0)
+	s.mustSign(s.job("j1", in, msg, solPartSOL, sol.PathHot, nil, "alice"), s.hot.k.Pub[:])
+	calls := s.hot.calls.Load()
+	in2, msg2 := s.wdAt("w2", 7_000_000, 5000, 0) // another amount, a higher price, the same account and value
+	s.mustRefuse(s.job("j2", in2, msg2, solPartSOL, sol.PathHot, nil, "alice"), ReasonNonceTaken)
+	if s.hot.calls.Load() != calls {
+		t.Fatal("a key signed")
+	}
+}
+
+// Two pool accounts advanced in one block hold the same value. Claims are the account and the value together, so two withdrawals, one on each,
+// both sign.
+func TestSOLEqualValuesOnTwoAccountsAreTwoNonces(t *testing.T) {
+	s := newSOLHarness(t, nil)
+	in1, msg1 := s.wdAt("w1", 5_000_000, 1000, 0)
+	in2, msg2 := s.wdAt("w2", 6_000_000, 1000, 1) // s.bh is the value of both accounts
+	s.mustSign(s.job("j1", in1, msg1, solPartSOL, sol.PathHot, nil, "alice"), s.hot.k.Pub[:])
+	s.mustSign(s.job("j2", in2, msg2, solPartSOL, sol.PathHot, nil, "alice"), s.hot.k.Pub[:])
+	// and each still holds its own: a third intent on either is refused
+	in3, msg3 := s.wdAt("w3", 7_000_000, 1000, 1)
+	s.mustRefuse(s.job("j3", in3, msg3, solPartSOL, sol.PathHot, nil, "alice"), ReasonNonceTaken)
 }

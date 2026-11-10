@@ -57,7 +57,7 @@ func newSOLEnv(t *testing.T) *solEnv {
 			SOL: &gateway.SOLFile{AccountPublicKey: hex.EncodeToString(e.node.Pub[:]), AccountChainCode: hex.EncodeToString(e.node.ChainCode[:]),
 				HotShards:       map[string]string{solPart: e.hot.Address(), solTok: e.hot.Address()},
 				Tokens:          map[string]gateway.SOLTokenFile{"TKN": {Mint: sol.Address(e.mint), Decimals: 6}},
-				MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: 100_000, MaxPriorityFeeLamports: 15_000},
+				MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: 100_000, MaxPriorityFeeLamports: 15_000, NoncePool: 3, NonceRentLamports: sol.DefaultNonceRent},
 			Assets: map[string]gateway.AssetFile{
 				"SOL": {WithdrawalDestinations: []string{sol.Address(e.dest)}, PerTxCap: "10000000000", DailyCap: "20000000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}},
 				"TKN": {AnyDestination: true, PerTxCap: "1000000", DailyCap: "2000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}}}}},
@@ -85,9 +85,12 @@ func newSOLEnv(t *testing.T) *solEnv {
 
 func (e *solEnv) msg(ixs ...st.Ix) []byte { return st.Compile(e.hot.Pub, e.bh, ixs...) }
 
+// adv advances pool account i of the hot shard; e.bh plays the value it holds.
+func (e *solEnv) adv(i int) st.Ix { return st.AdvanceNonce(sol.NonceAddress(e.hot.Pub, i), e.hot.Pub) }
+
 func (e *solEnv) wdSOL(id string, amount uint64) (signjob.Intent, []byte) {
 	return signjob.Intent{Kind: "withdrawal", ID: id, Asset: "SOL", PartitionID: solPart, To: sol.Address(e.dest), Amount: fmt.Sprint(amount), NotAfter: e.notAfter},
-		e.msg(st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.dest, amount))
+		e.msg(e.adv(0), st.SetLimit(10_000), st.SetPrice(1000), st.Transfer(e.hot.Pub, e.dest, amount))
 }
 
 // request is what a rogue gateway sends party B (or C) for a job, with the public key it says will sign.
@@ -158,11 +161,11 @@ func TestCosignerSOLRefusesEveryAttack(t *testing.T) {
 		req  func() wire.Request
 		code string
 	}
-	badDest := e.msg(st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.oth, 5_000_000))
-	moreAmt := e.msg(st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.dest, 6_000_000))
-	extra := e.msg(st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.dest, 5_000_000), st.Transfer(e.hot.Pub, e.oth, 1))
-	pricey := e.msg(st.SetLimit(10_000), st.SetPrice(100_001), st.Transfer(e.hot.Pub, e.dest, 5_000_000))
-	otherPayer := st.Compile(e.oth, e.bh, st.SetLimit(10_000), st.Transfer(e.oth, e.dest, 5_000_000))
+	badDest := e.msg(e.adv(0), st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.oth, 5_000_000))
+	moreAmt := e.msg(e.adv(0), st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.dest, 6_000_000))
+	extra := e.msg(e.adv(0), st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.dest, 5_000_000), st.Transfer(e.hot.Pub, e.oth, 1))
+	pricey := e.msg(e.adv(0), st.SetLimit(10_000), st.SetPrice(100_001), st.Transfer(e.hot.Pub, e.dest, 5_000_000))
+	otherPayer := st.Compile(e.oth, e.bh, e.adv(0), st.SetLimit(10_000), st.Transfer(e.oth, e.dest, 5_000_000))
 	in2 := in
 	in2.Amount = "5000001"
 	notListed := in
@@ -172,8 +175,8 @@ func TestCosignerSOLRefusesEveryAttack(t *testing.T) {
 	sweepMsg := e.msg(st.SetLimit(10_000), st.Transfer(e.depKey, e.hot.Pub, 3_000_000))
 	sweepEvil := e.msg(st.SetLimit(10_000), st.Transfer(e.depKey, e.oth, 3_000_000))
 	tokIn := signjob.Intent{Kind: "withdrawal", ID: "ti1", Asset: "TKN", PartitionID: solTok, To: sol.Address(e.dest), Amount: "777", NotAfter: e.notAfter}
-	tokBad := e.msg(st.SetLimit(50_000), st.CheckedTransfer(st.ATAOf(e.hot.Pub, e.mint), e.mint, st.ATAOf(e.oth, e.mint), e.hot.Pub, 777, 6))
-	tokDec := e.msg(st.SetLimit(50_000), st.CheckedTransfer(st.ATAOf(e.hot.Pub, e.mint), e.mint, st.ATAOf(e.dest, e.mint), e.hot.Pub, 777, 9))
+	tokBad := e.msg(e.adv(0), st.SetLimit(50_000), st.CheckedTransfer(st.ATAOf(e.hot.Pub, e.mint), e.mint, st.ATAOf(e.oth, e.mint), e.hot.Pub, 777, 6))
+	tokDec := e.msg(e.adv(0), st.SetLimit(50_000), st.CheckedTransfer(st.ATAOf(e.hot.Pub, e.mint), e.mint, st.ATAOf(e.dest, e.mint), e.hot.Pub, 777, 9))
 	short := e.request("a-short", in, msg, sol.PathHot, nil, e.hot.Pub[:31], true)
 	long := e.request("a-long", in, msg, sol.PathHot, nil, nil, true)
 	long.Digest = make([]byte, sol.MaxMessage+1)
@@ -192,12 +195,12 @@ func TestCosignerSOLRefusesEveryAttack(t *testing.T) {
 		{"a price above the cap", func() wire.Request { return e.request("a5", in, pricey, sol.PathHot, nil, nil, true) }, gateway.ReasonTx},
 		{"another fee payer", func() wire.Request { return e.request("a6", in, otherPayer, sol.PathHot, nil, nil, true) }, gateway.ReasonTx},
 		{"a destination the config does not list", func() wire.Request {
-			m := e.msg(st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.oth, 5_000_000))
+			m := e.msg(e.adv(0), st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.oth, 5_000_000))
 			return e.request("a7", notListed, m, sol.PathHot, nil, nil, true)
 		}, gateway.ReasonDestination},
 		{"an amount the approval does not cover", func() wire.Request { return e.request("a8", in2, msg, sol.PathHot, nil, nil, true) }, gateway.ReasonTx},
 		{"setAuthority next to the transfer", func() wire.Request {
-			return e.request("a9", in, e.msg(st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.dest, 5_000_000), setAuth), sol.PathHot, nil, nil, true)
+			return e.request("a9", in, e.msg(e.adv(0), st.SetLimit(10_000), st.Transfer(e.hot.Pub, e.dest, 5_000_000), setAuth), sol.PathHot, nil, nil, true)
 		}, gateway.ReasonTx},
 		{"a v0 message", func() wire.Request {
 			return e.request("a10", in, append([]byte{0x80}, msg...), sol.PathHot, nil, nil, true)
@@ -230,14 +233,76 @@ func TestCosignerSOLRefusesEveryAttack(t *testing.T) {
 	}
 }
 
-// The cosigner keeps what it allowed: another message for an intent it allowed is refused, whatever the gateway says.
-func TestCosignerSOLRefusesASecondMessageForAnIntent(t *testing.T) {
+// The cosigner keeps what it allowed: the versions of one intent share a nonce account and value and may only raise the price; anything else is
+// refused, whatever the gateway says, and so is a cancel that does not match a nonce it has seen.
+func TestCosignerSOLVersionsShareOneNonce(t *testing.T) {
 	e := newSOLEnv(t)
 	in, msg := e.wdSOL("wi1", 5_000_000)
 	e.allow(e.c, e.request("w1", in, msg, sol.PathHot, nil, nil, true))
+	at := func(nonceIdx int, price uint64, limit uint32, to [32]byte, amount uint64) []byte {
+		return e.msg(e.adv(nonceIdx), st.SetLimit(limit), st.SetPrice(price), st.Transfer(e.hot.Pub, to, amount))
+	}
+	// a higher price: allowed (a new message), and its own retry too
+	higher := e.request("w2", in, at(0, 1500, 10_000, e.dest, 5_000_000), sol.PathHot, nil, nil, true)
+	e.allow(e.c, higher)
+	e.allow(e.c, higher)
+	e.allow(e.c, e.request("v-first-again", in, at(0, 1000, 10_000, e.dest, 5_000_000), sol.PathHot, nil, nil, true)) // the first message again is a retry, not a new message
+	e.refuse(e.c, e.request("v-lower", in, at(0, 900, 10_000, e.dest, 5_000_000), sol.PathHot, nil, nil, true), gateway.ReasonFeeNotHigher)
+	e.refuse(e.c, e.request("v-limit", in, at(0, 3000, 20_000, e.dest, 5_000_000), sol.PathHot, nil, nil, true), gateway.ReasonFeeNotHigher)
+	e.refuse(e.c, e.request("v-acct", in, at(1, 3000, 10_000, e.dest, 5_000_000), sol.PathHot, nil, nil, true), gateway.ReasonNonceChanged)
+	e.refuse(e.c, e.request("v-dest", in, at(0, 3000, 10_000, e.oth, 5_000_000), sol.PathHot, nil, nil, true), gateway.ReasonTx)
+	e.refuse(e.c, e.request("v-amt", in, at(0, 3000, 10_000, e.dest, 5_000_001), sol.PathHot, nil, nil, true), gateway.ReasonTx)
+	// the value of the nonce changed (a new blockhash field): another nonce, not a version
+	was := e.bh
 	e.bh = st.NewKey().Pub
-	_, msg2 := e.wdSOL("wi1", 5_000_000)
-	e.refuse(e.c, e.request("w2", in, msg2, sol.PathHot, nil, nil, true), gateway.ReasonFeeNotHigher)
-	// B's cosigner has not seen the first: it allows its own first message, once
-	e.allow(e.b, e.request("w2", in, msg2, sol.PathHot, nil, nil, true))
+	e.refuse(e.c, e.request("v-value", in, at(0, 3000, 10_000, e.dest, 5_000_000), sol.PathHot, nil, nil, true), gateway.ReasonNonceChanged)
+	// attacks on the nonce account next to the transfer: authority change and withdrawal
+	e.bh = was
+	authority := e.msg(st.AdvanceNonce(sol.NonceAddress(e.hot.Pub, 0), e.oth), st.SetLimit(10_000), st.SetPrice(3000), st.Transfer(e.hot.Pub, e.dest, 5_000_000))
+	e.refuse(e.c, e.request("v-auth", in, authority, sol.PathHot, nil, nil, true), gateway.ReasonTx)
+	for name, ix := range map[string]st.Ix{
+		"withdraw nonce":  st.WithdrawNonce(sol.NonceAddress(e.hot.Pub, 0), e.oth, e.hot.Pub, 1_000_000),
+		"authorize nonce": st.AuthorizeNonce(sol.NonceAddress(e.hot.Pub, 0), e.hot.Pub, e.oth),
+	} {
+		m := e.msg(e.adv(0), st.SetLimit(10_000), st.SetPrice(3000), st.Transfer(e.hot.Pub, e.dest, 5_000_000), ix)
+		e.refuse(e.c, e.request("v-"+name, in, m, sol.PathHot, nil, nil, true), gateway.ReasonTx)
+	}
+	// B has not seen the first: it allows its own first message, once
+	e.allow(e.b, e.request("w2", in, at(0, 1500, 10_000, e.dest, 5_000_000), sol.PathHot, nil, nil, true))
+	e.refuse(e.b, e.request("w3", in, at(0, 1400, 10_000, e.dest, 5_000_000), sol.PathHot, nil, nil, true), gateway.ReasonFeeNotHigher)
+}
+
+// A different intent that names a nonce account and value another open intent holds is refused by B's cosigner and by C's, each from its own
+// records: a bug that hands one nonce value to two withdrawals is stopped before anything is signed. The same message under another intent is
+// refused as a digest that belongs to the first.
+func TestCosignerSOLRefusesAnotherIntentOnAHeldNonce(t *testing.T) {
+	e := newSOLEnv(t)
+	in1, msg1 := e.wdSOL("wi1", 5_000_000)
+	for _, c := range []*cosigner.Cosigner{e.b, e.c} {
+		e.allow(c, e.request("first-"+fmt.Sprint(c == e.b), in1, msg1, sol.PathHot, nil, nil, true))
+	}
+	in2 := in1
+	in2.ID = "wi2"
+	other := e.msg(e.adv(0), st.SetLimit(10_000), st.SetPrice(2000), st.Transfer(e.hot.Pub, e.dest, 5_000_000))
+	for _, c := range []*cosigner.Cosigner{e.b, e.c} {
+		e.refuse(c, e.request("second", in2, other, sol.PathHot, nil, nil, true), gateway.ReasonNonceTaken)
+		e.refuse(c, e.request("same-message", in2, msg1, sol.PathHot, nil, nil, true), gateway.ReasonIntentChanged)
+	}
+}
+
+// Equal nonce values on two pool accounts are two nonces for B's cosigner and C's.
+func TestCosignerSOLEqualValuesOnTwoAccountsAreTwoNonces(t *testing.T) {
+	e := newSOLEnv(t)
+	mk := func(id string, idx int, amount uint64) (signjob.Intent, []byte) {
+		in, _ := e.wdSOL(id, amount)
+		return in, e.msg(e.adv(idx), st.SetLimit(10_000), st.SetPrice(1000), st.Transfer(e.hot.Pub, e.dest, amount))
+	}
+	in1, m1 := mk("wi1", 0, 5_000_000)
+	in2, m2 := mk("wi2", 1, 6_000_000)
+	in3, m3 := mk("wi3", 1, 7_000_000)
+	for _, c := range []*cosigner.Cosigner{e.b, e.c} {
+		e.allow(c, e.request("a", in1, m1, sol.PathHot, nil, nil, true))
+		e.allow(c, e.request("b", in2, m2, sol.PathHot, nil, nil, true))
+		e.refuse(c, e.request("c", in3, m3, sol.PathHot, nil, nil, true), gateway.ReasonNonceTaken)
+	}
 }

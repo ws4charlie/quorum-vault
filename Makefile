@@ -8,7 +8,7 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-.PHONY: dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
+.PHONY: dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
 
 setup: softhsm db-up chain-up
 
@@ -146,6 +146,14 @@ test-e2e-sol-deposits:
 # and the validator; every signed transaction lands on it. Needs `make sol-up softhsm mpc-build`.
 test-e2e-sol-signing:
 	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v ./e2e/solsign/...
+
+# Solana withdrawals on durable nonces (P8-5): the hot shard on 2-of-3 mpc-party, gateway, cosigners, qv-core and qv-worker, the validator. Needs `make sol-up infra-up softhsm mpc-build`.
+# Two groups: the flows (settle, fail, refuse, fee raise, park, queue), and the faults (zone attacks, operator pool and cancel, one party down, crash at every boundary).
+test-e2e-sol-withdrawals:
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestWdFlows' ./e2e/sol/...
+
+test-e2e-sol-wd-faults:
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestWdFaults|TestWdCrash' ./e2e/sol/...
 
 E2E_BTC_ENV := QV_REQUIRE_BTC=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1
 E2E_BTC_DEPOSITS := TestXpub|TestDeposit|TestTwoOutputs|TestRescan|TestShallowReorg|TestDeepReorg|TestBelowMinimum|TestCoinbase|TestWrongNetwork|TestTwoInputTransactionsSign

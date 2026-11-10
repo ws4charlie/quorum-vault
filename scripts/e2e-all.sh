@@ -32,6 +32,8 @@ e2e-evm-tx-failures|pai|148|3|make test-e2e-evm-tx-failures
 e2e-btc-deposits|pbi|96|3|make test-e2e-btc-deposits
 e2e-sol-deposits|psi|150|3|make test-e2e-sol-deposits
 e2e-sol-signing|ps|60|3|make test-e2e-sol-signing
+e2e-sol-withdrawals|psi|130|3|make test-e2e-sol-withdrawals
+e2e-sol-wd-faults|psi|300|3|make test-e2e-sol-wd-faults
 test|p|90|1|go vet ./... && QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -short -count=1 -p 1 ./...
 mpc-signing|pa|74|1|make test-mpc
 "

@@ -173,6 +173,7 @@ type Config struct {
 	EVM    evm.Config
 	BTC    btc.Config // the btc family
 	SOL    sol.Config // the sol family
+	SOLHot []string   // the sol family: the hot shard addresses in shard order
 	Chain  string
 	Native string
 
@@ -312,6 +313,17 @@ type SOLFile struct {
 	RPCURL           string `json:"rpc_url"`
 	AccountPublicKey string `json:"account_public_key"` // hex, m/44'/501'/0' from mpc-party Node
 	AccountChainCode string `json:"account_chain_code"` // hex
+	// HotShards are the hot shard addresses in shard order (a 2-of-3 Ed25519 keyset each; shard i serves the partitions of shard i).
+	HotShards []string `json:"hot_shards"`
+	// NoncePool is how many durable-nonce accounts each shard owns (one withdrawal in flight per account); NonceRentLamports is what each holds.
+	NoncePool         int    `json:"nonce_pool"`
+	NonceRentLamports uint64 `json:"nonce_rent_lamports"`
+	// ComputeUnitLimit and ComputeUnitPrice (micro-lamports per unit) are what withdrawals are built with; a fee raise adds FeeBumpPercent to the
+	// price, up to MaxMicroLamports (which must not exceed the signing zone's cap).
+	ComputeUnitLimit uint32 `json:"compute_unit_limit"`
+	ComputeUnitPrice uint64 `json:"compute_unit_price"`
+	FeeBumpPercent   int    `json:"fee_bump_percent"`
+	MaxMicroLamports uint64 `json:"max_micro_lamports"`
 }
 
 // buildSOL reads the sol family's section and its assets: SOL (no address) and classic SPL tokens (address = the mint).
@@ -321,7 +333,9 @@ func (c *Config) buildSOL(cf ChainFile) error {
 		return errors.New("custody: config: family sol needs a chain.sol section")
 	}
 	c.SOL = sol.Config{Chain: cf.Name, Network: s.Network, RPCURL: s.RPCURL, AccountPublicKey: s.AccountPublicKey, AccountChainCode: s.AccountChainCode,
-		Tokens: map[string]string{}, TokenDecimals: map[string]int{}}
+		Tokens: map[string]string{}, TokenDecimals: map[string]int{}, NoncePool: s.NoncePool, NonceRent: s.NonceRentLamports,
+		ComputeUnitLimit: s.ComputeUnitLimit, ComputeUnitPrice: s.ComputeUnitPrice, FeeBumpPercent: s.FeeBumpPercent, MaxMicroLamports: s.MaxMicroLamports}
+	c.SOLHot = append([]string(nil), s.HotShards...)
 	if c.Native != sol.Native {
 		return fmt.Errorf("custody: config: family sol has the native asset %s", sol.Native)
 	}
@@ -350,6 +364,13 @@ func (c *Config) buildSOL(cf ChainFile) error {
 		c.AssetList = append(c.AssetList, sym)
 	}
 	sort.Strings(c.AssetList)
+	// Every asset's partition of shard i is served by the one hot address of shard i.
+	c.SOL.HotShards = map[string]string{}
+	for i, h := range s.HotShards {
+		for _, sym := range c.AssetList {
+			c.SOL.HotShards[c.PartitionKey(sym, i).String()] = h
+		}
+	}
 	if err := c.SOL.Validate(); err != nil {
 		return fmt.Errorf("custody: config: %w", err)
 	}
@@ -770,6 +791,9 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 func (c *Config) shardCount() int {
 	if c.Family == FamilyBTC {
 		return len(c.BTC.HotShards)
+	}
+	if c.Family == FamilySOL {
+		return len(c.SOLHot)
 	}
 	return len(c.HotShards)
 }

@@ -22,6 +22,24 @@ type Ix struct {
 	Data    []byte
 }
 
+// Prod converts to the production instruction type.
+func (x Ix) Prod() sol.Ix {
+	o := sol.Ix{Program: x.Program, Data: x.Data}
+	for _, m := range x.Accts {
+		o.Accts = append(o.Accts, sol.Meta{Key: m.Key, Signer: m.Signer, Writable: m.Writable})
+	}
+	return o
+}
+
+// Compile builds a legacy message with payer as the fee payer (the compiler of package sol).
+func Compile(payer, blockhash [32]byte, ixs ...Ix) []byte {
+	p := make([]sol.Ix, len(ixs))
+	for i, x := range ixs {
+		p[i] = x.Prod()
+	}
+	return sol.Compile(payer, blockhash, p...)
+}
+
 func compactU16(n int) []byte {
 	var out []byte
 	for {
@@ -32,80 +50,6 @@ func compactU16(n int) []byte {
 		}
 		out = append(out, b|0x80)
 	}
-}
-
-// Compile builds a legacy message with payer as the fee payer: signers first (payer first of them), then writable, then read-only accounts.
-func Compile(payer, blockhash [32]byte, ixs ...Ix) []byte {
-	type a struct {
-		k    [32]byte
-		s, w bool
-	}
-	var order []*a
-	idx := map[[32]byte]*a{}
-	add := func(k [32]byte, sg, w bool) {
-		if x, ok := idx[k]; ok {
-			x.s, x.w = x.s || sg, x.w || w
-			return
-		}
-		x := &a{k, sg, w}
-		idx[k] = x
-		order = append(order, x)
-	}
-	add(payer, true, true)
-	for _, in := range ixs {
-		for _, m := range in.Accts {
-			add(m.Key, m.Signer, m.Writable)
-		}
-		add(in.Program, false, false)
-	}
-	rank := func(x *a) int {
-		switch {
-		case x.k == payer:
-			return -1
-		case x.s && x.w:
-			return 0
-		case x.s:
-			return 1
-		case x.w:
-			return 2
-		}
-		return 3
-	}
-	for i := 1; i < len(order); i++ {
-		for j := i; j > 0 && rank(order[j]) < rank(order[j-1]); j-- {
-			order[j], order[j-1] = order[j-1], order[j]
-		}
-	}
-	pos := map[[32]byte]int{}
-	ns, nro, nrou := 0, 0, 0
-	for i, x := range order {
-		pos[x.k] = i
-		if x.s {
-			ns++
-			if !x.w {
-				nro++
-			}
-		} else if !x.w {
-			nrou++
-		}
-	}
-	m := []byte{byte(ns), byte(nro), byte(nrou)}
-	m = append(m, compactU16(len(order))...)
-	for _, x := range order {
-		m = append(m, x.k[:]...)
-	}
-	m = append(m, blockhash[:]...)
-	m = append(m, compactU16(len(ixs))...)
-	for _, in := range ixs {
-		m = append(m, byte(pos[in.Program]))
-		m = append(m, compactU16(len(in.Accts))...)
-		for _, ac := range in.Accts {
-			m = append(m, byte(pos[ac.Key]))
-		}
-		m = append(m, compactU16(len(in.Data))...)
-		m = append(m, in.Data...)
-	}
-	return m
 }
 
 func prog(s string) [32]byte { p, _ := sol.ParseAddress(s); return p }
@@ -178,4 +122,35 @@ func Assemble(msg []byte, sigs ...[]byte) []byte {
 		out = append(out, s...)
 	}
 	return append(out, msg...)
+}
+
+// AdvanceNonce is the system program's AdvanceNonceAccount; authority signs.
+func AdvanceNonce(nonce, authority [32]byte) Ix {
+	return Ix{Program: prog(sol.SystemProgram), Accts: []Meta{{nonce, false, true}, {prog(sol.SysvarRecentBlockhashes), false, false}, {authority, true, false}},
+		Data: sol.AdvanceNonceData()}
+}
+
+// CreateNonceWithSeed is CreateAccountWithSeed for pool account i of hot (the hot shard is the base and pays).
+func CreateNonceWithSeed(hot [32]byte, i int, lamports uint64) Ix {
+	return Ix{Program: prog(sol.SystemProgram), Accts: []Meta{{hot, true, true}, {sol.NonceAddress(hot, i), false, true}},
+		Data: sol.CreateWithSeedData(hot, sol.NonceSeed(i), lamports, sol.NonceAccountSize)}
+}
+
+// InitNonce is InitializeNonceAccount with authority.
+func InitNonce(nonce, authority [32]byte) Ix {
+	return Ix{Program: prog(sol.SystemProgram), Accts: []Meta{{nonce, false, true}, {prog(sol.SysvarRecentBlockhashes), false, false}, {prog(sol.SysvarRent), false, false}},
+		Data: sol.InitNonceData(authority)}
+}
+
+// WithdrawNonce is the system program's WithdrawNonceAccount (index 5): authority takes lamports out of nonce to dest. The zone must refuse it.
+func WithdrawNonce(nonce, dest, authority [32]byte, lamports uint64) Ix {
+	return Ix{Program: prog(sol.SystemProgram), Accts: []Meta{{nonce, false, true}, {dest, false, true}, {prog(sol.SysvarRecentBlockhashes), false, false},
+		{prog(sol.SysvarRent), false, false}, {authority, true, false}},
+		Data: binary.LittleEndian.AppendUint64(binary.LittleEndian.AppendUint32(nil, 5), lamports)}
+}
+
+// AuthorizeNonce is AuthorizeNonceAccount (index 7): it hands the nonce account to newAuthority. The zone must refuse it.
+func AuthorizeNonce(nonce, authority, newAuthority [32]byte) Ix {
+	return Ix{Program: prog(sol.SystemProgram), Accts: []Meta{{nonce, false, true}, {authority, true, false}},
+		Data: append(binary.LittleEndian.AppendUint32(nil, 7), newAuthority[:]...)}
 }

@@ -29,6 +29,18 @@ type Config struct {
 	// and must equal TokenDecimals[symbol] (the books and the config must agree with the chain before anything is credited).
 	Tokens        map[string]string
 	TokenDecimals map[string]int
+
+	// HotShards maps each hot partition ID (the SOL partition and the token partitions of one shard share an address) to the address of its
+	// shard. NoncePool is the number of nonce accounts per shard and NonceRent the lamports each holds; the core checks NonceRent against the node.
+	HotShards map[string]string
+	NoncePool int
+	NonceRent uint64
+	// ComputeUnitLimit and ComputeUnitPrice (micro-lamports per unit) are what a withdrawal is built with; a fee raise adds FeeBumpPercent to the
+	// price (at least one micro-lamport) and never goes above MaxMicroLamports, which must not exceed the signing zone's cap.
+	ComputeUnitLimit uint32
+	ComputeUnitPrice uint64
+	FeeBumpPercent   int
+	MaxMicroLamports uint64
 }
 
 // genesis hashes of the public clusters; a node of another cluster than the config names is refused at start. A local validator has a
@@ -50,6 +62,7 @@ type validatedConfig struct {
 	Config
 	node  Node
 	mints []mint // sorted by symbol
+	hot   map[string][32]byte
 }
 
 // Validate checks the config without any network access.
@@ -97,5 +110,24 @@ func (c Config) validated() (*validatedConfig, error) {
 		v.mints = append(v.mints, mint{symbol: sym, address: addr, raw: raw})
 	}
 	sort.Slice(v.mints, func(i, j int) bool { return v.mints[i].symbol < v.mints[j].symbol })
+	v.hot = map[string][32]byte{}
+	for part, addr := range c.HotShards {
+		raw, err := ParseAddress(addr)
+		if err != nil || !onCurve(raw[:]) {
+			return nil, fmt.Errorf("sol: config: hot shard %q: %q is not an Ed25519 public key", part, addr)
+		}
+		v.hot[part] = raw
+	}
+	if len(c.HotShards) > 0 {
+		if c.NoncePool < 1 || c.NoncePool > 64 || c.NonceRent == 0 {
+			return nil, errors.New("sol: config: nonce_pool (1 to 64) and nonce_rent_lamports are required with hot shards")
+		}
+		if c.ComputeUnitLimit == 0 || c.MaxMicroLamports == 0 || c.ComputeUnitPrice > c.MaxMicroLamports {
+			return nil, errors.New("sol: config: compute_unit_limit and max_micro_lamports are required and compute_unit_price must not exceed the maximum")
+		}
+		if c.FeeBumpPercent <= 0 {
+			v.FeeBumpPercent = 20
+		}
+	}
 	return v, nil
 }

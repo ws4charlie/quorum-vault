@@ -61,11 +61,16 @@ func TestMain(m *testing.M) {
 		if mpcBin, err = mpcstack.Build(dir); err != nil {
 			buildErr = err
 		}
-		for _, b := range []string{"qv-worker", "qv-core"} {
+		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway", "qv-sol-nonces"} {
 			if buildErr != nil {
 				break
 			}
-			out, err := exec.Command("go", "build", "-o", filepath.Join(dir, b), "github.com/ws4charlie/quorum-vault/cmd/"+b).CombinedOutput()
+			// The worker has the crash-test failpoints (QV_FAILPOINT), which exist only in binaries built with -tags devauth.
+			args := []string{"build", "-o", filepath.Join(dir, b)}
+			if b == "qv-worker" {
+				args = append(args, "-tags", "devauth")
+			}
+			out, err := exec.Command("go", append(args, "github.com/ws4charlie/quorum-vault/cmd/"+b)...).CombinedOutput()
 			if err != nil {
 				buildErr = fmt.Errorf("build %s: %v\n%s", b, err, out)
 			}
@@ -162,7 +167,10 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-func (s *system) spawn(name string, args ...string) *proc {
+func (s *system) spawn(name string, args ...string) *proc { return s.spawnEnv(name, nil, args...) }
+
+// spawnEnv starts a binary with extra environment (the crash failpoint of the worker).
+func (s *system) spawnEnv(name string, env []string, args ...string) *proc {
 	s.t.Helper()
 	logPath := filepath.Join(s.dir, fmt.Sprintf("%s-%d.log", name, time.Now().UnixNano()))
 	lf, err := os.Create(logPath)
@@ -170,7 +178,7 @@ func (s *system) spawn(name string, args ...string) *proc {
 		s.t.Fatal(err)
 	}
 	cmd := exec.Command(filepath.Join(binDir, name), args...)
-	cmd.Env = append(os.Environ(), "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf())
+	cmd.Env = append(append(os.Environ(), env...), "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf())
 	cmd.Stdout, cmd.Stderr = lf, lf
 	mpcstack.Guard(cmd)
 	if err := cmd.Start(); err != nil {

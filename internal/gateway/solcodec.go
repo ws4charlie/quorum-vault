@@ -29,6 +29,8 @@ var (
 	_ EdSignerCodec = (*SOLCodec)(nil)
 	_ GuardKeyCodec = (*SOLCodec)(nil)
 	_ MessageCodec  = (*SOLCodec)(nil)
+
+	_ StrictCancelCodec = (*SOLCodec)(nil)
 )
 
 // NewSOLCodec builds the codec from the signing-zone chain config.
@@ -52,7 +54,7 @@ func (c *SOLCodec) DecodeFor(u chain.UnsignedTx, i signjob.Intent) (TxInfo, erro
 	if err != nil {
 		return TxInfo{}, fmt.Errorf("gateway: decode sol payload: %w", err)
 	}
-	return TxInfo{Sender: in.Sender, Destination: in.Destination, Claims: in.Claims, SignerKey: in.SignerKey, Fees: []*big.Int{in.Fee}}, nil
+	return TxInfo{Sender: in.Sender, Destination: in.Destination, Claims: in.Claims, SignerKey: in.SignerKey, Fees: in.Fees}, nil
 }
 
 // CheckSigner implements ChainCodec: a Solana key is never a secp256k1 key.
@@ -72,10 +74,16 @@ func (c *SOLCodec) CheckEd25519Signer(info TxInfo, pub ed25519.PublicKey) error 
 	return nil
 }
 
-// FeesRaised implements ChainCodec: never. A second message for an intent is a second transaction with a new blockhash that could land as
-// well as the first, so the zone signs one message per intent (the stored signature is returned on a retry). Re-signing after a blockhash
-// expired needs a proof that the old message is dead, which the zone cannot make offline: that rule belongs to the withdrawal task.
-func (c *SOLCodec) FeesRaised(prev, next []*big.Int) bool { return false }
+// FeesRaised implements ChainCodec. A withdrawal or cancel is signed as versions of one nonce: a version may raise the compute unit price and change
+// nothing else, so the fees are [price, limit] and next must have the same limit and a higher price. (The nonce itself is the claim: the guard
+// refuses a version with another nonce account or value as "nonce changed" before it gets here.) A sweep carries one fee component and is never
+// replaced: it signs a recent blockhash, and a second message for it could land as well as the first.
+func (c *SOLCodec) FeesRaised(prev, next []*big.Int) bool {
+	return len(prev) == 2 && len(next) == 2 && next[1].Cmp(prev[1]) == 0 && next[0].Cmp(prev[0]) > 0
+}
+
+// StrictCancel implements StrictCancelCodec: a Solana cancel advances exactly the nonce of the attempt it frees.
+func (c *SOLCodec) StrictCancel() bool { return true }
 
 // GuardKey implements GuardKeyCodec: the two jobs of a sweep sign the same message under different keys and must not collide in the guard.
 func (c *SOLCodec) GuardKey(u chain.UnsignedTx, info TxInfo) []byte {

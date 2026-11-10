@@ -214,12 +214,27 @@ func (s *Service) nativePartitionOf(partitionID string) (string, error) {
 // own money in the native asset (funding minus fees paid), so it mirrors the
 // hot wallet exactly as customer money mirrors deposits. id makes it idempotent.
 func (s *Service) FundHot(ctx context.Context, id string, shard int, amount *big.Int) error {
-	if shard < 0 || shard >= len(s.Cfg.HotShards) || amount.Sign() <= 0 {
+	if shard < 0 || shard >= s.Cfg.shardCount() || amount.Sign() <= 0 {
 		return fmt.Errorf("%w: fund hot", ErrInvalid)
 	}
 	part := s.Cfg.PartitionKey(s.Cfg.Native, shard).String()
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		return s.transfer(ctx, tx, "fund:"+id, hotAcct(part), feeAcct(s.Cfg.Chain, s.Cfg.Native), amount, map[string]any{"kind": "hot_funding"})
+	})
+}
+
+// FundHotAsset records the operator putting amount of a token on a hot shard (seed liquidity): hot -> operator funding. id makes it idempotent.
+// The native asset is FundHot's.
+func (s *Service) FundHotAsset(ctx context.Context, id string, shard int, asset string, amount *big.Int) error {
+	if asset == s.Cfg.Native {
+		return s.FundHot(ctx, id, shard, amount)
+	}
+	if _, ok := s.Cfg.Assets[asset]; !ok || shard < 0 || shard >= s.Cfg.shardCount() || amount.Sign() <= 0 {
+		return fmt.Errorf("%w: fund hot", ErrInvalid)
+	}
+	part := s.Cfg.PartitionKey(asset, shard).String()
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		return s.transfer(ctx, tx, "fund:"+id, hotAcct(part), opFundAcct(s.Cfg.Chain, asset), amount, map[string]any{"kind": "hot_funding"})
 	})
 }
 
@@ -229,4 +244,12 @@ func (s *Service) cancelFee(ctx context.Context, feeTx string) (*big.Int, error)
 		return nil, nil
 	}
 	return s.Chain.TxFee(ctx, feeTx)
+}
+
+// NonceSetup is implemented by a chain cell whose hot shards sign withdrawals on a pool of durable-nonce accounts (Solana).
+type NonceSetup interface {
+	// BuildNonceSetup builds the creation of the shard's missing pool accounts and the total rent the intent names (count 0: nothing missing).
+	BuildNonceSetup(ctx context.Context, partitionID string) (u chain.UnsignedTx, amount *big.Int, count int, err error)
+	// SubmitNonceSetup sends the signed creation and waits until it is final.
+	SubmitNonceSetup(ctx context.Context, s chain.SignedTx, wait time.Duration) (string, error)
 }

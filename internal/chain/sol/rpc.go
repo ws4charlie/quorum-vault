@@ -124,6 +124,9 @@ type Transaction struct {
 	Slot uint64 `json:"slot"`
 	Meta *struct {
 		Err               json.RawMessage `json:"err"`
+		Fee               uint64          `json:"fee"`
+		PreBalances       []uint64        `json:"preBalances"`
+		PostBalances      []uint64        `json:"postBalances"`
 		InnerInstructions []struct {
 			Index        int           `json:"index"`
 			Instructions []Instruction `json:"instructions"`
