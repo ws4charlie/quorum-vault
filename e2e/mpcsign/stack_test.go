@@ -656,13 +656,48 @@ func (s *stack) waitAllUp(t *testing.T, what string) {
 	t.Fatalf("%s: the parties did not come back", what)
 }
 
+// waitMemberResolved waits until the restarted member itself (not party A) reports every keyset resolved. A member that has
+// restarted never serves a keyset it has not been reconciled on (E23-2), and party A can already report the keyset resolved
+// (reconciled with one member only, "partial") while the returning member is still waiting for its reconciliation. If A is taken
+// down in that gap, the returning member stays unavailable and the other pair cannot sign (B and C reconciling alone is not built).
+func (s *stack) waitMemberResolved(t *testing.T, name, addr, pin string) {
+	t.Helper()
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(pinnedTLS(s.certGW, pin))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	cl := pb.NewMpcPartyClient(conn)
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		h, err := cl.Health(c, &pb.HealthRequest{})
+		cancel()
+		if err == nil && len(h.Keysets) > 0 {
+			ok := true
+			for _, k := range h.Keysets {
+				ok = ok && k.Resolved
+			}
+			if ok {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("party %s did not become resolved after its restart", name)
+}
+
 func (s *stack) restartB(t *testing.T) {
 	s.b = startProc(t, "B", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgB)
 	s.waitAllUp(t, "B")
+	s.waitMemberResolved(t, "B", s.callerB, s.certB.pin)
+	s.waitAllUp(t, "B") // A flips the keyset to unresolved when it notices the new link; wait for that round to end too
 }
 
 func (s *stack) restartC(t *testing.T) {
 	s.c = startProc(t, "C", binMPC, mpcstack.SoftHSMEnv(), "-config", s.cfgC)
+	s.waitAllUp(t, "C")
+	s.waitMemberResolved(t, "C", s.callerC, s.certC.pin)
 	s.waitAllUp(t, "C")
 }
 
