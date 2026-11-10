@@ -12,7 +12,7 @@ func solFile() File {
 	return File{Chain: ChainFile{Family: "sol", Name: "sol-local", SOL: &SOLFile{Network: "localnet", RPCURL: "http://127.0.0.1:18899", AccountPublicKey: pk, AccountChainCode: hex.EncodeToString(make([]byte, 32))},
 		Assets: map[string]AssetFile{
 			"SOL": {Decimals: 9, MinDeposit: "1000"},
-			"TKN": {Address: "So11111111111111111111111111111111111111112", Decimals: 6, MinDeposit: "1"},
+			"TKN": {Address: "So11111111111111111111111111111111111111112", Decimals: 6, MinDeposit: "1"}, // the public wrapped-SOL mint, not a secret; ggignore
 		}}}
 }
 

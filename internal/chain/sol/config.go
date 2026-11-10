@@ -34,9 +34,9 @@ type Config struct {
 // genesis hashes of the public clusters; a node of another cluster than the config names is refused at start. A local validator has a
 // genesis hash of its own and is not checked.
 var genesis = map[string]string{
-	"mainnet": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
-	"devnet":  "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-	"testnet": "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY",
+	"mainnet": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d", // public genesis hash, not a secret; ggignore
+	"devnet":  "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", // public genesis hash, not a secret; ggignore
+	"testnet": "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY", // public genesis hash, not a secret; ggignore
 }
 
 type mint struct {

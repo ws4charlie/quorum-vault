@@ -108,9 +108,9 @@ func (n Node) DepositAddressAt(index uint32) (string, error) {
 
 // Program ids (classic SPL Token and the Associated Token Account program; Token-2022 is not supported).
 const (
-	SystemProgram       = "11111111111111111111111111111111"
-	TokenProgram        = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-	AssociatedTokenProg = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+	SystemProgram       = "11111111111111111111111111111111"             // public program id, not a secret; ggignore
+	TokenProgram        = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"  // public program id, not a secret; ggignore
+	AssociatedTokenProg = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" // public program id, not a secret; ggignore
 )
 
 // onCurve reports whether 32 bytes decode to a point of the Ed25519 curve.

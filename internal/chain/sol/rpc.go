@@ -28,7 +28,9 @@ type RPCError struct {
 	Method  string `json:"-"`
 }
 
-func (e *RPCError) Error() string { return fmt.Sprintf("sol rpc %s: %s (%d)", e.Method, e.Message, e.Code) }
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("sol rpc %s: %s (%d)", e.Method, e.Message, e.Code)
+}
 
 // Call runs method and decodes its result into out (nil: ignore).
 func (r *RPC) Call(ctx context.Context, out any, method string, params ...any) error {

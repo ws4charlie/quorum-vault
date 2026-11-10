@@ -6,10 +6,10 @@ import (
 )
 
 const (
-	alice = "AliceDepositAddr1111111111111111111111111111"
-	bob   = "BobDepositAddr111111111111111111111111111111"
-	aAta  = "AliceTokenAccount1111111111111111111111111"
-	bAta  = "BobTokenAccount11111111111111111111111111"
+	alice = "AliceDepositAddr1111111111111111111111111111" // made-up address for a test, not a secret; ggignore
+	bob   = "BobDepositAddr111111111111111111111111111111" // made-up address for a test, not a secret; ggignore
+	aAta  = "AliceTokenAccount1111111111111111111111111"   // made-up address for a test, not a secret; ggignore
+	bAta  = "BobTokenAccount11111111111111111111111111"    // made-up address for a test, not a secret; ggignore
 )
 
 func watch() (map[string]bool, map[string]ataInfo) {
