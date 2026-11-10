@@ -19,6 +19,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
+	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
@@ -26,6 +27,7 @@ import (
 const (
 	FamilyEVM = "evm"
 	FamilyBTC = "btc"
+	FamilySOL = "sol"
 )
 
 // File is the JSON form of Config. Amounts are canonical decimal strings,
@@ -98,6 +100,8 @@ type ChainFile struct {
 	Family string `json:"family,omitempty"`
 	// BTC is the section of the btc family; the evm fields below are not read for it.
 	BTC              *BTCFile             `json:"btc,omitempty"`
+	// SOL is the section of the sol family (Solana); the evm fields below are not read for it.
+	SOL              *SOLFile             `json:"sol,omitempty"`
 	Name             string               `json:"name"`
 	ChainID          uint64               `json:"chain_id"`
 	RPCURL           string               `json:"rpc_url"`
@@ -168,6 +172,7 @@ type Config struct {
 	Family string // FamilyEVM or FamilyBTC
 	EVM    evm.Config
 	BTC    btc.Config // the btc family
+	SOL    sol.Config // the sol family
 	Chain  string
 	Native string
 
@@ -208,14 +213,15 @@ type Config struct {
 // Asset is a configured asset.
 type Asset struct {
 	Symbol     string
-	Address    common.Address // zero for native
+	Address    common.Address // zero for native (EVM tokens)
+	Mint       string         // the mint address of a Solana token; empty otherwise
 	Decimals   int
 	MinDeposit *big.Int
 	PriceWei   *big.Int
 }
 
 // Native reports whether the asset is the chain's native one.
-func (a Asset) Native() bool { return a.Address == (common.Address{}) }
+func (a Asset) Native() bool { return a.Address == (common.Address{}) && a.Mint == "" }
 
 // Tier is a validated approval tier.
 type Tier struct {
@@ -300,6 +306,57 @@ type BTCShardFile struct {
 	Path    []uint32 `json:"path"` // [1, index]
 }
 
+// SOLFile is the sol family's section of the business config. The core holds only the account node (public key and chain code).
+type SOLFile struct {
+	Network          string `json:"network"` // localnet, devnet, testnet or mainnet
+	RPCURL           string `json:"rpc_url"`
+	AccountPublicKey string `json:"account_public_key"` // hex, m/44'/501'/0' from mpc-party Node
+	AccountChainCode string `json:"account_chain_code"` // hex
+}
+
+// buildSOL reads the sol family's section and its assets: SOL (no address) and classic SPL tokens (address = the mint).
+func (c *Config) buildSOL(cf ChainFile) error {
+	s := cf.SOL
+	if s == nil {
+		return errors.New("custody: config: family sol needs a chain.sol section")
+	}
+	c.SOL = sol.Config{Chain: cf.Name, Network: s.Network, RPCURL: s.RPCURL, AccountPublicKey: s.AccountPublicKey, AccountChainCode: s.AccountChainCode,
+		Tokens: map[string]string{}, TokenDecimals: map[string]int{}}
+	if c.Native != sol.Native {
+		return fmt.Errorf("custody: config: family sol has the native asset %s", sol.Native)
+	}
+	af, ok := cf.Assets[sol.Native]
+	if !ok || af.Address != "" || af.Decimals != sol.Decimals {
+		return fmt.Errorf("custody: config: family sol needs the asset %s with no address and %d decimals", sol.Native, sol.Decimals)
+	}
+	for sym, a := range cf.Assets {
+		min, err := amount(sym+" min_deposit", orZero(a.MinDeposit))
+		if err != nil {
+			return err
+		}
+		if sym != sol.Native {
+			if a.Address == "" {
+				return fmt.Errorf("custody: config: token %s needs its mint address", sym)
+			}
+			c.SOL.Tokens[sym], c.SOL.TokenDecimals[sym] = a.Address, a.Decimals
+		}
+		price := big.NewInt(1)
+		if a.PriceWei != "" {
+			if price, err = amount(sym+" price_wei", a.PriceWei); err != nil {
+				return err
+			}
+		}
+		c.Assets[sym] = Asset{Symbol: sym, Mint: a.Address, Decimals: a.Decimals, MinDeposit: min, PriceWei: price}
+		c.AssetList = append(c.AssetList, sym)
+	}
+	sort.Strings(c.AssetList)
+	if err := c.SOL.Validate(); err != nil {
+		return fmt.Errorf("custody: config: %w", err)
+	}
+	c.SinkShard = 0
+	return nil
+}
+
 // buildBTC reads the btc family's section and its assets (the native one only: bitcoin has no tokens here). It refuses a key or
 // address that belongs to another network than the config names.
 func (c *Config) buildBTC(cf ChainFile) error {
@@ -357,8 +414,13 @@ func (f File) Build() (*Config, error) {
 		if f.Chain.NativeAsset == "" {
 			c.Native = btc.Native
 		}
+	case FamilySOL:
+		c.Family = FamilySOL
+		if f.Chain.NativeAsset == "" {
+			c.Native = sol.Native
+		}
 	default:
-		return nil, fmt.Errorf("custody: config: unknown chain family %q (known: %s, %s)", cf.Family, FamilyEVM, FamilyBTC)
+		return nil, fmt.Errorf("custody: config: unknown chain family %q (known: %s, %s, %s)", cf.Family, FamilyEVM, FamilyBTC, FamilySOL)
 	}
 	if cf.Name == "" || strings.ContainsAny(cf.Name, ":/") {
 		return nil, errors.New("custody: config: chain name must be non-empty and contain no ':' or '/'")
@@ -368,6 +430,8 @@ func (f File) Build() (*Config, error) {
 	switch c.Family {
 	case FamilyBTC:
 		err = c.buildBTC(cf)
+	case FamilySOL:
+		err = c.buildSOL(cf)
 	default:
 		hot, err = c.buildEVM(cf)
 	}
@@ -633,6 +697,9 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 	}
 	if len(cf.Addresses) == 0 && len(cf.Limits) == 0 && len(cf.ShardLimits) == 0 {
 		return nil
+	}
+	if c.Family == FamilySOL {
+		return errors.New("custody: config: family sol has no cold tier yet")
 	}
 	if c.Family == FamilyBTC {
 		c.BTC.ColdAddresses = map[string]string{}

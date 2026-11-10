@@ -444,3 +444,21 @@ const (
 type TxVerifier interface {
 	Verify(u UnsignedTx, i signjob.Intent) error
 }
+
+// AssetView is what a chain cell without historical balances (Solana) can say about deposit addresses now: each address's balance per asset at
+// finalized commitment, and which addresses have finalized activity the scan has not covered yet.
+type AssetView struct {
+	// Slot is the finalized height the balances were read at or after.
+	Slot uint64
+	// Balance maps asset -> address -> balance in base units. An asset with no account yet has balance 0.
+	Balance map[string]map[string]*big.Int
+	// Pending lists the addresses whose newest finalized activity is at or above the scan cursor: the books have not seen it yet, so a difference
+	// for that address is not a difference.
+	Pending []string
+}
+
+// AssetViewer is implemented by a chain cell that reads balances at the node's current finalized state, with no history (Solana). The balances
+// are read first and the activity after, so activity between the two reads makes an address Pending instead of a false difference.
+type AssetViewer interface {
+	AssetView(ctx context.Context, addrs []string, scanCursor uint64) (AssetView, error)
+}

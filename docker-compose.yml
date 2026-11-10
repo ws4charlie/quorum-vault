@@ -1,4 +1,4 @@
-# Host ports can be moved with QV_PG_PORT, QV_ANVIL_PORT, QV_TEMPORAL_PORT, QV_KAFKA_PORT and QV_BTC_PORT (scripts/e2e-all.sh runs
+# Host ports can be moved with QV_PG_PORT, QV_ANVIL_PORT, QV_TEMPORAL_PORT, QV_KAFKA_PORT, QV_BTC_PORT and QV_SOL_PORT (scripts/e2e-all.sh runs
 # several isolated sets side by side); with none set they are the fixed ports below.
 # Dev-only services, reachable only from this machine. Postgres: no password
 # (trust auth).
@@ -160,6 +160,24 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  # ---- Solana (profile "solana"; `make sol-up`) ----
+  # solana-test-validator (Agave v3.0.14, built from the pinned release tarball: ci/solana/Dockerfile), RPC on 8899 inside, QV_SOL_PORT outside.
+  # A fresh ledger at every start; 100 ms slots, so a transaction is final (rooted) in a few seconds. The faucet is inside the container and
+  # reached through the RPC (requestAirdrop); no key is committed anywhere.
+  solana:
+    profiles: ["solana"]
+    build:
+      context: ci/solana
+    image: qv-solana-test:v3.0.14
+    platform: linux/amd64
+    ports:
+      - "127.0.0.1:${QV_SOL_PORT:-18899}:8899"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' --data '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}' http://127.0.0.1:8899 | grep -q ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
 
 # The server image needs a dynamic-config file; an empty one means defaults.
 configs:

@@ -147,9 +147,9 @@ func (s *Service) Balances(ctx context.Context, customer string) ([]AssetBalance
 
 func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
 
-// ensureIndexedAddress is EnsureDepositAddress for families whose addresses come from a key tree (Bitcoin): each customer gets
+// ensureIndexedAddress is EnsureDepositAddress for families whose addresses come from a key tree (Bitcoin, Solana): each customer gets
 // the next unused derivation index of the chain, under a lock, so two customers never share an address. The derivation itself
-// is offline (the account xpub); no key and no MPC is involved.
+// is offline (the account xpub, or the account node on Solana); no key and no MPC is involved.
 func (s *Service) ensureIndexedAddress(ctx context.Context, actor, customer string) (DepositAddress, error) {
 	out := DepositAddress{Customer: customer, Chain: s.Cfg.Chain}
 	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -164,7 +164,7 @@ func (s *Service) ensureIndexedAddress(ctx context.Context, actor, customer stri
 			return err
 		}
 		var next int64
-		if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(derivation_index)+1, 0) FROM deposit_addresses WHERE chain=$1 AND kind='xpub'`, s.Cfg.Chain).Scan(&next); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(derivation_index)+1, 0) FROM deposit_addresses WHERE chain=$1 AND kind IN ('xpub','ed25519')`, s.Cfg.Chain).Scan(&next); err != nil {
 			return err
 		}
 		d, err := s.Chain.DeriveDepositAddress(ctx, customer, uint64(next))

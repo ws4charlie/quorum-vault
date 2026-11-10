@@ -80,6 +80,13 @@ func (s *Service) posted(ctx context.Context, acct string) (*big.Int, error) {
 func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 	c := s.Cfg
 	rep := Report{Chain: c.Chain}
+	if c.Family == FamilySOL {
+		if err := s.reconcileSOL(ctx, &rep); err != nil {
+			return rep, err
+		}
+		s.finishReconcile(ctx, &rep)
+		return rep, nil
+	}
 	if c.Family != FamilyBTC {
 		// One consistent read of the books and the chain at one height: it takes its own height and scan cursor.
 		if err := s.reconcileEVM(ctx, &rep); err != nil {
@@ -146,7 +153,7 @@ func (s *Service) ledgerInvariants(ctx context.Context, rep *Report) {
 // finishReconcile (EVM: after the comparison) adds the ledger check, decides Clean and raises the ALERT for each real difference.
 func (s *Service) finishReconcile(ctx context.Context, rep *Report) {
 	c := s.Cfg
-	if c.Family != FamilyBTC {
+	if c.Family != FamilyBTC && c.Family != FamilySOL {
 		s.ledgerInvariants(ctx, rep)
 	}
 	rep.Clean = len(rep.Failures()) == 0 && rep.SkippedChainChecks == 0
