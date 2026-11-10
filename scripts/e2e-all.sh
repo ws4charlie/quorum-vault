@@ -167,6 +167,11 @@ i=1; while [ "$i" -le "$LANES" ]; do say "  lane $i (~${load[$i]}s in CI):${lane
 # ---- start: clean slate, then shared services and every lane at the same time ----
 t0=$SECONDS
 down_all
+# The validator image is built once here (Docker's layer cache makes a repeat instant), not once per lane: the lanes then start containers from it.
+i=1; while [ "$i" -le "$LANES" ]; do
+  case "${lane_svc[$i]}" in *s*) docker compose --profile solana build solana >"$OUT/solana-build.log" 2>&1 || die "building the Solana validator image failed (see $OUT/solana-build.log)"; break ;; esac
+  i=$((i + 1))
+done
 start_lane() { # start_lane <n>: Postgres, the chains it needs, and the lane's SoftHSM tokens
   local n=$1 svcs="postgres" prof=()
   case "${lane_svc[$n]}" in *a*) svcs="$svcs anvil" ;; esac

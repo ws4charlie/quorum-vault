@@ -20,6 +20,12 @@ inputs:
 runs:
   using: composite
   steps:
+    # The Solana validator image is pulled from ghcr (it may be a private package), so log in before the services start.
+    - name: Log in to ghcr.io
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || echo "no login: pulling anonymously"
     - name: Start the services in the background
       shell: bash
       env:

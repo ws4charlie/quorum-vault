@@ -169,7 +169,8 @@ services:
     profiles: ["solana"]
     build:
       context: ci/solana
-    image: qv-solana-test:v3.0.14
+    # CI pulls the image built once by the `image` job (ci/ensure-image.sh solana) and names it in QV_SOLANA_IMAGE; elsewhere it is built here.
+    image: ${QV_SOLANA_IMAGE:-qv-solana-test:v3.0.14}
     platform: linux/amd64
     ports:
       - "127.0.0.1:${QV_SOL_PORT:-18899}:8899"

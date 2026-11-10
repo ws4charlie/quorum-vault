@@ -28,6 +28,20 @@ start_anvil() {
   return 1
 }
 
+compose_up() { # compose_up <profile flags...> -- <services...>: the Solana validator image is pulled (built once by the `image` job), not built here
+  local flags=()
+  while [ "$1" != "--" ]; do flags+=("$1"); shift; done
+  shift
+  for s in "$@"; do
+    if [ "$s" = solana ]; then
+      QV_SOLANA_IMAGE="$(cd "$(dirname "$0")/.." && ci/image-tag.sh solana)"
+      export QV_SOLANA_IMAGE
+      "$(dirname "$0")/ensure-image.sh" use solana || return 1
+    fi
+  done
+  docker compose "${flags[@]}" up -d --wait "$@"
+}
+
 case "${1:-}" in
 start)
   shift
@@ -44,7 +58,7 @@ start)
   done
   [ "$anvil" = 1 ] && bg anvil start_anvil
   # One compose command for everything it starts: two at once would race to create the project's network.
-  [ "${#services[@]}" -gt 0 ] && bg compose docker compose "${profiles[@]}" up -d --wait "${services[@]}"
+  [ "${#services[@]}" -gt 0 ] && bg compose compose_up "${profiles[@]}" -- "${services[@]}"
   echo "started in the background; logs in $DIR"
   ;;
 wait)
