@@ -229,6 +229,7 @@ func TestGatewayRefusesBeforeAskingTheParties(t *testing.T) {
 func TestSecondSignatureOfOneMessageDoesNotLand(t *testing.T) {
 	requireSOL(t)
 	n := &node{t: t, rpc: sol.NewRPC(nodeURL())}
+	n.ensureValidator()
 	payer := st.NewKey()
 	n.airdrop(payer.Pub, 20*1_000_000_000)
 

@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,8 +140,82 @@ func (n *node) wait(sig, commitment string) (failed any) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	n.t.Fatalf("transaction %s did not reach %s", sig, commitment)
+	n.t.Fatalf("transaction %s did not reach %s\n%s", sig, commitment, n.dump(sig))
 	return nil
+}
+
+// dump explains a validator that does not confirm: what the node says (health, version, slots at each commitment, epoch, the blockhash, the
+// signature's status) and what the container says (state, OOMKilled, exit code, the last log lines, docker stats). The jobs of CI run the tests in
+// a container with the Docker socket, so the docker CLI answers; where it does not, that is said and the RPC part still stands.
+func (n *node) dump(sig string) string {
+	var b strings.Builder
+	call := func(label, method string, params ...any) {
+		var raw json.RawMessage
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := n.rpc.Call(ctx, &raw, method, params...); err != nil {
+			fmt.Fprintf(&b, "  %-26s error: %v\n", label, err)
+			return
+		}
+		out := string(raw)
+		if len(out) > 300 {
+			out = out[:300] + "..."
+		}
+		fmt.Fprintf(&b, "  %-26s %s\n", label, out)
+	}
+	fmt.Fprintf(&b, "validator at %s, %s:\n", nodeURL(), time.Now().UTC().Format(time.RFC3339))
+	call("getHealth", "getHealth")
+	call("getVersion", "getVersion")
+	for _, c := range []string{"processed", "confirmed", "finalized"} {
+		call("getSlot "+c, "getSlot", map[string]string{"commitment": c})
+	}
+	call("getEpochInfo", "getEpochInfo")
+	call("getLatestBlockhash", "getLatestBlockhash", map[string]string{"commitment": "confirmed"})
+	if sig != "" {
+		call("getSignatureStatuses", "getSignatureStatuses", []string{sig}, map[string]bool{"searchTransactionHistory": true})
+	}
+	run := func(args ...string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+		if err != nil {
+			return fmt.Sprintf("(docker %s: %v)\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+	names := strings.Fields(run("ps", "-a", "--filter", "name=solana", "--format", "{{.Names}}"))
+	fmt.Fprintf(&b, "containers: %v\n", names)
+	for _, c := range names {
+		fmt.Fprintf(&b, "inspect %s: %s", c, run("inspect", "-f", "status={{.State.Status}} oomkilled={{.State.OOMKilled}} exit={{.State.ExitCode}} started={{.State.StartedAt}} finished={{.State.FinishedAt}} restarts={{.RestartCount}}", c))
+		fmt.Fprintf(&b, "logs %s (last 40):\n%s", c, run("logs", "--tail", "40", c))
+	}
+	fmt.Fprintf(&b, "docker stats:\n%s", run("stats", "--no-stream", "--format", "{{.Name}} cpu={{.CPUPerc}} mem={{.MemUsage}}"))
+	fmt.Fprintf(&b, "host: %s", run("info", "--format", "cpus={{.NCPU}} mem={{.MemTotal}}"))
+	return b.String()
+}
+
+var validatorOnce sync.Once
+
+// ensureValidator runs once per test binary: it fails the whole group at once, with the dump, when the validator does not produce blocks and confirm a
+// transaction, instead of letting every test wait out its own timeout. It also waits for the first rooted slot, so no test starts on a validator that
+// is healthy but has not finished its first epoch.
+func (n *node) ensureValidator() {
+	n.t.Helper()
+	validatorOnce.Do(func() {
+		deadline := time.Now().Add(90 * time.Second)
+		for time.Now().Before(deadline) {
+			if slot, err := n.rpc.Slot(context.Background(), sol.Finalized); err == nil && slot > 0 {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		probe := st.NewKey()
+		var sig string
+		if err := n.rpc.Call(context.Background(), &sig, "requestAirdrop", sol.Address(probe.Pub), 1_000_000_000); err != nil {
+			n.t.Fatalf("the validator refuses an airdrop: %v\n%s", err, n.dump(""))
+		}
+		n.wait(sig, "confirmed") // dumps and fails if it never confirms
+	})
 }
 
 func (n *node) land(tx []byte) string {
@@ -255,8 +330,9 @@ func newStack(t *testing.T, o optsT) *stack {
 	requireSOL(t)
 	s := &stack{t: t, dir: t.TempDir(), n: &node{t: t, rpc: sol.NewRPC(nodeURL())}, funder: st.NewKey()}
 	if _, err := s.n.rpc.Slot(context.Background(), sol.Finalized); err != nil {
-		t.Fatalf("solana-test-validator: %v (make sol-up)", err)
+		t.Fatalf("solana-test-validator: %v (make sol-up)\n%s", err, s.n.dump(""))
 	}
+	s.n.ensureValidator()
 	s.mpc = mpcstack.Start3(t, filepath.Join(s.dir, "mpc"), mpcBin, mpcstack.Opts{})
 	s.n.airdrop(s.funder.Pub, 1000*1_000_000_000)
 	s.mint = s.n.newMint(s.funder, 6)
