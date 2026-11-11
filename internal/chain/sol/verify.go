@@ -23,7 +23,8 @@ import (
 // What bounds a withdrawal is its nonce. A withdrawal (and the cancel that frees it) signs the value of a nonce account of the hot shard's own
 // pool as its blockhash and advances that nonce first, so at most one message of all the versions of one withdrawal can ever land. The zone
 // signs a second message for an intent only when it has the same nonce account and value and a higher priority price (see FeesRaised in the
-// gateway codec). A sweep still signs a recent blockhash, and the zone signs one message per intent for it.
+// gateway codec). A sweep is built the same way: it signs a nonce of the shard's pool, because its several signers (one deposit key per address) must not
+// race a blockhash that expires while they sign.
 //
 // Allowed shapes (a withdrawal or cancel starts with AdvanceNonceAccount; then compute-budget instructions: one limit, required; one price,
 // optional):
@@ -34,13 +35,14 @@ import (
 //	cancel            advance nonce, nothing else (frees the nonce of a withdrawal that must not land)
 //	nonce setup       pairs of CreateAccountWithSeed + InitializeNonceAccount for pool accounts i of the hot shard, rent from the hot shard
 //	                  (a normal recent blockhash; needs an operator approval)
-//	sweep SOL         system transfer deposit address -> hot shard                 signers: hot shard (fee payer), deposit address
-//	sweep token       [create hot ATA, idempotent] transferChecked deposit ATA -> hot ATA
-//	                  [closeAccount deposit ATA, rent to the hot shard]            signers: hot shard (fee payer), deposit address
+//	sweep SOL         advance nonce; one system transfer deposit address -> hot shard per address     signers: hot shard (fee payer), each deposit address
+//	sweep token       advance nonce; [create hot ATA, idempotent]; per address: transferChecked deposit ATA -> hot ATA,
+//	                  [closeAccount of that deposit ATA, rent to the hot shard]                       signers: hot shard (fee payer), each deposit address
 //
-// A sweep's amount is the intent's amount exactly. Whether a SOL sweep leaves the rent-exempt minimum behind depends on the account's
-// balance, which the zone cannot see: it cannot be checked here. A transfer that would leave a system account between zero and the minimum
-// fails on the chain; one that empties it closes it, and the funds are still the hot shard's.
+// A sweep moves the amount per address the message names and the intent names the total. The zone cannot see balances, so it cannot check that a
+// SOL sweep leaves nothing or at least the rent minimum behind: a transfer that would leave a system account between zero and the minimum fails on the
+// chain, and the funds stay where they were. Moving more from one address and less from another changes nothing for the books: every lamport goes to
+// the same hot shard.
 
 // ErrRejected wraps every Verify rejection.
 var ErrRejected = errors.New("sol: transaction does not match intent")
@@ -82,11 +84,18 @@ type SigningConfig struct {
 	NonceRent uint64
 }
 
-// Payload is what the core puts in a job: the message to sign and, for a sweep, the index of the deposit address that signs as owner.
+// Payload is what the core puts in a job: the message to sign and, for a sweep, the derivation index of each deposit address that signs as owner, in the
+// order of their signatures in the message (right after the hot shard's).
 type Payload struct {
-	Message      []byte  `json:"message"`
-	DepositIndex *uint32 `json:"deposit_index,omitempty"`
+	Message        []byte   `json:"message"`
+	DepositIndices []uint32 `json:"deposit_indices,omitempty"`
 }
+
+// MaxSweepLegs bounds the deposit addresses of one sweep; the size of the transaction bounds it first.
+const MaxSweepLegs = 12
+
+// MaxTransaction is the size of a transaction on the wire: signature count, signatures and message.
+const MaxTransaction = 1232
 
 // KeyRef paths of a job: the hot shard (the fee payer) or a deposit key.
 const (
@@ -254,7 +263,8 @@ type shape struct {
 	hotAddr   string
 	dest      string
 	kind      string
-	deposit   [32]byte
+	deposits  [][32]byte // sweep: the deposit keys in the order of their signatures
+	depIdx    []uint32
 	feeLamp   *big.Int
 	amount    uint64
 	asset     string
@@ -323,7 +333,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 
 	// A withdrawal and its cancel start by advancing the nonce of one account of the hot shard's pool, and sign the value that nonce holds.
 	idx := 0
-	if i.Kind == "withdrawal" || i.Kind == "cancel" {
+	if i.Kind == "withdrawal" || i.Kind == "cancel" || i.Kind == "sweep" {
 		if err := v.advance(s, m); err != nil {
 			return nil, err
 		}
@@ -398,16 +408,21 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 			return nil, err
 		}
 	case "sweep":
-		wantSigners = 2
-		if err := v.sweep(s, rest, i, p.DepositIndex); err != nil {
+		if err := v.sweep(s, rest, i, p.DepositIndices); err != nil {
 			return nil, err
+		}
+		wantSigners = 1 + len(s.deposits)
+		if size := 1 + 64*wantSigners + len(p.Message); size > MaxTransaction {
+			return nil, reject("the transaction would be %d bytes with its %d signatures, the limit is %d", size, wantSigners, MaxTransaction)
 		}
 	}
 	if m.NumSigners != wantSigners {
 		return nil, reject("the message has %d required signers, a %s needs %d", m.NumSigners, i.Kind, wantSigners)
 	}
-	if wantSigners == 2 && m.Keys[1] != s.deposit {
-		return nil, reject("the second signer %s is not the deposit address %s", Address(m.Keys[1]), Address(s.deposit))
+	for k, dk := range s.deposits {
+		if m.Keys[1+k] != dk {
+			return nil, reject("signer %d is %s, not the deposit address %s", 1+k, Address(m.Keys[1+k]), Address(dk))
+		}
 	}
 	// Every account of the message is the fee payer, a signer or an account/program an accepted instruction names: nothing rides along unseen.
 	used := map[int]bool{0: true}
@@ -425,7 +440,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		}
 	}
 	s.feeLamp = new(big.Int).Add(prio, big.NewInt(5000*int64(wantSigners)))
-	if s.fees == nil { // a sweep: never replaced
+	if s.fees == nil { // a nonce setup: signed once, with a recent blockhash; a new one is a new intent
 		s.fees = []*big.Int{s.feeLamp}
 	} else {
 		s.fees = []*big.Int{new(big.Int).SetUint64(price), new(big.Int).SetUint64(uint64(limit))}
@@ -439,10 +454,15 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 	if !dep {
 		s.signerKey = hot
 	} else {
-		if wantSigners != 2 || p.DepositIndex == nil || di != *p.DepositIndex {
+		found := false
+		for k, ix := range s.depIdx {
+			if ix == di {
+				s.signerKey, found = s.deposits[k], true
+			}
+		}
+		if !found {
 			return nil, reject("key %s is not the deposit key of this transaction", u.KeyRef.Path)
 		}
-		s.signerKey = s.deposit
 	}
 	return s, nil
 }
@@ -573,63 +593,98 @@ func (v *Verifier) withdrawal(s *shape, rest []MsgInstruction, i signjob.Intent)
 	return nil
 }
 
-func (v *Verifier) sweep(s *shape, rest []MsgInstruction, i signjob.Intent, depIndex *uint32) error {
-	if depIndex == nil {
-		return reject("a sweep names the deposit index in its payload")
+func (v *Verifier) sweep(s *shape, rest []MsgInstruction, i signjob.Intent, idxs []uint32) error {
+	if len(idxs) == 0 || len(idxs) > MaxSweepLegs {
+		return reject("a sweep names 1 to %d deposit indices in its payload, not %d", MaxSweepLegs, len(idxs))
 	}
-	dk, err := v.DepositKey(*depIndex)
-	if err != nil {
-		return reject("deposit index %d: %v", *depIndex, err)
+	seen := map[uint32]bool{}
+	var from []string
+	for _, ix := range idxs {
+		if seen[ix] {
+			return reject("deposit index %d appears twice", ix)
+		}
+		seen[ix] = true
+		dk, err := v.DepositKey(ix)
+		if err != nil {
+			return reject("deposit index %d: %v", ix, err)
+		}
+		s.deposits = append(s.deposits, dk)
+		from = append(from, Address(dk))
 	}
-	if i.From != Address(dk) {
-		return reject("the sweep source %q is not the deposit address %s at index %d", i.From, Address(dk), *depIndex)
+	s.depIdx = idxs
+	if i.From != strings.Join(from, ",") {
+		return reject("the sweep sources %q are not the deposit addresses %q at the payload's indices", i.From, strings.Join(from, ","))
 	}
 	if i.To != s.hotAddr {
 		return reject("a sweep pays the hot shard %s, not %q", s.hotAddr, i.To)
 	}
-	s.deposit, s.dest = dk, s.hotAddr
-	if i.Asset == Native {
-		if len(rest) != 1 {
-			return reject("a SOL sweep is one system transfer, the message has %d instructions after the compute budget", len(rest))
+	s.dest = s.hotAddr
+	var total uint64
+	add := func(n uint64) error {
+		if n == 0 || total+n < total {
+			return reject("a sweep amount of %d", n)
 		}
-		in := rest[0]
-		if in.Program != v.sys || !eqAccts(in.Accts, dk, s.hot) || !bytes.Equal(in.Data, v.transferData(s.amount)) {
-			return reject("the instruction is not a system transfer of %d lamports from the deposit address to the hot shard", s.amount)
-		}
+		total += n
 		return nil
 	}
-	t, ok := v.tok[i.Asset]
-	if !ok {
-		return reject("asset %q is not configured", i.Asset)
-	}
-	depATA, err := ATA(dk, t.mint)
-	if err != nil {
-		return err
-	}
-	hotATA, err := ATA(s.hot, t.mint)
-	if err != nil {
-		return err
-	}
-	if len(rest) > 0 && rest[0].Program == v.atap {
-		in := rest[0]
-		if !eqAccts(in.Accts, s.hot, hotATA, s.hot, t.mint, v.sys, v.tokp) || !bytes.Equal(in.Data, []byte{1}) {
-			return reject("the create instruction is not an idempotent create of the hot shard's own associated token account")
+	if i.Asset == Native {
+		if len(rest) != len(s.deposits) {
+			return reject("a SOL sweep is one system transfer per address (%d), the message has %d instructions after the nonce and the compute budget", len(s.deposits), len(rest))
 		}
-		rest = rest[1:]
-	}
-	if n := len(rest); n == 2 {
-		in := rest[1]
-		if in.Program != v.tokp || !eqAccts(in.Accts, depATA, s.hot, dk) || !bytes.Equal(in.Data, []byte{9}) {
-			return reject("the last instruction is not a closeAccount of the deposit token account with its rent going to the hot shard, owner signing")
+		for k, in := range rest {
+			if in.Program != v.sys || len(in.Data) != 12 || binary.LittleEndian.Uint32(in.Data) != 2 || !eqAccts(in.Accts, s.deposits[k], s.hot) {
+				return reject("instruction %d is not a system transfer from deposit address %d to the hot shard", k, k)
+			}
+			if err := add(binary.LittleEndian.Uint64(in.Data[4:])); err != nil {
+				return err
+			}
 		}
-		rest = rest[:1]
+	} else {
+		t, ok := v.tok[i.Asset]
+		if !ok {
+			return reject("asset %q is not configured", i.Asset)
+		}
+		hotATA, err := ATA(s.hot, t.mint)
+		if err != nil {
+			return err
+		}
+		if len(rest) > 0 && rest[0].Program == v.atap {
+			in := rest[0]
+			if !eqAccts(in.Accts, s.hot, hotATA, s.hot, t.mint, v.sys, v.tokp) || !bytes.Equal(in.Data, []byte{1}) {
+				return reject("the create instruction is not an idempotent create of the hot shard's own associated token account")
+			}
+			rest = rest[1:]
+		}
+		for k, dk := range s.deposits {
+			depATA, err := ATA(dk, t.mint)
+			if err != nil {
+				return err
+			}
+			if len(rest) == 0 {
+				return reject("the message ends before the transfer of address %d", k)
+			}
+			in := rest[0]
+			// transferChecked: tag 12, u64 amount, u8 decimals
+			if in.Program != v.tokp || len(in.Data) != 10 || in.Data[0] != 12 || in.Data[9] != t.decimals || !eqAccts(in.Accts, depATA, t.mint, hotATA, dk) {
+				return reject("instruction for address %d is not a transferChecked (decimals %d, mint %s) from its token account to the hot shard's", k, t.decimals, Address(t.mint))
+			}
+			if err := add(binary.LittleEndian.Uint64(in.Data[1:])); err != nil {
+				return err
+			}
+			rest = rest[1:]
+			if len(rest) > 0 && rest[0].Program == v.tokp && bytes.Equal(rest[0].Data, []byte{9}) {
+				if !eqAccts(rest[0].Accts, depATA, s.hot, dk) {
+					return reject("the closeAccount after address %d is not of its token account with the rent going to the hot shard, its owner signing", k)
+				}
+				rest = rest[1:]
+			}
+		}
+		if len(rest) != 0 {
+			return reject("%d instructions after the last address's transfer: a token sweep is [create hot account] and, per address, a transferChecked and optionally a closeAccount", len(rest))
+		}
 	}
-	if len(rest) != 1 {
-		return reject("a token sweep is [create hot account], one transferChecked and optionally a closeAccount")
-	}
-	in := rest[0]
-	if in.Program != v.tokp || !eqAccts(in.Accts, depATA, t.mint, hotATA, dk) || !bytes.Equal(in.Data, v.checkedData(s.amount, t.decimals)) {
-		return reject("the instruction is not a transferChecked of %d (decimals %d, mint %s) from the deposit token account to the hot shard's", s.amount, t.decimals, Address(t.mint))
+	if total != s.amount {
+		return reject("the message moves %d in all, the intent says %d", total, s.amount)
 	}
 	return nil
 }
@@ -648,9 +703,6 @@ func (v *Verifier) Decode(u chain.UnsignedTx, i signjob.Intent) (Info, error) {
 		return Info{}, err
 	}
 	claims := s.claims
-	if i.Kind == "sweep" { // one message per intent
-		claims = []string{s.hotAddr + "#" + i.ID}
-	}
 	return Info{Sender: s.hotAddr, Destination: s.dest, SignerKey: append([]byte(nil), s.signerKey[:]...),
 		Claims: claims, Fee: s.feeLamp, Fees: s.fees}, nil
 }

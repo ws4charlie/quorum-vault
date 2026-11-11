@@ -99,10 +99,10 @@ func TestSweepSignedByTheDepositKeyLands(t *testing.T) {
 	s.n.run(s.funder, nil, st.Transfer(s.funder.Pub, dep, 1_000_000_000))
 	rent := s.n.rent(0)
 	amount := s.n.lamports(dep) - rent
-	hotBefore := s.n.lamports(s.hotPub)
 	di := uint32(idx)
 	in := s.intent("sweep", "s1", "SOL", partSOL, sol.Address(dep), sol.Address(s.hotPub), amount)
-	msg := s.msgFromHot(st.SetLimit(10_000), st.Transfer(dep, s.hotPub, amount))
+	msg := s.wdMsg(st.SetLimit(10_000), st.Transfer(dep, s.hotPub, amount))
+	hotBefore := s.n.lamports(s.hotPub) // after wdMsg: it creates the nonce account through the zone the first time, which costs rent and a fee
 	hotSig := s.sign("s1-hot", in, msg, sol.PathHot, &di)
 	depSig := s.sign("s1-dep", in, msg, sol.DepositPath(idx), &di)
 	s.n.land(st.Assemble(msg, hotSig, depSig))
@@ -127,7 +127,7 @@ func TestTokenSweepWithCloseLands(t *testing.T) {
 		st.CreateATA(s.funder.Pub, depATA, dep, s.mint.Pub), st.CheckedTransfer(funderATA, s.mint.Pub, depATA, s.funder.Pub, 7_000, 6))
 	di := uint32(idx)
 	in := s.intent("sweep", "s2", "TKN", partTKN, sol.Address(dep), sol.Address(s.hotPub), 7_000)
-	msg := s.msgFromHot(st.SetLimit(80_000), st.CheckedTransfer(depATA, s.mint.Pub, hotATA, dep, 7_000, 6), st.CloseAccount(depATA, s.hotPub, dep))
+	msg := s.wdMsg(st.SetLimit(80_000), st.CheckedTransfer(depATA, s.mint.Pub, hotATA, dep, 7_000, 6), st.CloseAccount(depATA, s.hotPub, dep))
 	hotSig := s.sign("s2-hot", in, msg, sol.PathHot, &di)
 	depSig := s.sign("s2-dep", in, msg, sol.DepositPath(idx), &di)
 	s.n.land(st.Assemble(msg, hotSig, depSig))

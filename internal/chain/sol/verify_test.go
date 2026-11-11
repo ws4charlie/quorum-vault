@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -194,7 +195,11 @@ func (f *fx) closeAcct(acct, to, owner [32]byte) tix {
 }
 
 func (f *fx) job(msg []byte, part, keyPath string, dep *uint32) chain.UnsignedTx {
-	p, _ := json.Marshal(Payload{Message: msg, DepositIndex: dep})
+	var ix []uint32
+	if dep != nil {
+		ix = []uint32{*dep}
+	}
+	p, _ := json.Marshal(Payload{Message: msg, DepositIndices: ix})
 	return chain.UnsignedTx{Chain: "sol-1", Digest: msg, Payload: p, KeyRef: chain.KeyRef{PartitionID: part, Path: keyPath}}
 }
 
@@ -243,7 +248,7 @@ func TestAllowedShapes(t *testing.T) {
 	f.mustPass("token withdrawal with create", f.job(m, f.partTKN, PathHot, nil), f.wIntent("TKN", f.partTKN, "777"))
 
 	// SOL sweep: both jobs (fee payer, deposit owner) pass
-	m = compile(f.hot, f.bh, f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000))
+	m = compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000))
 	f.mustPass("SOL sweep, hot job", f.job(m, f.partSOL, PathHot, &idx), f.sIntent("SOL", f.partSOL, "3000000"))
 	f.mustPass("SOL sweep, deposit job", f.job(m, f.partSOL, DepositPath(idx), &idx), f.sIntent("SOL", f.partSOL, "3000000"))
 
@@ -255,13 +260,13 @@ func TestAllowedShapes(t *testing.T) {
 		"with close":   {f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint), f.closeAcct(dsrc, f.hot, f.depAddr)},
 		"create+close": {f.create(f.hot, hdst, f.hot, f.mint), f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint), f.closeAcct(dsrc, f.hot, f.depAddr)},
 	} {
-		m = compile(f.hot, f.bh, append([]tix{f.cbLimit(60_000)}, ixs...)...)
+		m = compile(f.hot, f.nv, append([]tix{f.adv(), f.cbLimit(60_000)}, ixs...)...)
 		f.mustPass("token sweep "+name+", hot job", f.job(m, f.partTKN, PathHot, &idx), f.sIntent("TKN", f.partTKN, "900"))
 		f.mustPass("token sweep "+name+", deposit job", f.job(m, f.partTKN, DepositPath(idx), &idx), f.sIntent("TKN", f.partTKN, "900"))
 	}
 
 	// Decode: the sender is the fee payer for both jobs of a sweep, the signer key differs
-	m = compile(f.hot, f.bh, f.cbLimit(10_000), f.cbPrice(1000), f.sysTransfer(f.depAddr, f.hot, 3_000_000))
+	m = compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.cbPrice(1000), f.sysTransfer(f.depAddr, f.hot, 3_000_000))
 	in := f.sIntent("SOL", f.partSOL, "3000000")
 	a, err := f.v.Decode(f.job(m, f.partSOL, PathHot, &idx), in)
 	if err != nil {
@@ -402,20 +407,20 @@ func TestSweepAttacks(t *testing.T) {
 	f := newFx(t)
 	idx := f.depIdx
 	in := f.sIntent("SOL", f.partSOL, "3000000")
-	good := compile(f.hot, f.bh, f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000))
+	good := compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000))
 	f.mustPass("baseline hot", f.job(good, f.partSOL, PathHot, &idx), in)
 	// a sweep that pays someone else
-	f.mustFail("sweep to another address", f.job(compile(f.hot, f.bh, f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.other, 3_000_000)), f.partSOL, PathHot, &idx), in, "not a system transfer")
+	f.mustFail("sweep to another address", f.job(compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.other, 3_000_000)), f.partSOL, PathHot, &idx), in, "not a system transfer")
 	// a different amount (drains more than the intent says)
-	f.mustFail("sweep of more than the intent", f.job(compile(f.hot, f.bh, f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_001)), f.partSOL, PathHot, &idx), in, "not a system transfer")
+	f.mustFail("sweep of more than the intent", f.job(compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_001)), f.partSOL, PathHot, &idx), in, "in all")
 	// a second transfer out of the deposit address
-	f.mustFail("second transfer", f.job(compile(f.hot, f.bh, f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000), f.sysTransfer(f.depAddr, f.other, 1)), f.partSOL, PathHot, &idx), in, "one system transfer")
+	f.mustFail("second transfer", f.job(compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000), f.sysTransfer(f.depAddr, f.other, 1)), f.partSOL, PathHot, &idx), in, "one system transfer")
 	// the deposit address is not the one at the claimed index
 	bad := uint32(8)
 	f.mustFail("deposit index not matching the source", f.job(good, f.partSOL, PathHot, &bad), in, "source")
-	f.mustFail("no deposit index", f.job(good, f.partSOL, PathHot, nil), in, "deposit index")
+	f.mustFail("no deposit index", f.job(good, f.partSOL, PathHot, nil), in, "deposit indices")
 	// the deposit address pays the fee
-	f.mustFail("deposit address as fee payer", f.job(compile(f.depAddr, f.bh, f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000)), f.partSOL, PathHot, &idx), in, "fee payer")
+	f.mustFail("deposit address as fee payer", f.job(compile(f.depAddr, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000)), f.partSOL, PathHot, &idx), in, "fee payer")
 	// signer set: the message must have exactly the hot shard and the deposit address
 	f.mustFail("deposit job with another index", f.job(good, f.partSOL, DepositPath(9), &idx), in, "not the deposit key")
 	// sweep intents: to must be the hot shard
@@ -430,17 +435,17 @@ func TestSweepAttacks(t *testing.T) {
 	tin := f.sIntent("TKN", f.partTKN, "900")
 	dsrc, hdst := f.ata(f.depAddr), f.ata(f.hot)
 	mk := func(ixs ...tix) chain.UnsignedTx {
-		return f.job(compile(f.hot, f.bh, append([]tix{f.cbLimit(60_000)}, ixs...)...), f.partTKN, PathHot, &idx)
+		return f.job(compile(f.hot, f.nv, append([]tix{f.adv(), f.cbLimit(60_000)}, ixs...)...), f.partTKN, PathHot, &idx)
 	}
-	f.mustFail("closeAccount rent to someone else", mk(f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint), f.closeAcct(dsrc, f.other, f.depAddr)), tin, "closeAccount")
-	f.mustFail("closeAccount of another account", mk(f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint), f.closeAcct(hdst, f.hot, f.depAddr)), tin, "closeAccount")
-	f.mustFail("close before the transfer", mk(f.closeAcct(dsrc, f.hot, f.depAddr), f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint)), tin, "closeAccount")
+	f.mustFail("closeAccount rent to someone else", mk(f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint), f.closeAcct(dsrc, f.other, f.depAddr)), tin, "closeAccount after address 0")
+	f.mustFail("closeAccount of another account", mk(f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint), f.closeAcct(hdst, f.hot, f.depAddr)), tin, "closeAccount after address 0")
+	f.mustFail("close before the transfer", mk(f.closeAcct(dsrc, f.hot, f.depAddr), f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint)), tin, "transferChecked")
 	f.mustFail("sweep to another token account", mk(f.checked(dsrc, f.ata(f.other), f.depAddr, 900, 6, f.mint)), tin, "transferChecked")
 	f.mustFail("wrong mint", mk(f.checked(dsrc, hdst, f.depAddr, 900, 6, f.other)), tin, "transferChecked")
-	f.mustFail("wrong decimals", mk(f.checked(dsrc, hdst, f.depAddr, 900, 7, f.mint)), tin, "decimals")
+	f.mustFail("wrong decimals", mk(f.checked(dsrc, hdst, f.depAddr, 900, 7, f.mint)), tin, "decimals 6")
 	f.mustFail("create for the deposit address instead", mk(f.create(f.hot, dsrc, f.depAddr, f.mint), f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint)), tin, "create")
 	approve := tix{prog: f.tokp, accts: []tmeta{{dsrc, false, true}, {f.other, false, false}, {f.depAddr, true, false}}, data: append([]byte{4}, le64(5)...)}
-	f.mustFail("approve on the deposit ATA", mk(f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint), approve), tin, "closeAccount")
+	f.mustFail("approve on the deposit ATA", mk(f.checked(dsrc, hdst, f.depAddr, 900, 6, f.mint), approve), tin, "after the last address")
 	f.mustFail("SOL instruction in a token sweep", mk(f.sysTransfer(f.depAddr, f.hot, 900)), tin, "transferChecked")
 }
 
@@ -564,8 +569,8 @@ func TestNonceShapes(t *testing.T) {
 	f.mustFail("withdraw from the nonce account", wd(f.adv(), f.cbLimit(10_000), xfer, WithdrawNonceIx(f)), in, "one system transfer")
 	f.mustFail("authorize a new authority", wd(f.adv(), f.cbLimit(10_000), xfer, AuthorizeNonceIx(f)), in, "one system transfer")
 	f.mustFail("a transfer out of the nonce account", wd(f.adv(), f.cbLimit(10_000), f.sysTransfer(f.nonce0, f.dest, 5_000_000)), in, "not a system transfer")
-	// a sweep is not a nonce message, and a nonce message is not a sweep
-	f.mustFail("a sweep with an advance", f.job(compile(f.hot, f.nv, f.adv(), f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000)), f.partSOL, PathHot, &f.depIdx), f.sIntent("SOL", f.partSOL, "3000000"), "")
+	// a sweep without the advance is refused: it needs a nonce like a withdrawal
+	f.mustFail("a sweep without the advance", f.job(compile(f.hot, f.bh, f.cbLimit(10_000), f.sysTransfer(f.depAddr, f.hot, 3_000_000)), f.partSOL, PathHot, &f.depIdx), f.sIntent("SOL", f.partSOL, "3000000"), "first instruction")
 
 	// cancel: the advance and the compute budget, nothing else, amount 0, paid in SOL
 	c := func(ixs ...tix) chain.UnsignedTx { return f.job(compile(f.hot, f.nv, ixs...), f.partSOL, PathHot, nil) }
@@ -615,4 +620,80 @@ func TestNonceSetupShapes(t *testing.T) {
 	f.mustFail("create without initialize", mk(f.cbLimit(20_000), create(0, DefaultNonceRent)), f.setupIntent(1), "pairs")
 	f.mustFail("a transfer next to the setup", mk(f.cbLimit(20_000), create(0, DefaultNonceRent), init(0, f.hot), f.sysTransfer(f.hot, f.other, 1)), f.setupIntent(1), "pairs")
 	f.mustFail("setup in a token", mk(f.cbLimit(20_000), create(0, DefaultNonceRent), init(0, f.hot)), func() signjob.Intent { i := f.setupIntent(1); i.Asset = "TKN"; return i }(), "in SOL")
+}
+
+// ---- batched sweeps ----
+
+func (f *fx) batchIntent(asset, part string, idxs []uint32, amount uint64) signjob.Intent {
+	var from []string
+	for _, ix := range idxs {
+		k, _ := f.v.DepositKey(ix)
+		from = append(from, Address(k))
+	}
+	return signjob.Intent{Kind: "sweep", ID: "sb", PartitionID: part, Chain: "sol-1", Asset: asset, From: strings.Join(from, ","), To: Address(f.hot), Amount: fmt.Sprint(amount)}
+}
+
+func (f *fx) batchJob(msg []byte, part, path string, idxs []uint32) chain.UnsignedTx {
+	p, _ := json.Marshal(Payload{Message: msg, DepositIndices: idxs})
+	return chain.UnsignedTx{Chain: "sol-1", Digest: msg, Payload: p, KeyRef: chain.KeyRef{PartitionID: part, Path: path}}
+}
+
+func TestBatchedSweeps(t *testing.T) {
+	f := newFx(t)
+	idxs := []uint32{3, 7, 11}
+	var dk [][32]byte
+	for _, ix := range idxs {
+		k, _ := f.v.DepositKey(ix)
+		dk = append(dk, k)
+	}
+	// SOL: one transfer per address, the hot shard first, then the deposit keys in order; every job (the hot shard's and each key's) passes
+	sol := compile(f.hot, f.nv, f.adv(), f.cbLimit(30_000), f.cbPrice(500), f.sysTransfer(dk[0], f.hot, 1_000_000), f.sysTransfer(dk[1], f.hot, 2_000_000), f.sysTransfer(dk[2], f.hot, 3_000_000))
+	in := f.batchIntent("SOL", f.partSOL, idxs, 6_000_000)
+	f.mustPass("SOL batch, hot job", f.batchJob(sol, f.partSOL, PathHot, idxs), in)
+	for k, ix := range idxs {
+		f.mustPass("SOL batch, deposit job", f.batchJob(sol, f.partSOL, DepositPath(ix), idxs), in)
+		inf, err := f.v.Decode(f.batchJob(sol, f.partSOL, DepositPath(ix), idxs), in)
+		if err != nil || string(inf.SignerKey) != string(dk[k][:]) || inf.Claims[0] != Address(f.nonce0)+"#"+Address(f.nv) {
+			t.Fatalf("decode %d: %+v %v", k, inf, err)
+		}
+	}
+	// attacks
+	f.mustFail("one more lamport than the intent", f.batchJob(compile(f.hot, f.nv, f.adv(), f.cbLimit(30_000), f.sysTransfer(dk[0], f.hot, 1_000_001), f.sysTransfer(dk[1], f.hot, 2_000_000), f.sysTransfer(dk[2], f.hot, 3_000_000)), f.partSOL, PathHot, idxs), in, "in all")
+	f.mustFail("a transfer to someone else", f.batchJob(compile(f.hot, f.nv, f.adv(), f.cbLimit(30_000), f.sysTransfer(dk[0], f.hot, 1_000_000), f.sysTransfer(dk[1], f.other, 2_000_000), f.sysTransfer(dk[2], f.hot, 3_000_000)), f.partSOL, PathHot, idxs), in, "instruction 1")
+	f.mustFail("signers in another order", f.batchJob(compile(f.hot, f.nv, f.adv(), f.cbLimit(30_000), f.sysTransfer(dk[1], f.hot, 2_000_000), f.sysTransfer(dk[0], f.hot, 1_000_000), f.sysTransfer(dk[2], f.hot, 3_000_000)), f.partSOL, PathHot, idxs), in, "instruction 0")
+	f.mustFail("an address left out", f.batchJob(compile(f.hot, f.nv, f.adv(), f.cbLimit(30_000), f.sysTransfer(dk[0], f.hot, 1_000_000), f.sysTransfer(dk[1], f.hot, 2_000_000)), f.partSOL, PathHot, idxs), in, "one system transfer per address")
+	f.mustFail("the same index twice", f.batchJob(sol, f.partSOL, PathHot, []uint32{3, 3, 11}), f.batchIntent("SOL", f.partSOL, []uint32{3, 3, 11}, 6_000_000), "twice")
+	f.mustFail("the intent names other sources", f.batchJob(sol, f.partSOL, PathHot, idxs), f.batchIntent("SOL", f.partSOL, []uint32{3, 7, 12}, 6_000_000), "sources")
+	f.mustFail("a key for an index not in the batch", f.batchJob(sol, f.partSOL, DepositPath(99), idxs), in, "not the deposit key")
+	// a key from outside the zone's own account node: an address the node does not derive at that index
+	foreign := pub(t)
+	f.mustFail("a foreign deposit key", f.batchJob(compile(f.hot, f.nv, f.adv(), f.cbLimit(30_000), f.sysTransfer(foreign, f.hot, 6_000_000)), f.partSOL, PathHot, []uint32{3}), f.batchIntent("SOL", f.partSOL, []uint32{3}, 6_000_000), "instruction 0")
+	// a deposit key that signs something else: a transfer to the destination with the deposit key as the source is the only use of it
+	f.mustFail("a deposit key used as a withdrawal source", f.batchJob(compile(f.hot, f.nv, f.adv(), f.cbLimit(30_000), f.sysTransfer(dk[0], f.hot, 1_000_000), f.sysTransfer(dk[1], f.hot, 2_000_000), f.sysTransfer(dk[2], f.hot, 3_000_000), f.sysTransfer(dk[0], f.other, 1)), f.partSOL, PathHot, idxs), in, "instructions after the nonce")
+
+	// tokens: the hot account created once, a close for some addresses only
+	hdst := f.ata(f.hot)
+	var d0, d1, d2 [32]byte = f.ata(dk[0]), f.ata(dk[1]), f.ata(dk[2])
+	tok := compile(f.hot, f.nv, f.adv(), f.cbLimit(80_000), f.create(f.hot, hdst, f.hot, f.mint),
+		f.checked(d0, hdst, dk[0], 100, 6, f.mint), f.closeAcct(d0, f.hot, dk[0]),
+		f.checked(d1, hdst, dk[1], 200, 6, f.mint),
+		f.checked(d2, hdst, dk[2], 300, 6, f.mint), f.closeAcct(d2, f.hot, dk[2]))
+	tin := f.batchIntent("TKN", f.partTKN, idxs, 600)
+	f.mustPass("token batch, hot job", f.batchJob(tok, f.partTKN, PathHot, idxs), tin)
+	f.mustPass("token batch, deposit job", f.batchJob(tok, f.partTKN, DepositPath(7), idxs), tin)
+	bad := compile(f.hot, f.nv, f.adv(), f.cbLimit(80_000), f.checked(d0, hdst, dk[0], 100, 6, f.mint), f.closeAcct(d0, f.other, dk[0]), f.checked(d1, hdst, dk[1], 200, 6, f.mint), f.checked(d2, hdst, dk[2], 300, 6, f.mint))
+	f.mustFail("rent of a closed account to someone else", f.batchJob(bad, f.partTKN, PathHot, idxs), tin, "closeAccount after address 0")
+	swapped := compile(f.hot, f.nv, f.adv(), f.cbLimit(80_000), f.checked(d1, hdst, dk[0], 100, 6, f.mint), f.checked(d1, hdst, dk[1], 200, 6, f.mint), f.checked(d2, hdst, dk[2], 300, 6, f.mint))
+	f.mustFail("one address's tokens taken with another's authority", f.batchJob(swapped, f.partTKN, PathHot, idxs), tin, "instruction for address 0")
+
+	// the size of a transaction bounds the batch
+	var many []uint32
+	var ixs []tix
+	ixs = append(ixs, f.adv(), f.cbLimit(30_000))
+	for ix := uint32(0); ix < 12; ix++ {
+		k, _ := f.v.DepositKey(ix)
+		many = append(many, ix)
+		ixs = append(ixs, f.sysTransfer(k, f.hot, 1000))
+	}
+	f.mustFail("too many addresses", f.batchJob(compile(f.hot, f.nv, ixs...), f.partSOL, PathHot, many), f.batchIntent("SOL", f.partSOL, many, 12_000), "bytes")
 }

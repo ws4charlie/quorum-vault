@@ -374,6 +374,17 @@ type SweepIntent struct {
 	From        string
 	ToPartition string
 	Amount      *big.Int
+	// Legs, on a chain that sweeps several deposit addresses in one transaction (Solana), lists every address with its amount; From is the first
+	// and Amount the total. Empty: the sweep is the one address From.
+	Legs []SweepLeg
+}
+
+// SweepLeg is one deposit address of a batched sweep.
+type SweepLeg struct {
+	From   string
+	Amount *big.Int
+	// Close asks to close the address's token account after the transfer, rent to the hot shard (the planner decided the address is quiet).
+	Close bool
 }
 
 // KeyRef names the key that must sign: the partition and, where the chain

@@ -139,6 +139,7 @@ type Transaction struct {
 			Instructions []Instruction `json:"instructions"`
 			AccountKeys  []struct {
 				Pubkey string `json:"pubkey"`
+				Signer bool   `json:"signer"`
 			} `json:"accountKeys"`
 		} `json:"message"`
 		Signatures []string `json:"signatures"`
@@ -147,9 +148,12 @@ type Transaction struct {
 
 // TokenBalance is an entry of pre/postTokenBalances.
 type TokenBalance struct {
-	AccountIndex int    `json:"accountIndex"`
-	Mint         string `json:"mint"`
-	Owner        string `json:"owner"`
+	AccountIndex  int    `json:"accountIndex"`
+	Mint          string `json:"mint"`
+	Owner         string `json:"owner"`
+	UITokenAmount struct {
+		Amount string `json:"amount"`
+	} `json:"uiTokenAmount"`
 }
 
 // GetTransaction reads one finalized transaction, parsed. A nil result means the node does not have it (yet).

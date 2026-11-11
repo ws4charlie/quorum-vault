@@ -34,6 +34,8 @@ e2e-sol-deposits|psi|150|3|make test-e2e-sol-deposits
 e2e-sol-signing|ps|60|3|make test-e2e-sol-signing
 e2e-sol-withdrawals|psi|130|3|make test-e2e-sol-withdrawals
 e2e-sol-wd-faults|psi|300|3|make test-e2e-sol-wd-faults
+e2e-sol-sweeps|psi|140|3|make test-e2e-sol-sweeps
+e2e-sol-sweep-faults|psi|290|3|make test-e2e-sol-sweep-faults
 test|p|90|1|go vet ./... && QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -short -count=1 -p 1 ./...
 mpc-signing|pa|74|1|make test-mpc
 "

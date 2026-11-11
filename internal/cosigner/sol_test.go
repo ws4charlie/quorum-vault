@@ -100,7 +100,11 @@ func (e *solEnv) request(id string, in signjob.Intent, msg []byte, keyPath strin
 	if in.PartitionID == "" {
 		in.PartitionID = solPart
 	}
-	p, _ := json.Marshal(sol.Payload{Message: msg, DepositIndex: dep})
+	var ix []uint32
+	if dep != nil {
+		ix = []uint32{*dep}
+	}
+	p, _ := json.Marshal(sol.Payload{Message: msg, DepositIndices: ix})
 	var apps []signjob.Approval
 	if approve {
 		h := in.Hash()
@@ -142,7 +146,7 @@ func TestCosignerSOLAllowsWhatIsApproved(t *testing.T) {
 		e.allow(c, r) // a retry of the same job
 	}
 	sin := signjob.Intent{Kind: "sweep", ID: "si1", Asset: "SOL", PartitionID: solPart, From: sol.Address(e.depKey), To: e.hot.Address(), Amount: "3000000"}
-	smsg := e.msg(st.SetLimit(10_000), st.Transfer(e.depKey, e.hot.Pub, 3_000_000))
+	smsg := e.msg(e.adv(1), st.SetLimit(10_000), st.Transfer(e.depKey, e.hot.Pub, 3_000_000))
 	idx := e.depIdx
 	for _, c := range []*cosigner.Cosigner{e.b, e.c} {
 		e.allow(c, e.request("s-hot", sin, smsg, sol.PathHot, &idx, nil, false))
@@ -172,8 +176,8 @@ func TestCosignerSOLRefusesEveryAttack(t *testing.T) {
 	notListed.To = sol.Address(e.oth)
 	setAuth := st.Ix{Program: st.CloseAccount(e.hot.Pub, e.hot.Pub, e.hot.Pub).Program, Accts: []st.Meta{{Key: e.hot.Pub, Signer: true, Writable: true}}, Data: []byte{6, 2, 1, 9, 9}}
 	sweepIn := signjob.Intent{Kind: "sweep", ID: "si1", Asset: "SOL", PartitionID: solPart, From: sol.Address(e.depKey), To: e.hot.Address(), Amount: "3000000"}
-	sweepMsg := e.msg(st.SetLimit(10_000), st.Transfer(e.depKey, e.hot.Pub, 3_000_000))
-	sweepEvil := e.msg(st.SetLimit(10_000), st.Transfer(e.depKey, e.oth, 3_000_000))
+	sweepMsg := e.msg(e.adv(1), st.SetLimit(10_000), st.Transfer(e.depKey, e.hot.Pub, 3_000_000))
+	sweepEvil := e.msg(e.adv(1), st.SetLimit(10_000), st.Transfer(e.depKey, e.oth, 3_000_000))
 	tokIn := signjob.Intent{Kind: "withdrawal", ID: "ti1", Asset: "TKN", PartitionID: solTok, To: sol.Address(e.dest), Amount: "777", NotAfter: e.notAfter}
 	tokBad := e.msg(e.adv(0), st.SetLimit(50_000), st.CheckedTransfer(st.ATAOf(e.hot.Pub, e.mint), e.mint, st.ATAOf(e.oth, e.mint), e.hot.Pub, 777, 6))
 	tokDec := e.msg(e.adv(0), st.SetLimit(50_000), st.CheckedTransfer(st.ATAOf(e.hot.Pub, e.mint), e.mint, st.ATAOf(e.dest, e.mint), e.hot.Pub, 777, 9))
@@ -304,5 +308,48 @@ func TestCosignerSOLEqualValuesOnTwoAccountsAreTwoNonces(t *testing.T) {
 		e.allow(c, e.request("a", in1, m1, sol.PathHot, nil, nil, true))
 		e.allow(c, e.request("b", in2, m2, sol.PathHot, nil, nil, true))
 		e.refuse(c, e.request("c", in3, m3, sol.PathHot, nil, nil, true), gateway.ReasonNonceTaken)
+	}
+}
+
+// A batched sweep passes B's cosigner and C's for the hot shard's job and for each deposit key's job; the attacks on a batch are refused by both.
+func TestCosignerSOLBatchedSweep(t *testing.T) {
+	e := newSOLEnv(t)
+	idxs := []uint32{3, 8, 9}
+	var keys [][32]byte
+	var addrs []string
+	for _, ix := range idxs {
+		c, _ := e.node.Public().Derive(sol.BranchExternal, ix)
+		keys = append(keys, c.PublicKey)
+		addrs = append(addrs, sol.Address(c.PublicKey))
+	}
+	mk := func(ixs ...st.Ix) []byte { return e.msg(append([]st.Ix{e.adv(1), st.SetLimit(30_000)}, ixs...)...) }
+	good := mk(st.Transfer(keys[0], e.hot.Pub, 1_000_000), st.Transfer(keys[1], e.hot.Pub, 2_000_000), st.Transfer(keys[2], e.hot.Pub, 3_000_000))
+	in := signjob.Intent{Kind: "sweep", ID: "sbatch", Asset: "SOL", PartitionID: solPart, From: strings.Join(addrs, ","), To: e.hot.Address(), Amount: "6000000"}
+	req := func(id, path string, key []byte, in signjob.Intent, msg []byte, ix []uint32) wire.Request {
+		in.Chain = solChain
+		p, _ := json.Marshal(sol.Payload{Message: msg, DepositIndices: ix})
+		j := signjob.Job{ID: id, PartitionID: solPart, KeyRef: path, Chain: solChain, Intent: mustJSON(in), Digest: msg, Payload: p}
+		pkg, err := gateway.EncodePackage(j)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wire.Request{JobID: id, KeyID: "k", KeysetID: "ks", Algorithm: int32(pb.Algorithm_ALGORITHM_ED25519), Digest: msg, IntentPackage: pkg, PublicKey: key}
+	}
+	for _, c := range []*cosigner.Cosigner{e.b, e.c} {
+		e.allow(c, req("hot", sol.PathHot, e.hot.Pub[:], in, good, idxs))
+		for k, ix := range idxs {
+			e.allow(c, req(fmt.Sprint("d", ix), sol.DepositPath(ix), keys[k][:], in, good, idxs))
+		}
+	}
+	e2 := in
+	e2.ID = "sbatch2"
+	evil := mk(st.Transfer(keys[0], e.hot.Pub, 1_000_000), st.Transfer(keys[1], e.oth, 2_000_000), st.Transfer(keys[2], e.hot.Pub, 3_000_000))
+	more := mk(st.Transfer(keys[0], e.hot.Pub, 1_000_001), st.Transfer(keys[1], e.hot.Pub, 2_000_000), st.Transfer(keys[2], e.hot.Pub, 3_000_000))
+	for _, c := range []*cosigner.Cosigner{e.b, e.c} {
+		e.refuse(c, req("evil", sol.PathHot, e.hot.Pub[:], e2, evil, idxs), gateway.ReasonTx)
+		e.refuse(c, req("more", sol.PathHot, e.hot.Pub[:], e2, more, idxs), gateway.ReasonTx)
+		raised := e.msg(e.adv(1), st.SetLimit(30_000), st.SetPrice(2000), st.Transfer(keys[0], e.hot.Pub, 1_000_000), st.Transfer(keys[1], e.hot.Pub, 2_000_000), st.Transfer(keys[2], e.hot.Pub, 3_000_000))
+		e.refuse(c, req("wrongkey", sol.DepositPath(idxs[0]), keys[1][:], in, raised, idxs), "signer_key_mismatch")
+		e.refuse(c, req("foreign", sol.DepositPath(77), keys[0][:], in, good, idxs), gateway.ReasonTx)
 	}
 }

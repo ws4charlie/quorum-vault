@@ -162,3 +162,8 @@ func (m *Message) Ixs() []Ix {
 	}
 	return out
 }
+
+// CloseAccountIx is a Token program closeAccount: the empty token account acct goes away and its rent to rentTo; owner signs.
+func CloseAccountIx(acct, rentTo, owner [32]byte) Ix {
+	return Ix{Program: mustAddr(TokenProgram), Accts: []Meta{{acct, false, true}, {rentTo, false, true}, {owner, true, false}}, Data: []byte{9}}
+}

@@ -105,12 +105,25 @@ func scanAlloc(row pgx.Row) (allocRow, error) {
 	return r, err
 }
 
-func (a *Adapter) unsigned(partitionID string, msg []byte) (chain.UnsignedTx, error) {
-	pl, err := json.Marshal(Payload{Message: msg})
+func (a *Adapter) unsigned(partitionID string, msg []byte, depIdx ...uint32) (chain.UnsignedTx, error) {
+	pl, err := json.Marshal(Payload{Message: msg, DepositIndices: depIdx})
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	return chain.UnsignedTx{Chain: a.cfg.Chain, Digest: msg, Payload: pl, KeyRef: chain.KeyRef{PartitionID: partitionID, Path: PathHot}}, nil
+	u := chain.UnsignedTx{Chain: a.cfg.Chain, Digest: msg, Payload: pl, KeyRef: chain.KeyRef{PartitionID: partitionID, Path: PathHot}}
+	for _, ix := range depIdx { // one signature per deposit key, over the same message, after the hot shard's
+		u.More = append(u.More, chain.SigInput{Digest: msg, KeyRef: chain.KeyRef{PartitionID: partitionID, Path: DepositPath(ix)}})
+	}
+	return u, nil
+}
+
+// unsignedFromStored rebuilds the unsigned transaction of a stored payload with a new message: the deposit signers stay as they were.
+func (a *Adapter) unsignedFromStored(partitionID string, stored []byte, msg []byte) (chain.UnsignedTx, error) {
+	p, err := parsePayload(stored)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	return a.unsigned(partitionID, msg, p.DepositIndices...)
 }
 
 func msgOfPayload(payload []byte) ([]byte, error) {
@@ -170,7 +183,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 			if err != nil {
 				return chain.UnsignedTx{}, err
 			}
-			return a.unsigned(w.PartitionID, msg)
+			return a.unsignedFromStored(w.PartitionID, have.payload, msg)
 		}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return chain.UnsignedTx{}, err
@@ -206,7 +219,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 }
 
 // takeSlot finds a free, usable nonce account of the shard, allocates it to the owner and builds the message on its value.
-func (a *Adapter) takeSlot(ctx context.Context, tx pgx.Tx, kind, id, partitionID string, hot [32]byte, body []Ix, limit uint32, price uint64) (chain.UnsignedTx, error) {
+func (a *Adapter) takeSlot(ctx context.Context, tx pgx.Tx, kind, id, partitionID string, hot [32]byte, body []Ix, limit uint32, price uint64, depIdx ...uint32) (chain.UnsignedTx, error) {
 	rows, err := tx.Query(ctx, `SELECT n.address FROM sol_nonce_accounts n WHERE n.chain=$1 AND n.hot_address=$2
 		AND NOT EXISTS (SELECT 1 FROM sol_nonce_allocations a WHERE a.chain=n.chain AND a.address=n.address AND a.status IN ('allocated','broadcast'))
 		ORDER BY n.idx FOR UPDATE OF n SKIP LOCKED`, a.cfg.Chain, Address(hot))
@@ -250,7 +263,10 @@ func (a *Adapter) takeSlot(ctx context.Context, tx pgx.Tx, kind, id, partitionID
 		}
 		ixs = append(ixs, body...)
 		msg := Compile(hot, st.Value, ixs...)
-		u, err := a.unsigned(partitionID, msg)
+		if size := 1 + 64*(1+len(depIdx)) + len(msg); size > MaxTransaction {
+			return chain.UnsignedTx{}, fmt.Errorf("sol: the transaction would be %d bytes, the limit is %d", size, MaxTransaction)
+		}
+		u, err := a.unsigned(partitionID, msg, depIdx...)
 		if err != nil {
 			return chain.UnsignedTx{}, err
 		}
@@ -334,7 +350,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 		return chain.UnsignedTx{}, fmt.Errorf("%w: price %d would exceed the maximum %d", chain.ErrCannotBump, price, a.cfg.MaxMicroLamports)
 	}
 	part := a.partitionOfHot(r.hot, ownerKind, ownerID)
-	u, err := a.unsigned(part, Compile(m.Keys[0], m.Blockhash, withPrice(m, price)...))
+	u, err := a.unsignedFromStored(part, r.payload, Compile(m.Keys[0], m.Blockhash, withPrice(m, price)...))
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -387,10 +403,10 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 	return u, a.storeBuilt(ctx, tx, r, u, price)
 }
 
-// Assemble joins the message with the hot shard's signature: the wire form of a transaction with one signature.
+// Assemble joins the message with one signature per signer: the hot shard's first, then each deposit key's, in the order of the message's signers.
 func (a *Adapter) Assemble(u chain.UnsignedTx, sigs []chain.Signature) (chain.SignedTx, error) {
-	if len(sigs) != 1 || len(u.More) != 0 {
-		return chain.SignedTx{}, fmt.Errorf("sol: a withdrawal has exactly one signature, got %d for %d inputs", len(sigs), 1+len(u.More))
+	if len(sigs) != 1+len(u.More) {
+		return chain.SignedTx{}, fmt.Errorf("sol: %d signatures for %d inputs", len(sigs), 1+len(u.More))
 	}
 	msg, err := msgOfPayload(u.Payload)
 	if err != nil {
@@ -403,25 +419,29 @@ func (a *Adapter) Assemble(u chain.UnsignedTx, sigs []chain.Signature) (chain.Si
 	if err != nil {
 		return chain.SignedTx{}, err
 	}
-	if m.NumSigners != 1 {
-		return chain.SignedTx{}, fmt.Errorf("sol: the message needs %d signatures, this assembles one", m.NumSigners)
+	if m.NumSigners != len(sigs) {
+		return chain.SignedTx{}, fmt.Errorf("sol: the message needs %d signatures, got %d", m.NumSigners, len(sigs))
 	}
-	if len(sigs[0].Bytes) != ed25519.SignatureSize {
-		return chain.SignedTx{}, fmt.Errorf("sol: signature is %d bytes, want 64", len(sigs[0].Bytes))
+	raw := compactU16(len(sigs))
+	for k, sg := range sigs {
+		if len(sg.Bytes) != ed25519.SignatureSize {
+			return chain.SignedTx{}, fmt.Errorf("sol: signature %d is %d bytes, want 64", k, len(sg.Bytes))
+		}
+		if !ed25519.Verify(m.Keys[k][:], msg, sg.Bytes) {
+			return chain.SignedTx{}, fmt.Errorf("sol: signature %d is not %s's over the message", k, Address(m.Keys[k]))
+		}
+		raw = append(raw, sg.Bytes...)
 	}
-	if !ed25519.Verify(m.Keys[0][:], msg, sigs[0].Bytes) {
-		return chain.SignedTx{}, errors.New("sol: the signature is not the fee payer's over the message")
-	}
-	raw := append(compactU16(1), sigs[0].Bytes...)
 	return chain.SignedTx{Chain: a.cfg.Chain, Raw: append(raw, msg...)}, nil
 }
 
-// splitTx reads the wire form of a transaction with one signature.
+// splitTx reads the wire form of a transaction: the signature count, the signatures, the message. It returns the first signature.
 func splitTx(raw []byte) (sig []byte, msg []byte, err error) {
-	if len(raw) < 1+64+3 || raw[0] != 1 {
-		return nil, nil, errors.New("sol: not a transaction with exactly one signature")
+	n, used, err := readCompactU16(raw)
+	if err != nil || n < 1 || len(raw) < used+64*n+3 {
+		return nil, nil, errors.New("sol: not a transaction with signatures and a message")
 	}
-	return raw[1:65], raw[65:], nil
+	return raw[used : used+64], raw[used+64*n:], nil
 }
 
 // Broadcast sends the transaction. The attempt is recorded before it is sent, so a crash cannot lose the signature; a transaction without an
@@ -665,8 +685,9 @@ func (a *Adapter) ReleaseUnsigned(ctx context.Context, tx pgx.Tx, ownerKind, own
 	return err
 }
 
-// TxFee is what the transaction cost the hot shard beyond what it sent: the network fee with its priority part, and the rent of a token
-// account it opened for the destination. A transaction that failed paid its fee only. Errors until the transaction is final.
+// TxFee is what the transaction cost the hot shard beyond the SOL it sent and received in system transfers: the network fee with its priority part, the rent
+// of a token account it opened, less the rent it got back by closing one. A transaction that failed paid its fee only. The result is negative when a sweep
+// closes more rent than it spends. Errors until the transaction is final.
 func (a *Adapter) TxFee(ctx context.Context, hash string) (*big.Int, error) {
 	tx, err := a.rpc.GetTransaction(ctx, hash)
 	if err != nil {
@@ -683,24 +704,28 @@ func (a *Adapter) TxFee(ctx context.Context, hash string) (*big.Int, error) {
 	if len(keys) == 0 || len(tx.Meta.PreBalances) == 0 || len(tx.Meta.PostBalances) == 0 {
 		return fee, nil
 	}
-	out := new(big.Int).Sub(new(big.Int).SetUint64(tx.Meta.PreBalances[0]), new(big.Int).SetUint64(tx.Meta.PostBalances[0]))
+	cost := new(big.Int).Sub(new(big.Int).SetUint64(tx.Meta.PreBalances[0]), new(big.Int).SetUint64(tx.Meta.PostBalances[0]))
 	for _, in := range tx.Transaction.Message.Instructions {
 		p, ok := decodeParsed(in.Parsed)
 		if !ok || in.ProgramID != SystemProgram || p.Type != "transfer" {
 			continue
 		}
 		var info struct {
-			Source   string `json:"source"`
-			Lamports uint64 `json:"lamports"`
+			Source      string `json:"source"`
+			Destination string `json:"destination"`
+			Lamports    uint64 `json:"lamports"`
 		}
-		if json.Unmarshal(p.Info, &info) == nil && info.Source == keys[0].Pubkey {
-			out.Sub(out, new(big.Int).SetUint64(info.Lamports))
+		if json.Unmarshal(p.Info, &info) != nil {
+			continue
+		}
+		if info.Source == keys[0].Pubkey {
+			cost.Sub(cost, new(big.Int).SetUint64(info.Lamports))
+		}
+		if info.Destination == keys[0].Pubkey {
+			cost.Add(cost, new(big.Int).SetUint64(info.Lamports))
 		}
 	}
-	if out.Cmp(fee) < 0 {
-		return fee, nil
-	}
-	return out, nil
+	return cost, nil
 }
 
 // TxBlock is the slot of a finalized transaction.
@@ -720,3 +745,6 @@ var (
 	_ = strings.TrimSpace
 	_ partition.Key
 )
+
+// SplitTransaction reads the wire form of a transaction and returns its first signature and its message (for tests and tools).
+func SplitTransaction(raw []byte) (sig, msg []byte, err error) { return splitTx(raw) }

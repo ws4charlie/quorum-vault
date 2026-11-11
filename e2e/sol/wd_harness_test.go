@@ -58,9 +58,16 @@ type wdOpts struct {
 	signTimeout   string
 	hotSOL        uint64 // lamports of the hot shard (default 100 SOL)
 	noGatewayWait bool
+
+	// sweeps: the planner only sweeps what is worth at least minSweep lamports (default: so much that nothing is ever swept)
+	minSweep   string
+	batch      int    // addresses per sweep (default 3)
+	closeQuiet string // see custody.SOLFile.CloseQuietAfter
+	activity   string // the engine's activity timeout (default 5s; sweep suites, whose scan reads more, use more)
 }
 
 type wdSys struct {
+	root *testing.T // the test that owns the processes
 	*system
 	m3      *mpcstack.Stack3
 	o       wdOpts
@@ -149,9 +156,18 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	if o.hotSOL == 0 {
 		o.hotSOL = hotSOL
 	}
+	if o.minSweep == "" {
+		o.minSweep = "1000000000000000000"
+	}
+	if o.batch == 0 {
+		o.batch = 3
+	}
+	if o.activity == "" {
+		o.activity = "5s"
+	}
 	tm := phasetime.Start(t, "sol-withdrawals")
 	sys := &system{t: t, ctx: context.Background(), dir: t.TempDir(), chain: "sol-" + uuid.NewString()[:8], queue: "qv-e2e-sol-" + uuid.NewString()[:8], tm: tm}
-	s := &wdSys{system: sys, o: o, approv: map[string]ed25519.PrivateKey{}, tag: uuid.NewString()[:8], apprPub: map[string]string{}}
+	s := &wdSys{root: t, system: sys, o: o, approv: map[string]ed25519.PrivateKey{}, tag: uuid.NewString()[:8], apprPub: map[string]string{}}
 	s.m3 = mpcstack.Start3(t, filepath.Join(s.dir, "mpc"), mpcBin, mpcstack.Opts{})
 	tm.Phase("mpc-start")
 	s.proxy = newRPCProxy(t, nodeURL())
@@ -212,11 +228,13 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 		Entity: "qv-us",
 		Chain: custody.ChainFile{Family: "sol", Name: s.chain,
 			SOL: &custody.SOLFile{Network: "localnet", RPCURL: s.proxy.url, AccountPublicKey: hex.EncodeToString(node.PublicKey[:]), AccountChainCode: hex.EncodeToString(node.ChainCode[:]),
-				HotShards: []string{s.hotAddr()}, NoncePool: o.pool, NonceRentLamports: rent, ComputeUnitLimit: startUnit, ComputeUnitPrice: 1000, FeeBumpPercent: 25, MaxMicroLamports: maxMicro},
+				HotShards: []string{s.hotAddr()}, NoncePool: o.pool, NonceRentLamports: rent, ComputeUnitLimit: startUnit, ComputeUnitPrice: 1000, FeeBumpPercent: 25, MaxMicroLamports: maxMicro,
+				SweepBatch: o.batch, CloseQuietAfter: o.closeQuiet},
 			Assets: map[string]custody.AssetFile{"SOL": {Decimals: 9, MinDeposit: "1000"}, "TKN": {Address: s.mint.addr(), Decimals: 6, MinDeposit: "1"}}},
-		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: o.approvalWait, SignTimeout: o.signTimeout, StuckAfter: o.stuckAfter, ActivityTimeout: "5s",
+		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: o.approvalWait, SignTimeout: o.signTimeout, StuckAfter: o.stuckAfter, ActivityTimeout: o.activity,
 			HotWait: "1m", MaxReplacements: o.maxReplace, Tiers: map[string][]custody.TierFile{"SOL": tiersSOL, "TKN": tiersTKN}},
-		Scan: custody.ScanFile{Interval: "300ms", StartHeight: start + 1},
+		Sweep: custody.SweepFile{K: 20, MinSweepWei: o.minSweep, PlanInterval: "500ms", RetryAfter: "3s"},
+		Scan:  custody.ScanFile{Interval: "300ms", StartHeight: start + 1},
 	}
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
 	writeJSONFile(t, s.cfgPath, s.cf)
@@ -335,6 +353,10 @@ func (s *wdSys) startGateway() {
 // startWorker starts qv-worker (built with the failpoints); failpoint "" arms nothing.
 func (s *wdSys) startWorker(failpoint string) {
 	s.t.Helper()
+	// The process is cleaned up when the test that STARTED it ends: a worker started inside a subtest belongs to the whole test, not to that subtest.
+	sub := s.t
+	s.t = s.root
+	defer func() { s.t = sub }()
 	s.worker = s.spawnEnv("qv-worker", []string{"QV_FAILPOINT=" + failpoint}, "-config", s.cfgPath, "-dsn", s.bizDSN, "-task-queue", s.queue, "-auto-approver-key-file", s.keyPath)
 	p := s.worker
 	s.waitFor(30*time.Second, "worker started", func() bool { return fileContains(p.log, "qv-worker started") })
