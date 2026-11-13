@@ -647,7 +647,10 @@ func TestSOLToColdAndRebalanceAreFixedByTheZone(t *testing.T) {
 	// the cosigner's own decider
 	cos := NewDecider(s.cfg, s.gw.codecs, mustGuard(t, s.harness), ModeCosigner, s.clock)
 	pub := s.hot.k.Pub[:]
-	decide := func(j signjob.Job) error { _, err := cos.DecideKey(t.Context(), j, SignerKey{Ed25519: pub}); return err }
+	decide := func(j signjob.Job) error {
+		_, err := cos.DecideKey(t.Context(), j, SignerKey{Ed25519: pub})
+		return err
+	}
 	refusedBy := func(err error, code string) {
 		t.Helper()
 		if why, ok := IsRejection(err); !ok || !strings.HasPrefix(why, code+":") {
