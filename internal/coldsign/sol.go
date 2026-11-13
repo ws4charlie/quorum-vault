@@ -39,6 +39,7 @@ const (
 // SOLRequest is a refill from the pool's cold address to one of its hot shards, as the online side exports it and the operators approve it.
 type SOLRequest struct {
 	Version  string `json:"version"`
+	Kind     string `json:"kind,omitempty"` // "" or "refill": a refill; "setup": the one-time creation of the cold address's nonce accounts and token accounts
 	ID       string `json:"id"`
 	Revision int    `json:"revision"` // grows with every re-export (a higher priority price)
 	Chain    string `json:"chain"`
@@ -58,7 +59,19 @@ type SOLRequest struct {
 	ComputeUnitPrice uint64 `json:"compute_unit_price"` // micro-lamports per unit; 0 for none
 	// CreateDestAccount makes the cold address open the hot shard's associated token account first (rent from the cold address); for a token only.
 	CreateDestAccount bool `json:"create_dest_account,omitempty"`
+
+	// Setup only: the pool nonce accounts of the cold address to create (indexes), the rent each holds, and the mints whose associated token account of the
+	// cold address to create. NonceValue is then a recent blockhash (there is no nonce yet to sign with), and the setup expires with it.
+	NonceIndexes []int    `json:"nonce_indexes,omitempty"`
+	NonceRent    uint64   `json:"nonce_rent,omitempty"`
+	Mints        []string `json:"mints,omitempty"`
 }
+
+// KindRefill and KindSetup are the kinds of a Solana request.
+const (
+	KindSOLRefill = "refill"
+	KindSOLSetup  = "setup"
+)
 
 // SOLRequestFile is what is carried to the offline machine: the request and its hash.
 type SOLRequestFile struct {
@@ -87,7 +100,11 @@ func IsSOLRequest(raw []byte) bool {
 }
 
 func (r SOLRequest) fields() []string {
-	return []string{r.Version, r.ID, strconv.Itoa(r.Revision), r.Chain, r.Pool, r.Asset, r.Mint, strconv.Itoa(r.Decimals), r.From, r.To, r.Amount, r.NonceAccount,
+	idx := make([]string, len(r.NonceIndexes))
+	for i, n := range r.NonceIndexes {
+		idx[i] = strconv.Itoa(n)
+	}
+	return []string{r.Version, r.Kind, strings.Join(idx, ","), strconv.FormatUint(r.NonceRent, 10), strings.Join(r.Mints, ","), r.ID, strconv.Itoa(r.Revision), r.Chain, r.Pool, r.Asset, r.Mint, strconv.Itoa(r.Decimals), r.From, r.To, r.Amount, r.NonceAccount,
 		r.NonceValue, strconv.FormatUint(uint64(r.ComputeUnitLimit), 10), strconv.FormatUint(r.ComputeUnitPrice, 10), strconv.FormatBool(r.CreateDestAccount)}
 }
 
@@ -140,12 +157,18 @@ func (r SOLRequest) Message() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if r.Kind == KindSOLSetup {
+		return r.setupMessage(from)
+	}
 	to, err := solAddr("to", r.To)
 	if err != nil {
 		return nil, err
 	}
 	if from == to {
 		return nil, errors.New("the cold address cannot pay itself")
+	}
+	if r.Kind != "" && r.Kind != KindSOLRefill {
+		return nil, fmt.Errorf("unknown request kind %q", r.Kind)
 	}
 	nonce, err := solAddr("nonce account", r.NonceAccount)
 	if err != nil {
@@ -209,6 +232,11 @@ func (r SOLRequest) Summary(decimals int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  request   %s (revision %d)\n", r.ID, r.Revision)
 	fmt.Fprintf(&b, "  chain     %s, pool %s\n", r.Chain, r.Pool)
+	if r.Kind == KindSOLSetup {
+		fmt.Fprintf(&b, "  SETUP     creates nonce accounts %v of the cold address (%d lamports of rent each) and the token accounts of %v; the cold address pays\n", r.NonceIndexes, r.NonceRent, r.Mints)
+		fmt.Fprintf(&b, "  from      %s (the cold address)\n  blockhash %s\n", r.From, r.NonceValue)
+		return b.String()
+	}
 	fmt.Fprintf(&b, "  from      %s (the cold address)\n", r.From)
 	fmt.Fprintf(&b, "  to        %s (a hot shard)\n", r.To)
 	fmt.Fprintf(&b, "  asset     %s\n", kind)
@@ -241,6 +269,8 @@ type SOLConfig struct {
 	Assets       map[string]SOLAssetPolicy `json:"assets"`
 	// NoncePool is how many nonce accounts (solmsg.NonceAddress of the cold address, index 0 up) a request may name.
 	NoncePool int `json:"nonce_pool"`
+	// NonceRent is the rent of a nonce account, which a setup may create (the cold address pays it). Zero: this config signs no setup of nonce accounts.
+	NonceRent uint64 `json:"nonce_rent,omitempty"`
 	// MaxComputeUnits caps the limit, MaxMicroLamports the price, MaxPriorityLamports their product.
 	MaxComputeUnits     uint32    `json:"max_compute_units"`
 	MaxMicroLamports    uint64    `json:"max_micro_lamports"`
@@ -353,6 +383,12 @@ func (c *SOLConfig) Check(rf SOLRequestFile) (SOLRequest, []byte, error) {
 	if r.From != cold {
 		return r, nil, refuse("the request pays from %s, this tool's cold key is %s", r.From, cold)
 	}
+	if r.Kind == KindSOLSetup {
+		return c.checkSetup(r, cold)
+	}
+	if r.Kind != "" && r.Kind != KindSOLRefill {
+		return r, nil, refuse("unknown request kind %q", r.Kind)
+	}
 	pinned := false
 	for _, d := range c.Destinations {
 		pinned = pinned || d == r.To
@@ -392,6 +428,40 @@ func (c *SOLConfig) Check(rf SOLRequestFile) (SOLRequest, []byte, error) {
 	}
 	if r.CreateDestAccount && r.Mint == "" {
 		return r, nil, refuse("a SOL refill opens no token account")
+	}
+	msg, err := r.Message()
+	if err != nil {
+		return r, nil, refuse("%v", err)
+	}
+	return r, msg, nil
+}
+
+// checkSetup applies the rules of a setup: only the cold address's own pool accounts and the configured tokens' accounts, with the configured rent.
+func (c *SOLConfig) checkSetup(r SOLRequest, cold string) (SOLRequest, []byte, error) {
+	if r.To != "" || r.Amount != "" && r.Amount != "0" || r.Asset != "" || r.Mint != "" || r.NonceAccount != "" || r.CreateDestAccount {
+		return r, nil, refuse("a setup moves nothing: it has no destination, amount, asset or nonce account")
+	}
+	for _, i := range r.NonceIndexes {
+		if i < 0 || i >= c.NoncePool {
+			return r, nil, refuse("nonce index %d is outside the pool of %d accounts", i, c.NoncePool)
+		}
+	}
+	if len(r.NonceIndexes) > 0 && (c.NonceRent == 0 || r.NonceRent != c.NonceRent) {
+		return r, nil, refuse("nonce rent %d lamports differs from the config's %d", r.NonceRent, c.NonceRent)
+	}
+	known := map[string]bool{}
+	for _, p := range c.Assets {
+		if p.Mint != "" {
+			known[p.Mint] = true
+		}
+	}
+	for _, m := range r.Mints {
+		if !known[m] {
+			return r, nil, refuse("mint %s is not a configured token", m)
+		}
+	}
+	if r.ComputeUnitLimit == 0 || r.ComputeUnitLimit > c.MaxComputeUnits || r.ComputeUnitPrice > c.MaxMicroLamports {
+		return r, nil, refuse("compute unit limit %d / price %d is outside the caps %d / %d", r.ComputeUnitLimit, r.ComputeUnitPrice, c.MaxComputeUnits, c.MaxMicroLamports)
 	}
 	msg, err := r.Message()
 	if err != nil {
@@ -457,8 +527,10 @@ func (c *SOLConfig) Sign(ctx context.Context, rf SOLRequestFile, approvals []App
 	if s, ok, err := rs.signedFor(rf.RequestHash); err != nil || ok {
 		return s, names, err // the same request again: the same signed file
 	}
-	if err := rs.admit(r); err != nil {
-		return SOLSigned{}, names, err
+	if r.Kind != KindSOLSetup { // a setup has no nonce value: its recent blockhash expires by itself
+		if err := rs.admit(r); err != nil {
+			return SOLSigned{}, names, err
+		}
 	}
 	sig, err := hsm.SignMessage(ctx, msg)
 	if err != nil {
@@ -592,4 +664,43 @@ func (ns *nonceStore) signedFor(hash string) (SOLSigned, bool, error) {
 func (ns *nonceStore) storeSigned(hash string, s SOLSigned) error {
 	b, _ := json.Marshal(s)
 	return writeFileSync(filepath.Join(ns.dir, "signed", hash+".json"), b)
+}
+
+// setupMessage is the one-time setup of the cold address: its nonce accounts (created from the cold key, which pays the rent) and the associated token
+// accounts of the configured tokens. The blockhash is a recent one: the setup cannot use a nonce it is about to create.
+func (r SOLRequest) setupMessage(from [32]byte) ([]byte, error) {
+	bh, err := solAddr("blockhash", r.NonceValue)
+	if err != nil {
+		return nil, err
+	}
+	if len(r.NonceIndexes) == 0 && len(r.Mints) == 0 {
+		return nil, errors.New("a setup that creates nothing")
+	}
+	if r.ComputeUnitLimit == 0 {
+		return nil, errors.New("compute unit limit is zero")
+	}
+	ixs := []solmsg.Ix{solmsg.SetLimitIx(r.ComputeUnitLimit)}
+	if r.ComputeUnitPrice > 0 {
+		ixs = append(ixs, solmsg.SetPriceIx(r.ComputeUnitPrice))
+	}
+	seen := map[int]bool{}
+	for _, i := range r.NonceIndexes {
+		if i < 0 || seen[i] {
+			return nil, fmt.Errorf("nonce index %d is negative or repeated", i)
+		}
+		seen[i] = true
+		ixs = append(ixs, solmsg.CreateNonceIxs(from, i, r.NonceRent)...)
+	}
+	for _, m := range r.Mints {
+		mint, err := solAddr("mint", m)
+		if err != nil {
+			return nil, err
+		}
+		ata, err := solmsg.ATA(from, mint)
+		if err != nil {
+			return nil, err
+		}
+		ixs = append(ixs, solmsg.CreateATAIx(from, ata, from, mint))
+	}
+	return solmsg.Compile(from, bh, ixs...), nil
 }

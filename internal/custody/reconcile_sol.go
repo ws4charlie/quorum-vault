@@ -172,7 +172,8 @@ func (s *Service) solStamp(ctx context.Context) (string, error) {
 		(SELECT count(*)::text FROM withdrawals WHERE chain=$1 AND status IN ('confirmed','failed')),
 		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM sweeps WHERE chain=$1),
 		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM cold_moves WHERE chain=$1),
-		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM rebalance_moves WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
+		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM rebalance_moves WHERE chain=$1),
+			(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM refills WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
 	return st, err
 }
 
@@ -292,7 +293,11 @@ func (s *Service) solLanded(ctx context.Context) (solLandedSet, error) {
 	if err != nil {
 		return res, err
 	}
-	res.key = strings.Join(append(append(key, sk...), mk...), ",")
+	rk, err := s.solLandedRefills(ctx, &res)
+	if err != nil {
+		return res, err
+	}
+	res.key = strings.Join(append(append(append(key, sk...), mk...), rk...), ",")
 	return res, nil
 }
 
@@ -457,6 +462,80 @@ func (s *Service) solLandedMoves(ctx context.Context, res *solLandedSet, add fun
 			res.n++
 			key = append(key, m.id+":"+oc.Hash)
 		}
+	}
+	return key, nil
+}
+
+// solLandedRefills adds the refills that are not settled: the cold address pays them, so what the chain did to the cold address and the hot shard is set
+// against what the books recorded. The books take the amount out of cold at broadcast and put it into the hot shard (and the fee out of cold) at settlement.
+func (s *Service) solLandedRefills(ctx context.Context, res *solLandedSet) ([]string, error) {
+	c := s.Cfg
+	rows, err := s.Pool.Query(ctx, `SELECT id, asset, amount::text, status, partition_id, cold_address, tx_hash FROM refills
+		WHERE chain=$1 AND kind='refill' AND status IN ('signed','broadcast') AND COALESCE(tx_hash,'')<>'' ORDER BY id`, c.Chain)
+	if err != nil {
+		return nil, err
+	}
+	type rf struct{ id, asset, amount, status, part, cold, tx string }
+	var rs []rf
+	for rows.Next() {
+		var r rf
+		if err := rows.Scan(&r.id, &r.asset, &r.amount, &r.status, &r.part, &r.cold, &r.tx); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rs = append(rs, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	addCold := func(asset, cold string, n *big.Int) {
+		k := [2]string{cold, asset}
+		if res.coldIn[k] == nil {
+			res.coldIn[k] = new(big.Int)
+		}
+		res.coldIn[k].Add(res.coldIn[k], n)
+	}
+	var key []string
+	for _, r := range rs {
+		amount := parseBig(r.amount)
+		reduced := r.status == "broadcast" // the books took it out of cold at broadcast
+		if reduced {
+			clearing := refillAcct(c.Chain, r.asset)
+			if res.moveTransit[clearing] == nil {
+				res.moveTransit[clearing] = new(big.Int)
+			}
+			res.moveTransit[clearing].Add(res.moveTransit[clearing], amount)
+		}
+		st, err := s.Chain.Status(ctx, r.tx)
+		if err != nil {
+			return nil, err
+		}
+		landed := st == chain.TxConfirmed || st == chain.TxFailed
+		if !landed {
+			if reduced {
+				addCold(r.asset, r.cold, amount) // the books have it out of cold, the chain does not yet
+			}
+			continue
+		}
+		cost, err := s.Chain.TxFee(ctx, r.tx)
+		if err != nil {
+			return nil, err
+		}
+		addCold(c.Native, r.cold, new(big.Int).Neg(cost)) // the books record the cost at settlement
+		if st == chain.TxConfirmed {
+			if !reduced {
+				addCold(r.asset, r.cold, new(big.Int).Neg(amount)) // already left cold, not yet booked
+			}
+			if res.in[r.part] == nil {
+				res.in[r.part] = new(big.Int)
+			}
+			res.in[r.part].Add(res.in[r.part], amount) // reached the hot shard, not yet booked
+		} else if reduced {
+			addCold(r.asset, r.cold, amount) // the books took it out and nothing left
+		}
+		res.n++
+		key = append(key, r.id+":"+r.tx)
 	}
 	return key, nil
 }
