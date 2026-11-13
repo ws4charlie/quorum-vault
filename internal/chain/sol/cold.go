@@ -100,7 +100,9 @@ func (a *Adapter) ColdSetupState(ctx context.Context, cold string) (missing []in
 }
 
 // SendRawTx broadcasts a transaction signed elsewhere (a cold refill or the cold setup) and returns its signature.
-func (a *Adapter) SendRawTx(ctx context.Context, raw []byte) (string, error) { return a.rpc.SendRaw(ctx, raw) }
+func (a *Adapter) SendRawTx(ctx context.Context, raw []byte) (string, error) {
+	return a.rpc.SendRaw(ctx, raw)
+}
 
 // TokenAccountMissing reports whether owner has no associated token account of mint at finalized commitment.
 func (a *Adapter) TokenAccountMissing(ctx context.Context, owner, mint string) (bool, error) {
