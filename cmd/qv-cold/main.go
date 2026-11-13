@@ -28,6 +28,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/btcsuite/btcd/btcutil/base58"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ws4charlie/quorum-vault/internal/coldsign"
@@ -64,6 +65,7 @@ func run(args []string, out, errw io.Writer) error {
 	lib := fs.String("lib", hsm.DefaultLibPath(), "PKCS#11 module (keygen)")
 	token := fs.String("token", "qv-cold", "token label (keygen)")
 	network := fs.String("network", "", "bitcoin network (keygen): also print the cold address for it (mainnet, testnet3, signet, regtest)")
+	curve := fs.String("curve", "secp256k1", "key type (keygen): secp256k1 (EVM, Bitcoin) or ed25519 (Solana)")
 	pinEnv := fs.String("pin-env", "QV_COLD_PIN", "environment variable holding the token PIN (keygen)")
 	var approvals multi
 	fs.Var(&approvals, "approval", "approval file (repeatable)")
@@ -97,6 +99,15 @@ func run(args []string, out, errw io.Writer) error {
 		defer tok.Close()
 		id := make([]byte, 16)
 		rand.Read(id)
+		if *curve == "ed25519" { // a Solana cold key: the address is the public key in base58
+			pub, err := tok.GenerateEd25519KeyPair(context.Background(), "qv-cold-"+hex.EncodeToString(id[:4]), id)
+			if err != nil {
+				return err
+			}
+			addr := base58.Encode(pub)
+			fmt.Fprintf(errw, "solana cold address %s\n", addr)
+			return write(map[string]string{"key_id": hex.EncodeToString(id), "public_key": hex.EncodeToString(pub), "address": addr})
+		}
 		pub, err := tok.GenerateECKeyPair(context.Background(), domain.CurveSecp256k1, "qv-cold-"+hex.EncodeToString(id[:4]), id)
 		if err != nil {
 			return err
@@ -135,6 +146,8 @@ func run(args []string, out, errw io.Writer) error {
 	case "inspect", "sign":
 		if cb, err := os.ReadFile(*cfgPath); err == nil && coldsign.IsBTCConfig(cb) {
 			return runBTC(cmd, *cfgPath, *reqPath, approvals, out, write)
+		} else if err == nil && coldsign.IsSOLConfig(cb) {
+			return runSOL(cmd, *cfgPath, *reqPath, approvals, out, write)
 		}
 		cfg, err := coldsign.LoadConfig(*cfgPath)
 		if err != nil {
@@ -199,6 +212,8 @@ func run(args []string, out, errw io.Writer) error {
 		}
 		if rb, err := os.ReadFile(*reqPath); err == nil && coldsign.IsBTCRequest(rb) {
 			return approveBTC(*operator, *keyPath, *reqPath, out, write)
+		} else if err == nil && coldsign.IsSOLRequest(rb) {
+			return approveSOL(*operator, *keyPath, *reqPath, out, write)
 		}
 		rf, err := readJSON[coldsign.RequestFile](*reqPath)
 		if err != nil {
@@ -326,5 +341,88 @@ func approveBTC(operator, keyPath, reqPath string, out io.Writer, write func(any
 		return fmt.Errorf("operator key file must hold %d hex bytes", ed25519.SeedSize)
 	}
 	fmt.Fprintf(out, "You are approving, as %s:\n%s  hash      %s\n", operator, rf.Request.Summary(), rf.RequestHash)
+	return write(coldsign.Approve(operator, ed25519.NewKeyFromSeed(seed), rf.RequestHash))
+}
+
+func (s tokenSigner) SignMessage(ctx context.Context, msg []byte) ([]byte, error) {
+	return s.tok.SignEd25519(ctx, s.id, msg)
+}
+
+// runSOL is inspect and sign for a Solana config.
+func runSOL(cmd, cfgPath, reqPath string, approvals []string, out io.Writer, write func(any) error) error {
+	cfg, err := coldsign.LoadSOLConfig(cfgPath)
+	if err != nil {
+		return err
+	}
+	rf, err := readJSON[coldsign.SOLRequestFile](reqPath)
+	if err != nil {
+		return err
+	}
+	r, _, cerr := cfg.Check(rf)
+	fmt.Fprintf(out, "REQUEST\n%s  hash      %s\n", r.Summary(r.Decimals), rf.RequestHash)
+	var apps []coldsign.Approval
+	for _, p := range approvals {
+		a, err := readJSON[coldsign.Approval](p)
+		if err != nil {
+			return err
+		}
+		apps = append(apps, a)
+	}
+	names, ignored := cfg.CountApprovals(rf.RequestHash, apps)
+	fmt.Fprintf(out, "APPROVALS  %d of %d required: %v\n", len(names), cfg.Threshold, names)
+	for _, ig := range ignored {
+		fmt.Fprintf(out, "  not counted: %s\n", ig)
+	}
+	fmt.Fprintln(out, softwareNote)
+	if cerr != nil {
+		return cerr
+	}
+	if cmd == "inspect" {
+		fmt.Fprintln(out, "CHECK      this signer would accept the request (the approvals and the record of signed nonce values are checked at signing)")
+		return nil
+	}
+	pin := os.Getenv(cfg.HSM.PinEnv)
+	if pin == "" {
+		return fmt.Errorf("the token PIN is not in $%s", cfg.HSM.PinEnv)
+	}
+	l, err := hsm.LoadLib(orDefault(cfg.HSM.Lib, hsm.DefaultLibPath()))
+	if err != nil {
+		return err
+	}
+	defer l.Close()
+	tok, err := l.OpenToken(cfg.HSM.Token, pin)
+	if err != nil {
+		return err
+	}
+	defer tok.Close()
+	id, err := hex.DecodeString(cfg.HSM.KeyID)
+	if err != nil {
+		return fmt.Errorf("config hsm.key_id: %w", err)
+	}
+	signed, _, err := cfg.Sign(context.Background(), rf, apps, tokenSigner{tok: tok, id: id})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "SIGNED     tx %s by %s\n", signed.TxHash, signed.Signer)
+	return write(signed)
+}
+
+func approveSOL(operator, keyPath, reqPath string, out io.Writer, write func(any) error) error {
+	rf, err := readJSON[coldsign.SOLRequestFile](reqPath)
+	if err != nil {
+		return err
+	}
+	if rf.RequestHash != rf.Request.HashHex() {
+		return fmt.Errorf("the request file is damaged: its hash does not match its content; do not approve")
+	}
+	seedHex, err := os.ReadFile(keyPath)
+	if err != nil {
+		return err
+	}
+	seed, err := hex.DecodeString(strings.TrimSpace(string(seedHex)))
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return fmt.Errorf("operator key file must hold %d hex bytes", ed25519.SeedSize)
+	}
+	fmt.Fprintf(out, "You are approving, as %s:\n%s  hash      %s\n", operator, rf.Request.Summary(rf.Request.Decimals), rf.RequestHash)
 	return write(coldsign.Approve(operator, ed25519.NewKeyFromSeed(seed), rf.RequestHash))
 }

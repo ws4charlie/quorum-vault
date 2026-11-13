@@ -99,7 +99,7 @@ type ChainFile struct {
 	// "evm". An unknown family refuses to start. The fields below are those of the evm family.
 	Family string `json:"family,omitempty"`
 	// BTC is the section of the btc family; the evm fields below are not read for it.
-	BTC              *BTCFile             `json:"btc,omitempty"`
+	BTC *BTCFile `json:"btc,omitempty"`
 	// SOL is the section of the sol family (Solana); the evm fields below are not read for it.
 	SOL              *SOLFile             `json:"sol,omitempty"`
 	Name             string               `json:"name"`
@@ -177,8 +177,8 @@ type Config struct {
 	// SweepBatch and CloseQuiet: see SOLFile.
 	SweepBatch int
 	CloseQuiet time.Duration
-	Chain  string
-	Native string
+	Chain      string
+	Native     string
 
 	HotShards []common.Address
 	SinkShard int
