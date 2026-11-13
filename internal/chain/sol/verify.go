@@ -82,6 +82,9 @@ type SigningConfig struct {
 	// account is created with (the rent-exempt minimum of 80 bytes). Both required.
 	NoncePool int
 	NonceRent uint64
+	// ColdAddresses maps a pool to its cold address: the only place a hot-to-cold move may pay. A hot shard may pay another hot shard of the same pool
+	// (a rebalance) and nothing else but a withdrawal's approved destination.
+	ColdAddresses map[string]string
 }
 
 // Payload is what the core puts in a job: the message to sign and, for a sweep, the derivation index of each deposit address that signs as owner, in the
@@ -137,6 +140,8 @@ type Verifier struct {
 	rent [32]byte // Rent sysvar
 	// nonces maps a hot shard key to the index of each account of its pool.
 	nonces map[[32]byte]map[[32]byte]int
+	cold   map[string][32]byte          // pool -> cold address
+	hotOf  map[string]map[[32]byte]bool // pool -> the hot shard keys of the pool
 }
 
 type tokenInfo struct {
@@ -172,6 +177,15 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 		return nil, errors.New("sol: nonce_pool (1 to 64 accounts per hot shard) and nonce_rent_lamports are required")
 	}
 	v.nonces = map[[32]byte]map[[32]byte]int{}
+	v.cold = map[string][32]byte{}
+	v.hotOf = map[string]map[[32]byte]bool{}
+	for pool, addr := range cfg.ColdAddresses {
+		raw, err := ParseAddress(addr)
+		if err != nil || !onCurve(raw[:]) {
+			return nil, fmt.Errorf("sol: cold address of pool %q: %q is not an Ed25519 public key", pool, addr)
+		}
+		v.cold[pool] = raw
+	}
 	for sym, t := range cfg.Tokens {
 		raw, err := ParseAddress(t.Mint)
 		if err != nil || sym == "" || sym == Native {
@@ -196,6 +210,10 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 		}
 		v.hot[part] = raw
 		v.own[addr] = true
+		if v.hotOf[string(k.Pool)] == nil {
+			v.hotOf[string(k.Pool)] = map[[32]byte]bool{}
+		}
+		v.hotOf[string(k.Pool)][raw] = true
 		if v.nonces[raw] == nil {
 			v.nonces[raw] = map[[32]byte]int{}
 			for i := 0; i < cfg.NoncePool; i++ {
@@ -294,7 +312,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		return nil, reject("%v", err)
 	}
 	switch i.Kind {
-	case "withdrawal", "sweep", "cancel", KindNonceSetup:
+	case "withdrawal", "to-cold", "rebalance", "sweep", "cancel", KindNonceSetup:
 	default:
 		return nil, reject("intent kind %q is not signed on this chain", i.Kind)
 	}
@@ -333,7 +351,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 
 	// A withdrawal and its cancel start by advancing the nonce of one account of the hot shard's pool, and sign the value that nonce holds.
 	idx := 0
-	if i.Kind == "withdrawal" || i.Kind == "cancel" || i.Kind == "sweep" {
+	if i.Kind == "withdrawal" || i.Kind == "to-cold" || i.Kind == "rebalance" || i.Kind == "cancel" || i.Kind == "sweep" {
 		if err := v.advance(s, m); err != nil {
 			return nil, err
 		}
@@ -394,8 +412,8 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 	}
 	wantSigners := 1
 	switch i.Kind {
-	case "withdrawal":
-		if err := v.withdrawal(s, rest, i); err != nil {
+	case "withdrawal", "to-cold", "rebalance":
+		if err := v.withdrawal(s, rest, i, pk); err != nil {
 			return nil, err
 		}
 	case "cancel":
@@ -542,9 +560,9 @@ func (v *Verifier) checkedData(amount uint64, decimals uint8) []byte {
 	return append(append([]byte{12}, binary.LittleEndian.AppendUint64(nil, amount)...), decimals)
 }
 
-func (v *Verifier) withdrawal(s *shape, rest []MsgInstruction, i signjob.Intent) error {
+func (v *Verifier) withdrawal(s *shape, rest []MsgInstruction, i signjob.Intent, pk partition.Key) error {
 	if i.To == "" {
-		return reject("a withdrawal has no destination")
+		return reject("a %s has no destination", i.Kind)
 	}
 	dest, err := ParseAddress(i.To)
 	if err != nil {
@@ -552,6 +570,18 @@ func (v *Verifier) withdrawal(s *shape, rest []MsgInstruction, i signjob.Intent)
 	}
 	if dest == s.hot {
 		return reject("the destination is the hot shard itself")
+	}
+	// Where a move may pay is pinned by the zone's own config, whatever the intent says: the pool's cold address, or another hot shard of the pool.
+	switch i.Kind {
+	case "to-cold":
+		cold, ok := v.cold[string(pk.Pool)]
+		if !ok || dest != cold {
+			return reject("a move to cold pays the cold address of pool %q, not %s", pk.Pool, i.To)
+		}
+	case "rebalance":
+		if !v.hotOf[string(pk.Pool)][dest] {
+			return reject("a rebalance pays another hot shard of pool %q, not %s", pk.Pool, i.To)
+		}
 	}
 	s.dest = Address(dest)
 	if i.Asset == Native {

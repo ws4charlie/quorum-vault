@@ -574,6 +574,8 @@ type SOLFile struct {
 	// Withdrawals sign the nonce of one of these accounts; the zone derives every address from the hot shard.
 	NoncePool         int    `json:"nonce_pool"`
 	NonceRentLamports uint64 `json:"nonce_rent_lamports"`
+	// ColdAddresses maps a pool to its cold address (base58): the only place a move to cold may pay.
+	ColdAddresses map[string]string `json:"cold_addresses"`
 }
 
 // SOLTokenFile is a configured classic SPL token.
@@ -601,7 +603,7 @@ func (cf ChainFile) buildSOL(name string, enabledApprovers int) (*ChainConfig, e
 	}
 	sc := sol.SigningConfig{Chain: name, HotShards: s.HotShards, Tokens: map[string]sol.Token{}, MaxComputeUnits: s.MaxComputeUnits,
 		MaxMicroLamportsPerUnit: s.MaxMicroLamportsPerUnit, MaxPriorityFeeLamports: s.MaxPriorityFeeLamports,
-		NoncePool: s.NoncePool, NonceRent: s.NonceRentLamports}
+		NoncePool: s.NoncePool, NonceRent: s.NonceRentLamports, ColdAddresses: s.ColdAddresses}
 	copy(sc.AccountPublicKey[:], pub)
 	copy(sc.AccountChainCode[:], cc)
 	for sym, t := range s.Tokens {
