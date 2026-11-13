@@ -37,6 +37,7 @@ type solKit struct {
 // newSolKit makes the cold key (before the system starts: its address is pinned in every config).
 func newSolKit(t *testing.T) *solKit {
 	t.Helper()
+	requireSOL(t)
 	k := &solKit{t: t, dir: t.TempDir(), opKeys: map[string]string{}, ops: map[string]string{}}
 	k.tok = hsmtest.Token(t, "qv-cold")
 	k.keyID = make([]byte, 16)
