@@ -196,6 +196,11 @@ func (s *Service) recordFee(ctx context.Context, tx pgx.Tx, txHash string, shard
 	if err != nil {
 		return err
 	}
+	if fee.Sign() < 0 {
+		// A cost below zero: a Solana sweep that closed token accounts got back more rent than it spent. The operator's cost goes down.
+		return s.transfer(ctx, tx, "fee:"+txHash, hotAcct(nativePart), feeAcct(s.Cfg.Chain, s.Cfg.Native), new(big.Int).Neg(fee),
+			map[string]any{"tx": txHash, "kind": "rent_recovered"})
+	}
 	return s.transfer(ctx, tx, "fee:"+txHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), hotAcct(nativePart), fee,
 		map[string]any{"tx": txHash, "kind": "network_fee"})
 }

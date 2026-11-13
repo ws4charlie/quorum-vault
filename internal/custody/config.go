@@ -174,6 +174,9 @@ type Config struct {
 	BTC    btc.Config // the btc family
 	SOL    sol.Config // the sol family
 	SOLHot []string   // the sol family: the hot shard addresses in shard order
+	// SweepBatch and CloseQuiet: see SOLFile.
+	SweepBatch int
+	CloseQuiet time.Duration
 	Chain  string
 	Native string
 
@@ -324,6 +327,11 @@ type SOLFile struct {
 	ComputeUnitPrice uint64 `json:"compute_unit_price"`
 	FeeBumpPercent   int    `json:"fee_bump_percent"`
 	MaxMicroLamports uint64 `json:"max_micro_lamports"`
+	// SweepBatch is how many deposit addresses of one asset a sweep takes at most (default 4; the transaction size bounds it: see the Solana page).
+	// CloseQuietAfter: a token sweep also closes the deposit token account, rent to the hot shard, when the address has had no credited deposit of
+	// that token for this long ("" or 0: never).
+	SweepBatch      int    `json:"sweep_batch"`
+	CloseQuietAfter string `json:"close_quiet_after"`
 }
 
 // buildSOL reads the sol family's section and its assets: SOL (no address) and classic SPL tokens (address = the mint).
@@ -336,6 +344,20 @@ func (c *Config) buildSOL(cf ChainFile) error {
 		Tokens: map[string]string{}, TokenDecimals: map[string]int{}, NoncePool: s.NoncePool, NonceRent: s.NonceRentLamports,
 		ComputeUnitLimit: s.ComputeUnitLimit, ComputeUnitPrice: s.ComputeUnitPrice, FeeBumpPercent: s.FeeBumpPercent, MaxMicroLamports: s.MaxMicroLamports}
 	c.SOLHot = append([]string(nil), s.HotShards...)
+	c.SweepBatch = s.SweepBatch
+	if c.SweepBatch == 0 {
+		c.SweepBatch = 4
+	}
+	if max := sol.MaxBatch(true); c.SweepBatch < 1 || c.SweepBatch > max {
+		return fmt.Errorf("custody: config: sweep_batch must be 1 to %d (what a token sweep that opens the hot account and closes every deposit account fits in one transaction)", max)
+	}
+	if s.CloseQuietAfter != "" {
+		d, err := time.ParseDuration(s.CloseQuietAfter)
+		if err != nil || d < 0 {
+			return fmt.Errorf("custody: config: close_quiet_after %q", s.CloseQuietAfter)
+		}
+		c.CloseQuiet = d
+	}
 	if c.Native != sol.Native {
 		return fmt.Errorf("custody: config: family sol has the native asset %s", sol.Native)
 	}

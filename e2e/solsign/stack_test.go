@@ -425,7 +425,11 @@ func (s *stack) intent(kind, id, asset, part, from, to string, amount uint64) si
 }
 
 func (s *stack) job(id string, in signjob.Intent, msg []byte, keyPath string, dep *uint32) signjob.Job {
-	p, _ := json.Marshal(sol.Payload{Message: msg, DepositIndex: dep})
+	var ix []uint32
+	if dep != nil {
+		ix = []uint32{*dep}
+	}
+	p, _ := json.Marshal(sol.Payload{Message: msg, DepositIndices: ix})
 	ib, _ := json.Marshal(in)
 	apps := []signjob.Approval{}
 	if in.Kind == "withdrawal" || in.Kind == sol.KindNonceSetup {

@@ -127,6 +127,9 @@ func (s *Service) unswept(ctx context.Context) (map[[2]string]*big.Int, error) {
 // frozen factory stops planning quietly: it returns ErrSweepFrozen and creates
 // nothing. It returns the sweeps it created.
 func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, error) {
+	if s.Cfg.Family == FamilySOL {
+		return s.planSweepsSOL(ctx, log)
+	}
 	// Bounds: one pass asks the node about each candidate, and every open sweep
 	// takes row locks on the same few ledger accounts (dep, sweep, hot, fee) and
 	// a nonce on the one sweep destination, so more than a handful in flight only
@@ -235,7 +238,7 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 // otherwise be planned, refused and released again at every pass. The wait starts at retry_after and doubles for each failure in a row, up to an
 // hour; one that confirmed ends it. Only for chains that plan from their own candidates (Bitcoin): the evm planner replans at once, as before.
 func (s *Service) sweepBackoff(ctx context.Context, addr, asset string) (bool, error) {
-	if _, ok := s.Chain.(chain.SweepSource); !ok {
+	if _, ok := s.Chain.(chain.SweepSource); !ok && s.Cfg.Family != FamilySOL {
 		return false, nil
 	}
 	rows, err := s.Pool.Query(ctx, `SELECT status, EXTRACT(EPOCH FROM (now() - updated_at)) FROM sweeps WHERE chain=$1 AND from_address=$2 AND asset=$3
@@ -295,7 +298,11 @@ func (s *Service) BuildSweepJob(ctx context.Context, id string) (string, error) 
 		if sw.JobID != "" || sw.Status != "planned" {
 			return nil
 		}
-		u, err := s.Chain.BuildSweep(ctx, tx, chain.SweepIntent{ID: id, Asset: sw.Asset, From: sw.From, ToPartition: sw.PartitionID, Amount: sw.Amount})
+		legs, err := s.sweepLegs(ctx, tx, sw)
+		if err != nil {
+			return err
+		}
+		u, err := s.Chain.BuildSweep(ctx, tx, chain.SweepIntent{ID: id, Asset: sw.Asset, From: sw.From, ToPartition: sw.PartitionID, Amount: sw.Amount, Legs: legs})
 		if errors.Is(err, evm.ErrSweepFrozen) || errors.Is(err, evm.ErrDestinationMismatch) {
 			frozen = true
 			if errors.Is(err, evm.ErrSweepFrozen) {
@@ -313,8 +320,16 @@ func (s *Service) BuildSweepJob(ctx context.Context, id string) (string, error) 
 		if err != nil {
 			return err
 		}
+		from := sw.From
+		if len(legs) > 0 { // a batch: the intent names every source, in the order of the signatures
+			srcs := make([]string, len(legs))
+			for i, l := range legs {
+				srcs[i] = l.From
+			}
+			from = strings.Join(srcs, ",")
+		}
 		intent := signjob.Intent{Kind: "sweep", ID: id, PartitionID: sw.PartitionID, Chain: s.Cfg.Chain, Asset: sw.Asset,
-			From: sw.From, To: dest, Amount: sw.Amount.String()}
+			From: from, To: dest, Amount: sw.Amount.String()}
 		ib, err := json.Marshal(intent)
 		if err != nil {
 			return err
@@ -336,6 +351,13 @@ func (s *Service) BuildSweepJob(ctx context.Context, id string) (string, error) 
 
 // sweepDestination is where a sweep of the partition pays: the factory's destination on the evm family, the partition's own shard address on Bitcoin.
 func (s *Service) sweepDestination(partitionID string) (string, error) {
+	if s.Cfg.Family == FamilySOL {
+		i, err := s.Cfg.ShardIndex(partitionID)
+		if err != nil || i >= len(s.Cfg.SOLHot) {
+			return "", fmt.Errorf("custody: partition %q has no hot shard", partitionID)
+		}
+		return s.Cfg.SOLHot[i], nil
+	}
 	if s.Cfg.Family != FamilyBTC {
 		return s.Cfg.EVM.SweepDestination.Hex(), nil
 	}
@@ -457,15 +479,29 @@ func (s *Service) SettleSweep(ctx context.Context, id, txHash string, status cha
 				return err
 			}
 		}
+		legs, err := s.sweepLegs(ctx, tx, sw)
+		if err != nil {
+			return err
+		}
+		mine := map[string]bool{sw.From: true}
+		for _, l := range legs {
+			mine[l.From] = true
+		}
 		byAsset := map[string]*big.Int{}
+		perAddr := map[[2]string]*big.Int{}
 		for _, m := range moved {
-			if m.Address != sw.From {
+			if !mine[m.Address] {
 				continue // nothing else is expected from one sweep; ignore rather than guess
 			}
 			if byAsset[m.Asset] == nil {
 				byAsset[m.Asset] = new(big.Int)
 			}
 			byAsset[m.Asset].Add(byAsset[m.Asset], m.Amount)
+			k := [2]string{m.Address, m.Asset}
+			if perAddr[k] == nil {
+				perAddr[k] = new(big.Int)
+			}
+			perAddr[k].Add(perAddr[k], m.Amount)
 		}
 		trueup := false
 		for _, asset := range sortedKeys(byAsset) {
@@ -474,9 +510,14 @@ func (s *Service) SettleSweep(ctx context.Context, id, txHash string, status cha
 				map[string]any{"sweep": id, "tx": txHash}); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO sweep_moves (sweep_id, chain, address, asset, amount) VALUES ($1,$2,$3,$4,$5::numeric) ON CONFLICT DO NOTHING`,
-				id, c.Chain, sw.From, asset, amt.String()); err != nil {
-				return err
+			for _, k := range sortedPairKeys(perAddr) {
+				if k[1] != asset {
+					continue
+				}
+				if _, err := tx.Exec(ctx, `INSERT INTO sweep_moves (sweep_id, chain, address, asset, amount) VALUES ($1,$2,$3,$4,$5::numeric) ON CONFLICT DO NOTHING`,
+					id, c.Chain, k[0], asset, perAddr[k].String()); err != nil {
+					return err
+				}
 			}
 			if asset != sw.Asset {
 				// Rode along (e.g. ETH with a token sweep): all of it is excess.

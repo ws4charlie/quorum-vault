@@ -218,7 +218,11 @@ func sigOf(raw []byte) string { return base58.Encode(raw[1:65]) }
 
 func priceOf(t testing.TB, raw []byte) uint64 {
 	t.Helper()
-	m, err := sol.DecodeMessage(raw[65:])
+	_, msg, err := sol.SplitTransaction(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sol.DecodeMessage(msg)
 	if err != nil {
 		t.Fatal(err)
 	}

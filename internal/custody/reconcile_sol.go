@@ -110,27 +110,37 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 				sum.Add(sum, b)
 			}
 			want := new(big.Int).Neg(posted[sym])
+			if adj := landedAfter.depAdj[sym]; adj != nil {
+				want.Add(want, adj) // swept money the books moved on broadcast and the chain has not (or the reverse)
+			}
 			rep.add(Check{Name: "deposit_addresses", Asset: sym, Ledger: want.String(), Chain: sum.String(), OK: want.Cmp(sum) == 0,
 				Detail: fmt.Sprintf("%d deposit addresses, finalized balances; the ledger side is every deposit booked, in the asset's base unit", len(addrs))})
 		}
 		for _, hc := range hotChain {
 			want := new(big.Int).Set(hotBooks[hc.partition])
-			if adj := landed.out[hc.partition]; adj != nil {
+			if adj := landedAfter.out[hc.partition]; adj != nil {
 				want.Sub(want, adj) // already left the chain, not yet booked
 			}
+			if adj := landedAfter.in[hc.partition]; adj != nil {
+				want.Add(want, adj) // already arrived (a sweep), not yet booked
+			}
 			rep.add(Check{Name: "hot_balance", Asset: hc.asset, Subject: hc.partition, Ledger: want.String(), Chain: hc.balance.String(), OK: want.Cmp(hc.balance) == 0,
-				Detail: fmt.Sprintf("hot shard %s at finalized commitment; %d finalized withdrawal(s) not settled yet are accounted for", hc.address, landed.n)})
+				Detail: fmt.Sprintf("hot shard %s at finalized commitment; %d finalized withdrawal(s) not settled yet are accounted for", hc.address, landedAfter.n)})
 		}
 		s.ledgerInvariants(ctx, rep)
-		// Nothing is swept or moved to cold on this family yet, and a withdrawal posts its hold and moves it on in one transaction, so every
-		// clearing account must be empty.
+		// Nothing is moved to cold on this family yet, and a withdrawal posts its hold and moves it on in one transaction, so those clearing
+		// accounts must be empty. The sweep account holds what sweeps broadcast and not settled yet are taking, as a negative amount.
 		for _, sym := range c.AssetList {
 			for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), rebalAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
 				p, err := s.posted(ctx, id)
 				if err != nil {
 					return err
 				}
-				rep.add(Check{Name: "clearing_residual", Asset: sym, Subject: id, Ledger: p.String(), Chain: "0", OK: p.Sign() == 0})
+				want := new(big.Int)
+				if id == sweepAcct(c.Chain, sym) && landedAfter.transit[sym] != nil {
+					want.Neg(landedAfter.transit[sym])
+				}
+				rep.add(Check{Name: "clearing_residual", Asset: sym, Subject: id, Ledger: p.String(), Chain: want.String(), OK: p.Cmp(want) == 0})
 			}
 		}
 		return nil
@@ -148,7 +158,8 @@ func (s *Service) solStamp(ctx context.Context) (string, error) {
 	err := s.Pool.QueryRow(ctx, `SELECT concat_ws('|', (SELECT count(*)::text FROM deposits WHERE chain=$1), (SELECT COALESCE(next_height,0)::text FROM chain_cursors WHERE chain=$1),
 		(SELECT count(*)::text FROM deposit_addresses WHERE chain=$1),
 		(SELECT COALESCE(string_agg(posted::text, ',' ORDER BY id), '') FROM ledger_accounts WHERE chain=$1),
-		(SELECT count(*)::text FROM withdrawals WHERE chain=$1 AND status IN ('confirmed','failed')))`, s.Cfg.Chain).Scan(&st)
+		(SELECT count(*)::text FROM withdrawals WHERE chain=$1 AND status IN ('confirmed','failed')),
+		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM sweeps WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
 	return st, err
 }
 
@@ -192,15 +203,21 @@ func (s *Service) solHotBooks(ctx context.Context) (map[string]*big.Int, error) 
 
 // solLandedSet is what the finalized transactions of withdrawals that are not settled yet have already taken off the hot shards.
 type solLandedSet struct {
-	out map[string]*big.Int // partition -> amount
-	n   int
-	key string
+	out map[string]*big.Int // partition -> amount that left the shard (a cost, or a withdrawal's amount; negative: rent got back)
+	in  map[string]*big.Int // partition -> amount that reached the shard (a sweep)
+	// depAdj, per asset, is added to what the books say the deposit addresses hold: a sweep the books took out of dep on broadcast whose
+	// transaction has not moved the funds (+), or one that moved them before the books heard (-).
+	depAdj map[string]*big.Int
+	// transit, per asset, is what the sweeps the books have broadcast and not settled are taking.
+	transit map[string]*big.Int
+	n       int
+	key     string
 }
 
 // solLanded asks the chain cell about every withdrawal that has a transaction out and is not settled in the books. A transaction that landed
 // moved its amount (when it succeeded) and cost its fee, which the books record at settlement or void.
 func (s *Service) solLanded(ctx context.Context) (solLandedSet, error) {
-	res := solLandedSet{out: map[string]*big.Int{}}
+	res := solLandedSet{out: map[string]*big.Int{}, in: map[string]*big.Int{}, depAdj: map[string]*big.Int{}, transit: map[string]*big.Int{}}
 	rows, err := s.Pool.Query(ctx, `SELECT id, asset, amount::text, partition_id FROM withdrawals WHERE chain=$1 AND status IN ('signing','broadcast') ORDER BY id`, s.Cfg.Chain)
 	if err != nil {
 		return res, err
@@ -249,6 +266,83 @@ func (s *Service) solLanded(ctx context.Context) (solLandedSet, error) {
 		res.n++
 		key = append(key, w.id+":"+oc.Hash)
 	}
-	res.key = strings.Join(key, ",")
+	sk, err := s.solLandedSweeps(ctx, &res, add)
+	if err != nil {
+		return res, err
+	}
+	res.key = strings.Join(append(key, sk...), ",")
 	return res, nil
+}
+
+// solLandedSweeps adds the sweeps that are not settled to res: what each moved on the chain against what the books recorded of it.
+func (s *Service) solLandedSweeps(ctx context.Context, res *solLandedSet, add func(string, *big.Int)) ([]string, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT id, asset, amount::text, status, to_partition_id FROM sweeps WHERE chain=$1 AND status IN ('signing','broadcast') ORDER BY id`, s.Cfg.Chain)
+	if err != nil {
+		return nil, err
+	}
+	type sw struct{ id, asset, amount, status, part string }
+	var ss []sw
+	for rows.Next() {
+		var w sw
+		if err := rows.Scan(&w.id, &w.asset, &w.amount, &w.status, &w.part); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ss = append(ss, w)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	addTo := func(m map[string]*big.Int, k string, n *big.Int) {
+		if m[k] == nil {
+			m[k] = new(big.Int)
+		}
+		m[k].Add(m[k], n)
+	}
+	var key []string
+	for _, w := range ss {
+		amount := parseBig(w.amount)
+		reduced := w.status == "broadcast" // the books took it out of dep at broadcast
+		if reduced {
+			addTo(res.transit, w.asset, amount)
+		}
+		oc, err := s.Chain.Outcome(ctx, "sweep", w.id)
+		if err != nil {
+			return nil, err
+		}
+		movedOnChain := new(big.Int)
+		if oc.State == chain.OutcomeConfirmed {
+			fee, err := s.Chain.TxFee(ctx, oc.Hash)
+			if err != nil {
+				return nil, err
+			}
+			nativePart, err := s.nativePartitionOf(w.part)
+			if err != nil {
+				return nil, err
+			}
+			add(nativePart, fee)
+			if !oc.Failed {
+				mv, err := s.Chain.MovedAssets(ctx, oc.Hash)
+				if err != nil {
+					return nil, err
+				}
+				for _, m := range mv {
+					addTo(res.in, s.Cfg.SinkPartition(m.Asset), m.Amount)
+					if m.Asset == w.asset {
+						movedOnChain.Add(movedOnChain, m.Amount)
+					}
+				}
+			}
+			res.n++
+			key = append(key, w.id+":"+oc.Hash)
+		}
+		switch {
+		case reduced && movedOnChain.Sign() == 0:
+			addTo(res.depAdj, w.asset, amount)
+		case !reduced && movedOnChain.Sign() > 0:
+			addTo(res.depAdj, w.asset, new(big.Int).Neg(movedOnChain))
+		}
+	}
+	return key, nil
 }

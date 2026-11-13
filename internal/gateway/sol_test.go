@@ -243,7 +243,11 @@ func (s *solH) job(id string, in signjob.Intent, msg []byte, part, keyPath strin
 	if in.Kind == "withdrawal" && in.NotAfter == 0 {
 		in.NotAfter = s.clock().Add(time.Hour).Unix()
 	}
-	p, _ := json.Marshal(sol.Payload{Message: msg, DepositIndex: dep})
+	var ix []uint32
+	if dep != nil {
+		ix = []uint32{*dep}
+	}
+	p, _ := json.Marshal(sol.Payload{Message: msg, DepositIndices: ix})
 	return signjob.Job{ID: id, PartitionID: part, KeyRef: keyPath, Chain: solChain, Intent: mustJSON(in), Digest: msg, Payload: p, Approvals: s.approvals(in, approvers...)}
 }
 
@@ -267,7 +271,7 @@ func (s *solH) cancelAt(id string, price uint64, nonceIdx int) (signjob.Intent, 
 
 func (s *solH) sweepIntent(id string, amount uint64) (signjob.Intent, []byte) {
 	in := signjob.Intent{Kind: "sweep", ID: id, Asset: "SOL", PartitionID: solPartSOL, From: sol.Address(s.depAddr), To: s.hot.k.Address(), Amount: fmt.Sprint(amount)}
-	return in, s.compile(s.hot.k.Pub, s.limit(10_000), s.transfer(s.depAddr, s.hot.k.Pub, amount))
+	return in, s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.transfer(s.depAddr, s.hot.k.Pub, amount))
 }
 
 func (s *solH) mustRefuse(j signjob.Job, code string) {
@@ -360,7 +364,7 @@ func TestSOLRefusals(t *testing.T) {
 	// a sweep that pays the wrong address, the deposit key asked for another index, a deposit job on a withdrawal
 	sin, smsg := s.sweepIntent("s1", 3_000_000)
 	idx := s.depIdx
-	evil := s.compile(s.hot.k.Pub, s.limit(10_000), s.transfer(s.depAddr, s.other, 3_000_000))
+	evil := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.transfer(s.depAddr, s.other, 3_000_000))
 	s.mustRefuse(s.job("s-evil", sin, evil, solPartSOL, sol.PathHot, &idx), ReasonTx)
 	wrongIdx := idx + 1
 	s.mustRefuse(s.job("s-idx", sin, smsg, solPartSOL, sol.DepositPath(wrongIdx), &idx), ReasonTx)
@@ -567,4 +571,53 @@ func TestSOLEqualValuesOnTwoAccountsAreTwoNonces(t *testing.T) {
 	// and each still holds its own: a third intent on either is refused
 	in3, msg3 := s.wdAt("w3", 7_000_000, 1000, 1)
 	s.mustRefuse(s.job("j3", in3, msg3, solPartSOL, sol.PathHot, nil, "alice"), ReasonNonceTaken)
+}
+
+// A batched sweep: one message, the hot shard's signature and one from each deposit key, each job asked of the key it names and no other.
+func TestSOLBatchedSweepSignsUnderEveryKey(t *testing.T) {
+	s := newSOLHarness(t, nil)
+	idxs := []uint32{4, 5, 6}
+	var keys [][32]byte
+	var addrs []string
+	for _, ix := range idxs {
+		c, _ := s.acct.Public().Derive(sol.BranchExternal, ix)
+		keys = append(keys, c.PublicKey)
+		addrs = append(addrs, sol.Address(c.PublicKey))
+	}
+	msg := s.compile(s.hot.k.Pub, s.adv(0), s.limit(30_000), s.price(1000), s.transfer(keys[0], s.hot.k.Pub, 1_000_000), s.transfer(keys[1], s.hot.k.Pub, 2_000_000), s.transfer(keys[2], s.hot.k.Pub, 3_000_000))
+	in := signjob.Intent{Kind: "sweep", ID: "sb1", Asset: "SOL", PartitionID: solPartSOL, From: strings.Join(addrs, ","), To: s.hot.k.Address(), Amount: "6000000"}
+	job := func(id, path string, ix []uint32, msg []byte, in signjob.Intent) signjob.Job {
+		p, _ := json.Marshal(sol.Payload{Message: msg, DepositIndices: ix})
+		in.Chain = solChain
+		return signjob.Job{ID: id, PartitionID: solPartSOL, KeyRef: path, Chain: solChain, Intent: mustJSON(in), Digest: msg, Payload: p}
+	}
+	sigs := map[string][]byte{}
+	hotJob := s.mustSign(job("b-hot", sol.PathHot, idxs, msg, in), s.hot.k.Pub[:])
+	sigs["hot"] = hotJob.Sig
+	for k, ix := range idxs {
+		d := s.mustSign(job(fmt.Sprintf("b-%d", ix), sol.DepositPath(ix), idxs, msg, in), keys[k][:])
+		for _, other := range sigs {
+			if bytes.Equal(other, d.Sig) {
+				t.Fatal("two signers got one signature")
+			}
+		}
+		sigs[fmt.Sprint(ix)] = d.Sig
+	}
+	// refusals: an extra source, a different total, a key of an index outside the batch, the same message under another intent
+	bad := s.compile(s.hot.k.Pub, s.adv(1), s.limit(30_000), s.transfer(keys[0], s.hot.k.Pub, 1_000_000), s.transfer(keys[1], s.other, 2_000_000), s.transfer(keys[2], s.hot.k.Pub, 3_000_000))
+	in2 := in
+	in2.ID = "sb2"
+	s.mustRefuse(job("x1", sol.PathHot, idxs, bad, in2), ReasonTx)
+	s.mustRefuse(job("x2", sol.DepositPath(9), idxs, msg, in), ReasonTx)
+	in3 := in2
+	in3.Amount = "6000001"
+	s.mustRefuse(job("x3", sol.PathHot, idxs, s.compile(s.hot.k.Pub, s.adv(1), s.limit(30_000), s.transfer(keys[0], s.hot.k.Pub, 1_000_000), s.transfer(keys[1], s.hot.k.Pub, 2_000_000), s.transfer(keys[2], s.hot.k.Pub, 3_000_000)), in3), ReasonTx)
+	// another intent on the nonce the batch holds is refused whatever else differs
+	in4 := in2
+	other := s.compile(s.hot.k.Pub, s.adv(0), s.limit(30_000), s.price(9000), s.transfer(keys[0], s.hot.k.Pub, 1_000_000), s.transfer(keys[1], s.hot.k.Pub, 2_000_000), s.transfer(keys[2], s.hot.k.Pub, 3_000_000))
+	s.mustRefuse(job("x4", sol.PathHot, idxs, other, in4), ReasonNonceTaken)
+	// a higher price of the same batch is a version, signed once for each key
+	higher := s.compile(s.hot.k.Pub, s.adv(0), s.limit(30_000), s.price(2000), s.transfer(keys[0], s.hot.k.Pub, 1_000_000), s.transfer(keys[1], s.hot.k.Pub, 2_000_000), s.transfer(keys[2], s.hot.k.Pub, 3_000_000))
+	s.mustSign(job("v-hot", sol.PathHot, idxs, higher, in), s.hot.k.Pub[:])
+	s.mustSign(job("v-1", sol.DepositPath(5), idxs, higher, in), keys[1][:])
 }

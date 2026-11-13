@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math/big"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
@@ -107,18 +106,6 @@ func (a *Adapter) watched(ctx context.Context) ([]string, error) {
 		out = append(out, s)
 	}
 	return out, rows.Err()
-}
-
-var errLater = fmt.Errorf("sol: %w (a later P8 task)", chain.ErrNotSupported)
-
-func (a *Adapter) BuildSweep(context.Context, pgx.Tx, chain.SweepIntent) (chain.UnsignedTx, error) {
-	return chain.UnsignedTx{}, errLater
-}
-func (a *Adapter) EstimateSweepFee(context.Context, chain.SweepIntent) (*big.Int, error) {
-	return nil, errLater
-}
-func (a *Adapter) MovedAssets(context.Context, string) ([]chain.MovedAsset, error) {
-	return nil, errLater
 }
 
 // ---- the custody.Reader of the chain ----

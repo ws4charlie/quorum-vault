@@ -2,7 +2,7 @@
 
 A customer gets a Solana address, pays it in SOL or in one SPL token, and is credited once, after the payment is final, through the same
 ledger as EVM and Bitcoin. Family `sol`, package [internal/chain/sol](../../internal/chain/sol). Customers withdraw SOL and the token from the hot shards, each
-withdrawal on a durable nonce (see "Withdrawals sign a nonce, not a blockhash").
+withdrawal on a durable nonce (see "Withdrawals sign a nonce, not a blockhash"), and credited deposits are swept to the hot shard in batches (see "Sweeps take several addresses at once").
 
 ```mermaid
 flowchart LR
@@ -68,20 +68,15 @@ changes who owns or may spend a token account. Each judges alone, so a refusal d
 | Token withdrawal | the nonce advance, then a checked transfer from the hot shard's token account to the destination's, with the configured mint and decimals, and optionally the creation of the destination's account, paid by the hot shard |
 | Cancel | the nonce advance alone |
 | Nonce setup | pairs of "create" and "initialize" for accounts of the shard's own pool, rent from the shard; needs an operator's approval |
-| Sweep of SOL | a transfer from the deposit address to the hot shard, which pays the fee |
-| Sweep of a token | a checked transfer from the deposit address's token account to the hot shard's, and optionally closing the deposit account with its rent going to the hot shard |
+| Sweep of SOL | the nonce advance, then one transfer per deposit address to the hot shard, which pays the fee |
+| Sweep of a token | the nonce advance, then per deposit address a checked transfer from its token account to the hot shard's, and optionally closing that deposit account with its rent going to the hot shard |
 
 A message may begin with a compute-budget limit (required) and price (optional), both under caps in the zone's config. Versioned messages
 are refused, because the tables they use hide who is paid.
 
-**Two keys, two jobs.** A withdrawal has one signature, the hot shard's, made by the 2-of-3 keyset on A, B and C. A sweep has two over the
-same message: the hot shard pays the fee, and the deposit key signs as owner. The deposit key comes from the two-party HD keyset; the zone
-derives its public key from its own copy of the account node and requires the signer to be that key. The replay guard keeps one record per
-message and signer, so the two jobs of one sweep do not collide.
+**Keys and jobs.** A withdrawal has one signature, the hot shard's, made by the 2-of-3 keyset on A, B and C. A sweep has one more for each deposit address it takes: the hot shard pays the fee, and each deposit key signs as the owner of its own address only. Deposit keys come from the two-party HD keyset; the zone derives their public keys from its own copy of the account node and requires each signer to be exactly the key at the index the sweep names. The replay guard keeps one record per message and signer, so the jobs of one sweep do not collide.
 
-**Versions of one intent.** A sweep still gets one message per intent: a second one, with a fresher blockhash, is refused, because the zone
-cannot tell the first is dead. A withdrawal may get more than one, under the nonce rule below. A retry of the same job returns the stored
-signature.
+**Versions of one intent.** A withdrawal or a sweep may get more than one message, under the nonce rule below; anything else about it is fixed by the intent. A retry of the same job returns the stored signature.
 
 **Rent on a sweep.** The zone checks the amount the intent names, not what the account keeps: it cannot see balances. The core decides the
 amount, and the chain refuses a transfer that would leave a system account between zero and the minimum.
@@ -127,9 +122,21 @@ signed only for a nonce that a signed intent of the same shard holds, and after 
 already left the chain, so it is explained from the cell's own records of the transaction, and the comparison is repeated if those, or the
 books, change while it runs.
 
+## Sweeps take several addresses at once
+
+A sweep moves the credited funds of up to a few deposit addresses of one asset into the hot shard in a single transaction. It signs a nonce of the shard's pool like a withdrawal, because the signatures of several parties would otherwise race a blockhash that lives for about a minute, and so at most one version of a sweep can land. Each sweep holds a pool account until it is final, so the planner never lets sweeps take the last account: one stays for withdrawals.
+
+- **What is swept.** Only credited deposits, and only when an address is worth it: its funds must cover several times the fee of sweeping it alone and pass a configured floor. Smaller amounts stay where they are. A SOL address is swept to zero; an address may not be left between zero and the rent minimum.
+- **How many fit.** A transaction is at most 1232 bytes and every deposit owner adds a signature and accounts. In the worst case, with the hot token account opened and every deposit account closed, five token addresses fit; eight SOL addresses fit. The configured batch is checked against the token limit at start.
+- **Closing the token account.** When an address has had no credited deposit of the token for a configured time, its sweep also closes the empty token account and the rent goes to the hot shard. The customer keeps the same address; the next deposit makes the sender create the account again, and it is credited as before. If a deposit lands between the planning and the transaction, the close fails with the whole transaction, and the sweep is planned again.
+- **Books.** A sweep is booked as on the other chains: out of the deposits when it is broadcast, into the hot shard when it is final, from what the chain says moved. The rent of a closed account is a cost reduction, not income: the fee account is the operator's own money in the native asset, and rent the operator paid to open accounts comes back to it. A sweep whose network fee is more than recovered rent still books a cost.
+- **Reconcile in flight.** Deposit addresses, the hot shard and the sweep clearing account are each compared with the chain at every stage. A sweep that has moved funds the books do not yet know is explained from the chain's record of the transaction; one the books have booked and the chain has not moved is added back.
+- **Failure.** A sweep that lands and fails moves nothing and pays its fee; the books record only the fee, and the planner tries again after a delay. The usual cause is funds that arrived after planning and would leave a system account below the rent minimum.
+- **A deposit key needs A and B.** The two-party key cannot sign with either down. A sweep then fails after its signing retry, and the planner sweeps again after the party returns. Nothing is lost while it waits; with C down alone, sweeps go on.
+
 ## Limits
 
-- **Withdrawals only, from the hot shards.** Sweeps, cold storage, refills and rebalancing for Solana come later; the zone refuses those intents on this chain.
+- **Withdrawals and sweeps, to and from the first hot shard.** Cold storage, refills and rebalancing for Solana come later; the zone refuses those intents on this chain, and sweeps all go to shard 0.
 - **Hot funding is booked by an operator call**, not found by the scan.
 - **The pool has a fixed size** set in config; a shard that needs more accounts than that waits for a free one.
 - **Rent paid for nonce accounts and for token accounts opened for customers is booked as a cost** and is not recovered.
