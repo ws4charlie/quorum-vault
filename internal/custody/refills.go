@@ -93,6 +93,12 @@ func scanRefill(row pgx.Row) (Refill, error) {
 				return r, err
 			}
 			r.BTC = &q
+		} else if coldsign.IsSOLRequest([]byte(`{"request":` + string(req) + `}`)) {
+			var q coldsign.SOLRequest
+			if err := json.Unmarshal(req, &q); err != nil {
+				return r, err
+			}
+			r.SOL = &q
 		} else {
 			var q coldsign.Request
 			if err := json.Unmarshal(req, &q); err != nil {
@@ -519,7 +525,7 @@ func (s *Service) ParkRefill(ctx context.Context, id, reason string) error {
 // FundCold books that the operator put amount of asset into the cold address (a deposit from outside the system), so the
 // ledger keeps mirroring the chain: cold -> opfund. id makes it idempotent. shard picks the partition the amount is booked to.
 func (s *Service) FundCold(ctx context.Context, id string, shard int, asset string, amount *big.Int) error {
-	if shard < 0 || shard >= len(s.Cfg.HotShards) || amount == nil || amount.Sign() <= 0 {
+	if shard < 0 || shard >= s.Cfg.shardCount() || amount == nil || amount.Sign() <= 0 {
 		return fmt.Errorf("%w: fund cold", ErrInvalid)
 	}
 	if _, ok := s.Cfg.Assets[asset]; !ok {
@@ -655,7 +661,7 @@ func (s *Service) RequestAction(ctx context.Context, kind, param, signer string)
 // SpendCold books that the operator took amount of asset out of the cold address by some other means (a transfer the books did not
 // make), so the cold balance in the books keeps matching the chain: opfund -> cold. id makes it idempotent.
 func (s *Service) SpendCold(ctx context.Context, id string, shard int, asset string, amount *big.Int) error {
-	if shard < 0 || shard >= len(s.Cfg.HotShards) || amount == nil || amount.Sign() <= 0 {
+	if shard < 0 || shard >= s.Cfg.shardCount() || amount == nil || amount.Sign() <= 0 {
 		return fmt.Errorf("%w: spend cold", ErrInvalid)
 	}
 	if _, ok := s.Cfg.Assets[asset]; !ok {

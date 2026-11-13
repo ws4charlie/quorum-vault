@@ -556,6 +556,83 @@ jobs:
       - name: make test-e2e-sol-sweep-faults
         run: ci/run-in-image.sh make test-e2e-sol-sweep-faults
 
+  # Solana cell, cold tier: moves to cold and rebalance, the refill ceremony on the offline signer (Ed25519 key in the qv-cold token) with its attacks, a refill that
+  # cannot mine and is closed by an operator.
+  e2e-sol-cold:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+          anvil: "false"
+          solana: "true"
+      - name: make test-e2e-sol-cold
+        run: ci/run-in-image.sh make test-e2e-sol-cold
+
+  # Solana cell, cold tier crash tests: every boundary of a refill, a move to cold and a rebalance.
+  e2e-sol-cold-crash:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+          anvil: "false"
+          solana: "true"
+      - name: make test-e2e-sol-cold-crash
+        run: ci/run-in-image.sh make test-e2e-sol-cold-crash
+
   # Bitcoin cell, withdrawals: the gateway, party B's cosigner and the workflows on real mpc-party, bitcoind in regtest with -txindex.
   e2e-btc-withdrawals:
     runs-on: ubuntu-24.04

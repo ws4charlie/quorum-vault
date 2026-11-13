@@ -66,14 +66,15 @@ type wdOpts struct {
 	activity   string // the engine's activity timeout (default 5s; sweep suites, whose scan reads more, use more)
 
 	// the cold tier (P8-7)
-	shards    int                 // hot shards (default 1), each its own 2-of-3 keyset
-	seedSOL   []uint64            // lamports on each shard (default hotSOL)
-	seedTKN   []uint64            // tokens on each shard (default hotTKN)
-	cold      map[string]coldBand // asset -> the pool's cold bands; with it the cold tier is configured
-	rebalance map[string]string   // asset (or asset/shard) -> the shard's rebalance target
-	coldAddr  string              // the pool's cold address (default: a fresh key's)
-	coldPlan  string              // the cold planner's interval (default 1s)
-	toColdCap string              // the zone's daily cap on moves to cold, per asset (default: far above anything a test moves)
+	shards      int                 // hot shards (default 1), each its own 2-of-3 keyset
+	seedSOL     []uint64            // lamports on each shard (default hotSOL)
+	seedTKN     []uint64            // tokens on each shard (default hotTKN)
+	cold        map[string]coldBand // asset -> the pool's cold bands; with it the cold tier is configured
+	rebalance   map[string]string   // asset (or asset/shard) -> the shard's rebalance target
+	coldAddr    string              // the pool's cold address (default: a fresh key's)
+	coldPlan    string              // the cold planner's interval (default 1s)
+	refillStuck string              // ALERT time of a broadcast refill that does not confirm (default 30m)
+	toColdCap   string              // the zone's daily cap on moves to cold, per asset (default: far above anything a test moves)
 }
 
 // coldBand is the low-water mark, high-water mark and target of an asset's hot shards.
@@ -433,7 +434,7 @@ func (s *wdSys) coldFile() custody.ColdFile {
 		plan = "1s"
 	}
 	cf := custody.ColdFile{Addresses: map[string]string{"omnibus": s.coldAdr}, Limits: map[string]custody.LimitFile{}, PlanInterval: plan,
-		Refill: custody.RefillFile{Poll: "1s"}}
+		Refill: custody.RefillFile{Poll: "1s", StuckAfter: o.refillStuck}}
 	for asset, b := range o.cold {
 		cf.Limits[asset] = custody.LimitFile{Low: b.low, High: b.high, Target: b.target}
 	}
