@@ -621,3 +621,85 @@ func TestSOLBatchedSweepSignsUnderEveryKey(t *testing.T) {
 	s.mustSign(job("v-hot", sol.PathHot, idxs, higher, in), s.hot.k.Pub[:])
 	s.mustSign(job("v-1", sol.DepositPath(5), idxs, higher, in), keys[1][:])
 }
+
+// A move to cold pays the pool's cold address and nothing else, a rebalance pays another hot shard of the same pool, and nothing can change a nonce
+// account's authority. The gateway and a cosigner's decider (its own config, its own guard) decide the same way.
+func TestSOLToColdAndRebalanceAreFixedByTheZone(t *testing.T) {
+	cold := soltest.NewKey().Pub
+	hot2 := soltest.NewKey().Pub
+	part2 := "qv-us/sol-test/SOL/hot/omnibus/1"
+	s := newSOLHarness(t, func(cf *ChainFile) {
+		cf.SOL.ColdAddresses = map[string]string{"omnibus": sol.Address(cold)}
+		cf.SOL.HotShards[part2] = sol.Address(hot2)
+		cf.ToColdPerHour, cf.RebalancePerHour = 100, 100
+		a := cf.Assets["SOL"]
+		a.ToColdDailyCap, a.RebalanceDailyCap = "1000000000000", "1000000000000"
+		cf.Assets["SOL"] = a
+	})
+	if _, err := s.harness.biz.Exec(context.Background(), `INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ('`+part2+`','qv-us','`+solChain+`','SOL','hot','omnibus',1)`); err != nil {
+		t.Fatal(err)
+	}
+	move := func(kind, id string, to [32]byte, amount uint64, nonceIdx int, extra ...mx) (signjob.Intent, []byte) {
+		in := signjob.Intent{Kind: kind, ID: id, Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(to), Amount: fmt.Sprint(amount)}
+		ixs := append([]mx{s.adv(nonceIdx), s.limit(10_000), s.price(1000), s.transfer(s.hot.k.Pub, to, amount)}, extra...)
+		return in, s.compile(s.hot.k.Pub, ixs...)
+	}
+	// the cosigner's own decider
+	cos := NewDecider(s.cfg, s.gw.codecs, mustGuard(t, s.harness), ModeCosigner, s.clock)
+	pub := s.hot.k.Pub[:]
+	decide := func(j signjob.Job) error { _, err := cos.DecideKey(t.Context(), j, SignerKey{Ed25519: pub}); return err }
+	refusedBy := func(err error, code string) {
+		t.Helper()
+		if why, ok := IsRejection(err); !ok || !strings.HasPrefix(why, code+":") {
+			t.Fatalf("err %v, want rejection %s", err, code)
+		}
+	}
+
+	// to cold: only the pinned address, in the gateway and in the cosigner
+	in, msg := move("to-cold", "tc-evil", s.other, 1_000_000, 0)
+	j := s.job("tc-evil", in, msg, solPartSOL, sol.PathHot, nil)
+	s.mustRefuse(j, ReasonTx)
+	refusedBy(decide(j), ReasonTx)
+	// a withdrawal-shaped transfer to the cold address is not a move to cold either way: the destination is the intent's, so a different intent is refused
+	in, msg = move("to-cold", "tc-ok", cold, 1_000_000, 1)
+	j = s.job("tc-ok", in, msg, solPartSOL, sol.PathHot, nil)
+	if err := decide(j); err != nil {
+		t.Fatalf("the cosigner refused the move to the pinned cold address: %v", err)
+	}
+	s.mustSign(j, s.hot.k.Pub[:])
+
+	// rebalance: another hot shard of the pool only (never cold, never a stranger)
+	in, msg = move("rebalance", "rb-cold", cold, 1_000_000, 0)
+	j = s.job("rb-cold", in, msg, solPartSOL, sol.PathHot, nil)
+	s.mustRefuse(j, ReasonTx)
+	refusedBy(decide(j), ReasonTx)
+	in, msg = move("rebalance", "rb-evil", s.other, 1_000_000, 0)
+	j = s.job("rb-evil", in, msg, solPartSOL, sol.PathHot, nil)
+	s.mustRefuse(j, ReasonTx)
+	refusedBy(decide(j), ReasonTx)
+	in, msg = move("rebalance", "rb-self", s.hot.k.Pub, 1_000_000, 0)
+	j = s.job("rb-self", in, msg, solPartSOL, sol.PathHot, nil)
+	s.mustRefuse(j, ReasonTx)
+	in, msg = move("rebalance", "rb-ok", hot2, 1_000_000, 2)
+	j = s.job("rb-ok", in, msg, solPartSOL, sol.PathHot, nil)
+	if err := decide(j); err != nil {
+		t.Fatalf("the cosigner refused a rebalance to the pool's other shard: %v", err)
+	}
+	s.mustSign(j, s.hot.k.Pub[:])
+
+	// no authority change on any nonce account, in any kind of message: AuthorizeNonceAccount (system instruction 7) names a new authority
+	authorize := func(n int, to [32]byte) mx {
+		data := make([]byte, 4, 36)
+		data[0] = 7
+		data = append(data, to[:]...)
+		return mx{prog: s.sys, accts: []solMeta{{sol.NonceAddress(s.hot.k.Pub, n), false, true}, {s.hot.k.Pub, true, false}}, data: data}
+	}
+	s.newBlockhash()
+	for i, kind := range []string{"to-cold", "withdrawal", "rebalance"} {
+		to := map[string][32]byte{"to-cold": cold, "withdrawal": s.dest, "rebalance": hot2}[kind]
+		in, msg = move(kind, fmt.Sprintf("auth-%d", i), to, 1_000_000, 0, authorize(1, s.other))
+		j = s.job(fmt.Sprintf("auth-%d", i), in, msg, solPartSOL, sol.PathHot, nil, "alice")
+		s.mustRefuse(j, ReasonTx)
+		refusedBy(decide(j), ReasonTx)
+	}
+}

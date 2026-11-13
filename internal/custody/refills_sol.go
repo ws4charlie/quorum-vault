@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -357,3 +358,25 @@ func (s *Service) SubmitColdSetup(ctx context.Context, req coldsign.SOLRequest, 
 }
 
 var _ = errors.New
+
+// waitFinal polls a transaction until it is final (or a minute passes).
+func (s *Service) waitFinal(ctx context.Context, sig string) (chain.TxStatus, error) {
+	deadline := time.Now().Add(time.Minute)
+	for {
+		st, err := s.Chain.Status(ctx, sig)
+		if err != nil {
+			return "", err
+		}
+		if st != chain.TxPending {
+			return st, nil
+		}
+		if time.Now().After(deadline) {
+			return st, fmt.Errorf("custody: %s is not final after a minute (its blockhash may have expired: export the setup again)", sig)
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(400 * time.Millisecond):
+		}
+	}
+}
