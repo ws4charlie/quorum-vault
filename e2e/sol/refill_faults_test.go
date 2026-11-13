@@ -155,6 +155,7 @@ func TestColdRefillCrash(t *testing.T) {
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("failed at %s", current)
+			s.dumpCold()
 			s.dump()
 		}
 	})
@@ -314,4 +315,31 @@ func (s *wdSys) requireDiedAt(fp string, timeout time.Duration) {
 	if !fileContains(s.worker.log, "failpoint reached: killing the process") || !fileContains(s.worker.log, `"failpoint":"`+fp+`"`) {
 		s.t.Fatalf("%s: the worker died, but not at this failpoint (no log line naming it)", fp)
 	}
+}
+
+// dumpCold says where the cold tier stands, for a test that waited for something that never came.
+func (s *wdSys) dumpCold() {
+	s.t.Logf("refills: %+v", s.refills())
+	rows, err := s.pool.Query(s.ctx, `SELECT partition_id FROM hot_low_alerts`)
+	if err == nil {
+		for rows.Next() {
+			var p string
+			rows.Scan(&p)
+			s.t.Logf("low-water alert held for %s", p)
+		}
+		rows.Close()
+	}
+	for _, a := range []string{"hot", "cold"} {
+		rows, err := s.pool.Query(s.ctx, `SELECT id, posted::text FROM ledger_accounts WHERE chain=$1 AND id LIKE $2||':%' ORDER BY id`, s.chain, a)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var id, p string
+			rows.Scan(&id, &p)
+			s.t.Logf("books %s = %s", id, p)
+		}
+		rows.Close()
+	}
+	s.t.Logf("chain: shard 0 %d lamports, cold %d lamports", s.shardBalance(0, "SOL"), s.coldBalance("SOL"))
 }
