@@ -163,7 +163,7 @@ services:
 
   # ---- Solana (profile "solana"; `make sol-up`) ----
   # solana-test-validator (Agave v3.0.14, built from the pinned release tarball: ci/solana/Dockerfile), RPC on 8899 inside, QV_SOL_PORT outside.
-  # A fresh ledger at every start; 100 ms slots, so a transaction is final (rooted) in a few seconds. The faucet is inside the container and
+  # A fresh ledger at every start; 100 ms slots and the default epoch length (see ci/solana/Dockerfile for why not shorter), so a transaction is final (rooted) in a few seconds. The faucet is inside the container and
   # reached through the RPC (requestAirdrop); no key is committed anywhere.
   solana:
     profiles: ["solana"]

@@ -20,5 +20,14 @@ ENV PATH=/opt/agave/bin:$PATH
 WORKDIR /ledger
 EXPOSE 8899 8900
 # A fresh ledger every start (--reset). Gossip and the RPC bind to the container's own address (the validator refuses 0.0.0.0); the compose
-# file publishes the RPC port on localhost only. A slot is 100 ms (16 ticks) and an epoch 32 slots, so a transaction is finalized in seconds.
-ENTRYPOINT ["sh", "-c", "exec solana-test-validator --reset --ledger /ledger --bind-address \"$(hostname -i | cut -d' ' -f1)\" --rpc-port 8899 --ticks-per-slot 16 --slots-per-epoch 32 --limit-ledger-size 100000"]
+# file publishes the RPC port on localhost only. A slot is 100 ms (16 ticks), so a transaction is finalized in seconds.
+#
+# The epoch length is the validator's default (432,000 slots, about twelve hours at 100 ms): a test run never crosses an epoch boundary. An earlier
+# version of this file set --slots-per-epoch 32 to keep the cluster small, and that stalled the validator in CI: at full speed (the runner is native
+# x86_64; under emulation the slots are slower and it never showed) block production stopped at the last slot of an epoch (slot 159, with finalized
+# stuck 32 behind), the validator alive and healthy. Its log then repeated "Couldn't vote on heaviest fork: 63, heaviest_fork_failures:
+# [FailedThreshold(63, 4, 0, ..), FailedThreshold(63, 5, 0, ..), FailedThreshold(63, 8, 0, ..)]": the tower's vote threshold check (depth 8) saw no voted
+# stake on the fork, so it could not vote, root nothing and, after a few more slots, produce no more. Reproduced locally with --ticks-per-slot 2 and
+# 32-slot epochs (stopped at slot 61-63, the end of the second epoch) and not with the default epoch length (12,000 slots in 2.5 minutes at the same
+# speed). Do not shorten the epochs again.
+ENTRYPOINT ["sh", "-c", "exec solana-test-validator --reset --ledger /ledger --bind-address \"$(hostname -i | cut -d' ' -f1)\" --rpc-port 8899 --ticks-per-slot 16 --limit-ledger-size 100000"]
