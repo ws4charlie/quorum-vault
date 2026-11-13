@@ -76,12 +76,20 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 			return err
 		}
 		posted := map[string]*big.Int{}
+		clearing := map[string]*big.Int{} // read inside the same window as the chain, so that a booking cannot slip between
 		for _, sym := range c.AssetList {
 			p, err := s.posted(ctx, depAcct(c.Chain, sym))
 			if err != nil {
 				return err
 			}
 			posted[sym] = p
+			for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), rebalAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
+				q, err := s.posted(ctx, id)
+				if err != nil {
+					return err
+				}
+				clearing[id] = q
+			}
 		}
 		hotChain, err := s.solHotBalances(ctx)
 		if err != nil {
@@ -135,10 +143,7 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 		// accounts must be empty. The sweep account holds what sweeps broadcast and not settled yet are taking, as a negative amount.
 		for _, sym := range c.AssetList {
 			for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), rebalAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
-				p, err := s.posted(ctx, id)
-				if err != nil {
-					return err
-				}
+				p := clearing[id]
 				want := new(big.Int)
 				if id == sweepAcct(c.Chain, sym) && landedAfter.transit[sym] != nil {
 					want.Neg(landedAfter.transit[sym])

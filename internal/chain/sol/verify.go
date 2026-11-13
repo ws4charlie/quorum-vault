@@ -51,11 +51,6 @@ func reject(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrRejected, fmt.Sprintf(format, args...))
 }
 
-// Program ids the zone knows.
-const (
-	ComputeBudgetProgram = "ComputeBudget111111111111111111111111111111" // public program id, not a secret; ggignore
-)
-
 // Token is a configured SPL token.
 type Token struct {
 	Mint     string
