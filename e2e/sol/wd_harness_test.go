@@ -73,6 +73,7 @@ type wdOpts struct {
 	rebalance   map[string]string   // asset (or asset/shard) -> the shard's rebalance target
 	coldAddr    string              // the pool's cold address (default: a fresh key's)
 	coldPlan    string              // the cold planner's interval (default 1s)
+	refillTTL   string              // how long a refill request may wait for its signed file (default 24h)
 	refillStuck string              // ALERT time of a broadcast refill that does not confirm (default 30m)
 	toColdCap   string              // the zone's daily cap on moves to cold, per asset (default: far above anything a test moves)
 }
@@ -434,7 +435,7 @@ func (s *wdSys) coldFile() custody.ColdFile {
 		plan = "1s"
 	}
 	cf := custody.ColdFile{Addresses: map[string]string{"omnibus": s.coldAdr}, Limits: map[string]custody.LimitFile{}, PlanInterval: plan,
-		Refill: custody.RefillFile{Poll: "1s", StuckAfter: o.refillStuck}}
+		Refill: custody.RefillFile{Poll: "1s", StuckAfter: o.refillStuck, RequestTTL: o.refillTTL}}
 	for asset, b := range o.cold {
 		cf.Limits[asset] = custody.LimitFile{Low: b.low, High: b.high, Target: b.target}
 	}

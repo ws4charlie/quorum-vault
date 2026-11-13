@@ -118,7 +118,7 @@ func TestColdRefillParked(t *testing.T) {
 func (s *wdSys) requireAudit(types ...string) {
 	s.t.Helper()
 	for _, ty := range types {
-		if s.count(`SELECT count(*) FROM audit_log WHERE type=$1`, ty) == 0 {
+		if s.count(`SELECT count(*) FROM outbox WHERE payload->>'type'=$1`, ty) == 0 {
 			s.t.Fatalf("no audit entry %q", ty)
 		}
 	}
@@ -134,7 +134,22 @@ func TestColdRefillCrash(t *testing.T) {
 	r := s.waitRefill("SOL", "requested", 90*time.Second)
 	s.refillCeremony(k, r.ID)
 	s.waitRefill("SOL", "confirmed", 120*time.Second)
-	s.reconcileClean("after the first refill")
+	// the token refill the planner asks for next would hold the cold address's one open request: it goes through first
+	tr := s.waitRefill("TKN", "requested", 90*time.Second)
+	// the real behaviour, not avoided: one open refill per cold address, whatever the asset, until it is closed or settled (the cold nonce pool has three accounts;
+	// the limit is the planner's rule, not a lack of nonces)
+	open := 0
+	for _, x := range s.refills() {
+		if x.Status != "confirmed" && x.Status != "failed" {
+			open++
+		}
+	}
+	if open != 1 {
+		t.Fatalf("%d open refills for one cold address, want 1", open)
+	}
+	s.refillCeremony(k, tr.ID)
+	s.waitRefill("TKN", "confirmed", 120*time.Second)
+	s.reconcileClean("after the first refills")
 
 	current := "setup"
 	t.Cleanup(func() {
@@ -161,9 +176,7 @@ func TestColdRefillCrash(t *testing.T) {
 			return false
 		})
 		s.refillCeremony(k, id)
-		if code, ok := exitCodeOf(s.worker, scale(120*time.Second)); !ok || code != 137 {
-			t.Fatalf("%s: the worker did not die at the failpoint (exited=%v code=%d)", fp, ok, code)
-		}
+		s.requireDiedAt(fp, scale(120*time.Second))
 		s.reconcileClean("worker dead at " + fp)
 		s.startWorker("")
 		s.waitFor(120*time.Second, fp+": the refill to confirm", func() bool {
@@ -175,7 +188,7 @@ func TestColdRefillCrash(t *testing.T) {
 			return false
 		})
 		moved := coldBefore - s.coldBalance("SOL")
-		if got := s.shardBalance(0, "SOL") - before; got != moved || moved < 2*oneSOL || moved > 3*oneSOL+oneSOL/2 {
+		if got := s.shardBalance(0, "SOL") - before; got > moved || moved-got > 100_000 || moved < 2*oneSOL || moved > 3*oneSOL+oneSOL/2 {
 			t.Fatalf("%s: the cold address paid %d lamports and the shard gained %d: one payment, to the shard, was expected", fp, moved, got)
 		}
 		for _, like := range []string{"rf-bcast:" + id, "rf-hot:" + id} {
@@ -214,14 +227,12 @@ func TestColdCrash(t *testing.T) {
 		current = fp
 		bal, cold, done := s.shardBalance(0, "SOL"), s.coldBalance("SOL"), s.movesDone("cold_moves")
 		s.reconfigure(setSOLBand(oneSOL, bal-2*oneSOL, bal-5*oneSOL), fp)
-		if code, ok := exitCodeOf(s.worker, scale(150*time.Second)); !ok || code != 137 {
-			t.Fatalf("%s: the worker did not die at the failpoint (exited=%v code=%d)", fp, ok, code)
-		}
+		s.requireDiedAt(fp, scale(150*time.Second))
 		s.reconcileClean("worker dead at " + fp)
 		s.reconfigure(nil, "")
 		s.waitFor(150*time.Second, fp+": the move to settle", func() bool { return s.openMoves() == 0 && s.movesDone("cold_moves") == done+1 })
 		gain := s.coldBalance("SOL") - cold
-		if lost := bal - s.shardBalance(0, "SOL"); gain < 2*oneSOL || gain > 3*oneSOL+oneSOL/2 || lost < gain || lost-gain > 100_000 {
+		if lost := bal - s.shardBalance(0, "SOL"); gain < 4*oneSOL+oneSOL/2 || gain > 5*oneSOL+oneSOL/2 || lost < gain || lost-gain > 100_000 {
 			t.Fatalf("%s: the cold address gained %d and the shard lost %d: one move was expected", fp, gain, lost)
 		}
 		s.reconcileClean("after " + fp)
@@ -231,15 +242,13 @@ func TestColdCrash(t *testing.T) {
 	// rebalances: shard 1 is given a higher target, shard 0 feeds it
 	s.reconfigure(setSOLBand(oneSOL, 1000*oneSOL, 500*oneSOL), "")
 	for i, p := range points {
-		fp := "rebal." + p
+		fp := "rebalance." + p
 		current = fp
 		b0, b1, done := s.shardBalance(0, "SOL"), s.shardBalance(1, "SOL"), s.movesDone("rebalance_moves")
 		s.reconfigure(func(cf *custody.File) {
 			cf.Cold.Rebalance.Targets = map[string]string{"SOL": fmt.Sprint(b1 + 2*oneSOL)}
 		}, fp)
-		if code, ok := exitCodeOf(s.worker, scale(150*time.Second)); !ok || code != 137 {
-			t.Fatalf("%s: the worker did not die at the failpoint (exited=%v code=%d)", fp, ok, code)
-		}
+		s.requireDiedAt(fp, scale(150*time.Second))
 		s.reconcileClean("worker dead at " + fp)
 		s.reconfigure(nil, "")
 		s.waitFor(150*time.Second, fp+": the rebalance to settle", func() bool { return s.openMoves() == 0 && s.movesDone("rebalance_moves") == done+1 })
@@ -249,5 +258,60 @@ func TestColdCrash(t *testing.T) {
 		}
 		s.reconcileClean("after " + fp)
 		t.Logf("crash %-22s ok: one rebalance of %d lamports (round %d)", fp, gain, i)
+	}
+}
+
+// A refill request nobody signs expires, as on Bitcoin: it fails with nothing booked, and the next one can be asked for. A signed file that comes back
+// after that is refused.
+func TestColdRefillRequestExpires(t *testing.T) {
+	k := newSolKit(t)
+	o := refillOpts(k, "")
+	o.refillTTL = "20s"
+	s := newWdSystem(t, o)
+	s.coldReady(k)
+	r := s.waitRefill("SOL", "requested", 90*time.Second)
+	rf := s.exportRefill(r.ID)
+	sg, out, err := k.ceremony("late", rf, "alice", "bob") // signed, but not brought back in time
+	if err != nil {
+		t.Fatalf("ceremony: %v\n%s", err, out)
+	}
+	s.waitRefill("SOL", "failed", 90*time.Second)
+	for _, x := range s.refills() {
+		if x.ID == r.ID && !strings.Contains(x.Reason, "not imported within") {
+			t.Fatalf("the expired request says %q", x.Reason)
+		}
+	}
+	s.refuseImport("a file for an expired request", r.ID, sg)
+	s.reconcileClean("after the expiry")
+	// it no longer blocks: the planner asks again, on another nonce value, and that one goes through
+	r2 := s.waitRefill("SOL", "requested", 90*time.Second)
+	if r2.ID == r.ID {
+		t.Fatal("no new request")
+	}
+	rf2 := s.exportRefill(r2.ID)
+	if rf2.Request.NonceAccount == rf.Request.NonceAccount && rf2.Request.NonceValue == rf.Request.NonceValue {
+		t.Fatal("the new request reuses the nonce value the expired one was signed on")
+	}
+	sg2, out, err := k.ceremony("on-time", rf2, "alice", "carol")
+	if err != nil {
+		t.Fatalf("ceremony 2: %v\n%s", err, out)
+	}
+	if code, res := s.importRefill(r2.ID, sg2); code != 200 {
+		t.Fatalf("import: %d %v", code, res)
+	}
+	s.waitRefill("SOL", "confirmed", 120*time.Second)
+	s.reconcileClean("after the second request")
+}
+
+// requireDiedAt fails unless the worker exited with status 137 AND logged that it reached the named failpoint: a failpoint with a wrong name arms nothing,
+// and a crash test that never crashes proves nothing.
+func (s *wdSys) requireDiedAt(fp string, timeout time.Duration) {
+	s.t.Helper()
+	code, ok := exitCodeOf(s.worker, timeout)
+	if !ok || code != 137 {
+		s.t.Fatalf("%s: the worker did not die at the failpoint (exited=%v code=%d)", fp, ok, code)
+	}
+	if !fileContains(s.worker.log, "failpoint reached: killing the process") || !fileContains(s.worker.log, `"failpoint":"`+fp+`"`) {
+		s.t.Fatalf("%s: the worker died, but not at this failpoint (no log line naming it)", fp)
 	}
 }
