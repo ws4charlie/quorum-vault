@@ -399,7 +399,7 @@ func (a *Activities) LoadRefill(ctx context.Context, id string) (RefillView, err
 	if err := a.D.Svc.Pool.QueryRow(ctx, `SELECT extract(epoch from now() - updated_at)::bigint FROM refills WHERE id=$1`, id).Scan(&age); err != nil {
 		return RefillView{}, err
 	}
-	exp := a.D.Svc.Cfg.Family == custody.FamilyBTC && r.Status == custody.RefillRequested && time.Duration(age)*time.Second > a.D.Svc.Cfg.RefillRequestTTL
+	exp := (a.D.Svc.Cfg.Family == custody.FamilyBTC || a.D.Svc.Cfg.Family == custody.FamilySOL) && r.Status == custody.RefillRequested && time.Duration(age)*time.Second > a.D.Svc.Cfg.RefillRequestTTL
 	repl := false
 	if r.Status == custody.RefillBroadcast {
 		repl, _ = a.D.Svc.HasUnsentReplacement(ctx, id)

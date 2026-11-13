@@ -2,7 +2,6 @@ package sol
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -18,61 +17,6 @@ import (
 // The accounts of the pool are not random keys: each is created with CreateAccountWithSeed from the hot shard as base, so its address is
 // sha256(hot shard, seed, system program) with a seed the zone can compute. Creating one needs no signature but the hot shard's, and the signing
 // zone knows every address of every pool from its own config.
-
-// Sysvars the nonce instructions name.
-const (
-	SysvarRecentBlockhashes = "SysvarRecentB1ockHashes11111111111111111111" // public sysvar id, not a secret; ggignore
-	SysvarRent              = "SysvarRent111111111111111111111111111111111" // public sysvar id, not a secret; ggignore
-)
-
-// NonceAccountSize is the size of a system-program nonce account.
-const NonceAccountSize = 80
-
-// DefaultNonceRent is the rent-exempt minimum of an 80-byte account at the default rent parameters ((128+80) x 3480 x 2). The zone's config
-// and the core's must carry the same number; the core checks it against the node at start.
-const DefaultNonceRent = 1_447_680
-
-// System program instruction numbers.
-const (
-	sysCreateWithSeed = 3
-	sysAdvanceNonce   = 4
-	sysInitNonce      = 6
-)
-
-// NonceSeed is the seed of pool account i of a hot shard.
-func NonceSeed(i int) string { return fmt.Sprintf("qv-nonce-%d", i) }
-
-// NonceAddress is the address of pool account i of the hot shard: create_with_seed(base = hot shard, seed, owner = system program).
-func NonceAddress(hot [32]byte, i int) [32]byte {
-	sys, _ := ParseAddress(SystemProgram)
-	h := sha256.New()
-	h.Write(hot[:])
-	h.Write([]byte(NonceSeed(i)))
-	h.Write(sys[:])
-	var out [32]byte
-	copy(out[:], h.Sum(nil))
-	return out
-}
-
-// AdvanceNonceData is the data of an AdvanceNonceAccount instruction.
-func AdvanceNonceData() []byte { return binary.LittleEndian.AppendUint32(nil, sysAdvanceNonce) }
-
-// InitNonceData is the data of an InitializeNonceAccount instruction for authority.
-func InitNonceData(authority [32]byte) []byte {
-	return append(binary.LittleEndian.AppendUint32(nil, sysInitNonce), authority[:]...)
-}
-
-// CreateWithSeedData is the data of a CreateAccountWithSeed instruction whose owner is the system program.
-func CreateWithSeedData(base [32]byte, seed string, lamports, space uint64) []byte {
-	sys, _ := ParseAddress(SystemProgram)
-	d := binary.LittleEndian.AppendUint32(nil, sysCreateWithSeed)
-	d = append(d, base[:]...)
-	d = binary.LittleEndian.AppendUint64(d, uint64(len(seed)))
-	d = append(d, seed...)
-	d = binary.LittleEndian.AppendUint64(d, lamports)
-	d = binary.LittleEndian.AppendUint64(d, space)
-	return append(d, sys[:]...)
-}
 
 // IsAdvanceNonce / IsInitNonce / IsCreateWithSeed tell the system instructions apart by their leading u32.
 func systemOp(data []byte) (uint32, bool) {

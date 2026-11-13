@@ -64,7 +64,22 @@ type wdOpts struct {
 	batch      int    // addresses per sweep (default 3)
 	closeQuiet string // see custody.SOLFile.CloseQuietAfter
 	activity   string // the engine's activity timeout (default 5s; sweep suites, whose scan reads more, use more)
+
+	// the cold tier (P8-7)
+	shards      int                 // hot shards (default 1), each its own 2-of-3 keyset
+	seedSOL     []uint64            // lamports on each shard (default hotSOL)
+	seedTKN     []uint64            // tokens on each shard (default hotTKN)
+	cold        map[string]coldBand // asset -> the pool's cold bands; with it the cold tier is configured
+	rebalance   map[string]string   // asset (or asset/shard) -> the shard's rebalance target
+	coldAddr    string              // the pool's cold address (default: a fresh key's)
+	coldPlan    string              // the cold planner's interval (default 1s)
+	refillTTL   string              // how long a refill request may wait for its signed file (default 24h)
+	refillStuck string              // ALERT time of a broadcast refill that does not confirm (default 30m)
+	toColdCap   string              // the zone's daily cap on moves to cold, per asset (default: far above anything a test moves)
 }
+
+// coldBand is the low-water mark, high-water mark and target of an asset's hot shards.
+type coldBand struct{ low, high, target string }
 
 type wdSys struct {
 	root *testing.T // the test that owns the processes
@@ -73,6 +88,10 @@ type wdSys struct {
 	o       wdOpts
 	hot     [32]byte
 	hotATA  [32]byte
+	hots    [][32]byte // every hot shard; hot is the first
+	coldKey key        // the pool's cold key when the test holds it (a plain address; the ceremony tests use the token's key)
+	coldAdr string
+	seeded  [][2]uint64 // per shard: the lamports and tokens put on it
 	svc     *custody.Service
 	adapter *sol.Adapter
 	approv  map[string]ed25519.PrivateKey
@@ -88,6 +107,14 @@ type wdSys struct {
 }
 
 func (s *wdSys) hotAddr() string { return sol.Address(s.hot) }
+
+func (s *wdSys) hotAddrs() []string {
+	var out []string
+	for _, h := range s.hots {
+		out = append(out, sol.Address(h))
+	}
+	return out
+}
 
 func (s *wdSys) newGuardDB() string {
 	t := s.t
@@ -162,6 +189,9 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	if o.batch == 0 {
 		o.batch = 3
 	}
+	if o.shards == 0 {
+		o.shards = 1
+	}
 	if o.activity == "" {
 		o.activity = "5s"
 	}
@@ -185,8 +215,18 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 
 	s.m3.WaitReady(90 * time.Second)
 	tm.Phase("mpc-wait")
-	pub := s.m3.DKGEd25519("sol-hot")
-	copy(s.hot[:], pub)
+	pubs := make([][]byte, o.shards)
+	for i := 0; i < o.shards; i++ {
+		id := "sol-hot"
+		if i > 0 {
+			id = fmt.Sprintf("sol-hot-%d", i)
+		}
+		pubs[i] = s.m3.DKGEd25519(id)
+		var h [32]byte
+		copy(h[:], pubs[i])
+		s.hots = append(s.hots, h)
+	}
+	s.hot = s.hots[0]
 	s.m3.DKGHDEd25519("sol-hd")
 	nctx, cancel := context.WithTimeout(s.ctx, time.Minute)
 	node, err := sol.AccountNode(nctx, s.m3.Client("A"), "sol-hd")
@@ -197,10 +237,29 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	s.node = node
 	tm.Phase("dkg")
 
-	// The hot shard: SOL for fees and withdrawals, tokens in its associated token account.
-	s.c.airdrop(s.hotAddr(), o.hotSOL)
-	s.hotATA = s.c.ata(s.hot, s.mint.pub)
-	s.c.run(s.funder, nil, s.c.createATA(s.funder.pub, s.hotATA, s.hot, s.mint.pub), s.c.mintTo(s.mint.pub, s.hotATA, s.funder.pub, hotTKN))
+	// The hot shards: SOL for fees and withdrawals, tokens in the associated token account.
+	for i, h := range s.hots {
+		sl, tk := uint64(o.hotSOL), uint64(hotTKN)
+		if i < len(o.seedSOL) {
+			sl = o.seedSOL[i]
+		}
+		if i < len(o.seedTKN) {
+			tk = o.seedTKN[i]
+		}
+		if sl > 0 {
+			s.c.airdrop(sol.Address(h), sl)
+		}
+		ata := s.c.ata(h, s.mint.pub)
+		ixs := []ix{s.c.createATA(s.funder.pub, ata, h, s.mint.pub)}
+		if tk > 0 {
+			ixs = append(ixs, s.c.mintTo(s.mint.pub, ata, s.funder.pub, tk))
+		}
+		s.c.run(s.funder, nil, ixs...)
+		if i == 0 {
+			s.hotATA = ata
+		}
+		s.seeded = append(s.seeded, [2]uint64{sl, tk})
+	}
 	// Wait until the funding is final: the core reads the shard at finalized commitment.
 	s.c.waitStatus(s.c.run(s.funder, nil, s.c.sysTransfer(s.funder.pub, s.funder.pub, 1)), "finalized", false)
 	tm.Phase("hot")
@@ -222,18 +281,26 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if o.cold != nil || o.coldAddr != "" {
+		s.coldAdr = o.coldAddr
+		if s.coldAdr == "" {
+			s.coldKey = newKey(t)
+			s.coldAdr = s.coldKey.addr()
+		}
+	}
 	tiersSOL := []custody.TierFile{{MinAmount: "0", Approvals: 1, Auto: true}, {MinAmount: fmt.Sprint(5 * oneSOL), Approvals: 2}}
 	tiersTKN := []custody.TierFile{{MinAmount: "0", Approvals: 1, Auto: true}, {MinAmount: fmt.Sprint(500 * tknUnit), Approvals: 2}}
 	s.cf = custody.File{
 		Entity: "qv-us",
 		Chain: custody.ChainFile{Family: "sol", Name: s.chain,
 			SOL: &custody.SOLFile{Network: "localnet", RPCURL: s.proxy.url, AccountPublicKey: hex.EncodeToString(node.PublicKey[:]), AccountChainCode: hex.EncodeToString(node.ChainCode[:]),
-				HotShards: []string{s.hotAddr()}, NoncePool: o.pool, NonceRentLamports: rent, ComputeUnitLimit: startUnit, ComputeUnitPrice: 1000, FeeBumpPercent: 25, MaxMicroLamports: maxMicro,
+				HotShards: s.hotAddrs(), NoncePool: o.pool, NonceRentLamports: rent, ComputeUnitLimit: startUnit, ComputeUnitPrice: 1000, FeeBumpPercent: 25, MaxMicroLamports: maxMicro,
 				SweepBatch: o.batch, CloseQuietAfter: o.closeQuiet},
 			Assets: map[string]custody.AssetFile{"SOL": {Decimals: 9, MinDeposit: "1000"}, "TKN": {Address: s.mint.addr(), Decimals: 6, MinDeposit: "1"}}},
 		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: o.approvalWait, SignTimeout: o.signTimeout, StuckAfter: o.stuckAfter, ActivityTimeout: o.activity,
 			HotWait: "1m", MaxReplacements: o.maxReplace, Tiers: map[string][]custody.TierFile{"SOL": tiersSOL, "TKN": tiersTKN}},
 		Sweep: custody.SweepFile{K: 20, MinSweepWei: o.minSweep, PlanInterval: "500ms", RetryAfter: "3s"},
+		Cold:  s.coldFile(),
 		Scan:  custody.ScanFile{Interval: "300ms", StartHeight: start + 1},
 	}
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
@@ -243,23 +310,33 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	}
 
 	// The signing zone's config: separate file, separate trust.
-	partSOL, partTKN := s.cfg.PartitionKey("SOL", 0).String(), s.cfg.PartitionKey("TKN", 0).String()
-	sf := s.m3.GatewaySignerEd("sol-hot", pub, "sol-hd", sol.AccountPath())
+	signers, hotMap := map[string]gateway.SignerFile{}, map[string]string{}
+	for i := range s.hots {
+		id := "sol-hot"
+		if i > 0 {
+			id = fmt.Sprintf("sol-hot-%d", i)
+		}
+		sf := s.m3.GatewaySignerEd(id, pubs[i], "sol-hd", sol.AccountPath())
+		for _, sym := range []string{"SOL", "TKN"} {
+			p := s.cfg.PartitionKey(sym, i).String()
+			signers[p], hotMap[p] = sf, sol.Address(s.hots[i])
+		}
+	}
 	apprs := map[string]gateway.ApproverFile{}
 	for n, p := range s.apprPub {
 		apprs[n] = gateway.ApproverFile{PublicKey: p, Enabled: true}
 	}
 	s.gf = gateway.File{
 		Approvers: apprs, SignTimeout: o.signTimeout, MaxIntentAge: "24h",
-		Signers: map[string]gateway.SignerFile{partSOL: sf, partTKN: sf},
-		Chains: map[string]gateway.ChainFile{s.chain: {Family: "sol", WithdrawalsPerHour: 100000, SweepsPerHour: 100000, CancelsPerHour: 1000,
+		Signers: signers,
+		Chains: map[string]gateway.ChainFile{s.chain: {Family: "sol", WithdrawalsPerHour: 100000, SweepsPerHour: 100000, CancelsPerHour: 1000, ToColdPerHour: 1000, RebalancePerHour: 1000,
 			SOL: &gateway.SOLFile{AccountPublicKey: hex.EncodeToString(node.PublicKey[:]), AccountChainCode: hex.EncodeToString(node.ChainCode[:]),
-				HotShards: map[string]string{partSOL: s.hotAddr(), partTKN: s.hotAddr()}, Tokens: map[string]gateway.SOLTokenFile{"TKN": {Mint: s.mint.addr(), Decimals: 6}},
+				HotShards: hotMap, ColdAddresses: s.coldMap(), Tokens: map[string]gateway.SOLTokenFile{"TKN": {Mint: s.mint.addr(), Decimals: 6}},
 				MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: maxMicro, MaxPriorityFeeLamports: 15_000, NoncePool: o.pool, NonceRentLamports: rent},
 			Assets: map[string]gateway.AssetFile{
-				"SOL": {AnyDestination: true, PerTxCap: fmt.Sprint(50 * oneSOL), DailyCap: fmt.Sprint(1000 * oneSOL),
+				"SOL": {AnyDestination: true, PerTxCap: fmt.Sprint(50 * oneSOL), DailyCap: fmt.Sprint(1000 * oneSOL), ToColdDailyCap: fmt.Sprint(100_000 * oneSOL), RebalanceDailyCap: fmt.Sprint(100_000 * oneSOL),
 					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: fmt.Sprint(5 * oneSOL), Approvals: 2}}},
-				"TKN": {AnyDestination: true, PerTxCap: fmt.Sprint(100_000 * tknUnit), DailyCap: fmt.Sprint(10_000_000 * tknUnit),
+				"TKN": {AnyDestination: true, PerTxCap: fmt.Sprint(100_000 * tknUnit), DailyCap: fmt.Sprint(10_000_000 * tknUnit), ToColdDailyCap: fmt.Sprint(100_000_000 * tknUnit), RebalanceDailyCap: fmt.Sprint(100_000_000 * tknUnit),
 					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: fmt.Sprint(500 * tknUnit), Approvals: 2}}}}}},
 	}
 	if o.gwTweak != nil {
@@ -309,11 +386,17 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	tm.Phase("gateway")
 
 	// The books learn what the operator put on the shard, then the pool is created through the signing zone.
-	if err := s.svc.FundHot(s.ctx, "seed-sol", 0, bigU(o.hotSOL)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.svc.FundHotAsset(s.ctx, "seed-tkn", 0, "TKN", bigU(hotTKN)); err != nil {
-		t.Fatal(err)
+	for i, sd := range s.seeded {
+		if sd[0] > 0 {
+			if err := s.svc.FundHot(s.ctx, fmt.Sprintf("seed-sol-%d", i), i, bigU(sd[0])); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if sd[1] > 0 {
+			if err := s.svc.FundHotAsset(s.ctx, fmt.Sprintf("seed-tkn-%d", i), i, "TKN", bigU(sd[1])); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	if !o.noPool {
 		s.setupPool()
@@ -330,11 +413,43 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 // setupPool creates the shard's nonce accounts through the signing zone, as the operator command does.
 func (s *wdSys) setupPool() int {
 	s.t.Helper()
-	n, err := s.svc.SetupNonces(s.ctx, 0, "carol", s.approv["carol"], 3*time.Minute)
-	if err != nil {
-		s.t.Fatalf("nonce pool: %v\ngateway: %s", err, tail(s.gateway.Output()))
+	total := 0
+	for i := range s.hots {
+		n, err := s.svc.SetupNonces(s.ctx, i, "carol", s.approv["carol"], 3*time.Minute)
+		if err != nil {
+			s.t.Fatalf("nonce pool of shard %d: %v\ngateway: %s", i, err, tail(s.gateway.Output()))
+		}
+		total += n
 	}
-	return n
+	return total
+}
+
+// coldMap is the zone's and the core's pinned cold address per pool ("" when the test has no cold tier).
+func (s *wdSys) coldFile() custody.ColdFile {
+	if s.coldAdr == "" {
+		return custody.ColdFile{}
+	}
+	o := s.o
+	plan := o.coldPlan
+	if plan == "" {
+		plan = "1s"
+	}
+	cf := custody.ColdFile{Addresses: map[string]string{"omnibus": s.coldAdr}, Limits: map[string]custody.LimitFile{}, PlanInterval: plan,
+		Refill: custody.RefillFile{Poll: "1s", StuckAfter: o.refillStuck, RequestTTL: o.refillTTL}}
+	for asset, b := range o.cold {
+		cf.Limits[asset] = custody.LimitFile{Low: b.low, High: b.high, Target: b.target}
+	}
+	if len(o.rebalance) > 0 {
+		cf.Rebalance = custody.RebalanceFile{Targets: o.rebalance}
+	}
+	return cf
+}
+
+func (s *wdSys) coldMap() map[string]string {
+	if s.coldAdr == "" {
+		return nil
+	}
+	return map[string]string{"omnibus": s.coldAdr}
 }
 
 func tail(s string) string {

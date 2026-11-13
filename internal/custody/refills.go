@@ -65,6 +65,7 @@ type Refill struct {
 	RequestHash string
 	Request     *coldsign.Request
 	BTC         *coldsign.BTCRequest // the request of a Bitcoin refill (Request is for the evm family)
+	SOL         *coldsign.SOLRequest // the request of a Solana refill
 	RawTx       string
 	TxHash      string
 	Reason      string
@@ -92,6 +93,12 @@ func scanRefill(row pgx.Row) (Refill, error) {
 				return r, err
 			}
 			r.BTC = &q
+		} else if coldsign.IsSOLRequest([]byte(`{"request":` + string(req) + `}`)) {
+			var q coldsign.SOLRequest
+			if err := json.Unmarshal(req, &q); err != nil {
+				return r, err
+			}
+			r.SOL = &q
 		} else {
 			var q coldsign.Request
 			if err := json.Unmarshal(req, &q); err != nil {
@@ -192,6 +199,13 @@ func (s *Service) openRefill(ctx context.Context, tx pgx.Tx, partitionID, asset 
 			return "", false, err
 		}
 		hotHex = s.Cfg.BTC.HotShards[i].Address
+	} else if s.Cfg.Family == FamilySOL {
+		if coldHex, err = s.Cfg.ColdAddressOf(partitionID, asset); err != nil {
+			return "", false, err
+		}
+		if hotHex, _, err = s.Cfg.ShardAddressOf(partitionID); err != nil {
+			return "", false, err
+		}
 	} else {
 		cold, err := s.Cfg.EVM.ColdAddress(partitionID, asset)
 		if err != nil {
@@ -229,8 +243,8 @@ func (s *Service) openRefill(ctx context.Context, tx pgx.Tx, partitionID, asset 
 // (the fees may be stale by the time the ceremony finishes, or the cold nonce moved): each export is a new revision with a new
 // hash, so a signed file made for an older export can no longer be imported. Only a request that has not been signed can be exported.
 func (s *Service) ExportRefill(ctx context.Context, id string) (coldsign.RequestFile, error) {
-	if s.Cfg.Family == FamilyBTC {
-		return coldsign.RequestFile{}, fmt.Errorf("%w: a Bitcoin refill is exported with ExportBTCRefill", ErrInvalid)
+	if s.Cfg.Family == FamilyBTC || s.Cfg.Family == FamilySOL {
+		return coldsign.RequestFile{}, fmt.Errorf("%w: a Bitcoin refill is exported with ExportBTCRefill, a Solana one with ExportSOLRefill", ErrInvalid)
 	}
 	rc, err := s.refillChain()
 	if err != nil {
@@ -345,6 +359,9 @@ func (s *Service) BroadcastRefill(ctx context.Context, id string, afterSend func
 	if s.Cfg.Family == FamilyBTC {
 		return s.broadcastBTCRefill(ctx, r, afterSend)
 	}
+	if s.Cfg.Family == FamilySOL {
+		return s.broadcastSOLRefill(ctx, r, afterSend)
+	}
 	rc, err := s.refillChain()
 	if err != nil {
 		return "", err
@@ -392,6 +409,10 @@ func (s *Service) RefillTxState(ctx context.Context, id string) (evm.RefillState
 		st, err := s.btcRefillState(ctx, id)
 		return evm.RefillState(st), err
 	}
+	if s.Cfg.Family == FamilySOL {
+		st, err := s.solRefillState(ctx, id)
+		return evm.RefillState(st), err
+	}
 	rc, err := s.refillChain()
 	if err != nil {
 		return "", err
@@ -419,6 +440,10 @@ func (s *Service) SettleRefill(ctx context.Context, id string, reverted bool) er
 	}
 	var fee *big.Int
 	if s.Cfg.Family == FamilyBTC {
+		if fee, err = s.Chain.TxFee(ctx, r.TxHash); err != nil {
+			return err
+		}
+	} else if s.Cfg.Family == FamilySOL {
 		if fee, err = s.Chain.TxFee(ctx, r.TxHash); err != nil {
 			return err
 		}
@@ -500,7 +525,7 @@ func (s *Service) ParkRefill(ctx context.Context, id, reason string) error {
 // FundCold books that the operator put amount of asset into the cold address (a deposit from outside the system), so the
 // ledger keeps mirroring the chain: cold -> opfund. id makes it idempotent. shard picks the partition the amount is booked to.
 func (s *Service) FundCold(ctx context.Context, id string, shard int, asset string, amount *big.Int) error {
-	if shard < 0 || shard >= len(s.Cfg.HotShards) || amount == nil || amount.Sign() <= 0 {
+	if shard < 0 || shard >= s.Cfg.shardCount() || amount == nil || amount.Sign() <= 0 {
 		return fmt.Errorf("%w: fund cold", ErrInvalid)
 	}
 	if _, ok := s.Cfg.Assets[asset]; !ok {
@@ -532,6 +557,14 @@ func partitionPool(partitionID string) (string, error) {
 func (s *Service) bookColdSignerFee(ctx context.Context, tx pgx.Tx, r Refill, fee *big.Int) error {
 	if s.Cfg.Family == FamilyBTC { // the cold address paid it: it comes out of cold
 		return s.transfer(ctx, tx, "rf-fee:"+r.TxHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), coldAcct(r.PartitionID), fee,
+			map[string]any{"refill": r.ID, "kind": "cold_network_fee", "signer": r.ColdAddress})
+	}
+	if s.Cfg.Family == FamilySOL { // the cold address paid the fee (and the rent of a token account it opened) in SOL
+		np, err := s.nativePartitionOf(r.PartitionID)
+		if err != nil {
+			return err
+		}
+		return s.transfer(ctx, tx, "rf-fee:"+r.TxHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), coldAcct(np), fee,
 			map[string]any{"refill": r.ID, "kind": "cold_network_fee", "signer": r.ColdAddress})
 	}
 	nativePart, err := s.nativePartitionOf(r.PartitionID)
@@ -628,7 +661,7 @@ func (s *Service) RequestAction(ctx context.Context, kind, param, signer string)
 // SpendCold books that the operator took amount of asset out of the cold address by some other means (a transfer the books did not
 // make), so the cold balance in the books keeps matching the chain: opfund -> cold. id makes it idempotent.
 func (s *Service) SpendCold(ctx context.Context, id string, shard int, asset string, amount *big.Int) error {
-	if shard < 0 || shard >= len(s.Cfg.HotShards) || amount == nil || amount.Sign() <= 0 {
+	if shard < 0 || shard >= s.Cfg.shardCount() || amount == nil || amount.Sign() <= 0 {
 		return fmt.Errorf("%w: spend cold", ErrInvalid)
 	}
 	if _, ok := s.Cfg.Assets[asset]; !ok {
@@ -676,6 +709,9 @@ func (s *Service) CloseRefill(ctx context.Context, id, actor, reason string) err
 		if s.Cfg.Family == FamilyBTC && r.Status == RefillSigned {
 			// A signature exists: releasing its inputs would let the signed transaction and a new one race. It is resolved on the chain first.
 			return fmt.Errorf("%w: %s is signed; its inputs stay reserved until the transaction is resolved on the chain", ErrInvalid, id)
+		}
+		if s.Cfg.Family == FamilySOL && r.Parked() && r.Status == RefillBroadcast {
+			return s.closeSOLBroadcast(ctx, tx, r, actor, reason)
 		}
 		if !r.Parked() || (r.Status != RefillRequested && r.Status != RefillSigned) {
 			return fmt.Errorf("%w: %s is %s%s: only a parked request that was never broadcast can be closed", ErrInvalid, id, r.Status, map[bool]string{true: ", parked", false: ", not parked"}[r.Parked()])

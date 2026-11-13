@@ -33,8 +33,10 @@ type Config struct {
 	// HotShards maps each hot partition ID (the SOL partition and the token partitions of one shard share an address) to the address of its
 	// shard. NoncePool is the number of nonce accounts per shard and NonceRent the lamports each holds; the core checks NonceRent against the node.
 	HotShards map[string]string
-	NoncePool int
-	NonceRent uint64
+	// ColdAddresses maps a pool ("omnibus", "segregated:<client>") to its cold address: the owner of the pool's SOL and of its token accounts.
+	ColdAddresses map[string]string
+	NoncePool     int
+	NonceRent     uint64
 	// ComputeUnitLimit and ComputeUnitPrice (micro-lamports per unit) are what a withdrawal is built with; a fee raise adds FeeBumpPercent to the
 	// price (at least one micro-lamport) and never goes above MaxMicroLamports, which must not exceed the signing zone's cap.
 	ComputeUnitLimit uint32

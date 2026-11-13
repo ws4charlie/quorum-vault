@@ -99,7 +99,7 @@ type ChainFile struct {
 	// "evm". An unknown family refuses to start. The fields below are those of the evm family.
 	Family string `json:"family,omitempty"`
 	// BTC is the section of the btc family; the evm fields below are not read for it.
-	BTC              *BTCFile             `json:"btc,omitempty"`
+	BTC *BTCFile `json:"btc,omitempty"`
 	// SOL is the section of the sol family (Solana); the evm fields below are not read for it.
 	SOL              *SOLFile             `json:"sol,omitempty"`
 	Name             string               `json:"name"`
@@ -177,8 +177,8 @@ type Config struct {
 	// SweepBatch and CloseQuiet: see SOLFile.
 	SweepBatch int
 	CloseQuiet time.Duration
-	Chain  string
-	Native string
+	Chain      string
+	Native     string
 
 	HotShards []common.Address
 	SinkShard int
@@ -667,6 +667,17 @@ func (c *Config) PartitionKey(asset string, shard int) partition.Key {
 // ColdAddressOf is the cold address of a partition's pool and asset, for any family, in the form the family's chain cell takes (an evm address in
 // hex, a canonical bitcoin address).
 func (c *Config) ColdAddressOf(partitionID, asset string) (string, error) {
+	if c.Family == FamilySOL {
+		k, err := partition.Parse(partitionID)
+		if err != nil {
+			return "", err
+		}
+		a, ok := c.SOL.ColdAddresses[string(k.Pool)]
+		if !ok {
+			return "", fmt.Errorf("custody: no cold address for pool %q", k.Pool)
+		}
+		return a, nil
+	}
 	if c.Family == FamilyBTC {
 		k, err := partition.Parse(partitionID)
 		if err != nil {
@@ -709,6 +720,38 @@ func (c *Config) ShardAddress(partitionID string) (common.Address, int, error) {
 	return c.HotShards[k.Shard], k.Shard, nil
 }
 
+// ShardAddressOf is the hot address of a partition's shard in the form the family's chain cell takes, and the shard's index.
+func (c *Config) ShardAddressOf(partitionID string) (string, int, error) {
+	switch c.Family {
+	case FamilySOL:
+		i, err := c.ShardIndex(partitionID)
+		if err != nil {
+			return "", 0, err
+		}
+		return c.SOLHot[i], i, nil
+	case FamilyBTC:
+		i, err := c.ShardIndex(partitionID)
+		if err != nil {
+			return "", 0, err
+		}
+		a, err := c.BTCShardAddress(partitionID)
+		return a, i, err
+	}
+	a, i, err := c.ShardAddress(partitionID)
+	return a.Hex(), i, err
+}
+
+// NativeReserve is the native balance a hot shard needs to pay the fee of a token transaction, and what a rebalance or refill of a token checks.
+func (c *Config) NativeReserve() *big.Int {
+	if c.Family == FamilySOL {
+		// the worst-case priority fee and the base fee of two signatures, plus the rent of a token account the transaction may open
+		fee := new(big.Int).Mul(new(big.Int).SetUint64(uint64(c.SOL.ComputeUnitLimit)), new(big.Int).SetUint64(c.SOL.MaxMicroLamports))
+		fee.Div(fee, big.NewInt(1_000_000))
+		return fee.Add(fee, big.NewInt(10_000+2_039_280))
+	}
+	return c.EVM.MaxTxFeeWei
+}
+
 // Required returns the approvals an amount of asset needs and whether the
 // automated key may supply them.
 func (c *Config) Required(asset string, amount *big.Int) (n int, auto bool) {
@@ -742,9 +785,21 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 		return nil
 	}
 	if c.Family == FamilySOL {
-		return errors.New("custody: config: family sol has no cold tier yet")
-	}
-	if c.Family == FamilyBTC {
+		// One cold key per pool: its address owns the pool's SOL and its token accounts. The signing zone pins the same addresses.
+		c.SOL.ColdAddresses = map[string]string{}
+		for pool, a := range cf.Addresses {
+			raw, err := sol.ParseAddress(a)
+			if err != nil {
+				return fmt.Errorf("custody: config: cold address of pool %q: %w", pool, err)
+			}
+			for _, h := range c.SOLHot {
+				if h == a {
+					return fmt.Errorf("custody: config: the cold address of pool %q is a hot shard", pool)
+				}
+			}
+			c.SOL.ColdAddresses[pool] = sol.Address(raw)
+		}
+	} else if c.Family == FamilyBTC {
 		c.BTC.ColdAddresses = map[string]string{}
 		for k, a := range cf.Addresses {
 			c.BTC.ColdAddresses[k] = a
@@ -839,7 +894,7 @@ func (c *Config) buildRebalance(rf RebalanceFile) error {
 	if len(rf.Targets) == 0 {
 		return nil
 	}
-	if len(c.HotShards) < 2 {
+	if c.shardCount() < 2 {
 		return errors.New("custody: config: rebalance targets need at least two hot shards")
 	}
 	c.RebalanceTargets = map[string]*big.Int{}
@@ -850,8 +905,8 @@ func (c *Config) buildRebalance(rf RebalanceFile) error {
 		}
 		if hasShard {
 			i, err := strconv.Atoi(shard)
-			if err != nil || i < 0 || i >= len(c.HotShards) {
-				return fmt.Errorf("custody: config: rebalance target %q: shard must be 0..%d", k, len(c.HotShards)-1)
+			if err != nil || i < 0 || i >= c.shardCount() {
+				return fmt.Errorf("custody: config: rebalance target %q: shard must be 0..%d", k, c.shardCount()-1)
 			}
 		}
 		if _, err := amount("rebalance target "+k, v); err != nil {
@@ -861,12 +916,12 @@ func (c *Config) buildRebalance(rf RebalanceFile) error {
 	for _, sym := range c.AssetList {
 		_, all := rf.Targets[sym]
 		anyShard := false
-		for i := range c.HotShards {
+		for i := 0; i < c.shardCount(); i++ {
 			if _, ok := rf.Targets[fmt.Sprintf("%s/%d", sym, i)]; ok {
 				anyShard = true
 			}
 		}
-		for i := range c.HotShards {
+		for i := 0; i < c.shardCount(); i++ {
 			v, ok := rf.Targets[fmt.Sprintf("%s/%d", sym, i)]
 			if !ok {
 				v, ok = rf.Targets[sym]
