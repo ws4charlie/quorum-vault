@@ -176,6 +176,10 @@ func TestColdRefillCrash(t *testing.T) {
 			}
 			return false
 		})
+		// every new request is announced, whatever the state of the once-per-outage flag
+		s.waitFor(30*time.Second, fp+": the ALERT naming the new request", func() bool {
+			return fileContains(s.worker.log, `"refill":"`+id+`"`) && fileContains(s.worker.log, "ALERT: hot wallet is below its low-water mark")
+		})
 		s.refillCeremony(k, id)
 		s.requireDiedAt(fp, scale(120*time.Second))
 		s.reconcileClean("worker dead at " + fp)
@@ -341,5 +345,43 @@ func (s *wdSys) dumpCold() {
 		}
 		rows.Close()
 	}
+	for _, id := range []string{"cold-planner:" + s.chain} {
+		d, err := s.tc.DescribeWorkflowExecution(s.ctx, id, "")
+		if err != nil {
+			s.t.Logf("workflow %s: %v", id, err)
+			continue
+		}
+		s.t.Logf("workflow %s: %v", id, d.WorkflowExecutionInfo.GetStatus())
+		for _, pa := range d.PendingActivities {
+			msg := ""
+			if f := pa.GetLastFailure(); f != nil {
+				msg = f.GetMessage()
+			}
+			s.t.Logf("  pending activity %s state %v attempt %d last heartbeat %v last failure %q", pa.GetActivityType().GetName(), pa.GetState(), pa.GetAttempt(), pa.GetLastHeartbeatTime().AsTime(), msg)
+		}
+	}
 	s.t.Logf("chain: shard 0 %d lamports, cold %d lamports", s.shardBalance(0, "SOL"), s.coldBalance("SOL"))
+}
+
+// A refill whose transaction the node never got (or the leaders dropped) is sent again until it lands: it would otherwise stay "broadcast" for ever,
+// holding the cold address's one open request, with no way for an operator to close it (its nonce is not consumed).
+func TestColdRefillIsSentAgainUntilItLands(t *testing.T) {
+	k := newSolKit(t)
+	s := newWdSystem(t, refillOpts(k, ""))
+	s.coldReady(k)
+	stop := s.watchReconcile()
+	r := s.waitRefill("SOL", "requested", 90*time.Second)
+	s.proxy.hold.Store(true) // nothing the core or the worker sends reaches the chain
+	s.refillCeremony(k, r.ID)
+	s.waitRefill("SOL", "broadcast", 60*time.Second)
+	s.waitFor(90*time.Second, "the transaction to be sent again while it is not on the chain", func() bool { return s.proxy.heldCount() >= 3 })
+	if st := s.statusOf(s.refills()[0].Tx); st != nil && st.Status != "" {
+		t.Fatalf("the held transaction landed: %+v", st)
+	}
+	s.proxy.hold.Store(false)
+	s.waitRefill("SOL", "confirmed", 120*time.Second)
+	if bad := stop(); len(bad) > 0 {
+		t.Fatalf("Reconcile failed: %v", bad)
+	}
+	s.reconcileClean("after the refill landed")
 }

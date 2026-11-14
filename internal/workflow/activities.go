@@ -349,6 +349,10 @@ func (a *Activities) PlanColdMoves(ctx context.Context) (int, error) {
 	stop := heartbeating(ctx)
 	defer stop()
 	mv, err := a.D.Svc.PlanColdMoves(ctx, a.log())
+	if err != nil {
+		// Temporal retries a failed pass silently; say so, or a planner that fails on every pass looks like a planner with nothing to do.
+		a.log().Error("cold planner pass failed; it is retried", "error", err.Error())
+	}
 	return len(mv), err
 }
 

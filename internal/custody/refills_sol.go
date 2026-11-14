@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -255,8 +256,32 @@ func (s *Service) solRefillState(ctx context.Context, id string) (string, error)
 			}
 			return "consumed", nil
 		}
+		s.resendSOLRefill(ctx, r)
 	}
 	return "pending", nil
+}
+
+// solResent remembers when a pending refill's transaction was last sent again, by refill ID.
+var solResent sync.Map
+
+// resendSOLRefill sends the signed transaction of a refill that is on its way again, at most every 10 seconds. A durable-nonce transaction does not expire, and
+// the same signature cannot land twice, so sending it again is harmless; it is what carries a transaction the leaders dropped (or the node never forwarded) to
+// the chain, instead of a refill that waits for ever and holds the cold address's one open request.
+func (s *Service) resendSOLRefill(ctx context.Context, r Refill) {
+	if r.RawTx == "" {
+		return
+	}
+	if t, ok := solResent.Load(r.ID); ok && time.Since(t.(time.Time)) < 10*time.Second {
+		return
+	}
+	solResent.Store(r.ID, time.Now())
+	sc, err := s.solCold()
+	if err != nil {
+		return
+	}
+	if raw, err := hex.DecodeString(r.RawTx); err == nil {
+		_, _ = sc.SendRawTx(ctx, raw)
+	}
 }
 
 // closeSOLBroadcast closes a parked Solana refill that was broadcast and whose nonce was consumed by something else: the transaction can never mine, so the
