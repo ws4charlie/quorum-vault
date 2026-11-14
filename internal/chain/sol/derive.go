@@ -2,10 +2,8 @@ package sol
 
 import (
 	"crypto/hmac"
-	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
-	"errors"
 	"fmt"
 
 	"filippo.io/edwards25519"
@@ -81,20 +79,6 @@ func (n Node) Derive(path ...uint32) (Node, error) {
 	return cur, nil
 }
 
-// Address is the base58 form of a 32-byte public key: the Solana address.
-func Address(pub [32]byte) string { return base58.Encode(pub[:]) }
-
-// ParseAddress decodes a base58 address to its 32 bytes.
-func ParseAddress(s string) ([32]byte, error) {
-	var out [32]byte
-	b := base58.Decode(s)
-	if len(b) != 32 {
-		return out, fmt.Errorf("sol: %q is not a 32-byte base58 address", s)
-	}
-	copy(out[:], b)
-	return out, nil
-}
-
 // DepositAddressAt is the deposit address of the customer index: account node -> external branch -> index.
 func (n Node) DepositAddressAt(index uint32) (string, error) {
 	c, err := n.Derive(BranchExternal, index)
@@ -102,55 +86,6 @@ func (n Node) DepositAddressAt(index uint32) (string, error) {
 		return "", err
 	}
 	return Address(c.PublicKey), nil
-}
-
-// ---- Associated token accounts ----
-
-// Program ids (classic SPL Token and the Associated Token Account program; Token-2022 is not supported).
-const (
-	SystemProgram       = "11111111111111111111111111111111"             // public program id, not a secret; ggignore
-	TokenProgram        = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"  // public program id, not a secret; ggignore
-	AssociatedTokenProg = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" // public program id, not a secret; ggignore
-)
-
-// onCurve reports whether 32 bytes decode to a point of the Ed25519 curve.
-func onCurve(b []byte) bool {
-	_, err := new(edwards25519.Point).SetBytes(b)
-	return err == nil
-}
-
-// findProgramAddress is Solana's PDA search: the first bump from 255 down for which sha256(seeds || bump || program || "ProgramDerivedAddress")
-// is not on the curve.
-func findProgramAddress(seeds [][]byte, program [32]byte) ([32]byte, error) {
-	for bump := 255; bump >= 0; bump-- {
-		h := sha256.New()
-		for _, s := range seeds {
-			h.Write(s)
-		}
-		h.Write([]byte{byte(bump)})
-		h.Write(program[:])
-		h.Write([]byte("ProgramDerivedAddress"))
-		var out [32]byte
-		copy(out[:], h.Sum(nil))
-		if !onCurve(out[:]) {
-			return out, nil
-		}
-	}
-	return [32]byte{}, errors.New("sol: no program address found")
-}
-
-// ATA is the associated token account of owner for mint: the PDA of the Associated Token program at seeds (owner, token program, mint).
-// Deposits of a token are credited only when they arrive here.
-func ATA(owner, mint [32]byte) ([32]byte, error) {
-	tok, err := ParseAddress(TokenProgram)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	ata, err := ParseAddress(AssociatedTokenProg)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	return findProgramAddress([][]byte{owner[:], tok[:], mint[:]}, ata)
 }
 
 // MustDecodeBase58 decodes a base58 string (a blockhash, a signature); it is for tests and returns nil for bad input.

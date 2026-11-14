@@ -63,6 +63,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v2/cold/spends", a.spendCold)
 	mux.HandleFunc("POST /v2/cold/actions", a.requestAction)
 	mux.HandleFunc("POST /v2/refills/{id}/close", a.closeRefill)
+	mux.HandleFunc("POST /v2/cold-setup/export", a.exportColdSetup)
+	mux.HandleFunc("POST /v2/cold-setup/submit", a.submitColdSetup)
 	mux.HandleFunc("POST /v2/guardian/freezes", a.guardianFreeze)
 	mux.HandleFunc("GET /v2/audit/verify", a.auditVerify)
 	// Whoever the X-Actor header names is the actor of everything the request causes, in the audit trail.
@@ -380,6 +382,15 @@ func (a *API) exportRefill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, f)
 		return
 	}
+	if a.svc.Cfg.Family == FamilySOL {
+		f, err := a.svc.ExportSOLRefill(r.Context(), r.PathValue("id"))
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, f)
+		return
+	}
 	f, err := a.svc.ExportRefill(r.Context(), r.PathValue("id"))
 	if err != nil {
 		a.fail(w, err)
@@ -407,6 +418,20 @@ func (a *API) importRefill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, refillJSON(x))
 		return
 	}
+	if a.svc.Cfg.Family == FamilySOL {
+		var ss coldsign.SOLSigned
+		if err := decode(r, &ss); err != nil {
+			a.fail(w, err)
+			return
+		}
+		x, err := a.svc.ImportSOLRefill(r.Context(), r.PathValue("id"), ss)
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, refillJSON(x))
+		return
+	}
 	var signed coldsign.Signed
 	if err := decode(r, &signed); err != nil {
 		a.fail(w, err)
@@ -418,6 +443,51 @@ func (a *API) importRefill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, refillJSON(x))
+}
+
+// exportColdSetup returns the request file of the one-time setup of a pool's cold address (Solana): the nonce accounts and token accounts it lacks.
+func (a *API) exportColdSetup(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		Pool string `json:"pool"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	f, need, err := a.svc.ExportColdSetup(r.Context(), body.Pool)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	if !need {
+		writeJSON(w, http.StatusOK, map[string]any{"nothing_to_do": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, f)
+}
+
+// submitColdSetup sends the signed setup that came back from the ceremony and books its cost.
+func (a *API) submitColdSetup(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		Request coldsign.SOLRequest `json:"request"`
+		Signed  coldsign.SOLSigned  `json:"signed"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	sig, err := a.svc.SubmitColdSetup(r.Context(), body.Request, body.Signed, a.svc.waitFinal)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tx_hash": sig})
 }
 
 // fundCold books operator funding of the cold address.

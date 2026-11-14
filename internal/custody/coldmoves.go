@@ -143,7 +143,9 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 				if err != nil {
 					return err
 				}
-				if !alerted {
+				// An ALERT for every new request, and one per outage for a shard that stays low: the flag below only keeps the second kind from repeating,
+				// so a flag left set (a refill settled and the band was crossed again before a pass saw the shard above its mark) never hides a request.
+				if opened || !alerted {
 					if _, err := tx.Exec(ctx, `INSERT INTO hot_low_alerts (partition_id) VALUES ($1) ON CONFLICT DO NOTHING`, p); err != nil {
 						return err
 					}

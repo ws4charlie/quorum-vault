@@ -328,9 +328,7 @@ func TestWdCrash(t *testing.T) {
 		if w.Code != 201 {
 			t.Fatalf("%s: %d %v", fp, w.Code, w.Raw)
 		}
-		if code, ok := exitCodeOf(s.worker, scale(120*time.Second)); !ok || code != 137 {
-			t.Fatalf("%s: the worker did not die at the failpoint (exited=%v code=%d)", fp, ok, code)
-		}
+		s.requireDiedAt(fp, scale(120*time.Second))
 		// with the worker dead, the books and the chain are in the middle of the withdrawal: Reconcile still agrees
 		s.reconcileClean("worker dead at " + fp)
 		s.startWorker("")

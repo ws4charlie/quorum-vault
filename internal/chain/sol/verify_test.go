@@ -128,6 +128,8 @@ type fx struct {
 	depAddr                [32]byte
 	depIdx                 uint32
 	bh                     [32]byte
+	cold, hot2             [32]byte
+	partSOL2               string
 	nv                     [32]byte // the value of the nonce account the withdrawals sign
 	nonce0                 [32]byte
 }
@@ -144,6 +146,8 @@ func pub(t *testing.T) [32]byte {
 
 func newFx(t *testing.T) *fx {
 	f := &fx{t: t, hot: pub(t), dest: pub(t), mint: pub(t), other: pub(t), depIdx: 7}
+	f.cold, f.hot2 = pub(t), pub(t)
+	f.partSOL2 = "qv-us/sol-1/SOL/hot/omnibus/1"
 	f.node = Node{PublicKey: pub(t)}
 	copy(f.node.ChainCode[:], []byte("a chain code of 32 bytes for tst"))
 	f.partSOL, f.partTKN = "qv-us/sol-1/SOL/hot/omnibus/0", "qv-us/sol-1/TKN/hot/omnibus/0"
@@ -152,7 +156,8 @@ func newFx(t *testing.T) *fx {
 	f.tokp, _ = ParseAddress(TokenProgram)
 	f.atap, _ = ParseAddress(AssociatedTokenProg)
 	f.cfg = SigningConfig{Chain: "sol-1", AccountPublicKey: f.node.PublicKey, AccountChainCode: f.node.ChainCode,
-		HotShards:       map[string]string{f.partSOL: Address(f.hot), f.partTKN: Address(f.hot)},
+		HotShards:       map[string]string{f.partSOL: Address(f.hot), f.partTKN: Address(f.hot), f.partSOL2: Address(f.hot2), "qv-us/sol-1/TKN/hot/omnibus/1": Address(f.hot2)},
+		ColdAddresses:   map[string]string{"omnibus": Address(f.cold)},
 		Tokens:          map[string]Token{"TKN": {Mint: Address(f.mint), Decimals: 6}},
 		MaxComputeUnits: 200_000, MaxMicroLamportsPerUnit: 100_000, MaxPriorityFeeLamports: 15_000, NoncePool: 3, NonceRent: DefaultNonceRent}
 	var err error
@@ -323,7 +328,7 @@ func TestWithdrawalAttacks(t *testing.T) {
 	in5.To = Address(f.hot)
 	f.mustFail("withdrawal to the hot shard", pass(good()), in5, "hot shard itself")
 	in6 := in
-	in6.Kind = "to-cold"
+	in6.Kind = "consolidate"
 	f.mustFail("another kind", pass(good()), in6, "not signed on this chain")
 	// partition / chain
 	f.mustFail("unknown partition", f.job(compile(f.hot, f.nv, good()...), "qv-us/sol-1/SOL/hot/omnibus/9", PathHot, nil), func() signjob.Intent { x := in; x.PartitionID = "qv-us/sol-1/SOL/hot/omnibus/9"; return x }(), "no hot shard")
@@ -696,4 +701,46 @@ func TestBatchedSweeps(t *testing.T) {
 		ixs = append(ixs, f.sysTransfer(k, f.hot, 1000))
 	}
 	f.mustFail("too many addresses", f.batchJob(compile(f.hot, f.nv, ixs...), f.partSOL, PathHot, many), f.batchIntent("SOL", f.partSOL, many, 12_000), "bytes")
+}
+
+// ---- the cold tier ----
+
+func TestColdAndRebalanceShapes(t *testing.T) {
+	f := newFx(t)
+	xfer := func(to [32]byte, n uint64) []tix {
+		return []tix{f.adv(), f.cbLimit(10_000), f.sysTransfer(f.hot, to, n)}
+	}
+	job := func(ixs []tix) chain.UnsignedTx { return f.job(compile(f.hot, f.nv, ixs...), f.partSOL, PathHot, nil) }
+	cin := signjob.Intent{Kind: "to-cold", ID: "c1", PartitionID: f.partSOL, Chain: "sol-1", Asset: "SOL", To: Address(f.cold), Amount: "5000000"}
+	f.mustPass("hot to cold", job(xfer(f.cold, 5_000_000)), cin)
+	// anything but the pinned cold address is refused, whatever the intent says
+	f.mustFail("to cold, another destination in the message", job(xfer(f.other, 5_000_000)), cin, "not a system transfer")
+	other := cin
+	other.To = Address(f.other)
+	f.mustFail("to cold, another destination in the intent", job(xfer(f.other, 5_000_000)), other, "pays the cold address")
+	hot2 := cin
+	hot2.To = Address(f.hot2)
+	f.mustFail("to cold, to another hot shard", job(xfer(f.hot2, 5_000_000)), hot2, "pays the cold address")
+	// a rebalance pays another hot shard of the pool and nothing else
+	rin := signjob.Intent{Kind: "rebalance", ID: "r1", PartitionID: f.partSOL, Chain: "sol-1", Asset: "SOL", To: Address(f.hot2), Amount: "5000000"}
+	f.mustPass("rebalance", job(xfer(f.hot2, 5_000_000)), rin)
+	rcold := rin
+	rcold.To = Address(f.cold)
+	f.mustFail("rebalance to cold", job(xfer(f.cold, 5_000_000)), rcold, "pays another hot shard")
+	rother := rin
+	rother.To = Address(f.other)
+	f.mustFail("rebalance to a stranger", job(xfer(f.other, 5_000_000)), rother, "pays another hot shard")
+	// tokens: the cold address's account, opened by the hot shard if need be
+	src, dst := f.ata(f.hot), f.ata(f.cold)
+	tin := signjob.Intent{Kind: "to-cold", ID: "c2", PartitionID: f.partTKN, Chain: "sol-1", Asset: "TKN", To: Address(f.cold), Amount: "777"}
+	tk := func(ixs ...tix) chain.UnsignedTx {
+		return f.job(compile(f.hot, f.nv, append([]tix{f.adv(), f.cbLimit(50_000)}, ixs...)...), f.partTKN, PathHot, nil)
+	}
+	f.mustPass("token to cold", tk(f.checked(src, dst, f.hot, 777, 6, f.mint)), tin)
+	f.mustPass("token to cold, opening the account", tk(f.create(f.hot, dst, f.cold, f.mint), f.checked(src, dst, f.hot, 777, 6, f.mint)), tin)
+	f.mustFail("token to cold, to a stranger's account", tk(f.checked(src, f.ata(f.other), f.hot, 777, 6, f.mint)), tin, "transferChecked")
+	// a cold address no config knows
+	nocold := tin
+	nocold.PartitionID, nocold.ID = "qv-us/sol-1/TKN/hot/segregated:x/0", "c3"
+	f.mustFail("a pool without a pinned cold address", f.job(compile(f.hot, f.nv, f.adv(), f.cbLimit(50_000), f.checked(src, dst, f.hot, 777, 6, f.mint)), nocold.PartitionID, PathHot, nil), nocold, "no hot shard")
 }

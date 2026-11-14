@@ -76,12 +76,20 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 			return err
 		}
 		posted := map[string]*big.Int{}
+		clearing := map[string]*big.Int{} // read inside the same window as the chain, so that a booking cannot slip between
 		for _, sym := range c.AssetList {
 			p, err := s.posted(ctx, depAcct(c.Chain, sym))
 			if err != nil {
 				return err
 			}
 			posted[sym] = p
+			for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), rebalAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
+				q, err := s.posted(ctx, id)
+				if err != nil {
+					return err
+				}
+				clearing[id] = q
+			}
 		}
 		hotChain, err := s.solHotBalances(ctx)
 		if err != nil {
@@ -127,18 +135,21 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 			rep.add(Check{Name: "hot_balance", Asset: hc.asset, Subject: hc.partition, Ledger: want.String(), Chain: hc.balance.String(), OK: want.Cmp(hc.balance) == 0,
 				Detail: fmt.Sprintf("hot shard %s at finalized commitment; %d finalized withdrawal(s) not settled yet are accounted for", hc.address, landedAfter.n)})
 		}
+		if err := s.solColdChecks(ctx, rep, landedAfter); err != nil {
+			return err
+		}
 		s.ledgerInvariants(ctx, rep)
 		// Nothing is moved to cold on this family yet, and a withdrawal posts its hold and moves it on in one transaction, so those clearing
 		// accounts must be empty. The sweep account holds what sweeps broadcast and not settled yet are taking, as a negative amount.
 		for _, sym := range c.AssetList {
 			for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), rebalAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
-				p, err := s.posted(ctx, id)
-				if err != nil {
-					return err
-				}
+				p := clearing[id]
 				want := new(big.Int)
 				if id == sweepAcct(c.Chain, sym) && landedAfter.transit[sym] != nil {
 					want.Neg(landedAfter.transit[sym])
+				}
+				if t := landedAfter.moveTransit[id]; t != nil { // moves to cold and rebalances broadcast and not settled
+					want.Neg(t)
 				}
 				rep.add(Check{Name: "clearing_residual", Asset: sym, Subject: id, Ledger: p.String(), Chain: want.String(), OK: p.Cmp(want) == 0})
 			}
@@ -159,7 +170,10 @@ func (s *Service) solStamp(ctx context.Context) (string, error) {
 		(SELECT count(*)::text FROM deposit_addresses WHERE chain=$1),
 		(SELECT COALESCE(string_agg(posted::text, ',' ORDER BY id), '') FROM ledger_accounts WHERE chain=$1),
 		(SELECT count(*)::text FROM withdrawals WHERE chain=$1 AND status IN ('confirmed','failed')),
-		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM sweeps WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
+		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM sweeps WHERE chain=$1),
+		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM cold_moves WHERE chain=$1),
+		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM rebalance_moves WHERE chain=$1),
+			(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM refills WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
 	return st, err
 }
 
@@ -210,14 +224,19 @@ type solLandedSet struct {
 	depAdj map[string]*big.Int
 	// transit, per asset, is what the sweeps the books have broadcast and not settled are taking.
 	transit map[string]*big.Int
-	n       int
-	key     string
+	// coldIn, per cold address and asset, is what finalized moves to cold have already put there and the books have not booked yet.
+	coldIn map[[2]string]*big.Int
+	// moveTransit, per clearing account, is what moves to cold and rebalances the books have broadcast and not settled are taking.
+	moveTransit map[string]*big.Int
+	n           int
+	key         string
 }
 
 // solLanded asks the chain cell about every withdrawal that has a transaction out and is not settled in the books. A transaction that landed
 // moved its amount (when it succeeded) and cost its fee, which the books record at settlement or void.
 func (s *Service) solLanded(ctx context.Context) (solLandedSet, error) {
-	res := solLandedSet{out: map[string]*big.Int{}, in: map[string]*big.Int{}, depAdj: map[string]*big.Int{}, transit: map[string]*big.Int{}}
+	res := solLandedSet{out: map[string]*big.Int{}, in: map[string]*big.Int{}, depAdj: map[string]*big.Int{}, transit: map[string]*big.Int{},
+		coldIn: map[[2]string]*big.Int{}, moveTransit: map[string]*big.Int{}}
 	rows, err := s.Pool.Query(ctx, `SELECT id, asset, amount::text, partition_id FROM withdrawals WHERE chain=$1 AND status IN ('signing','broadcast') ORDER BY id`, s.Cfg.Chain)
 	if err != nil {
 		return res, err
@@ -270,7 +289,15 @@ func (s *Service) solLanded(ctx context.Context) (solLandedSet, error) {
 	if err != nil {
 		return res, err
 	}
-	res.key = strings.Join(append(key, sk...), ",")
+	mk, err := s.solLandedMoves(ctx, &res, add)
+	if err != nil {
+		return res, err
+	}
+	rk, err := s.solLandedRefills(ctx, &res)
+	if err != nil {
+		return res, err
+	}
+	res.key = strings.Join(append(append(append(key, sk...), mk...), rk...), ",")
 	return res, nil
 }
 
@@ -345,4 +372,204 @@ func (s *Service) solLandedSweeps(ctx context.Context, res *solLandedSet, add fu
 		}
 	}
 	return key, nil
+}
+
+// solLandedMoves adds the moves to cold and the rebalances that are not settled: what each moved on the chain against what the books recorded of it.
+// The books take the amount out of the source shard at broadcast and put it into the cold account or the target shard at settlement; the chain does
+// both when the transaction is final.
+func (s *Service) solLandedMoves(ctx context.Context, res *solLandedSet, add func(string, *big.Int)) ([]string, error) {
+	c := s.Cfg
+	var key []string
+	for _, kind := range []struct{ owner, table, clearing string }{
+		{OwnerKindToCold, "cold_moves", "to-cold"}, {OwnerKindRebalance, "rebalance_moves", "rebal"}} {
+		q := `SELECT id, asset, amount::text, status, partition_id, ''::text FROM cold_moves WHERE chain=$1 AND status IN ('signing','broadcast') ORDER BY id`
+		if kind.table == "rebalance_moves" {
+			q = `SELECT id, asset, amount::text, status, partition_id, to_partition_id FROM rebalance_moves WHERE chain=$1 AND status IN ('signing','broadcast') ORDER BY id`
+		}
+		rows, err := s.Pool.Query(ctx, q, c.Chain)
+		if err != nil {
+			return nil, err
+		}
+		type mv struct{ id, asset, amount, status, part, to string }
+		var ms []mv
+		for rows.Next() {
+			var m mv
+			if err := rows.Scan(&m.id, &m.asset, &m.amount, &m.status, &m.part, &m.to); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ms = append(ms, m)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		for _, m := range ms {
+			amount := parseBig(m.amount)
+			reduced := m.status == "broadcast" // the books took it out of the source shard at broadcast
+			clearing := toColdAcct(c.Chain, m.asset)
+			if kind.owner == OwnerKindRebalance {
+				clearing = rebalAcct(c.Chain, m.asset)
+			}
+			if reduced {
+				if res.moveTransit[clearing] == nil {
+					res.moveTransit[clearing] = new(big.Int)
+				}
+				res.moveTransit[clearing].Add(res.moveTransit[clearing], amount)
+			}
+			oc, err := s.Chain.Outcome(ctx, kind.owner, m.id)
+			if err != nil {
+				return nil, err
+			}
+			if oc.State != chain.OutcomeConfirmed {
+				if reduced { // the books have it out of the shard, the chain does not yet
+					add(m.part, new(big.Int).Neg(amount))
+				}
+				continue
+			}
+			fee, err := s.Chain.TxFee(ctx, oc.Hash)
+			if err != nil {
+				return nil, err
+			}
+			nativePart, err := s.nativePartitionOf(m.part)
+			if err != nil {
+				return nil, err
+			}
+			add(nativePart, fee)
+			if !oc.Failed && oc.Kind == chain.AttemptSend {
+				if !reduced {
+					add(m.part, amount) // already left the shard, not yet booked
+				}
+				if kind.owner == OwnerKindToCold {
+					cold, err := c.ColdAddressOf(m.part, m.asset)
+					if err != nil {
+						return nil, err
+					}
+					k := [2]string{cold, m.asset}
+					if res.coldIn[k] == nil {
+						res.coldIn[k] = new(big.Int)
+					}
+					res.coldIn[k].Add(res.coldIn[k], amount)
+				} else {
+					if res.in[m.to] == nil {
+						res.in[m.to] = new(big.Int)
+					}
+					res.in[m.to].Add(res.in[m.to], amount)
+				}
+			} else if reduced {
+				add(m.part, new(big.Int).Neg(amount)) // the books took it out and nothing left
+			}
+			res.n++
+			key = append(key, m.id+":"+oc.Hash)
+		}
+	}
+	return key, nil
+}
+
+// solLandedRefills adds the refills that are not settled: the cold address pays them, so what the chain did to the cold address and the hot shard is set
+// against what the books recorded. The books take the amount out of cold at broadcast and put it into the hot shard (and the fee out of cold) at settlement.
+func (s *Service) solLandedRefills(ctx context.Context, res *solLandedSet) ([]string, error) {
+	c := s.Cfg
+	rows, err := s.Pool.Query(ctx, `SELECT id, asset, amount::text, status, partition_id, cold_address, tx_hash FROM refills
+		WHERE chain=$1 AND kind='refill' AND status IN ('signed','broadcast') AND COALESCE(tx_hash,'')<>'' ORDER BY id`, c.Chain)
+	if err != nil {
+		return nil, err
+	}
+	type rf struct{ id, asset, amount, status, part, cold, tx string }
+	var rs []rf
+	for rows.Next() {
+		var r rf
+		if err := rows.Scan(&r.id, &r.asset, &r.amount, &r.status, &r.part, &r.cold, &r.tx); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rs = append(rs, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	addCold := func(asset, cold string, n *big.Int) {
+		k := [2]string{cold, asset}
+		if res.coldIn[k] == nil {
+			res.coldIn[k] = new(big.Int)
+		}
+		res.coldIn[k].Add(res.coldIn[k], n)
+	}
+	var key []string
+	for _, r := range rs {
+		amount := parseBig(r.amount)
+		reduced := r.status == "broadcast" // the books took it out of cold at broadcast
+		if reduced {
+			clearing := refillAcct(c.Chain, r.asset)
+			if res.moveTransit[clearing] == nil {
+				res.moveTransit[clearing] = new(big.Int)
+			}
+			res.moveTransit[clearing].Add(res.moveTransit[clearing], amount)
+		}
+		st, err := s.Chain.Status(ctx, r.tx)
+		if err != nil {
+			return nil, err
+		}
+		landed := st == chain.TxConfirmed || st == chain.TxFailed
+		if !landed {
+			if reduced {
+				addCold(r.asset, r.cold, amount) // the books have it out of cold, the chain does not yet
+			}
+			continue
+		}
+		cost, err := s.Chain.TxFee(ctx, r.tx)
+		if err != nil {
+			return nil, err
+		}
+		addCold(c.Native, r.cold, new(big.Int).Neg(cost)) // the books record the cost at settlement
+		if st == chain.TxConfirmed {
+			if !reduced {
+				addCold(r.asset, r.cold, new(big.Int).Neg(amount)) // already left cold, not yet booked
+			}
+			if res.in[r.part] == nil {
+				res.in[r.part] = new(big.Int)
+			}
+			res.in[r.part].Add(res.in[r.part], amount) // reached the hot shard, not yet booked
+		} else if reduced {
+			addCold(r.asset, r.cold, amount) // the books took it out and nothing left
+		}
+		res.n++
+		key = append(key, r.id+":"+r.tx)
+	}
+	return key, nil
+}
+
+// solColdChecks compares each pool's cold address with the books: minus the cold accounts of the partitions that use it, per asset.
+func (s *Service) solColdChecks(ctx context.Context, rep *Report, landed solLandedSet) error {
+	c := s.Cfg
+	if len(c.SOL.ColdAddresses) == 0 {
+		return nil
+	}
+	for pool, addr := range c.SOL.ColdAddresses {
+		for _, sym := range c.AssetList {
+			want := new(big.Int)
+			for i := 0; i < c.shardCount(); i++ {
+				p := c.PartitionKey(sym, i)
+				if string(p.Pool) != pool {
+					continue
+				}
+				posted, err := s.posted(ctx, coldAcct(p.String()))
+				if err != nil {
+					return err
+				}
+				want.Sub(want, posted)
+			}
+			if in := landed.coldIn[[2]string{addr, sym}]; in != nil {
+				want.Add(want, in)
+			}
+			got, err := s.Reader.Balance(ctx, addr, sym, 0)
+			if err != nil {
+				return err
+			}
+			rep.add(Check{Name: "cold_balance", Asset: sym, Subject: addr, Ledger: want.String(), Chain: got.String(), OK: want.Cmp(got) == 0,
+				Detail: fmt.Sprintf("cold address of pool %s at finalized commitment", pool)})
+		}
+	}
+	return nil
 }

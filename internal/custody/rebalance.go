@@ -201,22 +201,22 @@ func (s *Service) PlanRebalances(ctx context.Context, log *slog.Logger) ([]Rebal
 					if amt.Sign() <= 0 {
 						break
 					}
-					to, _, err := c.ShardAddress(d.part)
+					toAddr, _, err := c.ShardAddressOf(d.part)
 					if err != nil {
 						return err
 					}
 					id := "rb-" + uuid.NewString()
 					tag, err := tx.Exec(ctx, `INSERT INTO rebalance_moves (id, chain, asset, partition_id, to_partition_id, to_address, amount, status)
-						VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,'planned') ON CONFLICT DO NOTHING`, id, c.Chain, sym, src.part, d.part, to.Hex(), amt.String())
+						VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,'planned') ON CONFLICT DO NOTHING`, id, c.Chain, sym, src.part, d.part, toAddr, amt.String())
 					if err != nil {
 						return fmt.Errorf("custody: insert rebalance: %w", err)
 					}
 					if tag.RowsAffected() == 1 {
-						made = append(made, RebalanceMove{ID: id, Asset: sym, PartitionID: src.part, ToPartitionID: d.part, To: to.Hex(), Amount: amt, Status: "planned"})
+						made = append(made, RebalanceMove{ID: id, Asset: sym, PartitionID: src.part, ToPartitionID: d.part, To: toAddr, Amount: amt, Status: "planned"})
 						src.outgoing, src.free = true, new(big.Int).Sub(src.free, amt)
 						d.incoming = true
 						if err := emit(ctx, tx, outbox.TopicColdMoves, id, "rebalance.planned", map[string]any{"chain": c.Chain, "asset": sym,
-							"from": src.part, "to_partition": d.part, "to": to.Hex(), "amount": amt.String()}); err != nil {
+							"from": src.part, "to_partition": d.part, "to": toAddr, "amount": amt.String()}); err != nil {
 							return err
 						}
 					}
@@ -241,7 +241,7 @@ func (s *Service) sourceHasGas(ctx context.Context, tx pgx.Tx, log *slog.Logger,
 	if asset == c.Native {
 		return true, nil
 	}
-	_, shard, err := c.ShardAddress(source)
+	_, shard, err := c.ShardAddressOf(source)
 	if err != nil {
 		return false, err
 	}
@@ -254,7 +254,7 @@ func (s *Service) sourceHasGas(ctx context.Context, tx pgx.Tx, log *slog.Logger,
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM rebalance_gas_alerts WHERE partition_id=$1)`, source).Scan(&alerted); err != nil {
 		return false, err
 	}
-	if have.Cmp(c.EVM.MaxTxFeeWei) >= 0 {
+	if have.Cmp(c.NativeReserve()) >= 0 {
 		if alerted {
 			_, err = tx.Exec(ctx, `DELETE FROM rebalance_gas_alerts WHERE partition_id=$1`, source)
 		}
@@ -265,7 +265,7 @@ func (s *Service) sourceHasGas(ctx context.Context, tx pgx.Tx, log *slog.Logger,
 			return false, err
 		}
 		log.Error("ALERT: a hot shard has no gas to rebalance a token; fund it with the native asset, the rebalance from it is skipped until then",
-			"partition", source, "asset", asset, "native_balance", have.String(), "needs", c.EVM.MaxTxFeeWei.String())
+			"partition", source, "asset", asset, "native_balance", have.String(), "needs", c.NativeReserve().String())
 	}
 	return false, nil
 }

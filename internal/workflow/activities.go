@@ -349,6 +349,10 @@ func (a *Activities) PlanColdMoves(ctx context.Context) (int, error) {
 	stop := heartbeating(ctx)
 	defer stop()
 	mv, err := a.D.Svc.PlanColdMoves(ctx, a.log())
+	if err != nil {
+		// Temporal retries a failed pass silently; say so, or a planner that fails on every pass looks like a planner with nothing to do.
+		a.log().Error("cold planner pass failed; it is retried", "error", err.Error())
+	}
 	return len(mv), err
 }
 
@@ -399,7 +403,7 @@ func (a *Activities) LoadRefill(ctx context.Context, id string) (RefillView, err
 	if err := a.D.Svc.Pool.QueryRow(ctx, `SELECT extract(epoch from now() - updated_at)::bigint FROM refills WHERE id=$1`, id).Scan(&age); err != nil {
 		return RefillView{}, err
 	}
-	exp := a.D.Svc.Cfg.Family == custody.FamilyBTC && r.Status == custody.RefillRequested && time.Duration(age)*time.Second > a.D.Svc.Cfg.RefillRequestTTL
+	exp := (a.D.Svc.Cfg.Family == custody.FamilyBTC || a.D.Svc.Cfg.Family == custody.FamilySOL) && r.Status == custody.RefillRequested && time.Duration(age)*time.Second > a.D.Svc.Cfg.RefillRequestTTL
 	repl := false
 	if r.Status == custody.RefillBroadcast {
 		repl, _ = a.D.Svc.HasUnsentReplacement(ctx, id)

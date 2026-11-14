@@ -68,8 +68,8 @@ type loopSpec struct {
 func loopSpecs(chain string) []loopSpec { return loopSpecsFor(custody.FamilyEVM, chain) }
 
 func loopSpecsFor(family, chain string) []loopSpec {
-	if family == custody.FamilySOL { // deposits, sweeps and withdrawals so far: nothing is moved to cold
-		return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}}
+	if family == custody.FamilySOL { // deposits, sweeps, withdrawals and the cold tier
+		return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}, {ColdPlannerID(chain), ColdPlannerWorkflow}}
 	}
 	if family == custody.FamilyBTC {
 		return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}, {ColdPlannerID(chain), ColdPlannerWorkflow}}

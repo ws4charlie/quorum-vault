@@ -136,9 +136,7 @@ func TestSwCrash(t *testing.T) {
 		hot0 := s.lamports(s.hotAddr())
 		s.paySOL(addr, 2*oneSOL)
 		s.waitDeposits(cust, 2*oneSOL, 0)
-		if code, ok := exitCodeOf(s.worker, scale(120*time.Second)); !ok || code != 137 {
-			t.Fatalf("%s: the worker did not die at the failpoint (exited=%v code=%d)", fp, ok, code)
-		}
+		s.requireDiedAt(fp, scale(120*time.Second))
 		// With the worker dead the scan stands still, so finalized activity of the sweep on the deposit address stays "not covered yet" and Reconcile may
 		// decline to compare that address: what it must never do is report a difference.
 		stop := s.watchReconcile()
