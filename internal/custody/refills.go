@@ -188,30 +188,9 @@ func (s *Service) openRefillFor(ctx context.Context, q interface {
 // openRefill opens a refill request for a partition that is below its low mark, unless one is open for the same cold address
 // (it has one nonce, so one refill at a time). need is the amount that brings the partition to its target.
 func (s *Service) openRefill(ctx context.Context, tx pgx.Tx, partitionID, asset string, need *big.Int) (id string, opened bool, err error) {
-	coldHex, hotHex := "", ""
-	if s.Cfg.Family == FamilyBTC {
-		coldHex, err = s.Cfg.ColdAddressOf(partitionID, asset)
-		if err != nil {
-			return "", false, err
-		}
-		i, err := s.Cfg.ShardIndex(partitionID)
-		if err != nil {
-			return "", false, err
-		}
-		hotHex = s.Cfg.BTC.HotShards[i].Address
-	} else if s.Cfg.Family == FamilySOL {
-		if coldHex, err = s.Cfg.ColdAddressOf(partitionID, asset); err != nil {
-			return "", false, err
-		}
-		if hotHex, _, err = s.Cfg.ShardAddressOf(partitionID); err != nil {
-			return "", false, err
-		}
-	} else {
-		cold, err := s.Cfg.EVM.ColdAddress(partitionID, asset)
-		if err != nil {
-			return "", false, err
-		}
-		coldHex, hotHex = cold.Hex(), s.Cfg.EVM.HotAddresses[partitionID].Hex()
+	coldHex, hotHex, err := s.refillEnds(partitionID, asset)
+	if err != nil {
+		return "", false, err
 	}
 	if id, open, err := s.openRefillFor(ctx, tx, coldHex); err != nil || open {
 		return id, false, err
@@ -457,12 +436,6 @@ func (s *Service) SettleRefill(ctx context.Context, id string, reverted bool) er
 		}
 	}
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		// The partition first, like the cold planner: it holds this row for a whole pass, and it decides from the open refills and from the hot
-		// balance together. Without it a pass could read the hot balance before this settlement and the open refills after it, see no open refill
-		// and a shard still below its mark, and ask for a second refill for money that has already arrived.
-		if _, err := tx.Exec(ctx, `SELECT 1 FROM partitions WHERE id=$1 FOR UPDATE`, r.PartitionID); err != nil {
-			return err
-		}
 		r, err := scanRefill(tx.QueryRow(ctx, `SELECT `+refillCols+` FROM refills WHERE id=$1 FOR UPDATE`, id))
 		if err != nil {
 			return err
@@ -952,4 +925,30 @@ func (s *Service) StuckHint(ctx context.Context, id string) string {
 		return "the refill has no change output, so it cannot be fee-bumped; it keeps waiting and can still confirm"
 	}
 	return "export a new revision (POST /v2/refills/" + id + "/export) for a higher fee over the same inputs, run the ceremony, and import it; at most one of the two can confirm"
+}
+
+// refillEnds are the cold address a refill of the partition's asset pays from and the hot address it pays to, in the form the family's chain cell takes.
+func (s *Service) refillEnds(partitionID, asset string) (coldHex, hotHex string, err error) {
+	switch s.Cfg.Family {
+	case FamilyBTC:
+		if coldHex, err = s.Cfg.ColdAddressOf(partitionID, asset); err != nil {
+			return "", "", err
+		}
+		i, err := s.Cfg.ShardIndex(partitionID)
+		if err != nil {
+			return "", "", err
+		}
+		return coldHex, s.Cfg.BTC.HotShards[i].Address, nil
+	case FamilySOL:
+		if coldHex, err = s.Cfg.ColdAddressOf(partitionID, asset); err != nil {
+			return "", "", err
+		}
+		hotHex, _, err = s.Cfg.ShardAddressOf(partitionID)
+		return coldHex, hotHex, err
+	}
+	cold, err := s.Cfg.EVM.ColdAddress(partitionID, asset)
+	if err != nil {
+		return "", "", err
+	}
+	return cold.Hex(), s.Cfg.EVM.HotAddresses[partitionID].Hex(), nil
 }

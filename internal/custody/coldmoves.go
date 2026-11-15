@@ -116,32 +116,52 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 			if err := tx.QueryRow(ctx, `SELECT asset FROM partitions WHERE id=$1 FOR UPDATE`, p).Scan(&asset); err != nil {
 				return err
 			}
-			var open bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM cold_moves WHERE partition_id=$1 AND status NOT IN ('confirmed','failed'))`, p).Scan(&open); err != nil {
+			// Every input of the decision comes from ONE snapshot, taken now that this partition is held (no withdrawal reservation can commit
+			// between the snapshot and what is written below): the open move, the hot balance, what rebalances are bringing, the alert flag and
+			// the open refill. A settlement that commits in the middle of the pass (a refill, a sweep, a withdrawal) is seen whole or not at all;
+			// read statement by statement, a pass could see the hot balance from before a refill settled and the open refills from after it.
+			snap, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+			if err != nil {
 				return err
 			}
-			free, err := s.freeHot(ctx, tx, p)
+			defer snap.Rollback(ctx)
+			var open, alerted bool
+			if err := snap.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM cold_moves WHERE partition_id=$1 AND status NOT IN ('confirmed','failed')),
+				EXISTS (SELECT 1 FROM hot_low_alerts WHERE partition_id=$1)`, p).Scan(&open, &alerted); err != nil {
+				return err
+			}
+			free, err := s.freeHot(ctx, snap, p)
 			if err != nil {
 				return err
 			}
 			// A rebalance on its way to this shard counts as its liquidity for the low-water mark (no refill ceremony for a shard
 			// that is being fed), but not for the high-water mark: funds that have not arrived cannot be moved on.
-			incoming, err := s.incomingRebalance(ctx, tx, p)
+			incoming, err := s.incomingRebalance(ctx, snap, p)
 			if err != nil {
 				return err
 			}
 			withIncoming := new(big.Int).Add(free, incoming)
-			var alerted bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM hot_low_alerts WHERE partition_id=$1)`, p).Scan(&alerted); err != nil {
-				return err
+			if s.planHook != nil {
+				s.planHook("balance read") // between the hot balance and the open refills: where an interleaved settlement would show
+			}
+			refillCold, _, rerr := s.refillEnds(p, asset)
+			var refillID string
+			var refillOpen bool
+			if rerr == nil {
+				if refillID, refillOpen, err = s.openRefillFor(ctx, snap, refillCold); err != nil {
+					return err
+				}
 			}
 			switch {
 			case withIncoming.Cmp(lim.Low) < 0:
 				// Ask for a refill (one open at a time per cold address), and say so in the ALERT, once per outage.
-				need := new(big.Int).Sub(lim.Target, withIncoming)
-				rid, opened, err := s.openRefill(ctx, tx, p, asset, need)
-				if err != nil {
-					return err
+				rid, opened := refillID, false
+				if !refillOpen {
+					need := new(big.Int).Sub(lim.Target, withIncoming)
+					var err error
+					if rid, opened, err = s.openRefill(ctx, tx, p, asset, need); err != nil {
+						return err
+					}
 				}
 				// An ALERT for every new request, and one per outage for a shard that stays low: the flag below only keeps the second kind from repeating,
 				// so a flag left set (a refill settled and the band was crossed again before a pass saw the shard above its mark) never hides a request.
@@ -164,6 +184,17 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 				}
 			}
 			if open || free.Cmp(lim.High) <= 0 {
+				return nil
+			}
+			// the amount comes from what the shard holds now, under the hold on the partition: never more than the snapshot said
+			freeNow, err := s.freeHot(ctx, tx, p)
+			if err != nil {
+				return err
+			}
+			if freeNow.Cmp(free) < 0 {
+				free = freeNow
+			}
+			if free.Cmp(lim.High) <= 0 {
 				return nil
 			}
 			amt := new(big.Int).Sub(free, lim.Target)

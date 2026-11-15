@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
@@ -30,59 +31,120 @@ func (refillChain) FactoryRead(context.Context, string) (common.Address, error) 
 }
 func (refillChain) FactoryAddress() common.Address { return common.Address{} }
 
-// The cold planner decides from the open refills and the hot balance in one pass. SettleRefill changes both (the status and the hot booking) in one
-// transaction, so it must not run in the middle of a pass: it waits for the planner's hold on the partition. A pass that read the hot balance before
-// the settlement and the open refills after it would open a second refill for money that has already arrived.
-func TestSettleRefillWaitsForAPlannerPass(t *testing.T) {
-	ctx := context.Background()
+func newRefillSvc(t *testing.T) (*Service, *fakeChain, *Config) {
+	t.Helper()
 	cfg, err := rebalFile(nil).Build()
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool := dbtest.New(t)
-	s := New(pool, cfg, refillChain{&fakeChain{fee: big.NewInt(0), statuses: map[string]chain.TxStatus{}}}, fakeReader{block: 50})
-	if err := s.Bootstrap(ctx); err != nil {
+	fc := &fakeChain{fee: big.NewInt(0), statuses: map[string]chain.TxStatus{}}
+	s := New(dbtest.New(t), cfg, refillChain{fc}, fakeReader{block: 50})
+	if err := s.Bootstrap(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	return s, fc, cfg
+}
+
+func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+func (s *Service) refillRows(t *testing.T, partitionID string) int {
+	t.Helper()
+	var n int
+	if err := s.Pool.QueryRow(context.Background(), `SELECT count(*) FROM refills WHERE chain=$1 AND partition_id=$2`, testChain, partitionID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// The cold planner reads every input of a pass from one snapshot. A refill that settles in the middle of a pass (its status and the hot balance change
+// in one transaction) is seen whole or not at all: read statement by statement, a pass saw the hot balance from before the settlement and the open
+// refills from after it, and asked for a second refill for money that had already arrived.
+func TestPlannerPassSeesARefillSettlementWholeOrNotAtAll(t *testing.T) {
+	ctx := context.Background()
+	s, _, cfg := newRefillSvc(t)
 	p0 := cfg.PartitionKey("ETH", 0).String()
 	cold, _ := cfg.ColdAddressOf(p0, "ETH")
 	if err := s.FundHot(ctx, "seed", 0, big.NewInt(50)); err != nil { // below the low-water mark of 100
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO refills (id, chain, asset, partition_id, cold_address, to_address, amount, status, raw_tx, tx_hash)
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO refills (id, chain, asset, partition_id, cold_address, to_address, amount, status, raw_tx, tx_hash)
 		VALUES ('rf-1',$1,'ETH',$2,$3,'0x00000000000000000000000000000000000000a1',300,'signed','aa','0xh1')`, testChain, p0, cold); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.recordRefillBroadcast(ctx, "rf-1", "0xh1"); err != nil {
 		t.Fatal(err)
 	}
+	first := true
+	s.planHook = func(stage string) {
+		if stage != "balance read" || !first {
+			return
+		}
+		first = false
+		// every input of this pass has been read; now the refill settles
+		if err := s.SettleRefill(ctx, "rf-1", false); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, err := s.PlanColdMoves(ctx, quietLog()); err != nil {
+		t.Fatal(err)
+	}
+	if first {
+		t.Fatal("the hook never ran")
+	}
+	if n := s.refillRows(t, p0); n != 1 {
+		t.Fatalf("%d refills for the shard after a pass that a settlement interrupted, want 1", n)
+	}
+	// and the next pass sees the settled refill with the hot balance that includes it
+	s.planHook = nil
+	if _, err := s.PlanColdMoves(ctx, quietLog()); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.refillRows(t, p0); n != 1 {
+		t.Fatalf("%d refills for the shard after the settlement, want 1", n)
+	}
+	if got, _ := s.freeHot(ctx, s.Pool, p0); got.Cmp(big.NewInt(350)) != 0 {
+		t.Fatalf("free after the settlement: %v", got)
+	}
+}
 
-	// a planner pass: it holds the partition and reads
-	tx, err := pool.Begin(ctx)
-	if err != nil {
+// A sweep settles with an UPDATE of its row, which takes a lock on the partition the planner holds for a pass: it waits for the pass, so a sweep
+// cannot raise the hot balance in the middle of one. The next pass sees it whole.
+func TestSweepSettlementWaitsForAPlannerPass(t *testing.T) {
+	ctx := context.Background()
+	s, fc, cfg := newRefillSvc(t)
+	p0 := cfg.PartitionKey("ETH", 0).String()
+	if _, _, err := s.CreateCustomer(ctx, "ops", "c1", ""); err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT asset FROM partitions WHERE id=$1 FOR UPDATE`, p0); err != nil {
+	if err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		return s.transfer(ctx, tx, "pre", depAcct(testChain, "ETH"), custAcct("c1", testChain, "ETH"), big.NewInt(500), nil)
+	}); err != nil {
 		t.Fatal(err)
 	}
-	free, err := s.freeHot(ctx, tx, p0)
-	if err != nil || free.Cmp(big.NewInt(50)) != 0 {
-		t.Fatalf("free %v %v", free, err)
-	}
+	setupSweep(t, s, "sw1", "ETH", 500)
+	fc.moved = []chain.MovedAsset{{Address: "0xADDR", Asset: "ETH", Amount: big.NewInt(500)}}
 	done := make(chan error, 1)
-	go func() { done <- s.SettleRefill(ctx, "rf-1", false) }()
-	select {
-	case err := <-done:
-		t.Fatalf("the refill settled while a planner pass held its partition (err %v)", err)
-	case <-time.After(700 * time.Millisecond):
+	first, settledInPass := true, false
+	s.planHook = func(stage string) {
+		if stage != "balance read" || !first {
+			return
+		}
+		first = false
+		go func() { done <- s.SettleSweep(ctx, "sw1", "0xtx", chain.TxConfirmed) }()
+		select {
+		case <-done:
+			settledInPass = true
+		case <-time.After(700 * time.Millisecond):
+		}
 	}
-	// the rest of the pass still sees the refill as open: the view is consistent with the balance it read
-	if _, open, err := s.openRefillFor(ctx, tx, cold); err != nil || !open {
-		t.Fatalf("the open refill disappeared in the middle of a pass: open=%v err=%v", open, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
+	if _, err := s.PlanColdMoves(ctx, quietLog()); err != nil {
 		t.Fatal(err)
+	}
+	if first {
+		t.Fatal("the hook never ran")
+	}
+	if settledInPass {
+		t.Fatal("a sweep settled in the middle of a planner pass")
 	}
 	select {
 	case err := <-done:
@@ -90,18 +152,15 @@ func TestSettleRefillWaitsForAPlannerPass(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the settlement did not finish after the pass ended")
+		t.Fatal("the sweep did not settle after the pass")
 	}
-
-	// the next pass sees the settled refill and the hot balance that includes it: nothing to ask for
-	if _, err := s.PlanColdMoves(ctx, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+	// the pass saw the shard low and asked for a refill (the sweep was not booked yet); the next pass sees the sweep and asks for nothing more
+	before := s.refillRows(t, p0)
+	s.planHook = nil
+	if _, err := s.PlanColdMoves(ctx, quietLog()); err != nil {
 		t.Fatal(err)
 	}
-	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM refills WHERE chain=$1 AND partition_id=$2`, testChain, p0).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("%d refills for the shard after the settlement, want 1 (err %v)", n, err)
-	}
-	if got, _ := s.freeHot(ctx, pool, p0); got.Cmp(big.NewInt(350)) != 0 {
-		t.Fatalf("free after the settlement: %v", got)
+	if n := s.refillRows(t, p0); n != before {
+		t.Fatalf("the next pass opened another refill (%d, was %d)", n, before)
 	}
 }
