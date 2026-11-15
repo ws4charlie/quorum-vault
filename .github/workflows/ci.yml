@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main, dev, team/quorum-vault/speed-1-mpc-party-ci] # TEMP: remove this branch before merging
+    branches: [main, dev]
   pull_request:
 
 permissions:
