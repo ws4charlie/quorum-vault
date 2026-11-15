@@ -43,7 +43,8 @@ e2e-sol-nonces|psi|90|3|make test-e2e-sol-nonces
 test|p|90|1|go vet ./... && QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -short -count=1 -p 1 ./...
 mpc-signing|pa|74|1|make test-mpc
 "
-ALL_GROUPS="$(printf '%s\n' "$GROUP_TABLE" | sed -n 's/^\([^|]*\)|.*/\1/p' | tr '\n' ' ')"
+# heaviest first, whatever the table's order
+ALL_GROUPS="$(printf '%s\n' "$GROUP_TABLE" | grep '|' | sort -t'|' -k3,3 -rn | cut -d'|' -f1 | tr '\n' ' ')"
 
 LANES="${LANES:-6}"
 BASE="${QV_E2E_PORT_BASE:-41000}"
@@ -87,23 +88,48 @@ ngroups=$(printf '%s\n' $selected | wc -l | tr -d ' ')
 [ "$LANES" -ge 1 ] || die "LANES must be at least 1"
 
 # ---- lanes: heaviest group first, each to the lane with the least weight so far ----
+# The Solana validator is the heaviest container (an x86_64 binary, emulated on Apple silicon: ~1.3 GB and over one core each), so only the first
+# SOL_LANES lanes run one, and the Solana groups are spread over those lanes by weight (default: one validator per ~600 s of CI time, at most 3).
+sol_weight=0
+for g in $selected; do case "$(field "$g" 2)" in *s*) sol_weight=$((sol_weight + $(field "$g" 3))) ;; esac; done
+# How many validators fit: memory the Docker VM has free now (other stacks on this machine count), since the kernel kills the biggest container
+# when the VM runs out (seen: a validator "exited 137, OOMKilled", the group then failing with "sol rpc getSlot: EOF"). Measured per validator
+# ~1.6 GB in its cgroup plus emulation overhead outside it, so 1.8 GB is reserved; ~250 MB per lane; ~0.7 GB for Temporal and Redpanda.
+vm_free_mb=0
+if [ "$sol_weight" -gt 0 ] && [ -z "${QV_E2E_SOL_LANES:-}" ] && command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+  vm_free_mb=$(docker run --rm --pid=host alpine awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+fi
+SOL_LANES="${QV_E2E_SOL_LANES:-$(( (sol_weight + 599) / 600 ))}"
+[ "$SOL_LANES" -gt 3 ] && SOL_LANES=3
+if [ -z "${QV_E2E_SOL_LANES:-}" ] && [ "${vm_free_mb:-0}" -gt 0 ]; then
+  fit=$(( (vm_free_mb - 700 - 250 * LANES) / 1800 ))
+  [ "$fit" -lt 1 ] && fit=1
+  [ "$SOL_LANES" -gt "$fit" ] && SOL_LANES=$fit
+  SOL_NOTE="Docker VM has ${vm_free_mb} MB free: $SOL_LANES Solana validator(s)"
+fi
+# Fewer than one validator's worth is not a run that "mostly works": every run that started below this lost a validator to the OOM killer
+# or Temporal to a stall ("register namespace: context deadline exceeded") some minutes in. Say so now instead.
+if [ "${vm_free_mb:-0}" -gt 0 ] && [ "${QV_E2E_FORCE:-0}" != 1 ]; then
+  need_mb=$(( 700 + 250 * LANES + 2300 * SOL_LANES + 1000 ))
+  if [ "$vm_free_mb" -lt "$need_mb" ]; then
+    die "the Docker VM has ${vm_free_mb} MB free and this run needs about ${need_mb} MB (Temporal and Redpanda, ${LANES} lanes, ${SOL_LANES} Solana validator(s) of ~1.6 GB that grow while they run): stop other compose stacks (docker ps), or give Docker Desktop more memory (Settings > Resources), or run fewer groups (QV_E2E_GROUPS=evm,btc,test) or LANES=3. QV_E2E_FORCE=1 runs anyway (expect random failures)."
+  fi
+fi
+[ "$SOL_LANES" -gt "$LANES" ] && SOL_LANES=$LANES
+[ "$sol_weight" -gt 0 ] && [ "$SOL_LANES" -lt 1 ] && SOL_LANES=1
 i=1; while [ "$i" -le "$LANES" ]; do load[$i]=0; lane_groups[$i]=""; lane_svc[$i]="p"; i=$((i + 1)); done
-for g in $selected; do
+# the Solana groups first (they can only go to the validator lanes), then the others fill whatever is lightest
+sorted_groups=""
+for g in $selected; do case "$(field "$g" 2)" in *s*) sorted_groups="$sorted_groups $g" ;; esac; done
+for g in $selected; do case "$(field "$g" 2)" in *s*) ;; *) sorted_groups="$sorted_groups $g" ;; esac; done
+for g in $sorted_groups; do
+  svc="$(field "$g" 2)"
+  limit=$LANES
+  case "$svc" in *s*) limit=$SOL_LANES ;; esac
   best=1; i=2
-  while [ "$i" -le "$LANES" ]; do [ "${load[$i]}" -lt "${load[$best]}" ] && best=$i; i=$((i + 1)); done
-  # A group that needs the Solana validator goes to a lane that already has one: the validator is the heaviest container (an x86_64 binary,
-  # emulated on Apple silicon), so a run starts as few as it can.
-  case "$(field "$g" 2)" in *s*)
-    sbest=""; i=1
-    while [ "$i" -le "$LANES" ]; do
-      case "${lane_svc[$i]}" in *s*) if [ -z "$sbest" ] || [ "${load[$i]}" -lt "${load[$sbest]}" ]; then sbest=$i; fi ;; esac
-      i=$((i + 1))
-    done
-    [ -n "$sbest" ] && best=$sbest ;;
-  esac
+  while [ "$i" -le "$limit" ]; do [ "${load[$i]}" -lt "${load[$best]}" ] && best=$i; i=$((i + 1)); done
   load[$best]=$((${load[$best]} + $(field "$g" 3)))
   lane_groups[$best]="${lane_groups[$best]} $g"
-  svc="$(field "$g" 2)"
   case "$svc" in *a*) case "${lane_svc[$best]}" in *a*) ;; *) lane_svc[$best]="${lane_svc[$best]}a" ;; esac ;; esac
   case "$svc" in *b*) case "${lane_svc[$best]}" in *b*) ;; *) lane_svc[$best]="${lane_svc[$best]}b" ;; esac ;; esac
   case "$svc" in *s*) case "${lane_svc[$best]}" in *s*) ;; *) lane_svc[$best]="${lane_svc[$best]}s" ;; esac ;; esac
@@ -181,7 +207,9 @@ mkdir -p "$OUT"
 check_ports
 started=1
 say "e2e-all: $ngroups groups on $LANES lanes; logs and results in $OUT"
+[ -n "${SOL_NOTE:-}" ] && say "  ($SOL_NOTE; QV_E2E_SOL_LANES=n sets it, and more validators need more Docker memory)"
 i=1; while [ "$i" -le "$LANES" ]; do say "  lane $i (~${load[$i]}s in CI):${lane_groups[$i]}  [services: ${lane_svc[$i]}]"; i=$((i + 1)); done
+[ "${QV_E2E_PLAN_ONLY:-0}" = 1 ] && exit 0 # print the lanes and stop (cleanup has nothing to stop: nothing was started)
 
 # ---- start: clean slate, then shared services and every lane at the same time ----
 t0=$SECONDS
