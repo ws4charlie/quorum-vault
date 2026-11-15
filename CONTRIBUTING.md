@@ -24,8 +24,8 @@ make dev-env && make setup && make mpc-build
 |---|---|
 | `make test-short` | Unit and integration tests, fast |
 | `make test` | Every package; fails instead of skipping if Postgres or SoftHSM is missing |
-| `make test-e2e-all` | Every CI group at once, in parallel lanes, about ten minutes. Needs Docker, `make softhsm mpc-build` once, and leaves the ports of `make setup` alone |
-| `make test-e2e-all GROUPS=e2e-btc-cold,test` | Some groups (`evm`, `btc` and `sol` stand for all of theirs); `LANES=4` changes the lane count |
+| `make test-e2e-all` | Every CI group at once, in parallel lanes, about ten minutes with 8 lanes. Needs Docker, `make softhsm mpc-build` once, and leaves the ports of `make setup` alone |
+| `make test-e2e-all GROUPS=e2e-btc-cold,test` | Some groups (`evm`, `btc` and `sol` stand for all of theirs); `LANES=4` changes the lane count. It needs about 5.5 GB of free memory in the Docker VM (a Solana validator is ~1.6 GB) and refuses to start with a message when there is less; `QV_E2E_FORCE=1` overrides |
 
 Each group writes a log under `data/e2e-all/`. Pull requests run the light groups; the heavy crash and failure groups run nightly or from the Actions tab. `QV_CRASH_BOUNDARIES` picks crash points, and `make test-e2e-evm TEST=<name>` runs a single test. The `mpc-party` module has its own tests (`cd mpc-party && go test ./...`).
 
