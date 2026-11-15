@@ -1,7 +1,7 @@
-# mpc-party — cb-mpc wrapper (P5b-1)
+# mpc-party — cb-mpc wrapper and the party service
 
 A tested Go wrapper over [Coinbase cb-mpc](https://github.com/coinbase/cb-mpc) for the hot-wallet signer: 2-party ECDSA
-(secp256k1), Ed25519 and BIP340 Schnorr, HD keysets, backup. No network service yet (P5b-2).
+(secp256k1), Ed25519 and BIP340 Schnorr, HD keysets, backup, and the gRPC service that runs one party. The concepts are in [docs/mpc.md](../docs/mpc.md); this file is the developer reference.
 
 **Separate Go module on purpose.** cb-mpc vendors its own libsecp256k1, which collides with go-ethereum's cgo copy at
 link time, and the repository root must keep building with no C++ toolchain. Nothing in this module imports
@@ -9,7 +9,7 @@ go-ethereum (`TestModuleDoesNotDependOnGoEthereum` enforces it) and nothing in t
 
 Pinned: **cb-mpc v0.2.2 = `2f2c4f1005729bd575b6f17bce8a47478df7ce78`**, in [cbmpc.pin](cbmpc.pin) (single source of
 truth; [pin.go](internal/cbmpc/pin.go) mirrors it and `TestPinMatchesBuild` fails if they or the built library differ).
-Why this version and what was reviewed: [docs/spikes/p5a-cbmpc.md](../docs/spikes/p5a-cbmpc.md) and the P5b-1 report.
+Why this version and what was reviewed: [docs/spikes/p5a-cbmpc.md](../docs/spikes/p5a-cbmpc.md).
 
 ## Build and test
 
@@ -43,14 +43,14 @@ go test -run '^$' -fuzz FuzzEntryPoints -fuzztime 60s ./internal/cbmpc
 | Signing | `(*SignKey).Sign` (ECDSA 2PC DER low-S, Ed25519 2PC), `DKGBIP340` + `Sign` + `XOnlyPublicKey` + `Refresh` (non-HD) |
 | Backup | `(*Keyset).Split`, `NewKeysetSplit`, `Join`, `GeneratePVEKeys`, `(*KeysetSplit).PVEExport`, `PVEVerify`, `PVERestore`, `BackupLabel` |
 | Threshold 2-of-3 ECDSA (EVM, not HD) | `TDKG`, `(*TKey).Refresh`, `.Sign(ctx, mesh, peer, receiver, digest)`, `.SelfTest(ctx, mesh, label)`, `.PublicKey`, `.SharePoint`, `LoadTKey`; backup `.Split`, `TBackupLabel`, `(*TKeySplit).PVEExport`, `TPVEVerify`, `TRestoreScalar`, `TJoin` |
-| Threshold 2-of-3 Ed25519 (Solana, not HD, P8-1) | the same type and methods as ECDSA, with the scheme as a parameter: `TDKGAlg(ctx, mesh, self, Ed25519)`, `LoadTKeyAlg`, `TBackupLabelAlg`, `TRestoreScalarAlg`; `.Sign` takes the whole message and returns a 64-byte signature; `TPVEVerify` / `TJoin` follow the point length (32 bytes = Ed25519) |
+| Threshold 2-of-3 Ed25519 (Solana, not HD) | the same type and methods as ECDSA, with the scheme as a parameter: `TDKGAlg(ctx, mesh, self, Ed25519)`, `LoadTKeyAlg`, `TBackupLabelAlg`, `TRestoreScalarAlg`; `.Sign` takes the whole message and returns a 64-byte signature; `TPVEVerify` / `TJoin` follow the point length (32 bytes = Ed25519) |
 | Transport | `Transport` interface (`Send/Recv(ctx, ...)`), `NewMemPair`, `ConnTransport`, `ReadFrame/WriteFrame`; threshold sessions use a `Mesh` (`Send(ctx, to, msg)`, `Recv(ctx, from)`), built from one `Transport` per peer with `NewLinkMesh` / `NewMemMesh`; options `WithRecvTimeout`, `WithMaxFrame` |
 | Errors | `*Error{Kind, Op, Code}`; `IsTransport`, `IsCryptographic`, `IsInternal` |
 | Secrets | `Secret` (C memory, mlock, `Wipe`), `WipeBytes` |
 
 P1 is the coordinator and the only party that receives a signature. P2 gets `(nil, nil)` from `Sign`.
 
-### Error classes (what P5b-3 should do)
+### Error classes (what a caller should do)
 
 | Kind | Meaning | Action |
 |---|---|---|
@@ -75,7 +75,7 @@ Every blocking call returns promptly on context cancel or transport failure: the
 Keyset and key blobs are produced by C++ and handed to Go as a `Secret` that owns the malloc'ed buffer (mlock attempted,
 `OPENSSL_cleanse` on `Wipe`, finalizer as a safety net). They enter C++ by pointer, not by copy. Cannot be wiped by this
 module: copies you take with `Secret.Bytes()` (use `WipeBytes`), the sealing envelope you build from them, swap and core
-dumps (the process must set `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0`: P5b-2), the C++ stack and registers of a finished call
+dumps (the process must set `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0`), the C++ stack and registers of a finished call
 (cb-mpc zeroizes its own buffers, not the stack), `std::vector` temporaries inside cb-mpc, and peer messages (they are
 not secret). Public data (public keys, chain codes, signatures, PVE ciphertexts) is returned as ordinary `[]byte`.
 
@@ -95,7 +95,7 @@ not secret). Public data (public keys, chain codes, signatures, PVE ciphertexts)
 5. Only the public cb-mpc `sign()` is used (full proof mode). The internal global-abort variant is not reachable.
 6. `NodeExport`, the keyset split/join and `qv_hd_info` use cb-mpc internals. Golden tests pin them.
 
-## Threshold ECDSA, 2-of-3 (E23-1)
+## Threshold ECDSA, 2-of-3
 
 cb-mpc's `ecdsa_mp` with the access structure `Threshold(2, {qv-t0, qv-t1, qv-t2})`, secp256k1, no HD. Members are 0, 1, 2.
 Go/no-go, numbers and the review: [docs/spikes/e23-threshold.md](../docs/spikes/e23-threshold.md), [UPSTREAM_REVIEW.md](UPSTREAM_REVIEW.md).
@@ -115,7 +115,7 @@ Go/no-go, numbers and the review: [docs/spikes/e23-threshold.md](../docs/spikes/
   scalar (no Paillier key, no x over q). Restore: `TRestoreScalar` + `TJoin`, then refresh and self-test.
 - Measure: `go test ./internal/cbmpc -run TestMeasure -measure` (see [docs/measurements/mpc.md](../docs/measurements/mpc.md)).
 
-### Threshold Ed25519, 2-of-3 (P8-1)
+### Threshold Ed25519, 2-of-3
 
 The same wrapper serves cb-mpc's `eddsa_mp` with the same access structure and party names; one shim path, the scheme is a parameter.
 Signatures are standard Ed25519 but randomized: sign a message once, store the signature, rebroadcast it. Go/no-go and review:
@@ -149,7 +149,7 @@ pins the layout (`testdata/golden_teddsa.json`, TEST-ONLY); the upgrade procedur
 
 ---
 
-# The service (P5b-2)
+# The service
 
 Layout: `api/` generated gRPC code (own module, pure Go; `api/generate.sh` lists the generator versions),
 `internal/server` the service, `cmd/mpc-party` the binary, `e2e/` real-process tests, `internal/testenv` throwaway
@@ -172,7 +172,7 @@ contains the allow-all authorizer:
 ```bash
 cd mpc-party
 go build -tags devauth -o /tmp/mpc-party-dev ./cmd/mpc-party     # dev build: has "dev-allow-all"
-go build -o /tmp/mpc-party ./cmd/mpc-party                       # production build: only "deny-all" until P5b-3
+go build -o /tmp/mpc-party ./cmd/mpc-party                       # production build: the real authorizers
 ```
 
 Make certificates (any tool; the tests generate P-256 self-signed ones) for party A, party B and one caller, and compute
@@ -215,15 +215,14 @@ duration, outcome, kind); no secrets.
   stores it durably before returning it. `job_id` is the idempotency key: same job and digest returns the stored
   signature (`replayed=true`), a different digest is `FailedPrecondition`.
 - **DKG and Refresh** always run `SelfTest` on both sides. New shares are stored only after A's self-test passed and A told B;
-  B stores first, then A. A crash between the two stores leaves a mismatch that P5b-4's durable two-phase commit
-  closes; until then re-run the operation (the old shares are still in the data dir only until the replacement is written).
+  B stores first, then A. A crash between the two stores is closed by the durable two-phase commit (see the sealing section).
 - **Authorizer**: `server.Authorizer` is called on B (before joining) and on A. The default build has only `deny-all`;
-  `dev-allow-all` exists only with `-tags devauth` and the risk phrase in the config. The production implementation is P5b-3.
-- Sealing uses the clearly named test sealer (`insecure-static-key-for-tests`). P5b-4 adds the HSM sealer.
+  `dev-allow-all` exists only with `-tags devauth` and the risk phrase in the config. The production authorizers are described in the section below.
+- A build with the test sealer (`insecure-static-key-for-tests`) exists for tests only; production uses the HSM sealer (see below).
 - Hardening at start: `RLIMIT_CORE=0` everywhere; on Linux also `PR_SET_DUMPABLE=0` and `mlockall` (result logged).
 - SIGTERM/SIGINT: stop accepting, wait for sessions up to `shutdown_grace_ms`, wipe keysets from memory.
 
-## P5b-3: production authorizers, freeze, cosigner
+## Production authorizers, freeze, cosigner
 
 - `authorizer.type`: `pinned-caller` on party A (its pinned caller, the gateway, already decided), `cosigner` on party B
   (`socket`, `timeout_ms`: asks `qv-cosigner` over a unix socket and refuses when it is down or slow), `deny-all`, and in
@@ -236,22 +235,22 @@ duration, outcome, kind); no secrets.
   garbage (denial of service, not theft); that is the price of failing closed.
 - Log lines to alert on: `ALERT keyset frozen after a cryptographic failure`, `ALERT cannot persist keyset freeze`.
 
-## P5b-4: sealing, generations, backup
+## Sealing, generations, backup
 
 - **Sealer** `pkcs11` (`token`, optional `lib`, and `pin_env` or `pin_file`): AES-256-GCM in the party's own token; AAD binds role,
   keyset id, generation. Missing token / wrong PIN: the process refuses to start. HSM error at run time: `UNAVAILABLE`.
 - **Generations and reconciliation**: DKG and Refresh are a durable two-phase commit; after a restart every keyset is reconciled
-  with the peer and proven by a self-test before it serves (until then `UNAVAILABLE`). Details: `docs/learn/p5b-4-sealing-backup.md`.
+  with the peer and proven by a self-test before it serves (until then `UNAVAILABLE`).
 - **Backups**: `mpc-party backup gen-recovery-key | export | verify | restore` (offline restore), runbook
   `docs/runbooks/mpc-backup-restore.md`; `Health` reports `backup_generation` and `backup_stale` per keyset. Freeze:
   `docs/runbooks/mpc-keyset-freeze.md`. Drill: `scripts/restore-drill.sh`.
 - Crash testing: `-tags devauth` builds read `QV_FAILPOINT=<name>` and exit at that step (e2e `TestCrashMatrix*`). Production
   builds contain neither the failpoints nor the insecure sealer.
 
-## E23-2: 2-of-3 keysets and party C
+## 2-of-3 keysets and party C
 
 A keyset has a **scheme**: today's 2-party HD keyset (members A and B; Bitcoin and the Solana deposit keys), a **2-of-3 threshold
-ECDSA** keyset (members A, B and C; secp256k1, not HD; EVM hot keys) or, since P8-2, a **2-of-3 threshold Ed25519** keyset (the same
+ECDSA** keyset (members A, B and C; secp256k1, not HD; EVM hot keys) or, a **2-of-3 threshold Ed25519** keyset (the same
 members; Solana hot keys). A 2-of-3 keyset IS the key: `Sign` names it as `key_id`. All kinds live in the same processes; a process
 refuses an operation on a keyset whose scheme it does not hold (party C holds 2-of-3 keysets only).
 
@@ -262,8 +261,7 @@ checks the 64-byte signature with `crypto/ed25519` against the 32-byte key; an E
 signatures are randomized, so the first signature stored under a job id is final: a repeat of the job returns it unchanged and starts
 no session, and the same job id with another message is refused. A request for one scheme on the other scheme's keyset is refused
 with an error that names both, and a DKG, refresh or reconcile that names the wrong scheme is refused by the followers.
-Wrapper, review and numbers: [docs/spikes/e23-threshold.md](../docs/spikes/e23-threshold.md). Learn page:
-[docs/learn/e23-2-three-party-service.md](../docs/learn/e23-2-three-party-service.md).
+Wrapper, review and numbers: [docs/spikes/e23-threshold.md](../docs/spikes/e23-threshold.md)..
 
 | Party | Caller port serves | Peer port | Dials |
 |---|---|---|---|

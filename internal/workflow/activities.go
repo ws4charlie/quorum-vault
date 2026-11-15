@@ -123,7 +123,7 @@ func (a *Activities) ScanOnce(ctx context.Context) (ScanResult, error) {
 		// Stopped on purpose (the chain was rewritten below the safe depth): credits stay, nothing is retried or reversed, and
 		// the loop idles until an operator clears the halt.
 		if !a.haltAlerted.Swap(true) {
-			a.log().Error("ALERT: scanning is halted and credits are kept; an operator must look (see docs/learn/p7-2-btc-deposits.md)", "error", err.Error())
+			a.log().Error("ALERT: scanning is halted and credits are kept; an operator must look (see docs/bitcoin.md)", "error", err.Error())
 		}
 		cur, cerr := a.D.Svc.Cursor(ctx)
 		return ScanResult{Cursor: cur}, cerr

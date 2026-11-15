@@ -1,6 +1,6 @@
 -- P3b closed loop: scan cursor, sweep and withdrawal bookkeeping for the
 -- workflows. Everything here is business-zone state; the ledger stays the
--- source of truth for money (see docs/learn/p3b-closed-loop.md).
+-- source of truth for money (see docs/workflows.md and docs/ledger.md).
 
 -- Next block height Scan starts from, per chain. Advanced in the same
 -- transaction that credits the deposits found below it.

@@ -22,7 +22,7 @@ CREATE TABLE deferred_deposits (
 CREATE INDEX deferred_deposits_release ON deferred_deposits (chain, release_at);
 
 -- A scan that found the chain rewritten below the safe depth stops here. Credits stay. An operator looks, then deletes the row
--- (docs/learn/p7-2-btc-deposits.md).
+-- (docs/bitcoin.md).
 CREATE TABLE scan_halts (
     chain  text PRIMARY KEY,
     reason text NOT NULL,
