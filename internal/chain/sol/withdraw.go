@@ -220,7 +220,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 
 // takeSlot finds a free, usable nonce account of the shard, allocates it to the owner and builds the message on its value.
 func (a *Adapter) takeSlot(ctx context.Context, tx pgx.Tx, kind, id, partitionID string, hot [32]byte, body []Ix, limit uint32, price uint64, depIdx ...uint32) (chain.UnsignedTx, error) {
-	rows, err := tx.Query(ctx, `SELECT n.address FROM sol_nonce_accounts n WHERE n.chain=$1 AND n.hot_address=$2
+	rows, err := tx.Query(ctx, `SELECT n.address FROM sol_nonce_accounts n WHERE n.chain=$1 AND n.hot_address=$2 AND n.retired_at IS NULL
 		AND NOT EXISTS (SELECT 1 FROM sol_nonce_allocations a WHERE a.chain=n.chain AND a.address=n.address AND a.status IN ('allocated','broadcast'))
 		ORDER BY n.idx FOR UPDATE OF n SKIP LOCKED`, a.cfg.Chain, Address(hot))
 	if err != nil {

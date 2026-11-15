@@ -30,6 +30,8 @@ type SOLColdChain interface {
 	ColdSetupState(ctx context.Context, cold string) (missing []int, mints []string, blockhash string, rent uint64, err error)
 	SendRawTx(ctx context.Context, raw []byte) (string, error)
 	TokenAccountMissing(ctx context.Context, owner, mint string) (bool, error)
+	AccountLamports(ctx context.Context, address string) (uint64, error)
+	ColdBlockhash(ctx context.Context) (string, error)
 	MintOf(symbol string) (string, bool)
 }
 
@@ -83,30 +85,28 @@ func (s *Service) ExportSOLRefill(ctx context.Context, id string) (coldsign.SOLR
 	if err != nil {
 		return zero, err
 	}
+	// A replacement (the same nonce value, a higher price) keeps its account; a first export takes a free one, chosen below under a lock so that two
+	// requests exported at the same time (a SOL refill and a token refill) never take the same account.
 	var account, value string
 	if r.SOL != nil {
 		if cur, err := sc.ColdNonceValue(ctx, r.SOL.NonceAccount); err == nil && cur == r.SOL.NonceValue {
-			account, value = r.SOL.NonceAccount, r.SOL.NonceValue // the same value: a replacement (a higher price)
+			account, value = r.SOL.NonceAccount, r.SOL.NonceValue
 		}
 	}
+	var cands []sol.ColdNonce
 	if account == "" {
 		ns, err := sc.ColdNonces(ctx, r.ColdAddress)
 		if err != nil {
 			return zero, err
 		}
 		for _, n := range ns {
-			var used bool
-			if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM refills WHERE request->>'nonce_account'=$1 AND request->>'nonce_value'=$2 AND id<>$3)`,
-				n.Account, n.Value, id).Scan(&used); err != nil {
+			var retired bool
+			if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sol_cold_nonce_retired WHERE chain=$1 AND address=$2)`, s.Cfg.Chain, n.Account).Scan(&retired); err != nil {
 				return zero, err
 			}
-			if !used {
-				account, value = n.Account, n.Value
-				break
+			if !retired { // a retired account is out of the pool: nothing is signed on it any more
+				cands = append(cands, n)
 			}
-		}
-		if account == "" {
-			return zero, fmt.Errorf("%w: the cold address %s has no nonce account free of an earlier request: run the cold setup, or resolve the open ones", ErrInvalid, r.ColdAddress)
 		}
 	}
 	a := s.Cfg.Assets[r.Asset]
@@ -150,6 +150,29 @@ func (s *Service) ExportSOLRefill(ctx context.Context, id string) (coldsign.SOLR
 		if cur.Status != RefillRequested {
 			return fmt.Errorf("%w: refill %s is %s", ErrInvalid, id, cur.Status)
 		}
+		if account == "" {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "qv-cold-nonce:"+s.Cfg.Chain+":"+r.ColdAddress); err != nil {
+				return err
+			}
+			for _, n := range cands {
+				var used bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM refills WHERE request->>'nonce_account'=$1 AND request->>'nonce_value'=$2 AND id<>$3)`,
+					n.Account, n.Value, id).Scan(&used); err != nil {
+					return err
+				}
+				if !used {
+					account, value = n.Account, n.Value
+					break
+				}
+			}
+			if account == "" {
+				return errNoColdNonce
+			}
+			req.NonceAccount, req.NonceValue = account, value
+		}
+		if _, err := tx.Exec(ctx, `UPDATE refills SET failure_reason=NULL WHERE id=$1 AND failure_reason LIKE 'waiting:%'`, id); err != nil {
+			return err
+		}
 		req.Revision = cur.Revision + 1
 		out = req.File()
 		b, _ := json.Marshal(req)
@@ -159,8 +182,17 @@ func (s *Service) ExportSOLRefill(ctx context.Context, id string) (coldsign.SOLR
 		}
 		return auditEvent(ctx, tx, id, "refill.exported", map[string]any{"revision": req.Revision, "request_hash": out.RequestHash, "nonce_account": account})
 	})
+	if errors.Is(err, errNoColdNonce) {
+		// The request waits, and says why: every usable nonce account of the cold address is held by another request (one open refill per asset signs
+		// one account each), or it has none. An operator frees one (another refill settles or is closed), or runs the cold setup.
+		reason := "waiting: the cold address has no nonce account free of another request; export again when one refill settles or is closed, or run the cold setup"
+		_, _ = s.Pool.Exec(ctx, `UPDATE refills SET failure_reason=$2, updated_at=updated_at WHERE id=$1 AND status='requested'`, id, reason)
+		return zero, fmt.Errorf("%w: %s", ErrInvalid, reason)
+	}
 	return out, err
 }
+
+var errNoColdNonce = errors.New("custody: no free cold nonce account")
 
 // ImportSOLRefill takes the signed file that came back from the ceremony. It must answer the CURRENT export, and the transaction inside must be exactly
 // the request's message, signed by the cold address.
@@ -344,8 +376,11 @@ func (s *Service) SubmitColdSetup(ctx context.Context, req coldsign.SOLRequest, 
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
-	if req.Kind != coldsign.KindSOLSetup {
-		return "", fmt.Errorf("%w: not a setup request", ErrInvalid)
+	if req.Kind != coldsign.KindSOLSetup && req.Kind != coldsign.KindSOLClose {
+		return "", fmt.Errorf("%w: not a setup or close request", ErrInvalid)
+	}
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO sol_cold_ops (chain, signature, cold, kind) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, s.Cfg.Chain, signed.TxHash, req.From, req.Kind); err != nil {
+		return "", err
 	}
 	sig, err := sc.SendRawTx(ctx, raw)
 	if err != nil {
@@ -373,9 +408,26 @@ func (s *Service) SubmitColdSetup(ctx context.Context, req coldsign.SOLRequest, 
 		return sig, fmt.Errorf("%w: pool %q has no partition", ErrInvalid, req.Pool)
 	}
 	return sig, InTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		if cost.Sign() != 0 {
-			if err := s.transfer(ctx, tx, "cold-setup:"+sig, feeAcct(s.Cfg.Chain, s.Cfg.Native), coldAcct(part), cost, map[string]any{"kind": "cold_setup", "tx": sig}); err != nil {
+		switch {
+		case cost.Sign() > 0:
+			if err := s.transfer(ctx, tx, "cold-setup:"+sig, feeAcct(s.Cfg.Chain, s.Cfg.Native), coldAcct(part), cost, map[string]any{"kind": "cold_" + req.Kind, "tx": sig}); err != nil {
 				return err
+			}
+		case cost.Sign() < 0: // a close got more rent back than the fee: the cost is negative, as for a closed token account
+			if err := s.transfer(ctx, tx, "cold-setup:"+sig, coldAcct(part), feeAcct(s.Cfg.Chain, s.Cfg.Native), new(big.Int).Neg(cost), map[string]any{"kind": "cold_" + req.Kind, "tx": sig}); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE sol_cold_ops SET booked=true WHERE chain=$1 AND signature=$2`, s.Cfg.Chain, sig); err != nil {
+			return err
+		}
+		if req.Kind == coldsign.KindSOLClose {
+			cold := req.From
+			for _, i := range req.NonceIndexes {
+				ck, _ := solmsgAddr(cold)
+				if _, err := tx.Exec(ctx, `UPDATE sol_cold_nonce_retired SET closed_at=COALESCE(closed_at, now()) WHERE chain=$1 AND address=$2`, s.Cfg.Chain, solNonceAddress(ck, i)); err != nil {
+					return err
+				}
 			}
 		}
 		return auditOnce(ctx, tx, "cold-setup:"+sig, sig, "cold.setup", map[string]any{"pool": req.Pool, "nonces": req.NonceIndexes, "mints": req.Mints, "cost": cost.String()})
@@ -405,3 +457,93 @@ func (s *Service) waitFinal(ctx context.Context, sig string) (chain.TxStatus, er
 		}
 	}
 }
+
+// RetireColdNonce takes pool account idx of a pool's cold address out of the pool: no refill request is exported on it any more. The last account
+// of the pool is never retired.
+func (s *Service) RetireColdNonce(ctx context.Context, pool string, idx int) error {
+	cold, ok := s.Cfg.SOL.ColdAddresses[pool]
+	if !ok {
+		return fmt.Errorf("%w: pool %q has no cold address", ErrInvalid, pool)
+	}
+	if idx < 0 || idx >= s.Cfg.SOL.NoncePool {
+		return fmt.Errorf("%w: pool account %d: the pool has %d", ErrInvalid, idx, s.Cfg.SOL.NoncePool)
+	}
+	ck, err := solmsgAddr(cold)
+	if err != nil {
+		return err
+	}
+	addr := solNonceAddress(ck, idx)
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		var retired int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM sol_cold_nonce_retired WHERE chain=$1 AND cold=$2 AND address<>$3`, s.Cfg.Chain, cold, addr).Scan(&retired); err != nil {
+			return err
+		}
+		if s.Cfg.SOL.NoncePool-retired-1 < 1 {
+			return fmt.Errorf("%w: pool account %d is the last of the cold address's pool", ErrInvalid, idx)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO sol_cold_nonce_retired (chain, address, cold, idx) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, s.Cfg.Chain, addr, cold, idx); err != nil {
+			return err
+		}
+		return auditOnce(ctx, tx, "cold-nonce-retire:"+addr, addr, "nonce.retired", map[string]any{"cold": cold, "index": idx})
+	})
+}
+
+// ExportColdClose builds the request file that closes retired, idle nonce accounts of a pool's cold address, rent back to the cold address. An account
+// is closed only when it is retired, exists, and no refill that is not final names it.
+func (s *Service) ExportColdClose(ctx context.Context, pool string, indexes []int) (coldsign.SOLRequestFile, error) {
+	var zero coldsign.SOLRequestFile
+	sc, err := s.solCold()
+	if err != nil {
+		return zero, err
+	}
+	cold, ok := s.Cfg.SOL.ColdAddresses[pool]
+	if !ok {
+		return zero, fmt.Errorf("%w: pool %q has no cold address", ErrInvalid, pool)
+	}
+	have, err := sc.ColdNonces(ctx, cold)
+	if err != nil {
+		return zero, err
+	}
+	byIdx := map[int]sol.ColdNonce{}
+	for _, n := range have {
+		byIdx[n.Index] = n
+	}
+	var lamports []uint64
+	for _, i := range indexes {
+		n, ok := byIdx[i]
+		if !ok {
+			return zero, fmt.Errorf("%w: pool account %d of the cold address does not exist", ErrInvalid, i)
+		}
+		var retired bool
+		if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sol_cold_nonce_retired WHERE chain=$1 AND address=$2)`, s.Cfg.Chain, n.Account).Scan(&retired); err != nil {
+			return zero, err
+		}
+		if !retired {
+			return zero, fmt.Errorf("%w: pool account %d is still in the pool: retire it first", ErrInvalid, i)
+		}
+		var open bool
+		if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM refills WHERE chain=$1 AND request->>'nonce_account'=$2 AND status NOT IN ('confirmed','failed'))`, s.Cfg.Chain, n.Account).Scan(&open); err != nil {
+			return zero, err
+		}
+		if open {
+			return zero, fmt.Errorf("%w: a refill that is not final still names pool account %d", ErrInvalid, i)
+		}
+		bal, err := sc.AccountLamports(ctx, n.Account)
+		if err != nil {
+			return zero, err
+		}
+		lamports = append(lamports, bal)
+	}
+	bh, err := sc.ColdBlockhash(ctx)
+	if err != nil {
+		return zero, err
+	}
+	limit := uint32(10_000 + 5_000*len(indexes))
+	_, price := s.solRequestFee(nil)
+	req := coldsign.SOLRequest{Version: coldsign.SOLRequestVersion, Kind: coldsign.KindSOLClose, ID: "close-" + bh[:8], Revision: 1, Chain: s.Cfg.Chain, Pool: pool,
+		From: cold, NonceValue: bh, NonceIndexes: indexes, Lamports: lamports, ComputeUnitLimit: limit, ComputeUnitPrice: price}
+	return req.File(), nil
+}
+
+func solmsgAddr(a string) ([32]byte, error)        { return sol.ParseAddress(a) }
+func solNonceAddress(owner [32]byte, i int) string { return sol.Address(sol.NonceAddress(owner, i)) }

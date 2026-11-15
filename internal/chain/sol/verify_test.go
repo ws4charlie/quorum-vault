@@ -571,7 +571,7 @@ func TestNonceShapes(t *testing.T) {
 	f.mustFail("no advance", wd(f.cbLimit(10_000), xfer), in, "first instruction")
 	f.mustFail("advance twice", wd(f.adv(), f.adv(), f.cbLimit(10_000), xfer), in, "compute")
 	// attacks on the nonce account itself, next to a withdrawal
-	f.mustFail("withdraw from the nonce account", wd(f.adv(), f.cbLimit(10_000), xfer, WithdrawNonceIx(f)), in, "one system transfer")
+	f.mustFail("withdraw from the nonce account", wd(f.adv(), f.cbLimit(10_000), xfer, withdrawNonceTix(f)), in, "one system transfer")
 	f.mustFail("authorize a new authority", wd(f.adv(), f.cbLimit(10_000), xfer, AuthorizeNonceIx(f)), in, "one system transfer")
 	f.mustFail("a transfer out of the nonce account", wd(f.adv(), f.cbLimit(10_000), f.sysTransfer(f.nonce0, f.dest, 5_000_000)), in, "not a system transfer")
 	// a sweep without the advance is refused: it needs a nonce like a withdrawal
@@ -595,7 +595,7 @@ func TestNonceShapes(t *testing.T) {
 	}
 }
 
-func WithdrawNonceIx(f *fx) tix {
+func withdrawNonceTix(f *fx) tix {
 	bh, _ := ParseAddress(SysvarRecentBlockhashes)
 	rent, _ := ParseAddress(SysvarRent)
 	return tix{prog: f.sys, accts: []tmeta{{f.nonce0, false, true}, {f.dest, false, true}, {bh, false, false}, {rent, false, false}, {f.hot, true, false}}, data: append(le32(5), le64(1_000_000)...)}
@@ -743,4 +743,31 @@ func TestColdAndRebalanceShapes(t *testing.T) {
 	nocold := tin
 	nocold.PartitionID, nocold.ID = "qv-us/sol-1/TKN/hot/segregated:x/0", "c3"
 	f.mustFail("a pool without a pinned cold address", f.job(compile(f.hot, f.nv, f.adv(), f.cbLimit(50_000), f.checked(src, dst, f.hot, 777, 6, f.mint)), nocold.PartitionID, PathHot, nil), nocold, "no hot shard")
+}
+
+// A retired account is closed by one WithdrawNonceAccount of the whole balance of an account of the shard's own pool, to the shard itself, the shard
+// being the authority. Nothing else is accepted under that intent: no other destination, no account of another pool, no authority change.
+func TestNonceCloseShape(t *testing.T) {
+	f := newFx(t)
+	bh, _ := ParseAddress(SysvarRecentBlockhashes)
+	rent, _ := ParseAddress(SysvarRent)
+	wnd := func(nonce, dest, auth [32]byte, lamports uint64) tix {
+		return tix{prog: f.sys, accts: []tmeta{{nonce, false, true}, {dest, false, true}, {bh, false, false}, {rent, false, false}, {auth, true, false}}, data: append(le32(5), le64(lamports)...)}
+	}
+	job := func(ixs ...tix) chain.UnsignedTx { return f.job(compile(f.hot, f.nv, ixs...), f.partSOL, PathHot, nil) }
+	in := signjob.Intent{Kind: KindNonceClose, ID: "close-1", PartitionID: f.partSOL, Chain: "sol-1", Asset: "SOL", To: Address(f.hot), Amount: "1447680"}
+	f.mustPass("close of an account of the pool, rent to the shard", job(f.cbLimit(10_000), wnd(f.nonce0, f.hot, f.hot, 1_447_680)), in)
+
+	f.mustFail("rent to another destination", job(f.cbLimit(10_000), wnd(f.nonce0, f.other, f.hot, 1_447_680)), in, "goes to the hot shard itself")
+	f.mustFail("rent to the cold address", job(f.cbLimit(10_000), wnd(f.nonce0, f.cold, f.hot, 1_447_680)), in, "goes to the hot shard itself")
+	f.mustFail("an account that is not in the pool", job(f.cbLimit(10_000), wnd(f.other, f.hot, f.hot, 1_447_680)), in, "not in the pool")
+	f.mustFail("an account of another shard's pool", job(f.cbLimit(10_000), wnd(NonceAddress(f.hot2, 0), f.hot, f.hot, 1_447_680)), in, "not in the pool")
+	f.mustFail("another authority", job(f.cbLimit(10_000), wnd(f.nonce0, f.hot, f.other, 1_447_680)), in, "goes to the hot shard itself")
+	f.mustFail("an amount other than the intent's", job(f.cbLimit(10_000), wnd(f.nonce0, f.hot, f.hot, 1_000_000)), in, "WithdrawNonceAccount of the amount")
+	f.mustFail("two instructions", job(f.cbLimit(10_000), wnd(f.nonce0, f.hot, f.hot, 1_447_680), wnd(NonceAddress(f.hot, 1), f.hot, f.hot, 1_447_680)), in, "one WithdrawNonceAccount")
+	f.mustFail("a transfer along with it", job(f.cbLimit(10_000), wnd(f.nonce0, f.hot, f.hot, 1_447_680), f.sysTransfer(f.hot, f.other, 1)), in, "one WithdrawNonceAccount")
+	f.mustFail("an authority change instead", job(f.cbLimit(10_000), AuthorizeNonceIx(f)), in, "WithdrawNonceAccount")
+	// the same message under another kind of intent is not a withdrawal either
+	w := f.wIntent("SOL", f.partSOL, "1447680")
+	f.mustFail("a withdrawal that is a nonce close", job(f.adv(), f.cbLimit(10_000), wnd(f.nonce0, f.hot, f.hot, 1_447_680)), w, "")
 }

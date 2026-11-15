@@ -20,7 +20,7 @@ The cold address is written into the signing zone's own config, which the busine
 
 ## Cold to hot needs people
 A refill makes coins more exposed, so it goes through a ceremony.
-1. The core opens a refill request. Only one stays open per cold address.
+1. The core opens a refill request. One stays open per cold address; on Solana one per asset, because each refill signs a nonce account of its own.
 2. An operator exports it as a file, with the current nonce and fees.
 3. The file is carried across an air gap to the offline signer.
 4. M of N operators approve, and the HSM signs. The offline config alone decides what may be signed.

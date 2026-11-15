@@ -1,6 +1,7 @@
 package coldsign
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -235,3 +236,79 @@ func TestSOLMessageShapes(t *testing.T) {
 		t.Fatalf("create-account variant not longer: %v", err)
 	}
 }
+
+func (e *solEnv) closeReq(indexes []int, lamports []uint64) SOLRequest {
+	var bh [32]byte
+	rand.Read(bh[:])
+	return SOLRequest{Version: SOLRequestVersion, Kind: KindSOLClose, ID: "close-1", Revision: 1, Chain: "solana-localnet", Pool: "p1", From: e.cold,
+		NonceValue: base58.Encode(bh[:]), NonceIndexes: indexes, Lamports: lamports, ComputeUnitLimit: 20_000}
+}
+
+// A close withdraws the whole balance of the cold address's own nonce accounts back to the cold address and nothing else; once one is signed, no
+// refill is signed on that account.
+func TestSOLCloseOfColdNonceAccounts(t *testing.T) {
+	e := newSOLEnv(t)
+	e.cfg.NonceRent = solmsg.DefaultNonceRent
+	ctx := context.Background()
+	r := e.closeReq([]int{1, 2}, []uint64{solmsg.DefaultNonceRent, solmsg.DefaultNonceRent})
+	s, _, err := e.cfg.Sign(ctx, r.File(), e.approvals(r, "alice", "bob"), e.signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := VerifySOLSignedMatches(r, r.HashHex(), s)
+	if err != nil || len(raw) == 0 {
+		t.Fatalf("verify: %v", err)
+	}
+	// the message is two WithdrawNonceAccount to the cold address and nothing else
+	msg, _ := r.Message()
+	if bytes.Contains(msg, solmsgAddrBytes(e.hot)) {
+		t.Fatal("the close names the hot shard")
+	}
+	// a refill on a closed account is refused; on another account it is signed
+	closedAcct := solmsg.Address(solmsg.NonceAddress(solmsgAddr(e.cold), 1))
+	rf := e.req("SOL", "1000", 1, 0)
+	if rf.NonceAccount != closedAcct {
+		t.Fatalf("test setup: %s vs %s", rf.NonceAccount, closedAcct)
+	}
+	if _, _, err := e.cfg.Sign(ctx, rf.File(), e.approvals(rf, "alice", "bob"), e.signer); err == nil || !strings.Contains(err.Error(), "signed for closing") {
+		t.Fatalf("a refill on a closed account: %v", err)
+	}
+	ok := e.req("SOL", "1000", 0, 0)
+	if _, _, err := e.cfg.Sign(ctx, ok.File(), e.approvals(ok, "alice", "bob"), e.signer); err != nil {
+		t.Fatalf("a refill on another account: %v", err)
+	}
+
+	// refusals
+	cases := map[string]func(q *SOLRequest){
+		"with a destination":                   func(q *SOLRequest) { q.To = e.hot },
+		"with an amount":                       func(q *SOLRequest) { q.Amount = "5" },
+		"with a mint":                          func(q *SOLRequest) { q.Mint = e.mint },
+		"an account outside the pool":          func(q *SOLRequest) { q.NonceIndexes = []int{1, 9} },
+		"a balance that is no nonce account's": func(q *SOLRequest) { q.Lamports = []uint64{solmsg.DefaultNonceRent * 1000, 1} },
+		"a repeated account":                   func(q *SOLRequest) { q.NonceIndexes = []int{1, 1} },
+		"no accounts":                          func(q *SOLRequest) { q.NonceIndexes, q.Lamports = nil, nil },
+		"a zero balance":                       func(q *SOLRequest) { q.Lamports = []uint64{0, 1} },
+		"a huge fee":                           func(q *SOLRequest) { q.ComputeUnitPrice = e.cfg.MaxMicroLamports + 1 },
+	}
+	for name, mut := range cases {
+		q := e.closeReq([]int{1, 2}, []uint64{solmsg.DefaultNonceRent, solmsg.DefaultNonceRent})
+		mut(&q)
+		if _, _, err := e.cfg.Sign(ctx, q.File(), e.approvals(q, "alice", "bob"), e.signer); err == nil {
+			t.Errorf("%s: signed", name)
+		}
+	}
+	// one approval is not enough
+	q := e.closeReq([]int{2}, []uint64{solmsg.DefaultNonceRent})
+	if _, _, err := e.cfg.Sign(ctx, q.File(), e.approvals(q, "alice"), e.signer); err == nil {
+		t.Error("one approval signed a close")
+	}
+	// a config without nonce_rent signs no close
+	e.cfg.NonceRent = 0
+	q = e.closeReq([]int{2}, []uint64{solmsg.DefaultNonceRent})
+	if _, _, err := e.cfg.Sign(ctx, q.File(), e.approvals(q, "alice", "bob"), e.signer); err == nil {
+		t.Error("a config without nonce_rent signed a close")
+	}
+}
+
+func solmsgAddr(a string) [32]byte    { b, _ := solmsg.ParseAddress(a); return b }
+func solmsgAddrBytes(a string) []byte { b := solmsgAddr(a); return b[:] }

@@ -148,7 +148,7 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 			var refillID string
 			var refillOpen bool
 			if rerr == nil {
-				if refillID, refillOpen, err = s.openRefillFor(ctx, snap, refillCold); err != nil {
+				if refillID, refillOpen, err = s.openRefillForAsset(ctx, snap, refillCold, asset); err != nil {
 					return err
 				}
 			}
@@ -173,7 +173,7 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 					if rid == "" {
 						note = "the cold address holds no available output to refill from"
 					} else if !opened {
-						note = "a refill is already open for this cold address and must finish first"
+						note = "a refill is already open for this cold address (and asset) and must finish first"
 					}
 					log.Error("ALERT: hot wallet is below its low-water mark; it needs a refill from cold storage, which takes an offline ceremony",
 						"partition", p, "free", free.String(), "low", lim.Low.String(), "target", lim.Target.String(), "refill", rid, "note", note)

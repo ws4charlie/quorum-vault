@@ -62,15 +62,19 @@ type SOLRequest struct {
 
 	// Setup only: the pool nonce accounts of the cold address to create (indexes), the rent each holds, and the mints whose associated token account of the
 	// cold address to create. NonceValue is then a recent blockhash (there is no nonce yet to sign with), and the setup expires with it.
-	NonceIndexes []int    `json:"nonce_indexes,omitempty"`
-	NonceRent    uint64   `json:"nonce_rent,omitempty"`
-	Mints        []string `json:"mints,omitempty"`
+	NonceIndexes []int `json:"nonce_indexes,omitempty"`
+	// Close only: the whole balance of each nonce account to close (parallel to NonceIndexes); the rent goes back to the cold address.
+	Lamports  []uint64 `json:"lamports,omitempty"`
+	NonceRent uint64   `json:"nonce_rent,omitempty"`
+	Mints     []string `json:"mints,omitempty"`
 }
 
 // KindRefill and KindSetup are the kinds of a Solana request.
 const (
 	KindSOLRefill = "refill"
 	KindSOLSetup  = "setup"
+	// KindSOLClose closes retired nonce accounts of the cold address: it withdraws the whole balance of each back to the cold address itself.
+	KindSOLClose = "close"
 )
 
 // SOLRequestFile is what is carried to the offline machine: the request and its hash.
@@ -104,7 +108,11 @@ func (r SOLRequest) fields() []string {
 	for i, n := range r.NonceIndexes {
 		idx[i] = strconv.Itoa(n)
 	}
-	return []string{r.Version, r.Kind, strings.Join(idx, ","), strconv.FormatUint(r.NonceRent, 10), strings.Join(r.Mints, ","), r.ID, strconv.Itoa(r.Revision), r.Chain, r.Pool, r.Asset, r.Mint, strconv.Itoa(r.Decimals), r.From, r.To, r.Amount, r.NonceAccount,
+	lam := make([]string, len(r.Lamports))
+	for i, n := range r.Lamports {
+		lam[i] = strconv.FormatUint(n, 10)
+	}
+	return []string{r.Version, r.Kind, strings.Join(idx, ","), strings.Join(lam, ","), strconv.FormatUint(r.NonceRent, 10), strings.Join(r.Mints, ","), r.ID, strconv.Itoa(r.Revision), r.Chain, r.Pool, r.Asset, r.Mint, strconv.Itoa(r.Decimals), r.From, r.To, r.Amount, r.NonceAccount,
 		r.NonceValue, strconv.FormatUint(uint64(r.ComputeUnitLimit), 10), strconv.FormatUint(r.ComputeUnitPrice, 10), strconv.FormatBool(r.CreateDestAccount)}
 }
 
@@ -159,6 +167,9 @@ func (r SOLRequest) Message() ([]byte, error) {
 	}
 	if r.Kind == KindSOLSetup {
 		return r.setupMessage(from)
+	}
+	if r.Kind == KindSOLClose {
+		return r.closeMessage(from)
 	}
 	to, err := solAddr("to", r.To)
 	if err != nil {
@@ -232,6 +243,11 @@ func (r SOLRequest) Summary(decimals int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  request   %s (revision %d)\n", r.ID, r.Revision)
 	fmt.Fprintf(&b, "  chain     %s, pool %s\n", r.Chain, r.Pool)
+	if r.Kind == KindSOLClose {
+		fmt.Fprintf(&b, "  CLOSE     nonce accounts %v of the cold address, %v lamports; the rent goes back to the cold address\n", r.NonceIndexes, r.Lamports)
+		fmt.Fprintf(&b, "  from      %s (the cold address)\n  blockhash %s\n", r.From, r.NonceValue)
+		return b.String()
+	}
 	if r.Kind == KindSOLSetup {
 		fmt.Fprintf(&b, "  SETUP     creates nonce accounts %v of the cold address (%d lamports of rent each) and the token accounts of %v; the cold address pays\n", r.NonceIndexes, r.NonceRent, r.Mints)
 		fmt.Fprintf(&b, "  from      %s (the cold address)\n  blockhash %s\n", r.From, r.NonceValue)
@@ -386,6 +402,9 @@ func (c *SOLConfig) Check(rf SOLRequestFile) (SOLRequest, []byte, error) {
 	if r.Kind == KindSOLSetup {
 		return c.checkSetup(r, cold)
 	}
+	if r.Kind == KindSOLClose {
+		return c.checkClose(r, cold)
+	}
 	if r.Kind != "" && r.Kind != KindSOLRefill {
 		return r, nil, refuse("unknown request kind %q", r.Kind)
 	}
@@ -527,7 +546,13 @@ func (c *SOLConfig) Sign(ctx context.Context, rf SOLRequestFile, approvals []App
 	if s, ok, err := rs.signedFor(rf.RequestHash); err != nil || ok {
 		return s, names, err // the same request again: the same signed file
 	}
-	if r.Kind != KindSOLSetup { // a setup has no nonce value: its recent blockhash expires by itself
+	switch r.Kind {
+	case KindSOLSetup: // no nonce value: the recent blockhash expires by itself
+	case KindSOLClose:
+		if err := rs.markClosed(r); err != nil { // before the signature exists: a refill on a closed account is never signed afterwards
+			return SOLSigned{}, names, err
+		}
+	default:
 		if err := rs.admit(r); err != nil {
 			return SOLSigned{}, names, err
 		}
@@ -594,7 +619,7 @@ type nonceStore struct {
 
 func openNonceRecord(base string) (*nonceStore, error) {
 	dir := filepath.Join(base, "sol")
-	for _, d := range []string{"nonces", "signed"} {
+	for _, d := range []string{"nonces", "signed", "closed"} {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
 			return nil, fmt.Errorf("record directory: %w", err)
 		}
@@ -619,8 +644,26 @@ func (ns *nonceStore) path(r SOLRequest) string {
 	return filepath.Join(ns.dir, "nonces", r.NonceAccount+"-"+r.NonceValue+".json")
 }
 
+// markClosed records that the nonce accounts of a close request are being closed, before the signature exists. admit refuses a refill on one of them.
+func (ns *nonceStore) markClosed(r SOLRequest) error {
+	cold, err := solmsg.ParseAddress(r.From)
+	if err != nil {
+		return err
+	}
+	for _, i := range r.NonceIndexes {
+		a := solmsg.Address(solmsg.NonceAddress(cold, i))
+		if err := writeFileSync(filepath.Join(ns.dir, "closed", a), []byte(r.HashHex())); err != nil {
+			return fmt.Errorf("record: %w", err)
+		}
+	}
+	return nil
+}
+
 // admit records the request BEFORE the signature exists, so a crash between the two can never leave a signature the record does not know.
 func (ns *nonceStore) admit(r SOLRequest) error {
+	if _, err := os.Stat(filepath.Join(ns.dir, "closed", r.NonceAccount)); err == nil {
+		return refuse("nonce account %s was signed for closing: no refill is signed on it", r.NonceAccount)
+	}
 	b, err := os.ReadFile(ns.path(r))
 	hash, content := r.HashHex(), r.ContentHash()
 	var rec nonceRecord
@@ -703,4 +746,58 @@ func (r SOLRequest) setupMessage(from [32]byte) ([]byte, error) {
 		ixs = append(ixs, solmsg.CreateATAIx(from, ata, from, mint))
 	}
 	return solmsg.Compile(from, bh, ixs...), nil
+}
+
+// closeMessage withdraws the whole balance of each listed nonce account back to the cold address, which is also the authority and the fee payer.
+func (r SOLRequest) closeMessage(from [32]byte) ([]byte, error) {
+	bh, err := solAddr("blockhash", r.NonceValue)
+	if err != nil {
+		return nil, err
+	}
+	if len(r.NonceIndexes) == 0 || len(r.NonceIndexes) != len(r.Lamports) || len(r.NonceIndexes) > 8 {
+		return nil, errors.New("a close names 1 to 8 nonce accounts, each with its balance")
+	}
+	if r.ComputeUnitLimit == 0 {
+		return nil, errors.New("compute unit limit is zero")
+	}
+	ixs := []solmsg.Ix{solmsg.SetLimitIx(r.ComputeUnitLimit)}
+	if r.ComputeUnitPrice > 0 {
+		ixs = append(ixs, solmsg.SetPriceIx(r.ComputeUnitPrice))
+	}
+	seen := map[int]bool{}
+	for k, i := range r.NonceIndexes {
+		if i < 0 || seen[i] || r.Lamports[k] == 0 {
+			return nil, fmt.Errorf("nonce index %d is negative or repeated, or its balance is zero", i)
+		}
+		seen[i] = true
+		ixs = append(ixs, solmsg.WithdrawNonceIx(solmsg.NonceAddress(from, i), from, from, r.Lamports[k]))
+	}
+	return solmsg.Compile(from, bh, ixs...), nil
+}
+
+// checkClose applies the rules of a close: only the cold address's own pool accounts, the rent only back to the cold address (the message builds nothing
+// else), a balance that is a nonce account's and not more, and no account that a signed refill still names.
+func (c *SOLConfig) checkClose(r SOLRequest, cold string) (SOLRequest, []byte, error) {
+	if r.To != "" || r.Amount != "" && r.Amount != "0" || r.Asset != "" || r.Mint != "" || r.NonceAccount != "" || r.CreateDestAccount || len(r.Mints) != 0 || r.NonceRent != 0 {
+		return r, nil, refuse("a close moves nothing but the rent of nonce accounts back to the cold address: it has no destination, amount, asset, mint or setup field")
+	}
+	if c.NonceRent == 0 {
+		return r, nil, refuse("this config has no nonce_rent: it signs no close of nonce accounts")
+	}
+	for k, i := range r.NonceIndexes {
+		if i < 0 || i >= c.NoncePool {
+			return r, nil, refuse("nonce index %d is outside the pool of %d accounts", i, c.NoncePool)
+		}
+		if k < len(r.Lamports) && r.Lamports[k] > 100*c.NonceRent {
+			return r, nil, refuse("balance %d of nonce account %d is above 100 times the rent %d: it is not a nonce account's", r.Lamports[k], i, c.NonceRent)
+		}
+	}
+	if r.ComputeUnitLimit == 0 || r.ComputeUnitLimit > c.MaxComputeUnits || r.ComputeUnitPrice > c.MaxMicroLamports {
+		return r, nil, refuse("compute unit limit %d / price %d is outside the caps %d / %d", r.ComputeUnitLimit, r.ComputeUnitPrice, c.MaxComputeUnits, c.MaxMicroLamports)
+	}
+	msg, err := r.Message()
+	if err != nil {
+		return r, nil, refuse("%v", err)
+	}
+	return r, msg, nil
 }

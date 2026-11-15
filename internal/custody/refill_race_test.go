@@ -164,3 +164,35 @@ func TestSweepSettlementWaitsForAPlannerPass(t *testing.T) {
 		t.Fatalf("the next pass opened another refill (%d, was %d)", n, before)
 	}
 }
+
+// On EVM (and Bitcoin) the cold address has one account nonce (one set of outputs): two refill requests exported side by side would take the same one, so
+// one refill is open per cold address whatever the asset. Only Solana, where each refill signs a nonce account of its own, opens one per asset.
+func TestEVMKeepsOneOpenRefillPerColdAddress(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := rebalFile(func(f *File) {
+		f.Cold.Limits["USDT"] = LimitFile{Low: "100", High: "10000", Target: "500"}
+		f.Cold.Rebalance = RebalanceFile{}
+	}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc := &fakeChain{fee: big.NewInt(0), statuses: map[string]chain.TxStatus{}}
+	s := New(dbtest.New(t), cfg, refillChain{fc}, fakeReader{block: 50})
+	if err := s.Bootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// every hot partition holds nothing: ETH and USDT of both shards are below their low marks
+	if _, err := s.PlanColdMoves(ctx, quietLog()); err != nil {
+		t.Fatal(err)
+	}
+	var open int
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM refills WHERE chain=$1 AND status NOT IN ('confirmed','failed')`, testChain).Scan(&open); err != nil {
+		t.Fatal(err)
+	}
+	if open != 1 {
+		t.Fatalf("%d open refills for one cold address, want 1", open)
+	}
+	if s.refillsPerAsset() {
+		t.Fatal("an EVM service allows a refill per asset")
+	}
+}

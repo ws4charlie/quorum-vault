@@ -21,18 +21,22 @@ type (
 	Ix   = solmsg.Ix
 )
 
-func Address(pub [32]byte) string                      { return solmsg.Address(pub) }
-func ParseAddress(s string) ([32]byte, error)          { return solmsg.ParseAddress(s) }
-func ATA(owner, mint [32]byte) ([32]byte, error)       { return solmsg.ATA(owner, mint) }
-func NonceSeed(i int) string                           { return solmsg.NonceSeed(i) }
-func NonceAddress(hot [32]byte, i int) [32]byte        { return solmsg.NonceAddress(hot, i) }
-func AdvanceNonceData() []byte                         { return solmsg.AdvanceNonceData() }
-func InitNonceData(authority [32]byte) []byte          { return solmsg.InitNonceData(authority) }
-func onCurve(b []byte) bool                            { return solmsg.OnCurve(b) }
-func compactU16(n int) []byte                          { return solmsg.CompactU16(n) }
-func mustAddr(s string) [32]byte                       { return solmsg.MustAddr(s) }
-func SetLimitIx(n uint32) Ix                           { return solmsg.SetLimitIx(n) }
-func SetPriceIx(microLamports uint64) Ix               { return solmsg.SetPriceIx(microLamports) }
+func Address(pub [32]byte) string                { return solmsg.Address(pub) }
+func ParseAddress(s string) ([32]byte, error)    { return solmsg.ParseAddress(s) }
+func ATA(owner, mint [32]byte) ([32]byte, error) { return solmsg.ATA(owner, mint) }
+func NonceSeed(i int) string                     { return solmsg.NonceSeed(i) }
+func NonceAddress(hot [32]byte, i int) [32]byte  { return solmsg.NonceAddress(hot, i) }
+func AdvanceNonceData() []byte                   { return solmsg.AdvanceNonceData() }
+func InitNonceData(authority [32]byte) []byte    { return solmsg.InitNonceData(authority) }
+func onCurve(b []byte) bool                      { return solmsg.OnCurve(b) }
+func compactU16(n int) []byte                    { return solmsg.CompactU16(n) }
+func mustAddr(s string) [32]byte                 { return solmsg.MustAddr(s) }
+func SetLimitIx(n uint32) Ix                     { return solmsg.SetLimitIx(n) }
+func SetPriceIx(microLamports uint64) Ix         { return solmsg.SetPriceIx(microLamports) }
+func WithdrawNonceData(lamports uint64) []byte   { return solmsg.WithdrawNonceData(lamports) }
+func WithdrawNonceIx(nonce, dest, authority [32]byte, lamports uint64) Ix {
+	return solmsg.WithdrawNonceIx(nonce, dest, authority, lamports)
+}
 func AdvanceNonceIx(nonce, authority [32]byte) Ix      { return solmsg.AdvanceNonceIx(nonce, authority) }
 func TransferIx(from, to [32]byte, lamports uint64) Ix { return solmsg.TransferIx(from, to, lamports) }
 func CheckedTransferIx(src, mint, dst, authority [32]byte, amount uint64, decimals uint8) Ix {

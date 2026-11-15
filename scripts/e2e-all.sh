@@ -39,6 +39,7 @@ e2e-sol-sweep-faults|psi|290|3|make test-e2e-sol-sweep-faults
 e2e-sol-cold|psi|300|3|make test-e2e-sol-cold
 e2e-sol-cold-crash|psi|150|3|make test-e2e-sol-cold-crash
 e2e-sol-cold-moves-crash|psi|150|3|make test-e2e-sol-cold-moves-crash
+e2e-sol-nonces|psi|90|3|make test-e2e-sol-nonces
 test|p|90|1|go vet ./... && QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -short -count=1 -p 1 ./...
 mpc-signing|pa|74|1|make test-mpc
 "

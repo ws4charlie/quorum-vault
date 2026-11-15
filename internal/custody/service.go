@@ -254,6 +254,17 @@ func (s *Service) cancelFee(ctx context.Context, feeTx string) (*big.Int, error)
 	return s.Chain.TxFee(ctx, feeTx)
 }
 
+// NonceCloser is implemented by a chain cell that can retire a nonce account and close it to get its rent back (Solana).
+type NonceCloser interface {
+	RetireNonce(ctx context.Context, partitionID string, idx int) error
+	NonceIdle(ctx context.Context, partitionID string, idx int) (bool, string, error)
+	BuildNonceClose(ctx context.Context, partitionID string, idx int) (chain.UnsignedTx, *big.Int, error)
+	MarkNonceClosed(ctx context.Context, partitionID string, idx int) error
+	RecordNonceCloseTx(ctx context.Context, partitionID string, idx int, sig string) error
+	NonceCloseTx(ctx context.Context, partitionID string, idx int) (string, error)
+	SubmitNonceSetup(ctx context.Context, s chain.SignedTx, wait time.Duration) (string, error)
+}
+
 // NonceSetup is implemented by a chain cell whose hot shards sign withdrawals on a pool of durable-nonce accounts (Solana).
 type NonceSetup interface {
 	// BuildNonceSetup builds the creation of the shard's missing pool accounts and the total rent the intent names (count 0: nothing missing).

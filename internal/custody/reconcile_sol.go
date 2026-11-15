@@ -297,7 +297,15 @@ func (s *Service) solLanded(ctx context.Context) (solLandedSet, error) {
 	if err != nil {
 		return res, err
 	}
-	res.key = strings.Join(append(append(append(key, sk...), mk...), rk...), ",")
+	nk, err := s.solLandedNonceCloses(ctx, add)
+	if err != nil {
+		return res, err
+	}
+	ok, err := s.solLandedColdOps(ctx, &res)
+	if err != nil {
+		return res, err
+	}
+	res.key = strings.Join(append(append(append(append(append(key, sk...), mk...), rk...), nk...), ok...), ",")
 	return res, nil
 }
 
@@ -536,6 +544,100 @@ func (s *Service) solLandedRefills(ctx context.Context, res *solLandedSet) ([]st
 		}
 		res.n++
 		key = append(key, r.id+":"+r.tx)
+	}
+	return key, nil
+}
+
+// solLandedNonceCloses adds the closes of nonce accounts that are final and not booked yet: the rent has come back to the hot shard (a negative cost) and
+// the books record it when the close finishes. The signature is stored before the close is sent, so a crash in between is explained the same way.
+func (s *Service) solLandedNonceCloses(ctx context.Context, add func(string, *big.Int)) ([]string, error) {
+	c := s.Cfg
+	rows, err := s.Pool.Query(ctx, `SELECT hot_address, close_tx FROM sol_nonce_accounts WHERE chain=$1 AND close_tx IS NOT NULL AND closed_at IS NULL ORDER BY address`, c.Chain)
+	if err != nil {
+		return nil, err
+	}
+	type cl struct{ hot, sig string }
+	var cs []cl
+	for rows.Next() {
+		var x cl
+		if err := rows.Scan(&x.hot, &x.sig); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		cs = append(cs, x)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var key []string
+	for _, x := range cs {
+		st, err := s.Chain.Status(ctx, x.sig)
+		if err != nil {
+			return nil, err
+		}
+		if st != chain.TxConfirmed {
+			continue
+		}
+		part := ""
+		for i, h := range c.SOLHot {
+			if h == x.hot {
+				part = c.PartitionKey(c.Native, i).String()
+			}
+		}
+		if part == "" {
+			continue
+		}
+		cost, err := s.Chain.TxFee(ctx, x.sig)
+		if err != nil {
+			return nil, err
+		}
+		add(part, cost)
+		key = append(key, "nonce-close:"+x.sig)
+	}
+	return key, nil
+}
+
+// solLandedColdOps adds the cold setups and closes that are final and not booked yet: they cost the cold address (or, for a close, gave it rent back) and the
+// books record that when the operation finishes.
+func (s *Service) solLandedColdOps(ctx context.Context, res *solLandedSet) ([]string, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT signature, cold FROM sol_cold_ops WHERE chain=$1 AND NOT booked ORDER BY signature`, s.Cfg.Chain)
+	if err != nil {
+		return nil, err
+	}
+	type op struct{ sig, cold string }
+	var ops []op
+	for rows.Next() {
+		var o op
+		if err := rows.Scan(&o.sig, &o.cold); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ops = append(ops, o)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var key []string
+	for _, o := range ops {
+		st, err := s.Chain.Status(ctx, o.sig)
+		if err != nil {
+			return nil, err
+		}
+		if st != chain.TxConfirmed {
+			continue
+		}
+		cost, err := s.Chain.TxFee(ctx, o.sig)
+		if err != nil {
+			return nil, err
+		}
+		k := [2]string{o.cold, s.Cfg.Native}
+		if res.coldIn[k] == nil {
+			res.coldIn[k] = new(big.Int)
+		}
+		res.coldIn[k].Sub(res.coldIn[k], cost) // the books record the cost when the operation finishes
+		key = append(key, "cold-op:"+o.sig)
 	}
 	return key, nil
 }

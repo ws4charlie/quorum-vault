@@ -36,8 +36,15 @@ func (a *Adapter) MissingNonces(ctx context.Context, partitionID string) ([]int,
 		return nil, fmt.Errorf("sol: partition %q has no hot shard", partitionID)
 	}
 	var missing []int
+	retired, err := a.retiredNonces(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for i := 0; i < a.cfg.NoncePool; i++ {
 		addr := Address(NonceAddress(hot, i))
+		if retired[addr] {
+			continue // taken out of the pool on purpose (and maybe closed): not created again
+		}
 		st, err := a.rpc.GetNonce(ctx, addr, Confirmed)
 		switch {
 		case errors.Is(err, ErrNoAccount):
