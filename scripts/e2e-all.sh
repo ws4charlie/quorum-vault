@@ -2,7 +2,7 @@
 # Runs every CI test group at the same time on this machine, each in an isolated lane, and reports one line per group.
 #   make test-e2e-all                          all groups
 #   make test-e2e-all GROUPS=e2e-btc-cold,test   a subset (CI job names; "evm", "btc" and "sol" stand for all their groups)
-#   make test-e2e-all LANES=4                  another number of lanes (default 6)
+#   make test-e2e-all LANES=4                  another number of lanes (default 8)
 #
 # A lane is the set of services that tests change: its own Postgres (the tests create and drop databases and switch a role's LOGIN),
 # its own anvil and/or bitcoind (tests mine, reorg, restart and fund), and its own SoftHSM token store. Temporal and Redpanda are one
@@ -46,7 +46,7 @@ mpc-signing|pa|74|1|make test-mpc
 # heaviest first, whatever the table's order
 ALL_GROUPS="$(printf '%s\n' "$GROUP_TABLE" | grep '|' | sort -t'|' -k3,3 -rn | cut -d'|' -f1 | tr '\n' ' ')"
 
-LANES="${LANES:-6}"
+LANES="${LANES:-8}"
 BASE="${QV_E2E_PORT_BASE:-41000}"
 PROJ="qve2e"
 STAMP="$(date +%Y%m%d-%H%M%S)"
