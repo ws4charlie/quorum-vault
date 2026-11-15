@@ -706,3 +706,41 @@ func TestSOLToColdAndRebalanceAreFixedByTheZone(t *testing.T) {
 		refusedBy(decide(j), ReasonTx)
 	}
 }
+
+// Closing a retired nonce account needs an operator's approval, pays the rent to the shard itself and nothing else, in the gateway and in a cosigner's
+// decider.
+func TestSOLNonceCloseNeedsAnOperatorAndPaysTheShard(t *testing.T) {
+	s := newSOLHarness(t, nil)
+	hot := s.hot.k.Pub
+	rentSys, bhSys := raw32(sol.SysvarRent), raw32(sol.SysvarRecentBlockhashes)
+	closeMsg := func(nonceIdx int, dest, auth [32]byte, lamports uint64) []byte {
+		n := sol.NonceAddress(hot, nonceIdx)
+		return s.compile(hot, s.limit(10_000), mx{prog: s.sys, accts: []solMeta{{n, false, true}, {dest, false, true}, {bhSys, false, false}, {rentSys, false, false}, {auth, true, false}},
+			data: sol.WithdrawNonceData(lamports)})
+	}
+	in := signjob.Intent{Kind: sol.KindNonceClose, ID: "close-1", Asset: "SOL", PartitionID: solPartSOL, To: s.hot.k.Address(), Amount: fmt.Sprint(sol.DefaultNonceRent)}
+	msg := closeMsg(1, hot, hot, sol.DefaultNonceRent)
+	cos := NewDecider(s.cfg, s.gw.codecs, mustGuard(t, s.harness), ModeCosigner, s.clock)
+	decide := func(j signjob.Job) error { _, err := cos.DecideKey(t.Context(), j, SignerKey{Ed25519: s.hot.k.Pub[:]}); return err }
+
+	s.mustRefuse(s.job("c0", in, msg, solPartSOL, sol.PathHot, nil), ReasonApprovals) // no approval
+	j := s.job("c1", in, msg, solPartSOL, sol.PathHot, nil, "alice")
+	if err := decide(j); err != nil {
+		t.Fatalf("the cosigner refused the honest close: %v", err)
+	}
+	s.mustSign(j, s.hot.k.Pub[:])
+	// to another destination, with another authority: refused by both
+	in2 := in
+	in2.ID = "close-2"
+	for name, m := range map[string][]byte{
+		"to a stranger":     closeMsg(2, s.other, hot, sol.DefaultNonceRent),
+		"another authority": closeMsg(2, hot, s.other, sol.DefaultNonceRent),
+		"another amount":    closeMsg(2, hot, hot, sol.DefaultNonceRent+1),
+	} {
+		j := s.job("c-"+name, in2, m, solPartSOL, sol.PathHot, nil, "alice")
+		s.mustRefuse(j, ReasonTx)
+		if why, ok := IsRejection(decide(j)); !ok || !strings.HasPrefix(why, ReasonTx+":") {
+			t.Fatalf("%s: the cosigner decided %q", name, why)
+		}
+	}
+}

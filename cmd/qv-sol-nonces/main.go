@@ -1,4 +1,5 @@
-// Command qv-sol-nonces creates the missing durable-nonce accounts of a Solana hot shard. Withdrawals on Solana sign the value of one of these
+// Command qv-sol-nonces creates the missing durable-nonce accounts of a Solana hot shard, and retires and closes them to get the rent back
+// (-action retire, then -action close once the account is idle). Withdrawals on Solana sign the value of one of these
 // accounts, so a shard cannot pay out until its pool exists. The creation is signed by the signing zone like any transaction: this command builds
 // it, puts the operator's approval on its intent and waits until the network has finalized it. Run it again to complete a pool; it does nothing
 // when the pool is complete.
@@ -39,12 +40,17 @@ func run(log *slog.Logger) error {
 	cfgPath := flag.String("config", "", "custody config file (required)")
 	dsn := flag.String("dsn", os.Getenv("DATABASE_URL"), "business database DSN (env DATABASE_URL)")
 	shard := flag.Int("shard", 0, "hot shard whose pool to complete")
+	action := flag.String("action", "setup", "setup: create the missing accounts; retire: take account -index out of the pool; close: close the retired, idle account -index")
+	index := flag.Int("index", -1, "pool account (retire and close)")
 	approver := flag.String("approver", "", "the operator's name in the signing zone's approver list (required)")
 	keyFile := flag.String("approver-key", "", "file with the operator's Ed25519 private key, 64 bytes in hex (required)")
 	wait := flag.Duration("wait", 2*time.Minute, "how long to wait for the signature and for finality")
 	flag.Parse()
 	if *cfgPath == "" || *dsn == "" || *approver == "" || *keyFile == "" {
 		return errors.New("-config, -dsn, -approver and -approver-key are required")
+	}
+	if *action != "setup" && (*index < 0) {
+		return errors.New("-index is required for retire and close")
 	}
 	raw, err := os.ReadFile(*keyFile)
 	if err != nil {
@@ -74,6 +80,24 @@ func run(log *slog.Logger) error {
 	}
 	defer backend.Close()
 	svc := custody.New(pool, cfg, backend.Adapter, backend.Reader)
+	switch *action {
+	case "retire":
+		if err := svc.RetireNonce(ctx, *shard, *index); err != nil {
+			return err
+		}
+		log.Info("the nonce account is out of the pool; close it when it is idle", "shard", *shard, "index", *index)
+		return nil
+	case "close":
+		got, err := svc.CloseNonce(ctx, *shard, *index, *approver, ed25519.PrivateKey(kb), *wait)
+		if err != nil {
+			return err
+		}
+		log.Info("the nonce account is closed", "shard", *shard, "index", *index, "recovered_lamports", got.String())
+		return nil
+	case "setup":
+	default:
+		return fmt.Errorf("unknown -action %q", *action)
+	}
 	n, err := svc.SetupNonces(ctx, *shard, *approver, ed25519.PrivateKey(kb), *wait)
 	if err != nil {
 		return err

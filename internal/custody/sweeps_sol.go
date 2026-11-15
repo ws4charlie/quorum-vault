@@ -61,7 +61,12 @@ func (s *Service) planSweepsSOL(ctx context.Context, log *slog.Logger) ([]Sweep,
 	c := s.Cfg
 	// Every open sweep holds a nonce account of the shard's pool for its whole life. The planner never lets sweeps take them all: one account stays for
 	// withdrawals, and a sweep that finds none free would only fail to build and be planned again.
-	maxOpen := max(1, c.SOL.NoncePool-1)
+	// A retired account is out of the pool: the shard with the most of them sets how many remain.
+	var retired int
+	if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(MAX(n), 0) FROM (SELECT count(*) n FROM sol_nonce_accounts WHERE chain=$1 AND retired_at IS NOT NULL GROUP BY hot_address) x`, c.Chain).Scan(&retired); err != nil {
+		return nil, err
+	}
+	maxOpen := max(1, c.SOL.NoncePool-retired-1)
 	var open int
 	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed')`, c.Chain).Scan(&open); err != nil {
 		return nil, err

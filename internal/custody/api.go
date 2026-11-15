@@ -65,6 +65,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v2/refills/{id}/close", a.closeRefill)
 	mux.HandleFunc("POST /v2/cold-setup/export", a.exportColdSetup)
 	mux.HandleFunc("POST /v2/cold-setup/submit", a.submitColdSetup)
+	mux.HandleFunc("POST /v2/cold-nonces/retire", a.retireColdNonce)
+	mux.HandleFunc("POST /v2/cold-close/export", a.exportColdClose)
+	mux.HandleFunc("POST /v2/cold-close/submit", a.submitColdSetup)
 	mux.HandleFunc("POST /v2/guardian/freezes", a.guardianFreeze)
 	mux.HandleFunc("GET /v2/audit/verify", a.auditVerify)
 	// Whoever the X-Actor header names is the actor of everything the request causes, in the audit trail.
@@ -464,6 +467,47 @@ func (a *API) exportColdSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	if !need {
 		writeJSON(w, http.StatusOK, map[string]any{"nothing_to_do": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, f)
+}
+
+// retireColdNonce takes a nonce account of a pool's cold address out of the pool, ahead of closing it.
+func (a *API) retireColdNonce(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		Pool  string `json:"pool"`
+		Index int    `json:"index"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	if err := a.svc.RetireColdNonce(r.Context(), body.Pool, body.Index); err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"retired": body.Index})
+}
+
+// exportColdClose returns the request file that closes retired, idle nonce accounts of a pool's cold address.
+func (a *API) exportColdClose(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		Pool    string `json:"pool"`
+		Indexes []int  `json:"indexes"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	f, err := a.svc.ExportColdClose(r.Context(), body.Pool, body.Indexes)
+	if err != nil {
+		a.fail(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, f)

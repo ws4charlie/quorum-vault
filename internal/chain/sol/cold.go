@@ -128,3 +128,18 @@ func (a *Adapter) TokenAccountMissing(ctx context.Context, owner, mint string) (
 
 // MintOf is the mint address of a configured token symbol.
 func (a *Adapter) MintOf(symbol string) (string, bool) { m, ok := a.cfg.Tokens[symbol]; return m, ok }
+
+// AccountLamports is the balance of an account at finalized commitment.
+func (a *Adapter) AccountLamports(ctx context.Context, address string) (uint64, error) {
+	acct, err := a.rpc.GetAccount(ctx, address, Finalized)
+	if err != nil {
+		return 0, err
+	}
+	return acct.Lamports, nil
+}
+
+// ColdBlockhash is a recent blockhash for a setup or close message of the cold address (it expires within a minute or two, and so does the request).
+func (a *Adapter) ColdBlockhash(ctx context.Context) (string, error) {
+	bh, err := a.rpc.LatestBlockhash(ctx, Finalized)
+	return Address(bh), err
+}

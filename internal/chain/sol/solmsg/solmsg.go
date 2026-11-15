@@ -249,6 +249,17 @@ func AdvanceNonceIx(nonce, authority [32]byte) Ix {
 		Data: AdvanceNonceData()}
 }
 
+// WithdrawNonceData is the data of a WithdrawNonceAccount instruction (system instruction 5) of lamports.
+func WithdrawNonceData(lamports uint64) []byte {
+	return binary.LittleEndian.AppendUint64(binary.LittleEndian.AppendUint32(nil, 5), lamports)
+}
+
+// WithdrawNonceIx withdraws lamports from nonce to dest; authority signs. Withdrawing the whole balance closes the account.
+func WithdrawNonceIx(nonce, dest, authority [32]byte, lamports uint64) Ix {
+	return Ix{Program: MustAddr(SystemProgram), Accts: []Meta{{nonce, false, true}, {dest, false, true}, {MustAddr(SysvarRecentBlockhashes), false, false},
+		{MustAddr(SysvarRent), false, false}, {authority, true, false}}, Data: WithdrawNonceData(lamports)}
+}
+
 // TransferIx is a system program transfer.
 func TransferIx(from, to [32]byte, lamports uint64) Ix {
 	return Ix{Program: MustAddr(SystemProgram), Accts: []Meta{{from, true, true}, {to, false, true}},

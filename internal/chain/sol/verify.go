@@ -307,7 +307,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		return nil, reject("%v", err)
 	}
 	switch i.Kind {
-	case "withdrawal", "to-cold", "rebalance", "sweep", "cancel", KindNonceSetup:
+	case "withdrawal", "to-cold", "rebalance", "sweep", "cancel", KindNonceSetup, KindNonceClose:
 	default:
 		return nil, reject("intent kind %q is not signed on this chain", i.Kind)
 	}
@@ -322,8 +322,8 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		return nil, reject("partition %q has no hot shard in this zone", i.PartitionID)
 	}
 	pk, _ := partition.Parse(i.PartitionID)
-	if i.Kind == "cancel" || i.Kind == KindNonceSetup {
-		// Both move no asset: they are about the shard, whichever of its partitions the owner is in. They are paid in SOL.
+	if i.Kind == "cancel" || i.Kind == KindNonceSetup || i.Kind == KindNonceClose {
+		// All move no asset: they are about the shard, whichever of its partitions the owner is in. They are paid in SOL.
 		if i.Asset != Native {
 			return nil, reject("a %s is in SOL, the intent says %q", i.Kind, i.Asset)
 		}
@@ -420,6 +420,10 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		if err := v.nonceSetup(s, rest, amount); err != nil {
 			return nil, err
 		}
+	case KindNonceClose:
+		if err := v.nonceClose(s, rest, amount); err != nil {
+			return nil, err
+		}
 	case "sweep":
 		if err := v.sweep(s, rest, i, p.DepositIndices); err != nil {
 			return nil, err
@@ -480,8 +484,33 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 	return s, nil
 }
 
-// KindNonceSetup is the intent kind of the creation of nonce accounts.
-const KindNonceSetup = "nonce-setup"
+// KindNonceSetup is the intent kind of the creation of nonce accounts; KindNonceClose is the closing of one that was retired.
+const (
+	KindNonceSetup = "nonce-setup"
+	KindNonceClose = "nonce-close"
+)
+
+// nonceClose accepts exactly one shape: a WithdrawNonceAccount of the whole balance of ONE account of the hot shard's own pool, to the hot shard
+// itself, with the hot shard as authority, signed on a recent blockhash. Whether the account is retired and idle is the business zone's and the
+// operator's approval's to say; what the zone fixes is that the rent can only go home and that no authority changes hands.
+func (v *Verifier) nonceClose(s *shape, rest []MsgInstruction, amount uint64) error {
+	if len(rest) != 1 {
+		return reject("a nonce close is one WithdrawNonceAccount after the compute budget, the message has %d instructions", len(rest))
+	}
+	in := rest[0]
+	pool := v.nonces[s.hot]
+	if in.Program != v.sys || len(in.Accts) != 5 || !bytes.Equal(in.Data, WithdrawNonceData(amount)) {
+		return reject("the instruction is not a WithdrawNonceAccount of the amount the intent names")
+	}
+	if _, ok := pool[in.Accts[0]]; !ok {
+		return reject("the nonce account %s is not in the pool of hot shard %s", Address(in.Accts[0]), s.hotAddr)
+	}
+	if in.Accts[1] != s.hot || in.Accts[2] != v.bh || in.Accts[3] != v.rent || in.Accts[4] != s.hot {
+		return reject("the rent of a closed nonce account goes to the hot shard itself, with the hot shard as authority, on the usual sysvars")
+	}
+	s.dest = s.hotAddr
+	return nil
+}
 
 // advance requires the first instruction of m to be AdvanceNonceAccount on an account of the hot shard's pool, authority the hot shard, and
 // takes the claim from it: the nonce account and the value the message signs.

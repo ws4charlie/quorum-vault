@@ -264,7 +264,7 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 		return i, reject(ReasonIntent, "intent has no id")
 	}
 	switch i.Kind {
-	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate", sol.KindNonceSetup:
+	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate", sol.KindNonceSetup, sol.KindNonceClose:
 	default:
 		return i, reject(ReasonIntent, "intent kind %q", i.Kind)
 	}
@@ -433,6 +433,15 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 		// shape (the pool's own addresses, the rent the config names) is the chain verifier's; what an approval cannot widen is the pool size.
 		if valid == 0 {
 			return reject(ReasonApprovals, "a nonce setup needs an operator approval")
+		}
+		if !codec.OwnsSender(info.Sender) {
+			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
+		}
+	case sol.KindNonceClose:
+		// An operator closes a retired nonce account of a hot shard, the rent going back to the shard: an approval is needed, and the shape (the
+		// pool's own account, the shard as destination and authority) is the chain verifier's.
+		if valid == 0 {
+			return reject(ReasonApprovals, "a nonce close needs an operator approval")
 		}
 		if !codec.OwnsSender(info.Sender) {
 			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
