@@ -27,7 +27,7 @@ import (
 // then signed through B yields a second, different, valid signature over the same message. The fallback rule never lets that happen
 // once a signing message was exchanged (such a failure pins the job to its coordinator). If A failed without a trace and B signs, only B's
 // signature exists. And if both did exist, the network runs only one transaction per message: see the experiment in e2e/mpcsign
-// (TestSecondSignatureOfOneMessageDoesNotLand) and docs/learn/solana.md.
+// (TestSecondSignatureOfOneMessageDoesNotLand) and docs/solana.md.
 type EdThresholdSigner struct {
 	*thresholdCore
 	pub []byte

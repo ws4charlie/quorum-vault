@@ -10,7 +10,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 )
 
-// The chart of accounts (docs/learn/p3b-closed-loop.md). The ledger sums to
+// The chart of accounts (docs/ledger.md). The ledger sums to
 // zero per (chain, asset): customer liabilities are positive, and every
 // on-chain holding is mirrored by a negative balance.
 

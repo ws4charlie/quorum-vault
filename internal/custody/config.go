@@ -70,7 +70,7 @@ type ColdFile struct {
 type RebalanceFile struct {
 	// Targets: what a shard should hold, per asset ("ETH": applies to every shard) or per shard ("ETH/1": overrides). Base units.
 	// A shard below its target receives from the fullest shard, if that holds more than its own target. With cold limits the target
-	// must lie between the shard's low-water mark and its cold target (see docs/learn/p6-4-shard-rebalance.md).
+	// must lie between the shard's low-water mark and its cold target (see docs/tiers.md).
 	Targets map[string]string `json:"targets"`
 }
 
