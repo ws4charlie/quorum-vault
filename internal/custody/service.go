@@ -41,6 +41,9 @@ type Service struct {
 
 	reconSkipSince  atomic.Int64 // Unix time the chain comparisons of Reconcile began to be skipped (0: they are not)
 	mismatchAlerted atomic.Bool  // the "destination changed on chain" ALERT was given and the mismatch has not cleared since
+
+	// planHook, set by tests only, is called inside a cold planner pass at the named stage ("balance read": the hot balance is read, the open refills are not yet).
+	planHook func(stage string)
 }
 
 // New returns a Service. Led defaults to the Postgres ledger.
