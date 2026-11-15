@@ -262,3 +262,6 @@ func mustRaw(t *testing.T, h string) []byte {
 	}
 	return b
 }
+
+// refile recomputes the hash of a request file whose request a test changed.
+func refile(rf coldsign.SOLRequestFile) coldsign.SOLRequestFile { return rf.Request.File() }

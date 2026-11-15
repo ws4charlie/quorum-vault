@@ -554,3 +554,12 @@ func (p *rpcProxy) heldCount() int {
 	defer p.mu.Unlock()
 	return len(p.held)
 }
+
+// takeHeld returns the transactions held back so far and forgets them.
+func (p *rpcProxy) takeHeld() [][]byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.held
+	p.held = nil
+	return h
+}

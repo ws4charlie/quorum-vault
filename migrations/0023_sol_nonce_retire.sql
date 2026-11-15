@@ -14,3 +14,14 @@ CREATE TABLE sol_cold_nonce_retired (
     closed_at  timestamptz,
     PRIMARY KEY (chain, address)
 );
+
+-- A cold setup or close, recorded before it is sent: between its being final and its cost being booked, Reconcile explains the cold address's balance from it.
+CREATE TABLE sol_cold_ops (
+    chain      text NOT NULL,
+    signature  text NOT NULL,
+    cold       text NOT NULL,
+    kind       text NOT NULL,
+    booked     boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (chain, signature)
+);

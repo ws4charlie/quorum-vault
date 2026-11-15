@@ -14,8 +14,8 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **No load test.** Numbers were measured on a laptop, not on target hardware. See [measurements](measurements).
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **Bitcoin has one hot shard per pool**, and so no rebalance.
-- **Solana is narrower.** Nonce accounts cannot be closed yet, only the classic token program is credited, and a very large customer base would need a different scan.
-- **One refill per cold address at a time**, and hot funding on Solana is booked by an operator call, not found by the scan.
+- **Solana is narrower.** Only the classic token program is credited, a very large customer base would need a different scan, and a cold ceremony that signs on a recent blockhash (setup, closing nonce accounts) must finish within its short life.
+- **One refill per cold address at a time** on EVM and Bitcoin (on Solana, one per asset), and hot funding on Solana is booked by an operator call, not found by the scan.
 - **Restore is drilled on one machine,** not across sites.
 
 [DESIGN_SCALE.md](../DESIGN_SCALE.md) works out what scaling would need.

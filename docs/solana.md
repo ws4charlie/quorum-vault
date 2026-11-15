@@ -25,5 +25,8 @@ The reference to a recent block would expire before the signers finish. So a wit
 | The nonce moved without us | The withdrawal is parked with an alert |
 | Cancelled | A message that only advances the nonce takes its place |
 
+## Nonce accounts can be given back
+Each nonce account holds rent. An operator retires one, so nothing new uses it, and closes it once it is idle: the hot wallet withdraws the whole balance back to itself, signed by the signing zone under an approval. The rent lowers the cost in the books. The zone accepts only this shape, for an account of the wallet's own pool and paid to the wallet itself, and still refuses to change who controls a nonce account. The cold address's accounts close the same way, in an offline ceremony.
+
 ## Sweeps take several addresses at once
 A sweep moves several deposit addresses into the hot wallet in one transaction, and the planner always leaves one nonce account for withdrawals. An empty token account is closed after a while and its rent returns to the hot wallet. Deposit keys need parties A and B, so sweeps wait if either is down.

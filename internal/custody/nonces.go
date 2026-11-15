@@ -189,6 +189,18 @@ func (s *Service) CloseNonce(ctx context.Context, shard, idx int, approver strin
 				return nil, err
 			}
 			if _, err := nc.SubmitNonceSetup(ctx, stx, wait); err != nil {
+				// a close that landed and failed moved nothing and cost its fee: book that and forget the signature, so the next try starts clean
+				if st, serr := s.Chain.Status(ctx, sig); serr == nil && st == chain.TxFailed {
+					if fee, ferr := s.Chain.TxFee(ctx, sig); ferr == nil {
+						_ = InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+							if err := s.recordFee(ctx, tx, sig, part, fee); err != nil {
+								return err
+							}
+							_, err := tx.Exec(ctx, `UPDATE sol_nonce_accounts SET close_tx=NULL WHERE chain=$1 AND close_tx=$2`, s.Cfg.Chain, sig)
+							return err
+						})
+					}
+				}
 				return nil, err
 			}
 			return lamports, s.finishNonceClose(ctx, nc, part, idx, sig)
@@ -203,14 +215,22 @@ func (s *Service) CloseNonce(ctx context.Context, shard, idx int, approver strin
 	}
 }
 
-// finishNonceClose books what the close cost (negative: the rent that came back, less the fee) and marks the account closed.
+// finishNonceClose books what the close cost (negative: the rent that came back, less the fee) and marks the account closed, in one transaction: between
+// the close being final and this commit, Reconcile explains the difference from the recorded signature.
 func (s *Service) finishNonceClose(ctx context.Context, nc NonceCloser, part string, idx int, sig string) error {
 	cost, err := s.Chain.TxFee(ctx, sig)
 	if err != nil {
 		return err
 	}
-	if err := InTx(ctx, s.Pool, func(tx pgx.Tx) error { return s.recordFee(ctx, tx, sig, part, cost) }); err != nil {
+	hot, err := s.Chain.(interface{ HotAddress(string) (string, error) }).HotAddress(part)
+	if err != nil {
 		return err
 	}
-	return nc.MarkNonceClosed(ctx, part, idx)
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := s.recordFee(ctx, tx, sig, part, cost); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE sol_nonce_accounts SET closed_at=COALESCE(closed_at, now()) WHERE chain=$1 AND hot_address=$2 AND close_tx=$3`, s.Cfg.Chain, hot, sig)
+		return err
+	})
 }

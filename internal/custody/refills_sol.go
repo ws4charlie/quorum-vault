@@ -379,6 +379,9 @@ func (s *Service) SubmitColdSetup(ctx context.Context, req coldsign.SOLRequest, 
 	if req.Kind != coldsign.KindSOLSetup && req.Kind != coldsign.KindSOLClose {
 		return "", fmt.Errorf("%w: not a setup or close request", ErrInvalid)
 	}
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO sol_cold_ops (chain, signature, cold, kind) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, s.Cfg.Chain, signed.TxHash, req.From, req.Kind); err != nil {
+		return "", err
+	}
 	sig, err := sc.SendRawTx(ctx, raw)
 	if err != nil {
 		return "", err
@@ -414,6 +417,9 @@ func (s *Service) SubmitColdSetup(ctx context.Context, req coldsign.SOLRequest, 
 			if err := s.transfer(ctx, tx, "cold-setup:"+sig, coldAcct(part), feeAcct(s.Cfg.Chain, s.Cfg.Native), new(big.Int).Neg(cost), map[string]any{"kind": "cold_" + req.Kind, "tx": sig}); err != nil {
 				return err
 			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE sol_cold_ops SET booked=true WHERE chain=$1 AND signature=$2`, s.Cfg.Chain, sig); err != nil {
+			return err
 		}
 		if req.Kind == coldsign.KindSOLClose {
 			cold := req.From
