@@ -457,6 +457,12 @@ func (s *Service) SettleRefill(ctx context.Context, id string, reverted bool) er
 		}
 	}
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		// The partition first, like the cold planner: it holds this row for a whole pass, and it decides from the open refills and from the hot
+		// balance together. Without it a pass could read the hot balance before this settlement and the open refills after it, see no open refill
+		// and a shard still below its mark, and ask for a second refill for money that has already arrived.
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM partitions WHERE id=$1 FOR UPDATE`, r.PartitionID); err != nil {
+			return err
+		}
 		r, err := scanRefill(tx.QueryRow(ctx, `SELECT `+refillCols+` FROM refills WHERE id=$1 FOR UPDATE`, id))
 		if err != nil {
 			return err
