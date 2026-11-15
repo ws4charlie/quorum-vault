@@ -48,3 +48,41 @@ func TestPlanReconcileThreeWay(t *testing.T) {
 		}
 	}
 }
+
+// Every case of the pair plan: two members reconcile without the third only when nothing can be pending from it.
+func TestPlanPair(t *testing.T) {
+	none := peerKS{}
+	cases := []struct {
+		name     string
+		mine     peerKS
+		theirs   peerKS
+		decision uint64
+		target   uint64
+		reason   string // "" = reconcile
+	}{
+		{"same generation, clean", ks(3, 0), ks(3, 0), 0, 3, ""},
+		{"generation 1 (just after DKG)", ks(1, 0), ks(1, 0), 0, 1, ""},
+		{"candidate on mine", ks(3, 4), ks(3, 0), 0, 0, "a commit may be unfinished"},
+		{"candidate on theirs", ks(3, 0), ks(3, 4), 0, 0, "a commit may be unfinished"},
+		{"candidate on both (A may have decided)", ks(3, 4), ks(3, 4), 0, 0, "a commit may be unfinished"},
+		{"a recorded decision", ks(3, 0), ks(3, 0), 4, 0, "a commit may be unfinished"},
+		{"theirs is older", ks(4, 0), ks(3, 0), 0, 0, "generations 4 and 3"},
+		{"mine is older", ks(3, 0), ks(4, 0), 0, 0, "generations 3 and 4"},
+		{"one switched to the decided generation, the other did not", ks(4, 0), ks(3, 4), 0, 0, "generations 4 and 3"},
+		{"they have no state", ks(3, 0), none, 0, 0, "no state"},
+		{"I have no state", none, ks(3, 0), 0, 0, "no state"},
+		{"aborted DKG (candidates only)", ks(0, 1), ks(0, 1), 0, 0, "generations 0 and 0"},
+	}
+	for _, c := range cases {
+		target, why := planPair("B", "C", "party A", c.mine, c.theirs, c.decision)
+		if c.reason == "" {
+			if why != "" || target != c.target {
+				t.Errorf("%s: target %d reason %q, want target %d", c.name, target, why, c.target)
+			}
+			continue
+		}
+		if target != 0 || !strings.Contains(why, c.reason) || !strings.Contains(why, "party A") {
+			t.Errorf("%s: target %d reason %q, want a refusal containing %q and naming party A", c.name, target, why, c.reason)
+		}
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -74,6 +75,10 @@ type Server struct {
 	peerCClient      pb.PeerClient
 	tcache           *tkeyCache
 	groups           groupTable
+	lastA            atomic.Int64 // party B: when A last opened a session here (unix nanoseconds), for the pair reconcile with C
+	pairMu           sync.Mutex
+	pairBusy         map[string]bool
+	pairLast         map[string]time.Time
 
 	jobMu    sync.Mutex
 	inflight map[string]*flight
@@ -220,6 +225,8 @@ func (s *Server) Start() error {
 			lctx, lcancel := context.WithCancel(context.Background())
 			s.loopCancel = lcancel
 			go s.watchLink(lctx, s.peerCConn, "C")
+			s.pairBusy, s.pairLast = map[string]bool{}, map[string]time.Time{}
+			s.noteContactFromA() // A counts as silent from now on until it opens a session here
 			go func() {
 				t := time.NewTicker(500 * time.Millisecond)
 				defer t.Stop()
@@ -229,6 +236,7 @@ func (s *Server) Start() error {
 						return
 					case <-t.C:
 						s.peerCConn.Connect()
+						s.pairLoopStep(lctx)
 					}
 				}
 			}()

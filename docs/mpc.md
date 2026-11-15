@@ -21,6 +21,8 @@ A customer address needs a key tree, where one parent key yields a child key for
 | A or B, on a two-party key | Signing waits, the job is retried, one alert is raised |
 | C only | Everything on two-party keys goes on |
 
+A restarted party must be checked against the others before it signs. When A is down, B and C check each other, but only if both are on the same generation and no refresh is half done, since only A knows whether one was decided. Otherwise they wait for A, and A checks all three when it is back.
+
 ## A failed check freezes the key
 If a proof does not verify, a message cannot be read, or a final signature is wrong, the parties may be talking to a bad peer. The key is then frozen on every party that holds it. Nothing is deleted, withdrawals wait with their holds, and only an operator's signed unfreeze lifts it. A party that is merely slow or offline is not a freeze. See the [freeze runbook](runbooks/mpc-keyset-freeze.md).
 

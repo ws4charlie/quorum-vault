@@ -26,6 +26,9 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 	s.wg.Add(1)
 	defer s.wg.Done()
 	start := time.Now()
+	if s.cfg.Role == "B" {
+		s.noteContactFromA() // B's peer port serves party A only (pinned certificate)
+	}
 	ctx, cancel := context.WithTimeout(stream.Context(), s.cfg.Limits.SessionTimeout())
 	defer cancel()
 

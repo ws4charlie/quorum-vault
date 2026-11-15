@@ -77,16 +77,16 @@ func (s *Server) groupFollow(ctx context.Context, stream pb.Peer_SessionServer, 
 	reject func(pb.ErrorKind, string) error, rejectCode func(pb.ErrorKind, uint32, string) error, start time.Time) error {
 	me := s.cfg.Role
 	if open.Op == pb.Op_OP_RECONCILE && open.Reason == "pair" && open.Group == "" {
-		// A reconciles with this member alone (the third is unreachable)
-		if from != "A" || open.Initiator != "A" || !validID(open.KeysetId) {
-			return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "pair reconciliation only from party A")
+		// the leader reconciles with this member alone: A (the third is unreachable), or B (A is unreachable; C follows)
+		if open.Initiator != from || !validID(open.KeysetId) || !(from == "A" || (from == "B" && me == "C")) {
+			return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "pair reconciliation only from party A, or from party B to party C")
 		}
 		tr := newSessTransport(sid, stream, s.cfg.Limits.MaxFrameBytes, &s.stats)
 		if err := tr.sendFrame(pb.FrameKind_FRAME_KIND_ACK, nil); err != nil {
 			return nil
 		}
 		go tr.pump()
-		return s.reconcilePairFollow(ctx, open, me, tr, sid)
+		return s.reconcilePairFollow(ctx, open, me, from, tr, sid)
 	}
 	if !sidRe.MatchString(open.Group) {
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "a three-party session needs a 32-hex group id")

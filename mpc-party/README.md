@@ -288,7 +288,10 @@ certificate only. C needs its own `role: "C"`, token (`qv-party-3`), certificate
 - **After a restart** (or when A's link to B or C comes back) A reconciles every 2-of-3 keyset with both, applies the three-way plan
   and proves it with the self-test; until then the keyset answers `UNAVAILABLE`. If a member is down, A reconciles with each reachable member alone, but only a clean
   keyset (same generation, no candidate, no decision), marks it partial and runs the full reconciliation as soon as the missing member
-  returns (learn page, gaps). B and C restarted while A is down wait for A.
+  returns (learn page, gaps). B and C restarted while A is down reconcile with each other (B leads, C follows) after B has not heard
+  from A for a few seconds, by the same pair path (same self-test, marked partial, nothing promoted, dropped or deleted), but only
+  when both hold the same current generation and no candidate: only A records commit decisions, so any candidate, a different
+  generation or a missing state means they stay unresolved, log why (`pair reconciliation with C pending`) and wait for A.
 - **Freeze.** A cryptographic failure freezes the keyset durably on both members of the session; the coordinator tells the third member
   (`FREEZE_NOTICE`) if it has a link to it (A: B and C; B: C). A member that was not told learns it at its next contact: a frozen
   member refuses every session with `FROZEN`, the one that hears it freezes too, and reconciliation carries the flag. `Unfreeze` is a
