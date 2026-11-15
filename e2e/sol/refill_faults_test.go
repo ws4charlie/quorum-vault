@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
+	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 )
 
@@ -89,7 +90,7 @@ func TestColdRefillParked(t *testing.T) {
 	if code, out := s.call("POST", "/v2/refills/"+r.ID+"/close", map[string]string{"reason": "the nonce was used by a transaction this system did not make; investigated"}); code != 200 {
 		t.Fatalf("close: %d %v", code, out)
 	}
-	if st := s.refills()[0]; st.Status != "failed" || !strings.Contains(st.Reason, "closed by ops") {
+	if st := s.refillOf("SOL"); st.Status != "failed" || !strings.Contains(st.Reason, "closed by ops") {
 		t.Fatalf("after the close: %+v", st)
 	}
 	if code, _ := s.call("POST", "/v2/refills/"+r.ID+"/close", map[string]string{"reason": "again"}); code != 400 {
@@ -375,7 +376,7 @@ func TestColdRefillIsSentAgainUntilItLands(t *testing.T) {
 	s.refillCeremony(k, r.ID)
 	s.waitRefill("SOL", "broadcast", 60*time.Second)
 	s.waitFor(90*time.Second, "the transaction to be sent again while it is not on the chain", func() bool { return s.proxy.heldCount() >= 3 })
-	if st := s.statusOf(s.refills()[0].Tx); st != nil && st.Status != "" {
+	if st := s.statusOf(s.refillOf("SOL").Tx); st != nil && st.Status != "" {
 		t.Fatalf("the held transaction landed: %+v", st)
 	}
 	s.proxy.hold.Store(false)
@@ -384,4 +385,86 @@ func TestColdRefillIsSentAgainUntilItLands(t *testing.T) {
 		t.Fatalf("Reconcile failed: %v", bad)
 	}
 	s.reconcileClean("after the refill landed")
+}
+
+// refillOf is the first refill of an asset.
+func (s *wdSys) refillOf(asset string) refillRow {
+	s.t.Helper()
+	for _, r := range s.refills() {
+		if r.Asset == asset {
+			return r
+		}
+	}
+	s.t.Fatalf("no %s refill", asset)
+	return refillRow{}
+}
+
+func (s *wdSys) openRefillCount(asset string) int {
+	n := 0
+	for _, r := range s.refills() {
+		if (asset == "" || r.Asset == asset) && r.Status != "confirmed" && r.Status != "failed" {
+			n++
+		}
+	}
+	return n
+}
+
+// One open refill per cold address and asset on Solana: a SOL refill and a token refill are open at the same time, each on a nonce account of its own,
+// run their ceremonies side by side and settle in parallel; two refills of the same asset (two shards short of SOL) still cannot be open together.
+func TestColdRefillsOfTwoAssetsRunInParallel(t *testing.T) {
+	k := newSolKit(t)
+	o := refillOpts(k, "")
+	o.shards = 2
+	o.seedSOL = []uint64{oneSOL / 2, oneSOL / 2}
+	o.seedTKN = []uint64{0, 0}
+	s := newWdSystem(t, o)
+	s.coldReady(k)
+	stop := s.watchReconcile()
+
+	sr := s.waitRefill("SOL", "requested", 90*time.Second)
+	tr := s.waitRefill("TKN", "requested", 90*time.Second)
+	// both shards are short of both assets, yet one refill per asset is open: two of the same asset cannot be
+	s.holds(5*time.Second, "one open refill per asset, not per shard", func() bool { return s.openRefillCount("SOL") == 1 && s.openRefillCount("TKN") == 1 })
+	if n := s.openRefillCount(""); n != 2 {
+		t.Fatalf("%d open refills, want 2 (one SOL, one token)", n)
+	}
+
+	// exported at the same moment, they take different nonce accounts of the cold address
+	var rfS, rfT coldsign.SOLRequestFile
+	done := make(chan struct{}, 2)
+	go func() { rfS = s.exportRefill(sr.ID); done <- struct{}{} }()
+	go func() { rfT = s.exportRefill(tr.ID); done <- struct{}{} }()
+	<-done
+	<-done
+	if rfS.Request.NonceAccount == rfT.Request.NonceAccount {
+		t.Fatalf("both refills took nonce account %s", rfS.Request.NonceAccount)
+	}
+	// both are signed and imported before either is broadcast
+	sgS, out, err := k.ceremony("par-sol", rfS, "alice", "bob")
+	if err != nil {
+		t.Fatalf("SOL ceremony: %v\n%s", err, out)
+	}
+	sgT, out, err := k.ceremony("par-tkn", rfT, "bob", "carol")
+	if err != nil {
+		t.Fatalf("token ceremony: %v\n%s", err, out)
+	}
+	s.proxy.hold.Store(true) // both on their way and neither landed: two refills in flight at once
+	if code, res := s.importRefill(sr.ID, sgS); code != 200 {
+		t.Fatalf("import SOL: %d %v", code, res)
+	}
+	if code, res := s.importRefill(tr.ID, sgT); code != 200 {
+		t.Fatalf("import token: %d %v", code, res)
+	}
+	s.waitFor(60*time.Second, "both refills to be broadcast", func() bool {
+		return s.refillOf("SOL").Status == "broadcast" && s.refillOf("TKN").Status == "broadcast"
+	})
+	s.reconcileClean("two refills in flight")
+	s.proxy.hold.Store(false)
+	s.waitFor(180*time.Second, "both refills to settle", func() bool {
+		return s.refillOf("SOL").Status == "confirmed" && s.refillOf("TKN").Status == "confirmed"
+	})
+	if bad := stop(); len(bad) > 0 {
+		t.Fatalf("Reconcile failed: %v", bad)
+	}
+	s.reconcileClean("after both refills")
 }

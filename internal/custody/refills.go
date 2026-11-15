@@ -177,22 +177,39 @@ func (s *Service) OpenRefills(ctx context.Context) ([]Refill, error) {
 func (s *Service) openRefillFor(ctx context.Context, q interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }, cold string) (string, bool, error) {
+	return s.openRefillForAsset(ctx, q, cold, "")
+}
+
+// openRefillForAsset is openRefillFor for one asset where the family allows a refill per asset (Solana: each refill signs a nonce account of its own);
+// on the other families the asset is ignored, and one refill is open per cold address.
+func (s *Service) openRefillForAsset(ctx context.Context, q interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}, cold, asset string) (string, bool, error) {
 	var id string
-	err := q.QueryRow(ctx, `SELECT id FROM refills WHERE chain=$1 AND cold_address=$2 AND status NOT IN ('confirmed','failed')`, s.Cfg.Chain, cold).Scan(&id)
+	var err error
+	if s.refillsPerAsset() && asset != "" {
+		err = q.QueryRow(ctx, `SELECT id FROM refills WHERE chain=$1 AND cold_address=$2 AND asset=$3 AND status NOT IN ('confirmed','failed')`, s.Cfg.Chain, cold, asset).Scan(&id)
+	} else {
+		err = q.QueryRow(ctx, `SELECT id FROM refills WHERE chain=$1 AND cold_address=$2 AND status NOT IN ('confirmed','failed') ORDER BY created_at LIMIT 1`, s.Cfg.Chain, cold).Scan(&id)
+	}
 	if isNoRows(err) {
 		return "", false, nil
 	}
 	return id, err == nil, err
 }
 
-// openRefill opens a refill request for a partition that is below its low mark, unless one is open for the same cold address
-// (it has one nonce, so one refill at a time). need is the amount that brings the partition to its target.
+// refillsPerAsset: on Solana a refill signs a durable nonce of its own, so one refill per cold address and asset may be open. On EVM the cold address has
+// one account nonce, and on Bitcoin one set of outputs: two requests exported side by side would take the same one, and only one could land.
+func (s *Service) refillsPerAsset() bool { return s.Cfg.Family == FamilySOL }
+
+// openRefill opens a refill request for a partition that is below its low mark, unless one is open for the same cold address (on Solana: and asset;
+// elsewhere the cold address has one nonce or one set of outputs, so one refill at a time). need is the amount that brings the partition to its target.
 func (s *Service) openRefill(ctx context.Context, tx pgx.Tx, partitionID, asset string, need *big.Int) (id string, opened bool, err error) {
 	coldHex, hotHex, err := s.refillEnds(partitionID, asset)
 	if err != nil {
 		return "", false, err
 	}
-	if id, open, err := s.openRefillFor(ctx, tx, coldHex); err != nil || open {
+	if id, open, err := s.openRefillForAsset(ctx, tx, coldHex, asset); err != nil || open {
 		return id, false, err
 	}
 	if rf, ok := s.Chain.(chain.ColdRefiller); ok {
@@ -206,8 +223,8 @@ func (s *Service) openRefill(ctx context.Context, tx pgx.Tx, partitionID, asset 
 		}
 	}
 	id = "rf-" + uuid.NewString()
-	tag, err := tx.Exec(ctx, `INSERT INTO refills (id, chain, asset, partition_id, cold_address, to_address, amount, status)
-		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,'requested') ON CONFLICT DO NOTHING`, id, s.Cfg.Chain, asset, partitionID, coldHex, hotHex, need.String())
+	tag, err := tx.Exec(ctx, `INSERT INTO refills (id, chain, asset, partition_id, cold_address, to_address, amount, status, exclusive)
+		VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,'requested',$8) ON CONFLICT DO NOTHING`, id, s.Cfg.Chain, asset, partitionID, coldHex, hotHex, need.String(), !s.refillsPerAsset())
 	if err != nil {
 		return "", false, fmt.Errorf("custody: insert refill: %w", err)
 	}

@@ -85,12 +85,15 @@ func (s *Service) ExportSOLRefill(ctx context.Context, id string) (coldsign.SOLR
 	if err != nil {
 		return zero, err
 	}
+	// A replacement (the same nonce value, a higher price) keeps its account; a first export takes a free one, chosen below under a lock so that two
+	// requests exported at the same time (a SOL refill and a token refill) never take the same account.
 	var account, value string
 	if r.SOL != nil {
 		if cur, err := sc.ColdNonceValue(ctx, r.SOL.NonceAccount); err == nil && cur == r.SOL.NonceValue {
-			account, value = r.SOL.NonceAccount, r.SOL.NonceValue // the same value: a replacement (a higher price)
+			account, value = r.SOL.NonceAccount, r.SOL.NonceValue
 		}
 	}
+	var cands []sol.ColdNonce
 	if account == "" {
 		ns, err := sc.ColdNonces(ctx, r.ColdAddress)
 		if err != nil {
@@ -101,21 +104,9 @@ func (s *Service) ExportSOLRefill(ctx context.Context, id string) (coldsign.SOLR
 			if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sol_cold_nonce_retired WHERE chain=$1 AND address=$2)`, s.Cfg.Chain, n.Account).Scan(&retired); err != nil {
 				return zero, err
 			}
-			if retired {
-				continue // out of the pool: nothing is signed on it any more
+			if !retired { // a retired account is out of the pool: nothing is signed on it any more
+				cands = append(cands, n)
 			}
-			var used bool
-			if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM refills WHERE request->>'nonce_account'=$1 AND request->>'nonce_value'=$2 AND id<>$3)`,
-				n.Account, n.Value, id).Scan(&used); err != nil {
-				return zero, err
-			}
-			if !used {
-				account, value = n.Account, n.Value
-				break
-			}
-		}
-		if account == "" {
-			return zero, fmt.Errorf("%w: the cold address %s has no nonce account free of an earlier request: run the cold setup, or resolve the open ones", ErrInvalid, r.ColdAddress)
 		}
 	}
 	a := s.Cfg.Assets[r.Asset]
@@ -159,6 +150,29 @@ func (s *Service) ExportSOLRefill(ctx context.Context, id string) (coldsign.SOLR
 		if cur.Status != RefillRequested {
 			return fmt.Errorf("%w: refill %s is %s", ErrInvalid, id, cur.Status)
 		}
+		if account == "" {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "qv-cold-nonce:"+s.Cfg.Chain+":"+r.ColdAddress); err != nil {
+				return err
+			}
+			for _, n := range cands {
+				var used bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM refills WHERE request->>'nonce_account'=$1 AND request->>'nonce_value'=$2 AND id<>$3)`,
+					n.Account, n.Value, id).Scan(&used); err != nil {
+					return err
+				}
+				if !used {
+					account, value = n.Account, n.Value
+					break
+				}
+			}
+			if account == "" {
+				return errNoColdNonce
+			}
+			req.NonceAccount, req.NonceValue = account, value
+		}
+		if _, err := tx.Exec(ctx, `UPDATE refills SET failure_reason=NULL WHERE id=$1 AND failure_reason LIKE 'waiting:%'`, id); err != nil {
+			return err
+		}
 		req.Revision = cur.Revision + 1
 		out = req.File()
 		b, _ := json.Marshal(req)
@@ -168,8 +182,17 @@ func (s *Service) ExportSOLRefill(ctx context.Context, id string) (coldsign.SOLR
 		}
 		return auditEvent(ctx, tx, id, "refill.exported", map[string]any{"revision": req.Revision, "request_hash": out.RequestHash, "nonce_account": account})
 	})
+	if errors.Is(err, errNoColdNonce) {
+		// The request waits, and says why: every usable nonce account of the cold address is held by another request (one open refill per asset signs
+		// one account each), or it has none. An operator frees one (another refill settles or is closed), or runs the cold setup.
+		reason := "waiting: the cold address has no nonce account free of another request; export again when one refill settles or is closed, or run the cold setup"
+		_, _ = s.Pool.Exec(ctx, `UPDATE refills SET failure_reason=$2, updated_at=updated_at WHERE id=$1 AND status='requested'`, id, reason)
+		return zero, fmt.Errorf("%w: %s", ErrInvalid, reason)
+	}
 	return out, err
 }
+
+var errNoColdNonce = errors.New("custody: no free cold nonce account")
 
 // ImportSOLRefill takes the signed file that came back from the ceremony. It must answer the CURRENT export, and the transaction inside must be exactly
 // the request's message, signed by the cold address.
