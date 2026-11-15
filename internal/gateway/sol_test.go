@@ -721,7 +721,10 @@ func TestSOLNonceCloseNeedsAnOperatorAndPaysTheShard(t *testing.T) {
 	in := signjob.Intent{Kind: sol.KindNonceClose, ID: "close-1", Asset: "SOL", PartitionID: solPartSOL, To: s.hot.k.Address(), Amount: fmt.Sprint(sol.DefaultNonceRent)}
 	msg := closeMsg(1, hot, hot, sol.DefaultNonceRent)
 	cos := NewDecider(s.cfg, s.gw.codecs, mustGuard(t, s.harness), ModeCosigner, s.clock)
-	decide := func(j signjob.Job) error { _, err := cos.DecideKey(t.Context(), j, SignerKey{Ed25519: s.hot.k.Pub[:]}); return err }
+	decide := func(j signjob.Job) error {
+		_, err := cos.DecideKey(t.Context(), j, SignerKey{Ed25519: s.hot.k.Pub[:]})
+		return err
+	}
 
 	s.mustRefuse(s.job("c0", in, msg, solPartSOL, sol.PathHot, nil), ReasonApprovals) // no approval
 	j := s.job("c1", in, msg, solPartSOL, sol.PathHot, nil, "alice")
