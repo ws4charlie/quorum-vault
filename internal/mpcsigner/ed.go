@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -60,16 +59,18 @@ func (t *EdThresholdSigner) SignMessage(ctx context.Context, msg []byte, opts si
 	defer cancel()
 	req := &pb.SignRequest{KeyId: t.cfg.KeysetID, Algorithm: pb.Algorithm_ALGORITHM_ED25519, Digest: msg, JobId: opts.JobID, IntentPackage: opts.IntentPackage}
 	start := time.Now()
-	resp, i, calls, err := t.call(ctx, req)
+	resp, st, calls, err := t.call(ctx, req)
 	if err != nil {
 		return signer.MessageResult{}, err
 	}
-	if len(resp.Signature) != 64 {
-		return signer.MessageResult{}, &Error{Kind: KindCryptographic, Message: fmt.Sprintf("party %s returned a signature of %d bytes", t.cfg.Coordinators[i].Name, len(resp.Signature))}
+	if e := checkPeer(st, resp); e != nil {
+		return signer.MessageResult{}, e
 	}
-	t.note(i)
-	return signer.MessageResult{Signature: resp.Signature, Participants: []string{"mpc-" + strings.ToLower(t.cfg.Coordinators[i].Name), "mpc-2of3"},
-		Meta: map[string]any{"duration_ms": time.Since(start).Milliseconds(), "calls": calls, "coordinator": t.cfg.Coordinators[i].Name, "replayed": resp.Replayed}}, nil
+	if len(resp.Signature) != 64 {
+		return signer.MessageResult{}, &Error{Kind: KindCryptographic, Message: fmt.Sprintf("party %s returned a signature of %d bytes", t.cfg.Coordinators[st.ci].Name, len(resp.Signature))}
+	}
+	t.note(st)
+	return signer.MessageResult{Signature: resp.Signature, Participants: t.participants(st), Meta: t.meta(st, calls, start, resp)}, nil
 }
 
 var _ signer.MessageSigner = (*EdThresholdSigner)(nil)

@@ -310,6 +310,8 @@ type stack struct {
 	bizDSN  string
 	gwGuard string
 	gw      *mpcstack.Proc
+	metrics string // the gateway's MPC route metrics file (optsT.route)
+	gwCfg   *gateway.Config
 	appr    ed25519.PrivateKey
 	seq     int
 
@@ -325,6 +327,7 @@ func ctxT(t testing.TB, d time.Duration) context.Context {
 type optsT struct {
 	cosignerTweak func(gateway.File) gateway.File // B's and C's cosigners get a different copy of the config
 	noDeposit     bool
+	route         bool // the gateway routes 2-of-3 signatures: health checks and the operators' preferred pair (mpc_route)
 }
 
 func newStack(t *testing.T, o optsT) *stack {
@@ -372,6 +375,9 @@ func newStack(t *testing.T, o optsT) *stack {
 	gf := f
 	gf.Signers = map[string]gateway.SignerFile{partSOL: sf, partTKN: sf}
 	gf.SignTimeout = "8s"
+	if o.route {
+		gf.MPCRoute = s.mpc.RouteFile("500ms", 3, "10s", 4)
+	}
 
 	s.biz = dbtest.New(t)
 	for _, q := range []string{
@@ -407,8 +413,12 @@ func newStack(t *testing.T, o optsT) *stack {
 	s.mpc.StartCosigner(writeJSON("cosigner-b.json", cos), guardB, s.gwGuard)
 	s.mpc.StartCosignerC(writeJSON("cosigner-c.json", cos), guardC, s.gwGuard)
 	gwCfg := writeJSON("gateway.json", gf)
+	if s.gwCfg, err = gateway.LoadConfig(gwCfg); err != nil {
+		t.Fatal(err)
+	}
+	s.metrics = filepath.Join(s.dir, "mpc-metrics.prom")
 	s.gw = mpcstack.NewProc(t, "gateway", filepath.Join(s.dir, "gateway.log"), binGW, nil, "-config", gwCfg, "-jobs-dsn", s.bizDSN, "-guard-dsn", s.gwGuard,
-		"-worker-id", "w1", "-interval", "100ms", "-lease", "10s")
+		"-worker-id", "w1", "-interval", "100ms", "-lease", "10s", "-mpc-metrics-file", s.metrics)
 	s.gw.Start(t)
 	s.mpc.WaitSigning(90 * time.Second)
 	return s

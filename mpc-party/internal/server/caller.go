@@ -249,6 +249,9 @@ func (s *Server) Sign(ctx context.Context, r *pb.SignRequest) (resp *pb.SignResp
 			}
 		}
 	}
+	if r.Peer != "" && (!tkeyset || r.Peer != "B" && r.Peer != "C") {
+		return nil, invalid("sign", "peer %q: only a 2-of-3 keyset takes a wanted peer, \"B\" or \"C\"", r.Peer)
+	}
 	if !tkeyset {
 		if s.cfg.Role != "A" {
 			return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Unimplemented, "sign", "2-of-3 keyset %q not found on this party (party %s signs 2-of-3 keysets only)", r.KeyId, s.cfg.Role)
@@ -323,7 +326,7 @@ func (s *Server) signLeader(ctx context.Context, r *pb.SignRequest, meta KeyMeta
 	var res *opResult
 	var err error
 	if tkeyset {
-		res, err = s.coordinateSignT(ctx, open, r.KeyId)
+		res, err = s.coordinateSignT(ctx, open, r.KeyId, r.Peer)
 	} else {
 		res, err = s.coordinate(ctx, "sign", open, r.KeyId)
 	}
@@ -337,7 +340,7 @@ func (s *Server) signLeader(ctx context.Context, r *pb.SignRequest, meta KeyMeta
 		// would be lost). The caller sees an internal error.
 		return nil, failf(pb.ErrorKind_ERROR_KIND_INTERNAL, codes.Internal, "sign", "cannot store the signature durably: %v", err)
 	}
-	return &pb.SignResponse{Signature: res.signature}, nil
+	return &pb.SignResponse{Signature: res.signature, SignedWith: res.with}, nil
 }
 
 func (s *Server) Unfreeze(ctx context.Context, r *pb.UnfreezeRequest) (_ *pb.UnfreezeResponse, err error) {

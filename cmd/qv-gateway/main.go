@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/auditchain"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
+	"github.com/ws4charlie/quorum-vault/internal/mpcsigner"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 )
@@ -46,6 +48,7 @@ func run(log *slog.Logger) error {
 	brokers := flag.String("brokers", os.Getenv("QV_KAFKA_BROKERS"), "Kafka brokers for publishing the head of this zone's audit chain on qv.audit.heads (optional; env QV_KAFKA_BROKERS)")
 	auditSource := flag.String("audit-source", "gateway", "name this chain's heads are published under on qv.audit.heads (several deployments sharing one topic need distinct names)")
 	anchorEvery := flag.Duration("anchor-interval", time.Minute, "publish the audit chain head at least this often, and at once when it changes")
+	metricsFile := flag.String("mpc-metrics-file", os.Getenv("QV_MPC_METRICS_FILE"), "write the MPC route and party health metrics here in the Prometheus text format, for a node-exporter textfile collector (the gateway opens no port; env QV_MPC_METRICS_FILE)")
 	flag.Parse()
 
 	if *configPath == "" || *jobsDSN == "" || *guardDSN == "" {
@@ -60,6 +63,43 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	jobs, err := pgxpool.New(ctx, *jobsDSN)
+	if err != nil {
+		return fmt.Errorf("open job queue: %w", err)
+	}
+	defer jobs.Close()
+	gp, err := pgxpool.New(ctx, *guardDSN)
+	if err != nil {
+		return fmt.Errorf("open replay guard: %w", err)
+	}
+	defer gp.Close()
+	guard, err := gateway.OpenGuard(ctx, gp)
+	if err != nil {
+		return err
+	}
+
+	// The routing of 2-of-3 signatures: the gateway's own health checks of the parties and the operators' signed preferred pair (mpc_route).
+	var router *mpcsigner.Router
+	var monitor *mpcsigner.Monitor
+	if cfg.Route != nil {
+		monitor, err = gateway.NewRouteMonitor(cfg, cfg.RouteFile)
+		if err != nil {
+			return err
+		}
+		defer monitor.Close()
+		router = mpcsigner.NewRouter(mpcsigner.RouterConfig{Health: monitor, Logger: log,
+			Preferred: guard.PreferredSource(cfg, func(n int) {
+				log.Error("ALERT mpc route: rows of the preferred-pair table do not carry valid approver signatures and are ignored", "rows", n)
+			})})
+		go monitor.Run(ctx, func() {
+			if *metricsFile != "" {
+				if err := writeMetrics(ctx, *metricsFile, router, monitor); err != nil {
+					log.Error("cannot write the MPC metrics file", "error", err.Error())
+				}
+			}
+		})
+	}
 
 	signers := map[string]signer.Signer{}
 	if gateway.HasHSMSigners(cfg) {
@@ -77,7 +117,7 @@ func run(log *slog.Logger) error {
 			signers[k] = v
 		}
 	}
-	ms, closeMPC, err := gateway.MPCSigners(cfg)
+	ms, closeMPC, err := gateway.MPCSignersRouted(cfg, router)
 	if err != nil {
 		return err
 	}
@@ -88,7 +128,7 @@ func run(log *slog.Logger) error {
 	if err := gateway.CheckSigners(cfg, signers); err != nil {
 		return err
 	}
-	hotMsg, depositMsg, closeMsg, err := gateway.MPCMessageSigners(cfg)
+	hotMsg, depositMsg, closeMsg, err := gateway.MPCMessageSignersRouted(cfg, router)
 	if err != nil {
 		return err
 	}
@@ -97,20 +137,6 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	jobs, err := pgxpool.New(ctx, *jobsDSN)
-	if err != nil {
-		return fmt.Errorf("open job queue: %w", err)
-	}
-	defer jobs.Close()
-	gp, err := pgxpool.New(ctx, *guardDSN)
-	if err != nil {
-		return fmt.Errorf("open replay guard: %w", err)
-	}
-	defer gp.Close()
-	guard, err := gateway.OpenGuard(ctx, gp)
-	if err != nil {
-		return err
-	}
 	if *brokers == "" {
 		log.Error("ALERT no -brokers: this zone's audit chain heads are not published, so a truncated or rewritten chain cannot be detected from outside the database")
 	}
@@ -164,4 +190,15 @@ func sameDatabase(a, b string) (bool, error) {
 		return false, err
 	}
 	return ka == kb, nil
+}
+
+// writeMetrics replaces the metrics file atomically, so a collector never reads half of it.
+func writeMetrics(ctx context.Context, path string, r *mpcsigner.Router, m *mpcsigner.Monitor) error {
+	var b bytes.Buffer
+	r.WriteMetrics(ctx, &b, m)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b.Bytes(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

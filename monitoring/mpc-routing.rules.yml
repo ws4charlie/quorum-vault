@@ -1,0 +1,37 @@
+# Prometheus alert rules for the MPC signing route. The gateway writes the metrics to a file (qv-gateway -mpc-metrics-file) that a
+# node-exporter textfile collector serves; see docs/runbooks/mpc-signing-pair.md.
+groups:
+  - name: qv-mpc-routing
+    rules:
+      - alert: QVMpcRouteDiffersFromPreferred
+        expr: qv_mpc_route_degraded == 1
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "Signing is on a different pair than the operators chose"
+          description: "Health checks rule the preferred pair out. Find the unhealthy party (qv_mpc_party_healthy) and fix it."
+      - alert: QVMpcPartyUnhealthy
+        expr: qv_mpc_party_healthy == 0
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "MPC party {{ $labels.party }} fails the gateway's health checks"
+          description: "After the configured number of failed checks the gateway routes away from it; it returns after the configured number of good checks."
+      - alert: QVMpcLinkUnhealthy
+        expr: qv_mpc_link_healthy == 0
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "The link from party {{ $labels.from }} to party {{ $labels.to }} is down"
+      - alert: QVMpcPreferredPairChanged
+        expr: changes(qv_mpc_preferred_pair{pair!=""}[10m]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "The operators changed the preferred signing pair"
+          description: "Expected during maintenance. The change is in the signing zone's audit chain as mpc.route.changed."
+      - alert: QVMpcHealthMetricsStale
+        expr: time() - max(qv_mpc_party_last_ok_timestamp_seconds) > 120 or absent(qv_mpc_party_healthy)
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "The gateway's MPC route metrics are missing or no party answered for two minutes"

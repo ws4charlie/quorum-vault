@@ -15,6 +15,11 @@ import (
 // MPCSigners opens one cb-mpc signer per partition whose signers entry has backend "mpc". Every hot partition of a
 // chain must have a signer, from either HSMSigners or this function; the hot address must be the key's address.
 func MPCSigners(cfg *Config) (map[string]signer.Signer, func(), error) {
+	return MPCSignersRouted(cfg, nil)
+}
+
+// MPCSignersRouted is MPCSigners with a Router that chooses the pair of every 2-of-3 signature (nil: the legacy order).
+func MPCSignersRouted(cfg *Config, router *mpcsigner.Router) (map[string]signer.Signer, func(), error) {
 	out := map[string]signer.Signer{}
 	var closers []func()
 	closeAll := func() {
@@ -47,7 +52,7 @@ func MPCSigners(cfg *Config) (map[string]signer.Signer, func(), error) {
 				coords = append(coords, mpcsigner.Coordinator{Name: c.Name, Address: c.Address, ClientCert: cert, ServerPin: c.ServerPin})
 			}
 			ts, err := mpcsigner.NewThreshold(mpcsigner.ThresholdConfig{PartitionID: p, KeysetID: sf.KeysetID, PublicKey: pub, Coordinators: coords,
-				MaxRetries: sf.Coordinators[0].MaxRetries, Timeout: cfg.SignTimeout})
+				MaxRetries: sf.Coordinators[0].MaxRetries, Timeout: cfg.SignTimeout, Router: router})
 			if err != nil {
 				closeAll()
 				return nil, nil, fmt.Errorf("gateway: signer %q: %w", p, err)
@@ -109,6 +114,11 @@ func MPCSigners(cfg *Config) (map[string]signer.Signer, func(), error) {
 // partition the 2-of-3 hot signer, and when the entry has a deposit section, the signer of the 2-party HD deposit key tree. Each hot signer's
 // public key must be the address its chain pins for the partition (checked here, before anything is signed).
 func MPCMessageSigners(cfg *Config) (hot map[string]signer.MessageSigner, deposit map[string]signer.MessageDeriver, closeAll func(), err error) {
+	return MPCMessageSignersRouted(cfg, nil)
+}
+
+// MPCMessageSignersRouted is MPCMessageSigners with a Router that chooses the pair of every 2-of-3 signature (nil: the legacy order).
+func MPCMessageSignersRouted(cfg *Config, router *mpcsigner.Router) (hot map[string]signer.MessageSigner, deposit map[string]signer.MessageDeriver, closeAll func(), err error) {
 	hot, deposit = map[string]signer.MessageSigner{}, map[string]signer.MessageDeriver{}
 	var closers []func()
 	closeAll = func() {
@@ -142,7 +152,7 @@ func MPCMessageSigners(cfg *Config) (hot map[string]signer.MessageSigner, deposi
 			coords = append(coords, mpcsigner.Coordinator{Name: c.Name, Address: c.Address, ClientCert: cert, ServerPin: c.ServerPin})
 		}
 		ts, err := mpcsigner.NewEdThreshold(mpcsigner.ThresholdConfig{PartitionID: p, KeysetID: sf.KeysetID, PublicKey: pub, Coordinators: coords,
-			MaxRetries: sf.Coordinators[0].MaxRetries, Timeout: cfg.SignTimeout})
+			MaxRetries: sf.Coordinators[0].MaxRetries, Timeout: cfg.SignTimeout, Router: router})
 		if err != nil {
 			return fail("gateway: signer %q: %v", p, err)
 		}

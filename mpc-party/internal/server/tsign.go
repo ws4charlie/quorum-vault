@@ -19,7 +19,17 @@ import (
 // the failure is an availability one (TRANSPORT or UNAVAILABLE) and happened before any signing message was exchanged
 // (connect, OPEN, ACK). It never moves on after REFUSED, CRYPTOGRAPHIC, FROZEN, LIMIT, or a failure after the ACK.
 
-func signOrder(role string) []string {
+// wantPeer is the peer the caller asked for (SignRequest.peer): "" keeps the order above; a name must be one of the party's own peers and is then
+// the ONLY one tried (a down link is an UNAVAILABLE failure for the caller to act on, never a silent swap to another pair).
+func signOrder(role, wantPeer string) []string {
+	if wantPeer != "" {
+		for _, p := range signOrder(role, "") {
+			if p == wantPeer {
+				return []string{p}
+			}
+		}
+		return nil
+	}
 	switch role {
 	case "A":
 		return []string{"B", "C"}
@@ -45,7 +55,7 @@ type pbPeerClient = pb.PeerClient
 func (s *Server) signCtxErr(err error) *Fail { return fromWrapper("sign", &transportErr{err}) }
 
 // coordinateSignT runs one signature of a 2-of-3 keyset as coordinator (A or B).
-func (s *Server) coordinateSignT(ctx context.Context, open *pb.Open, rateKey string) (res *opResult, err error) {
+func (s *Server) coordinateSignT(ctx context.Context, open *pb.Open, rateKey, wantPeer string) (res *opResult, err error) {
 	id := open.KeysetId
 	rt := s.rt(id)
 	var unres bool
@@ -69,7 +79,11 @@ func (s *Server) coordinateSignT(ctx context.Context, open *pb.Open, rateKey str
 		return nil, limitFail("sign", "rate limit of %.0f sessions/s exceeded for %q", s.cfg.Limits.SessionsPerSecKey, rateKey)
 	}
 	var last error
-	for _, peer := range signOrder(s.cfg.Role) {
+	order := signOrder(s.cfg.Role, wantPeer)
+	if wantPeer != "" && len(order) == 0 {
+		return nil, invalid("sign", "party %s cannot sign a 2-of-3 keyset with peer %q", s.cfg.Role, wantPeer)
+	}
+	for _, peer := range order {
 		if s.link(peer) == nil {
 			continue
 		}
@@ -201,7 +215,7 @@ func (s *Server) signViaPeer(ctx context.Context, open *pb.Open, tk *cbmpc.TKey,
 	if err := tr.sendFin(&pb.Fin{Ok: true}); err != nil {
 		return nil, started, fromWrapper(name, &transportErr{err})
 	}
-	return &opResult{public: sig, signature: sig, compare: pub}, started, nil
+	return &opResult{public: sig, signature: sig, compare: pub, with: peer}, started, nil
 }
 
 // signFollowT is the follower's side of a 2-of-3 signing session (party B or C). Everything that can refuse happens BEFORE the

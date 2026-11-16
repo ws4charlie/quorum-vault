@@ -40,6 +40,9 @@ type File struct {
 	// also how long a reservation counts as "being signed" (default "30s").
 	MaxIntentAge string `json:"max_intent_age,omitempty"`
 	SignTimeout  string `json:"sign_timeout,omitempty"`
+	// MPCRoute turns on the routing of 2-of-3 signatures: health checks of the parties and the operators' preferred pair (route.go). Absent: the
+	// legacy order, party A then party B, each coordinator choosing its own peer.
+	MPCRoute *MPCRouteFile `json:"mpc_route,omitempty"`
 }
 
 // SignerFile locates a partition's key: in an HSM token (backend "hsm", the default) or in the cb-mpc service
@@ -211,6 +214,9 @@ type Config struct {
 
 	MaxIntentAge time.Duration
 	SignTimeout  time.Duration
+	// Route is nil when the config has no mpc_route section; RouteFile is that section as written (certificate files to load).
+	Route     *RouteConfig
+	RouteFile *MPCRouteFile
 }
 
 // Approver is a configured approver key.
@@ -380,12 +386,19 @@ func (f File) build() (*Config, error) {
 	if len(f.Chains) == 0 {
 		return nil, errors.New("gateway: config: no chains")
 	}
+	var err error
 	for name, cf := range f.Chains {
 		cc, err := cf.build(name, enabled)
 		if err != nil {
 			return nil, err
 		}
 		c.Chains[name] = cc
+	}
+	if f.MPCRoute != nil {
+		if c.Route, err = f.MPCRoute.build(enabled); err != nil {
+			return nil, err
+		}
+		c.RouteFile = f.MPCRoute
 	}
 	return c, nil
 }
