@@ -266,6 +266,42 @@ jobs:
       - name: make test-mpc
         run: ci/run-in-image.sh make test-mpc
 
+  # The audit-head archive against a real store in compliance mode (SeaweedFS, started by the tests themselves from the digest in
+  # docker-compose.yml, which needs the Docker socket ci/run-in-image.sh passes) and a real Kafka (Redpanda from ci/infra.sh).
+  audit-archive:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+          anvil: "false"
+      - name: make test-archive
+        run: ci/run-in-image.sh make test-archive
+
   e2e-evm-flows:
     runs-on: ubuntu-24.04
     needs: image

@@ -1,0 +1,89 @@
+# promtool test rules audit-archive.rules.test.yml
+rule_files:
+  - audit-archive.rules.yml
+evaluation_interval: 1m
+
+tests:
+  # healthy: heads come every minute, nothing waits, no errors
+  - interval: 1m
+    input_series:
+      - series: 'qv_audit_archive_lag_seconds'
+        values: '0x60'
+      - series: 'qv_audit_archive_errors_total{kind="store"}'
+        values: '0x60'
+      - series: 'qv_audit_archive_errors_total{kind="record"}'
+        values: '0x60'
+      # the newest head time follows the clock: minute n -> 60*n seconds
+      - series: 'qv_audit_archive_last_head_timestamp_seconds{source="core"}'
+        values: '0+60x60'
+    alert_rule_test:
+      - {eval_time: 50m, alertname: QVAuditArchiveLagging, exp_alerts: []}
+      - {eval_time: 50m, alertname: QVAuditArchiveStoreErrors, exp_alerts: []}
+      - {eval_time: 50m, alertname: QVAuditArchiveBadRecords, exp_alerts: []}
+      - {eval_time: 50m, alertname: QVAuditArchiveSourceSilent, exp_alerts: []}
+      - {eval_time: 50m, alertname: QVAuditArchiveMetricsMissing, exp_alerts: []}
+
+  # the archive is refused from minute 10: lag seconds grow once heads wait; lagging fires 5 minutes after it passes 10 minutes
+  # (minute 20 + 5), the store errors fire 10 minutes after the first one, and nothing is archived so the source goes silent
+  - interval: 1m
+    input_series:
+      - series: 'qv_audit_archive_lag_seconds'
+        values: '0x10 0+60x50'
+      - series: 'qv_audit_archive_errors_total{kind="store"}'
+        values: '0x10 1+1x50'
+      - series: 'qv_audit_archive_last_head_timestamp_seconds{source="core"}'
+        values: '0+60x10 600x50'
+    alert_rule_test:
+      - {eval_time: 24m, alertname: QVAuditArchiveLagging, exp_alerts: []}
+      - eval_time: 27m
+        alertname: QVAuditArchiveLagging
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Published audit heads are waiting to be archived (no head archived for 16m 0s)"
+              description: "Until they are in the write-once bucket, the topic's retention or a broker administrator can still remove them. Check qv_audit_archive_errors_total{kind=\"store\"} and the archiver's log. Runbook: docs/runbooks/audit-archive.md"
+      - {eval_time: 19m, alertname: QVAuditArchiveStoreErrors, exp_alerts: []}
+      - eval_time: 25m
+        alertname: QVAuditArchiveStoreErrors
+        exp_alerts:
+          - exp_labels: {severity: page, kind: store}
+            exp_annotations:
+              summary: "The audit archive refuses or cannot be reached"
+              description: "Every head is retried until it is stored, so nothing is lost while this lasts, but nothing is archived either. Runbook: docs/runbooks/audit-archive.md"
+      - eval_time: 32m
+        alertname: QVAuditArchiveSourceSilent
+        exp_alerts:
+          - exp_labels: {severity: page, source: core}
+            exp_annotations:
+              summary: "No audit head of core reached the archive for 15 minutes"
+              description: "Every chain republishes its head every minute. Either the chain's publisher is down, Kafka is, or the archiver is behind. Runbook: docs/runbooks/audit-archive.md"
+
+  # a record that is not a head: a ticket, once, and it clears an hour later
+  - interval: 1m
+    input_series:
+      - series: 'qv_audit_archive_errors_total{kind="record"}'
+        values: '0x10 1x100'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: QVAuditArchiveBadRecords
+        exp_alerts:
+          - exp_labels: {severity: ticket, kind: record}
+            exp_annotations:
+              summary: "A record on the audit heads topic is not a head and was not archived"
+              description: "Someone with write access to the topic published something that is not an audit head. Find it in the archiver's log (\"not a head\"). Runbook: docs/runbooks/audit-archive.md"
+      - {eval_time: 80m, alertname: QVAuditArchiveBadRecords, exp_alerts: []}
+
+  # no archiver metrics at all: fires after 10 minutes
+  - interval: 1m
+    input_series:
+      - series: 'up{job="somethingelse"}'
+        values: '1x30'
+    alert_rule_test:
+      - {eval_time: 5m, alertname: QVAuditArchiveMetricsMissing, exp_alerts: []}
+      - eval_time: 12m
+        alertname: QVAuditArchiveMetricsMissing
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "qv-anchor-archiver exposes no metrics: it is down or not scraped"
+              description: "Without it nothing is copied into the write-once bucket. Runbook: docs/runbooks/audit-archive.md"

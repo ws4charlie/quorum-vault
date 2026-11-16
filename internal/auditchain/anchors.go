@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -79,7 +80,14 @@ func PublishHead(ctx context.Context, pub outbox.Publisher, h audit.Anchor) erro
 // Verify is the check behind `verify` of qv-relay, qv-gateway and qv-cosigner: it checks the chain in dsn against the anchors in
 // the file (one JSON object per line, as dumped from qv.audit.heads) and prints the result. A failed check is an error.
 func Verify(ctx context.Context, q audit.Querier, source, anchorsPath string, out io.Writer) error {
+	return VerifyAgainst(ctx, q, source, anchorsPath, nil, out)
+}
+
+// VerifyAgainst is Verify with a second source of anchors: the write-once archive. The anchors of the file and of the archive are
+// checked together; the chain must contain every one of them and contradict none.
+func VerifyAgainst(ctx context.Context, q audit.Querier, source, anchorsPath string, arch Archive, out io.Writer) error {
 	var anchors []audit.Anchor
+	nFile, nArchive := 0, 0
 	if anchorsPath != "" {
 		f, err := os.Open(anchorsPath)
 		if err != nil {
@@ -89,6 +97,18 @@ func Verify(ctx context.Context, q audit.Querier, source, anchorsPath string, ou
 		if anchors, err = audit.ReadAnchors(f, source); err != nil {
 			return err
 		}
+		nFile = len(anchors)
+	}
+	if arch != nil {
+		if err := arch.CheckLock(ctx, 0); err != nil {
+			fmt.Fprintf(out, "warning: the archive is not write-once: %v\n", err)
+		}
+		as, err := arch.Anchors(ctx, source)
+		if err != nil {
+			return fmt.Errorf("audit archive: %w", err)
+		}
+		nArchive = len(as)
+		anchors = append(anchors, as...)
 	}
 	rep, err := audit.CheckAnchors(ctx, q, anchors)
 	if err != nil {
@@ -98,30 +118,87 @@ func Verify(ctx context.Context, q audit.Querier, source, anchorsPath string, ou
 	if !rep.OK {
 		status = "FAILED"
 	}
-	fmt.Fprintf(out, "audit %s: %s  head seq %d  anchors checked %d\n", source, status, rep.HeadSeq, rep.Anchors)
+	fmt.Fprintf(out, "audit %s: %s  head seq %d  anchors checked %d", source, status, rep.HeadSeq, rep.Anchors)
+	if arch != nil {
+		fmt.Fprintf(out, " (file %d, archive %d)", nFile, nArchive)
+	}
+	fmt.Fprintln(out)
 	if !rep.OK {
 		return fmt.Errorf("audit chain %s: %s", source, rep.Problem)
 	}
 	return nil
 }
 
-// VerifyCommand runs `verify [-dsn DSN] [-anchors FILE]` for the chain of one binary (source "core", "gateway" or "cosigner").
+// ArchiveFlags registers the flags that name the write-once archive on fs and returns the function that builds it from them (nil when
+// no bucket is named). Credentials are never flags: QV_ARCHIVE_ACCESS_KEY and QV_ARCHIVE_SECRET_KEY, or the files named by
+// QV_ARCHIVE_ACCESS_KEY_FILE and QV_ARCHIVE_SECRET_KEY_FILE.
+func ArchiveFlags(fs *flag.FlagSet) func() (*S3Archive, error) {
+	endpoint := fs.String("archive-endpoint", os.Getenv("QV_ARCHIVE_ENDPOINT"), "S3 endpoint of the archive, empty for AWS (env QV_ARCHIVE_ENDPOINT)")
+	bucket := fs.String("archive-bucket", os.Getenv("QV_ARCHIVE_BUCKET"), "bucket that holds the archived heads (env QV_ARCHIVE_BUCKET)")
+	region := fs.String("archive-region", envOr("QV_ARCHIVE_REGION", "us-east-1"), "region (env QV_ARCHIVE_REGION)")
+	pathStyle := fs.Bool("archive-path-style", os.Getenv("QV_ARCHIVE_ENDPOINT") != "", "path-style addressing: on for a store at host:port, off for AWS")
+	return func() (*S3Archive, error) {
+		if *bucket == "" {
+			return nil, nil
+		}
+		ak, err := envOrFile("QV_ARCHIVE_ACCESS_KEY")
+		if err != nil {
+			return nil, err
+		}
+		sk, err := envOrFile("QV_ARCHIVE_SECRET_KEY")
+		if err != nil {
+			return nil, err
+		}
+		return NewS3Archive(ArchiveConfig{Endpoint: *endpoint, Region: *region, Bucket: *bucket, AccessKey: ak, SecretKey: sk, PathStyle: *pathStyle})
+	}
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// envOrFile reads a secret from $name, or from the file named by $name_FILE.
+func envOrFile(name string) (string, error) {
+	if v := os.Getenv(name); v != "" {
+		return v, nil
+	}
+	if f := os.Getenv(name + "_FILE"); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return "", fmt.Errorf("%s_FILE: %w", name, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return "", fmt.Errorf("%s or %s_FILE is required", name, name)
+}
+
+// VerifyCommand runs `verify [-dsn DSN] [-anchors FILE] [-archive-bucket B ...]` for the chain of one binary (source "core", "gateway" or "cosigner").
 // dsnEnv names the environment variable that holds the DSN by default. It exits with an error when the check fails.
 func VerifyCommand(ctx context.Context, args []string, source, dsnEnv string, out io.Writer) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	dsn := fs.String("dsn", os.Getenv(dsnEnv), "database that holds the audit chain (env "+dsnEnv+")")
 	src := fs.String("source", source, "name the heads of this chain were published under (the -audit-source of the binary)")
-	anchors := fs.String("anchors", "", "file of published heads, one JSON object per line (dump of qv.audit.heads); without it only the chain itself is checked")
+	anchors := fs.String("anchors", "", "file of published heads, one JSON object per line (dump of qv.audit.heads); without it and without -archive-bucket only the chain itself is checked")
+	archive := ArchiveFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *dsn == "" {
 		return fmt.Errorf("-dsn or %s is required", dsnEnv)
 	}
+	var arch Archive
+	if a, err := archive(); err != nil {
+		return err
+	} else if a != nil {
+		arch = a
+	}
 	pool, err := pgxpool.New(ctx, *dsn)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	return Verify(ctx, pool, *src, *anchors, out)
+	return VerifyAgainst(ctx, pool, *src, *anchors, arch, out)
 }

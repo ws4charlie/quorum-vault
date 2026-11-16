@@ -243,6 +243,12 @@ test-e2e-btc-consolidate:
 mpc-build:
 	cd mpc-party && scripts/fetch-build-cbmpc.sh
 
+# The audit-head archive (internal/auditchain): the tests start their own SeaweedFS in compliance mode (docker, image pinned in docker-compose.yml);
+# the Kafka ones need Redpanda (`make infra-up`; QV_KAFKA_BROKERS if it is not on 19092) and Postgres (`make db-up`).
+.PHONY: test-archive
+test-archive:
+	QV_REQUIRE_DB=1 QV_REQUIRE_INFRA=1 QV_REQUIRE_WORM=1 go test -count=1 -p 1 -timeout 15m -v ./internal/auditchain/...
+
 test-mpc:
 	QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=$${QV_ANVIL_RPC:-http://127.0.0.1:18545} go test -count=1 -p 1 -timeout 20m -v ./e2e/mpcsign/...
 
