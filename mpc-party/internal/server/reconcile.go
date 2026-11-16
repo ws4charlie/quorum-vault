@@ -135,6 +135,7 @@ func (s *Server) reconcileA(ctx context.Context, id string) (err error) {
 	var sidRaw [16]byte
 	randRead(sidRaw[:])
 	sid := fmt.Sprintf("%x", sidRaw)
+	defer func() { s.noteFail(sideCoordinator, pb.Op_OP_RECONCILE, "B", err) }()
 	stream, err := s.peerClient.Session(ctx)
 	if err != nil {
 		return err

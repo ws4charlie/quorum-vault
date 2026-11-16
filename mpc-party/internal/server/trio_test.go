@@ -25,6 +25,7 @@ type trioOpts struct {
 	fi                        map[string]*server.FaultInjection
 	recvMS                    int
 	scheme                    pb.Scheme // zero value: ECDSA
+	metrics                   bool      // serve the failure counters on a metrics port
 }
 
 type trio struct {
@@ -127,6 +128,9 @@ func startTrio(t *testing.T, o trioOpts) *trio {
 		}
 		if o.recvMS > 0 {
 			c.Limits.RecvTimeoutMS = o.recvMS
+		}
+		if o.metrics {
+			c.MetricsListen = "127.0.0.1:0"
 		}
 		tr.Cfg[role] = c
 		tr.Store[role] = testenv.Store(t, c)

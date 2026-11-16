@@ -39,6 +39,10 @@ type Config struct {
 
 	DataDir string `json:"data_dir"`
 
+	// MetricsListen, if set, serves the failure counters (GET /metrics, plain HTTP, read-only, no secrets) for Prometheus in central
+	// monitoring. Bind it to an address only the monitoring host can reach. Nothing in the party reads the counters back.
+	MetricsListen string `json:"metrics_listen"`
+
 	// AdminKeys are the operators' Ed25519 public keys (64 hex chars). DKG, Refresh and Unfreeze need a signature by one of
 	// them, checked by BOTH parties against their own list, so a compromised party A cannot start them.
 	AdminKeys          []string `json:"admin_keys"`

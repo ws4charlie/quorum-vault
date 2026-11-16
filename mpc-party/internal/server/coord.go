@@ -29,6 +29,8 @@ func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rat
 	if s.peerClient == nil {
 		return nil, invalid(name, "this party has no peer connection")
 	}
+	peerSeen := peerNone // the suspected peer is B once a session to it has been tried
+	defer func() { s.noteFail(sideCoordinator, open.Op, peerSeen, err) }()
 	// Per-keyset gating: refuse work on a keyset that has not been reconciled since the restart; one DKG/Refresh at a time;
 	// sessions that use the keyset hold the gate shared so that the commit window of a refresh runs alone.
 	var rt *ksRT
@@ -78,6 +80,7 @@ func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rat
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Limits.SessionTimeout())
 	defer cancel()
 
+	peerSeen = "B"
 	stream, err := s.peerClient.Session(ctx)
 	if err != nil {
 		return nil, fromWrapper(name, &transportErr{err})

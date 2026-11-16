@@ -113,7 +113,9 @@ func (s *Server) coordinateSignT(ctx context.Context, open *pb.Open, rateKey, wa
 // signViaPeer is one signing attempt with one peer. started reports whether the signing protocol had begun (the peer's ACK arrived).
 func (s *Server) signViaPeer(ctx context.Context, open *pb.Open, tk *cbmpc.TKey, peer string) (res *opResult, started bool, err error) {
 	const name = "sign"
+	peerSeen := peerNone // the suspected peer, once a session to it has been tried
 	defer func() {
+		s.noteFail(sideCoordinator, open.Op, peerSeen, err)
 		var f *Fail
 		if err != nil && errors.As(err, &f) {
 			s.maybeFreezeT(open, f, peer)
@@ -135,6 +137,7 @@ func (s *Server) signViaPeer(ctx context.Context, open *pb.Open, tk *cbmpc.TKey,
 	sid := hex.EncodeToString(sidRaw[:])
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Limits.SessionTimeout())
 	defer cancel()
+	peerSeen = peer
 	stream, err := s.link(peer).Session(ctx)
 	if err != nil {
 		return nil, false, fromWrapper(name, &transportErr{err})

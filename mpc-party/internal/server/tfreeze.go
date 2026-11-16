@@ -64,7 +64,8 @@ func (s *Server) notifyFreeze(id, reason, except string) {
 	}
 }
 
-func (s *Server) sendFreezeNotice(role, id, reason string) error {
+func (s *Server) sendFreezeNotice(role, id, reason string) (rerr error) {
+	defer func() { s.noteFail(sideCoordinator, pb.Op_OP_FREEZE_NOTICE, role, rerr) }()
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Limits.SessionTimeout())
 	defer cancel()
 	var sidRaw [16]byte
