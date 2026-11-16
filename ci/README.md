@@ -10,6 +10,7 @@ Go and building cb-mpc in every job.
 | `ensure-image.sh` | `publish` (the `image` job): build and push when the tag is missing. `use` (every other job): pull it, or build it locally from the same Dockerfile. |
 | `run-in-image.sh` | Runs a command in the image, in the checkout, on the host network, with the Docker socket. `ci/run-in-image.sh make test-e2e-btc-recovery` |
 | `solana/Dockerfile` | The local Solana validator (Agave, pinned by version and checksum) for the Solana tests. Built once per change of this file by the `image` job (`ensure-image.sh publish solana`, tag from `image-tag.sh solana`, `ghcr.io/ws4charlie/qv-solana:<hash>`); the Solana job pulls it. On a laptop compose builds it. |
+| `promtool-tests.sh` | The `monitoring / rules` job: `promtool check rules`, `check config` and the rule unit tests of `monitoring/`, then the Go tests that use promtool (`monitoring/`, the failure-counter alert in `mpc-party/internal/server`). A skipped test or a missing promtool fails it. promtool v3.5.0 (the version `docker-compose.yml` pins) is in the image, checked by SHA-256. |
 | `infra.sh` | Starts anvil, Temporal, Redpanda, bitcoind and the Solana validator in the background (`start`) and waits for them right before the tests (`wait`). |
 
 **No secrets in the image.** The SoftHSM tokens are created at job time by `scripts/setup-softhsm.sh`, in the checkout; the PINs are generated

@@ -117,6 +117,28 @@ jobs:
         run: |
           ci/run-in-image.sh bash -c 'cd mpc-party && go test -race -count=1 -timeout 25m $(go list ./... | grep -v "/e2e$")'
 
+  # The Prometheus rules of monitoring/: promtool check rules, check config, the rule unit tests, and the Go test that evaluates an alert on real
+  # counters. promtool is pinned in the CI image; ci/promtool-tests.sh fails on a skipped test, so a broken rule or a missing promtool is red.
+  monitoring-rules:
+    name: monitoring / rules
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          anvil: "false"
+      - name: promtool checks and rule tests
+        run: ci/run-in-image.sh ci/promtool-tests.sh
+
   mpc-party-e2e-1:
     name: mpc-party / e2e-1
     runs-on: ubuntu-24.04
