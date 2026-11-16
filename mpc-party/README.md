@@ -198,6 +198,8 @@ pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Create the SoftHSM toke
 /tmp/mpc-party-dev -config b.json &  /tmp/mpc-party-dev -config a.json &
 ```
 
+`metrics_listen` (optional): a plain-HTTP, read-only endpoint (`GET /metrics` only) with the party's failure counters, `qv_mpc_party_session_failures_total{party,side,op,peer,kind}` (`peer` is the suspected party, `none` when no single party is involved; every series starts at 0). Counts only: no keyset id, job id or any secret, and nothing in the party reads them back. Bind it to an address that only the monitoring host reaches. The rules and alerts are in `monitoring/mpc-blame.rules.yml`; the runbook is `docs/runbooks/mpc-failures.md`.
+
 `admin_keys` (required): operators' Ed25519 public keys. `DKG`, `Refresh` and `Unfreeze` carry an `AdminAuth` (a signature over `op, keyset, timestamp`, see `api/admin`) that BOTH parties verify against their own list; the timestamp must be within `admin_max_age_seconds` (300) and a signature works once.
 
 Optional `limits`: `recv_timeout_ms` (5000), `session_timeout_ms` (30000), `max_peer_sessions` (2 x cores),

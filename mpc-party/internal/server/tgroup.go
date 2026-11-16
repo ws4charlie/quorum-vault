@@ -110,6 +110,7 @@ func (s *Server) openGroup(ctx context.Context, name string, open *pb.Open, with
 func (s *Server) coordinateGroup(ctx context.Context, name string, open *pb.Open) (res *opResult, err error) {
 	id := open.KeysetId
 	rt := s.rt(id)
+	defer func() { s.noteFail(sideCoordinator, open.Op, peerNone, err) }() // a three-party session has no single suspect
 	if holder, ok := rt.tryBusy(name); !ok {
 		return nil, busyFail(name, id, holder)
 	}
@@ -479,8 +480,9 @@ func (s *Server) runGroupFollower(ctx context.Context, open *pb.Open, me string,
 
 // unfreezeGroup (party A): every member verifies the operator signature itself and must be reachable; nothing is lifted
 // unless all three accepted.
-func (s *Server) unfreezeGroup(ctx context.Context, keysetID string, admin *pb.AdminAuth) error {
+func (s *Server) unfreezeGroup(ctx context.Context, keysetID string, admin *pb.AdminAuth) (rerr error) {
 	const name = "unfreeze"
+	defer func() { s.noteFail(sideCoordinator, pb.Op_OP_UNFREEZE, peerNone, rerr) }() // both members must sign off: no single suspect
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Limits.SessionTimeout())
 	defer cancel()
 	open := &pb.Open{Op: pb.Op_OP_UNFREEZE, KeysetId: keysetID, Admin: admin}

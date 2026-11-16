@@ -138,6 +138,7 @@ func (s *Server) reconcileAT(ctx context.Context, id string) (err error) {
 	defer cancel()
 
 	open := &pb.Open{Op: pb.Op_OP_RECONCILE, KeysetId: id}
+	defer func() { s.noteFail(sideCoordinator, pb.Op_OP_RECONCILE, peerNone, err) }() // three parties: no single suspect
 	sess, f := s.openGroup(ctx, name, open, true)
 	if f != nil {
 		return f
@@ -394,7 +395,7 @@ func (s *Server) reconcileTWithFallback(ctx context.Context, id string) error {
 	return last
 }
 
-func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
+func (s *Server) reconcilePairWith(ctx context.Context, id, role string) (rerr error) {
 	const name = "reconcile"
 	me := s.cfg.Role // A (the third member is away) or B (A is unreachable, role is C)
 	if s.link(role) == nil {
@@ -410,6 +411,7 @@ func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Limits.SessionTimeout())
 	defer cancel()
 	sid := newSID()
+	defer func() { s.noteFail(sideCoordinator, pb.Op_OP_RECONCILE, role, rerr) }()
 	stream, err := s.link(role).Session(ctx)
 	if err != nil {
 		return fromWrapper(name, &transportErr{err})

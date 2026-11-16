@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -57,6 +58,9 @@ type Server struct {
 	kick       chan struct{}
 	loopCancel context.CancelFunc
 	stats      frameStats
+	fails      *failStats // failed sessions by side, op, suspected peer and kind (read-only metrics)
+	metricsLn  net.Listener
+	metricsSrv *http.Server
 
 	rl      *rateLimiter
 	slots   *slots // concurrent sessions: outgoing on A, incoming on B
@@ -134,7 +138,7 @@ func New(o Options) (*Server, error) {
 		return nil, err
 	}
 	return &Server{cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
-		cache: newKeyCache(), tcache: newTKeyCache(), rts: map[string]*ksRT{}, kick: make(chan struct{}, 1), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
+		fails: newFailStats(c.Role), cache: newKeyCache(), tcache: newTKeyCache(), rts: map[string]*ksRT{}, kick: make(chan struct{}, 1), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
 		replay: newReplayCache(c.Limits.ReplayCacheSize), inflight: map[string]*flight{}}, nil
 }
 
@@ -175,6 +179,9 @@ func (s *Server) Start() error {
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 5 * time.Second, PermitWithoutStream: true}),
 	}
 
+	if err := s.startMetrics(); err != nil {
+		return err
+	}
 	s.callerLn, err = net.Listen("tcp", c.CallerListen)
 	if err != nil {
 		return err
@@ -321,6 +328,7 @@ func (s *Server) Shutdown(ctx context.Context) {
 	if s.peerCConn != nil {
 		s.peerCConn.Close()
 	}
+	s.stopMetrics()
 	s.cache.wipeAll()
 	s.tcache.wipeAll()
 	s.log.Info("stopped, keysets wiped")

@@ -1,0 +1,134 @@
+# promtool test rules mpc-blame.rules.test.yml
+rule_files:
+  - mpc-blame.rules.yml
+evaluation_interval: 1m
+
+tests:
+  # no failures: nothing fires, although every series exists at 0
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_session_failures_total{party="A",side="coordinator",op="sign",peer="B",kind="CRYPTOGRAPHIC"}'
+        values: '0x30'
+      - series: 'qv_mpc_party_session_failures_total{party="B",side="follower",op="sign",peer="A",kind="CRYPTOGRAPHIC"}'
+        values: '0x30'
+      - series: 'qv_mpc_party_session_failures_total{party="C",side="follower",op="sign",peer="A",kind="TRANSPORT"}'
+        values: '0x30'
+    alert_rule_test:
+      - {eval_time: 30m, alertname: QVMpcPeerCryptographicFailures, exp_alerts: []}
+      - {eval_time: 30m, alertname: QVMpcPeerAvailabilityFailures, exp_alerts: []}
+      - {eval_time: 30m, alertname: QVMpcBlameMetricsMissing, exp_alerts: []}
+
+  # the first cryptographic failure with one peer alerts at once, for both parties that saw it, and stays for an hour
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_session_failures_total{party="A",side="coordinator",op="sign",peer="B",kind="CRYPTOGRAPHIC"}'
+        values: '0x10 1x80'
+      - series: 'qv_mpc_party_session_failures_total{party="B",side="follower",op="sign",peer="A",kind="CRYPTOGRAPHIC"}'
+        values: '0x10 1x80'
+      - series: 'qv_mpc_party_session_failures_total{party="C",side="follower",op="sign",peer="A",kind="CRYPTOGRAPHIC"}'
+        values: '0x90'
+    alert_rule_test:
+      - {eval_time: 9m, alertname: QVMpcPeerCryptographicFailures, exp_alerts: []}
+      - eval_time: 12m
+        alertname: QVMpcPeerCryptographicFailures
+        exp_alerts:
+          - exp_labels: {severity: page, peer: A, kind: CRYPTOGRAPHIC}
+            exp_annotations: &cryptoAnnotations
+              summary: "A signing session failed a cryptographic check with party A (suspect, not proven)"
+              description: "The failed message came in from party A, or its link failed. The cause may equally be the reporting party, the link or the third party. The keyset is frozen. Runbook: docs/runbooks/mpc-failures.md"
+          - exp_labels: {severity: page, peer: B, kind: CRYPTOGRAPHIC}
+            exp_annotations:
+              summary: "A signing session failed a cryptographic check with party B (suspect, not proven)"
+              description: "The failed message came in from party B, or its link failed. The cause may equally be the reporting party, the link or the third party. The keyset is frozen. Runbook: docs/runbooks/mpc-failures.md"
+      # still there 50 minutes later (the 1 h window), gone after it
+      - {eval_time: 60m, alertname: QVMpcPeerCryptographicFailures, exp_alerts: [{exp_labels: {severity: page, peer: A, kind: CRYPTOGRAPHIC}, exp_annotations: *cryptoAnnotations}, {exp_labels: {severity: page, peer: B, kind: CRYPTOGRAPHIC}, exp_annotations: {summary: "A signing session failed a cryptographic check with party B (suspect, not proven)", description: "The failed message came in from party B, or its link failed. The cause may equally be the reporting party, the link or the third party. The keyset is frozen. Runbook: docs/runbooks/mpc-failures.md"}}]}
+      - {eval_time: 80m, alertname: QVMpcPeerCryptographicFailures, exp_alerts: []}
+    promql_expr_test:
+      - expr: qv_mpc:peer_session_failures:increase1h{kind="CRYPTOGRAPHIC"}
+        eval_time: 15m
+        exp_samples:
+          - {labels: 'qv_mpc:peer_session_failures:increase1h{peer="A",kind="CRYPTOGRAPHIC"}', value: 1}
+          - {labels: 'qv_mpc:peer_session_failures:increase1h{peer="B",kind="CRYPTOGRAPHIC"}', value: 1}
+
+  # availability: a few failures at once (a restart) stay below the threshold; a steady stream alerts after 10 minutes; a party the health checks
+  # already route away from is left to QVMpcPartyUnhealthy
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_session_failures_total{party="A",side="coordinator",op="sign",peer="B",kind="TRANSPORT"}'
+        values: '0x5 3x40'
+      - series: 'qv_mpc_party_session_failures_total{party="A",side="coordinator",op="sign",peer="C",kind="TRANSPORT"}'
+        values: '0+2x45'
+      - series: 'qv_mpc_party_session_failures_total{party="B",side="coordinator",op="sign",peer="C",kind="UNAVAILABLE"}'
+        values: '0+2x45'
+      - series: 'qv_mpc_party_healthy{party="B"}'
+        values: '1x45'
+    alert_rule_test:
+      - {eval_time: 20m, alertname: QVMpcPeerAvailabilityFailures, exp_alerts: [{exp_labels: {severity: page, peer: C, kind: TRANSPORT}, exp_annotations: &availAnnotations {summary: "Sessions keep failing with party C although the health checks pass (suspect, not proven)", description: "A flaky link or host. A party that the health checks rule out is covered by QVMpcPartyUnhealthy. Runbook: docs/runbooks/mpc-failures.md"}}, {exp_labels: {severity: page, peer: C, kind: UNAVAILABLE}, exp_annotations: *availAnnotations}]}
+      # before the 10 minutes have passed: pending, not firing
+      - {eval_time: 8m, alertname: QVMpcPeerAvailabilityFailures, exp_alerts: []}
+
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_session_failures_total{party="A",side="coordinator",op="sign",peer="C",kind="TRANSPORT"}'
+        values: '0+2x45'
+      - series: 'qv_mpc_party_healthy{party="C"}'
+        values: '1x5 0x40'
+    alert_rule_test:
+      - {eval_time: 30m, alertname: QVMpcPeerAvailabilityFailures, exp_alerts: []}
+
+  # refusals and the other kinds are tickets with their own thresholds
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_session_failures_total{party="B",side="follower",op="sign",peer="A",kind="REFUSED"}'
+        values: '0+1x20'
+      - series: 'qv_mpc_party_session_failures_total{party="C",side="follower",op="sign",peer="A",kind="INTERNAL"}'
+        values: '0x5 3x15'
+      - series: 'qv_mpc_party_session_failures_total{party="C",side="follower",op="dkg",peer="none",kind="LIMIT"}'
+        values: '0x20'
+    alert_rule_test:
+      - {eval_time: 3m, alertname: QVMpcPeerRefusals, exp_alerts: []}
+      - eval_time: 15m
+        alertname: QVMpcPeerRefusals
+        exp_alerts:
+          - exp_labels: {severity: ticket, peer: A, kind: REFUSED}
+            exp_annotations: {summary: "Party A keeps asking for signatures that a cosigner refuses", description: "Look at the cosigner's refusal reasons and at what the gateway sent. Runbook: docs/runbooks/mpc-failures.md"}
+      - eval_time: 15m
+        alertname: QVMpcPeerOtherFailures
+        exp_alerts:
+          - exp_labels: {severity: ticket, peer: A}
+            exp_annotations: {summary: "Sessions with party A fail with limit, internal or frozen errors", description: "Not the network and not a cryptographic verdict. peer=none: no single peer. Runbook: docs/runbooks/mpc-failures.md"}
+
+  # the gateway's view, per pair
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_gateway_sign_failures_total{pair="A+C",kind="CRYPTOGRAPHIC"}'
+        values: '0x5 1x20'
+      - series: 'qv_mpc_gateway_sign_failures_total{pair="A+B",kind="TRANSPORT"}'
+        values: '0+1x40'
+      - series: 'qv_mpc_gateway_sign_failures_total{pair="B+C",kind="TRANSPORT"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: QVMpcGatewayPairCryptographicFailures
+        exp_alerts:
+          - exp_labels: {severity: page, pair: A+C, kind: CRYPTOGRAPHIC}
+            exp_annotations: {summary: "A sign call through pair A+C failed a cryptographic check", description: "Either party of the pair, or the link between them, is suspect. Runbook: docs/runbooks/mpc-failures.md"}
+      - eval_time: 30m
+        alertname: QVMpcGatewayPairAvailabilityFailures
+        exp_alerts:
+          - exp_labels: {severity: page, pair: A+B}
+            exp_annotations: {summary: "Sign calls through pair A+B keep failing", description: "The gateway also counts calls that never reached a party. The health checks and the route move signing away from a pair on their own; this says it has been going on. Runbook: docs/runbooks/mpc-failures.md"}
+
+  # collection: fewer than three parties reporting for 5 minutes, or none at all
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_session_failures_total{party="A",side="coordinator",op="sign",peer="B",kind="TRANSPORT"}'
+        values: '0x20'
+      - series: 'qv_mpc_party_session_failures_total{party="B",side="coordinator",op="sign",peer="C",kind="TRANSPORT"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: QVMpcBlameMetricsMissing
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations: {summary: "The failure counters of fewer than three parties are collected", description: "Check that Prometheus scrapes every party's metrics port (metrics_listen)."}

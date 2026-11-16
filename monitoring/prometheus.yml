@@ -1,0 +1,21 @@
+# A minimal Prometheus for the MPC counters and rules (docker compose --profile monitoring; `make monitoring-up`). It only reads: it scrapes
+# and evaluates, it has no admin API and no lifecycle endpoint (both are off unless a flag turns them on), and nothing in the signing zone depends
+# on it. In production this runs in central monitoring, outside the signing zone, and reaches the parties' metrics ports (config metrics_listen).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# relative to this file
+rule_files:
+  - mpc-routing.rules.yml
+  - mpc-blame.rules.yml
+
+scrape_configs:
+  # every party's metrics port: qv_mpc_party_session_failures_total. Local development: start the parties with metrics_listen on these ports.
+  - job_name: mpc-party
+    static_configs:
+      - targets: ["host.docker.internal:9464", "host.docker.internal:9465", "host.docker.internal:9466"]
+  # the gateway opens no port: it writes -mpc-metrics-file, which node-exporter serves through its textfile collector
+  - job_name: qv-gateway
+    static_configs:
+      - targets: ["node-exporter:9100"]

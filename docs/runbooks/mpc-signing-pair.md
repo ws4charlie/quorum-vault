@@ -63,4 +63,6 @@ Never take out two parties: two of three must be up for any signature, and `A+B`
 | `party A signed with peer ... although "C" was asked for` | A runs an old version that ignores the wanted peer. Upgrade the parties before moving the gateway to `A+C` |
 | `ALERT mpc route: rows ... do not carry valid approver signatures` | Something wrote to the guard database without approver keys, or an approver was removed or disabled. The gateway ignores those rows and keeps the last valid setting; investigate who has write access to the guard database |
 
+Sessions that keep failing with one party although the health checks pass are counted per suspected party and alerted; the steps for that, including when to take a party out with this runbook, are in [mpc-failures.md](mpc-failures.md).
+
 Rolling back is a new signed change to the pair you want; rows are never edited or deleted.

@@ -8,7 +8,7 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-.PHONY: dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
+.PHONY: monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
 
 setup: softhsm db-up chain-up
 
@@ -37,6 +37,19 @@ infra-up:
 
 infra-down:
 	docker compose --profile infra rm -sfv temporal-ui temporal temporal-schema temporal-db redpanda
+
+# Monitoring (profile "monitoring"): a read-only Prometheus over monitoring/ and node-exporter's textfile collector for the gateway's metrics file.
+monitoring-up:
+	mkdir -p "$${QV_MPC_METRICS_DIR:-.mpc-metrics}"
+	docker compose --profile monitoring up -d prometheus node-exporter
+
+monitoring-down:
+	docker compose --profile monitoring stop prometheus node-exporter
+
+# promtool check and unit tests of the rules in monitoring/ (pulls the pinned Prometheus image on first use; the Go test skips when promtool is absent).
+test-monitoring:
+	docker pull "$$(sed -n 's/^ *image: \(prom\/prometheus:.*\)$$/\1/p' docker-compose.yml)"
+	go test -count=1 -v ./monitoring/
 
 # Smoke test against `make infra-up`: a Temporal workflow and a Redpanda round trip.
 test-infra:

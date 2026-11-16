@@ -25,6 +25,9 @@ var sidRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 func (s *Server) Session(stream pb.Peer_SessionServer) error {
 	s.wg.Add(1)
 	defer s.wg.Done()
+	watch := &followWatch{Peer_SessionServer: stream, op: pb.Op_OP_UNSPECIFIED}
+	stream = watch
+	defer s.finishFollow(watch) // counts the session if a failing FIN crossed it (read-only metrics)
 	start := time.Now()
 	if s.cfg.Role == "B" {
 		s.noteContactFromA() // B's peer port serves party A only (pinned certificate)
@@ -70,6 +73,7 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 	if err := proto.Unmarshal(fr.Payload, &open); err != nil {
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "malformed OPEN")
 	}
+	watch.setOp(open.Op)
 	if len(open.IntentPackage) > s.cfg.Limits.MaxIntentBytes {
 		return reject(pb.ErrorKind_ERROR_KIND_LIMIT, "intent package too large")
 	}
