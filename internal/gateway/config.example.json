@@ -68,7 +68,7 @@
           "qv-us/btc-example/BTC/hot/segregated:acme/0": { "address": "bcrt1qz7z4ppgy3gusv5zcmasx4a2wpq2qk0d4el496t", "path": [1, 1] }
         },
         "cold_addresses": { "omnibus/native": "bcrt1qgn33jvqejtek6shugcz27eq322m2g95uxj6943" },
-        "max_tx_fee_sats": 50000,
+        "max_tx_fee_sats": 300000,
         "max_fee_rate": 200,
         "max_inputs": 20
       },

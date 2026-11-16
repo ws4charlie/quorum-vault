@@ -189,6 +189,13 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 			return err
 		}
 		known := rec != nil && bytes.Equal(rec.Hash, hash[:])
+		if rec == nil {
+			if fc, ok := codec.(FirstSendChecker); ok {
+				if err := fc.CheckFirstSend(u, intent); err != nil {
+					return reject(ReasonTx, "%v", err)
+				}
+			}
+		}
 
 		// 4. Policy. Caps and rates are admitted once per intent; a known
 		// intent (resubmission, replacement) is not counted again.
