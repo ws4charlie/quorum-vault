@@ -54,6 +54,8 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v2/withdrawals/{id}/approvals", a.approve)
 	mux.HandleFunc("POST /v2/withdrawals/{id}/rejections", a.reject)
 	mux.HandleFunc("GET /v2/withdrawals/{id}/intent", a.intent)
+	mux.HandleFunc("GET /v2/batches/{id}", a.getBatch)
+	mux.HandleFunc("POST /v2/batches/{id}/cancel", a.cancelBatch)
 	mux.HandleFunc("GET /v2/reconcile", a.reconcile)
 	mux.HandleFunc("GET /v2/refills", a.listRefills)
 	mux.HandleFunc("GET /v2/refills/{id}", a.getRefill)
@@ -98,7 +100,7 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 		code, msg = http.StatusConflict, err.Error()
 	case errors.Is(err, ErrSelfApproval):
 		code, msg = http.StatusForbidden, err.Error()
-	case errors.Is(err, ErrNotPending):
+	case errors.Is(err, ErrNotPending), errors.Is(err, ErrBatchLocked):
 		code, msg = http.StatusConflict, err.Error()
 	default:
 		a.log.Error("request failed", "error", err.Error())
@@ -319,6 +321,22 @@ func (a *API) reject(w http.ResponseWriter, r *http.Request) {
 	wd, err := a.svc.GetWithdrawal(r.Context(), id)
 	if err != nil {
 		a.fail(w, err)
+		return
+	}
+	// A withdrawal in the batch queue is cancelled here, at once: out of the queue, or with its unsigned batch discarded; refused (409) once its batch is signed.
+	if queued, err := a.svc.InBatchQueue(r.Context(), id); err != nil {
+		a.fail(w, err)
+		return
+	} else if queued && wd.Status != WdConfirmed && wd.Status != WdFailed {
+		if err := a.svc.RecordRejection(r.Context(), id, actor, body.Reason); err != nil {
+			a.fail(w, err)
+			return
+		}
+		if err := a.svc.CancelWithdrawal(r.Context(), id, actor+": "+body.Reason, a.log); err != nil {
+			a.fail(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"withdrawal": id, "rejected_by": actor, "cancelled": true})
 		return
 	}
 	if wd.Status != WdRequested && wd.Status != WdApproved {
@@ -672,4 +690,48 @@ func (a *API) auditVerify(w http.ResponseWriter, r *http.Request) {
 		out["first_bad_seq"] = bad
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// ---- batches (Bitcoin) ----
+
+func (a *API) getBatch(w http.ResponseWriter, r *http.Request) {
+	b, err := a.svc.GetBatch(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	items, err := a.svc.BatchItems(r.Context(), b.ID)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	members := []map[string]any{}
+	for _, it := range items {
+		m := map[string]any{"withdrawal": it.WithdrawalID, "position": it.Position, "vout": it.Vout, "amount": it.Amount.String()}
+		if it.FeeShare != nil {
+			m["fee_share"] = it.FeeShare.String()
+		}
+		members = append(members, m)
+	}
+	out := map[string]any{"id": b.ID, "partition": b.PartitionID, "status": b.Status, "tx_hash": b.TxHash, "cancel_tx": b.CancelTx, "reason": b.Reason, "members": members}
+	if b.Fee != nil {
+		out["fee"] = b.Fee.String()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// cancelBatch asks to cancel a whole batch: unsigned, it is discarded at once; signed, its workflow cancels it (the same coins back to the hot wallet) and
+// the members return to the queue.
+func (a *API) cancelBatch(w http.ResponseWriter, r *http.Request) {
+	actor, ok := a.actor(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if err := a.svc.CancelBatch(r.Context(), id, a.log); err != nil {
+		a.fail(w, err)
+		return
+	}
+	a.log.Info("batch cancel requested", "batch", id, "actor", actor)
+	writeJSON(w, http.StatusAccepted, map[string]any{"batch": id, "requested_by": actor})
 }

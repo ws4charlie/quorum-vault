@@ -52,6 +52,8 @@ func OwnerTrack(o Owner) Track {
 		return Track("rebal:" + o.ID)
 	case OwnerKindConsolidate:
 		return Track("consol:" + o.ID)
+	case OwnerKindBatch:
+		return Track("batch:" + o.ID)
 	}
 	return Track("sweep:" + o.ID)
 }
@@ -417,27 +419,35 @@ func jobStates(ctx context.Context, tx pgx.Tx, o Owner) (pending []string, mayEx
 // released. Jobs still pending are marked rejected in the same transaction, so no gateway claims one afterwards. Without a Releaser (EVM), or
 // with a signature that may exist (then a cancel is needed, see EnqueueCancel), it does nothing and reports false.
 func (s *Service) ReleaseIfUnsigned(ctx context.Context, o Owner) (bool, error) {
-	rel, ok := s.Chain.(chain.Releaser)
-	if !ok {
+	if _, ok := s.Chain.(chain.Releaser); !ok {
 		return false, nil
 	}
 	released := false
 	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		released = false
-		pending, may, err := jobStates(ctx, tx, o)
-		if err != nil || may {
-			return err
-		}
-		for _, id := range pending {
-			if _, err := tx.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='sibling_refused: another job of the attempt was refused', updated_at=now() WHERE id=$1 AND status='pending'`, id); err != nil {
-				return err
-			}
-		}
-		if err := rel.ReleaseUnsigned(ctx, tx, o.Kind, o.ID); err != nil {
-			return err
-		}
-		released = true
-		return nil
+		var err error
+		released, err = s.releaseIfUnsignedTx(ctx, tx, o)
+		return err
 	})
 	return released, err
+}
+
+// releaseIfUnsignedTx is ReleaseIfUnsigned inside the caller's transaction (a batch discards its members in the same one).
+func (s *Service) releaseIfUnsignedTx(ctx context.Context, tx pgx.Tx, o Owner) (bool, error) {
+	rel, ok := s.Chain.(chain.Releaser)
+	if !ok {
+		return false, nil
+	}
+	pending, may, err := jobStates(ctx, tx, o)
+	if err != nil || may {
+		return false, err
+	}
+	for _, id := range pending {
+		if _, err := tx.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='sibling_refused: another job of the attempt was refused', updated_at=now() WHERE id=$1 AND status='pending'`, id); err != nil {
+			return false, err
+		}
+	}
+	if err := rel.ReleaseUnsigned(ctx, tx, o.Kind, o.ID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
