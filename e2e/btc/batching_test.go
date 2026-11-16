@@ -233,3 +233,42 @@ func TestBatchRefusedByTheZoneIsDiscardedThenParked(t *testing.T) {
 	}
 	s.ledgerOK()
 }
+
+// The second look at every destination, right before the batch is built: a withdrawal that passed when the batch was sealed and fails now is taken out
+// of the batch before anything is signed for it, parked with an alert; the rest of the batch goes out. (The batch waits for coins, sealed, when the
+// destination changes.)
+func TestBatchRescreenRemovesAWithdrawalBeforeSigning(t *testing.T) {
+	s := batchSystem(t, opts{maxInputs: 2}, batchingOpts{outputs: 5, wait: "6s", inFlight: 1})
+	vals := make([]int64, 12)
+	for i := range vals {
+		vals[i] = 1_000_000
+	}
+	s.fundHotOutputs(vals...)
+	head, mid, bad := s.payQ(10_000_000), s.payQ(100_000), s.payQ(110_000)
+	b := s.untilBatches("sealed", 1, 90*time.Second)[0]
+	if len(b.Members) != 3 || b.Members[2] != bad.ID {
+		t.Fatalf("members %v: all three pass the check at seal time", b.Members)
+	}
+	if _, err := s.pool.Exec(s.ctx, `UPDATE withdrawals SET to_address='not-an-address' WHERE id=$1`, bad.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.waitFor(60*time.Second, "the bad withdrawal is parked", func() bool { return strings.HasPrefix(s.wdRow(bad.ID).Reason, "parked:") })
+	if r := s.wdRow(bad.ID); !strings.Contains(r.Reason, "destination check before signing") || r.Batch != "" {
+		t.Fatalf("the bad withdrawal: %+v", r)
+	}
+	if !s.workerLogHas("failed the destination check before its batch was signed") {
+		t.Fatal("no ALERT in the worker log")
+	}
+	if s.attempts("send") != 0 || s.utxoCount("reserved") != 0 {
+		t.Fatal("something was built or signed while the head still could not be funded")
+	}
+	s.fundHot(30_000_000)
+	got := s.untilBatches("broadcast", 1, 90*time.Second)[0]
+	if got.ID != b.ID || len(got.Members) != 2 || got.Members[0] != head.ID || got.Members[1] != mid.ID {
+		t.Fatalf("batch %+v: the same batch without the bad withdrawal", got)
+	}
+	s.assertBooked(s.mineBatch(got.ID), head, mid)
+	if n := s.received(bad.dest, 0); n != 0 {
+		t.Fatalf("the parked withdrawal was paid %d", n)
+	}
+}
