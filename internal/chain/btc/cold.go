@@ -19,8 +19,8 @@ import (
 )
 
 // MaxMove is the most a hot-to-cold move from the partition can carry now: the oldest available hot outputs, at most max_inputs of them, minus the
-// fee of a transaction with that many inputs and two outputs (the payment and the change). An output reserved by a withdrawal is not available, so a
-// move never takes one. Zero (or less than dust) means nothing can be moved yet.
+// fee-bump reserve of a transaction with that many inputs and two outputs (the payment and the change): the fee cap for its size and one dust change,
+// which stay in the shard (reserve.go). An output reserved by a withdrawal is not available, so a move never takes one. Zero (or less than dust) means nothing can be moved yet.
 func (a *Adapter) MaxMove(ctx context.Context, partitionID string) (*big.Int, error) {
 	sh, err := a.shardOf(partitionID)
 	if err != nil {
@@ -48,11 +48,12 @@ func (a *Adapter) MaxMove(ctx context.Context, partitionID string) (*big.Int, er
 		return new(big.Int), nil
 	}
 	// The cold address may be a script as large as P2WSH (34 bytes): size the payment output for it.
-	fee := vsize(n, sh.script, make([]byte, 34)) * a.feeRate(ctx)
-	if sum <= fee {
+	vs := vsize(n, sh.script, make([]byte, 34))
+	keep := ReserveNeed(0, vs*a.feeRate(ctx), vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate) // the fee now or the cap, and one dust change
+	if sum <= keep {
 		return new(big.Int), nil
 	}
-	return new(big.Int).SetUint64(sum - fee), nil
+	return new(big.Int).SetUint64(sum - keep), nil
 }
 
 // unspent is one output of the node's UTXO set.
