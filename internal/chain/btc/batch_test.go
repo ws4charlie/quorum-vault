@@ -267,3 +267,68 @@ func TestFeeSharesAddUpExactly(t *testing.T) {
 		}
 	}
 }
+
+// holdFor makes an available output the held output of a cancelled batch, as settling the cancel does.
+func (e *wEnv) holdFor(txid, oldBatch string) {
+	e.t.Helper()
+	tx, err := e.a.pool.Begin(context.Background())
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if err := e.a.HoldForResend(context.Background(), tx, txid, oldBatch); err != nil {
+		tx.Rollback(context.Background())
+		e.t.Fatal(err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// The members of a cancelled batch are paid by a batch that spends the output of that batch's cancel, which the cell held for them: it is spent whatever
+// else is available, and never by anything else; a batch never pays only some of them (the rest could no longer be paid); released, it is available again.
+func TestBuildBatchSpendsTheHeldOutputOfACancelledBatch(t *testing.T) {
+	e := newWEnvWith(t, func(c *Config) { c.MaxTxFeeSats = 100_000 })
+	other := e.fund(100_000) // available, oldest
+	held := e.fund(100_000)
+	if err := e.a.pool.QueryRow(context.Background(), `UPDATE btc_utxos SET vout=0 WHERE txid=$1 RETURNING txid`, held).Scan(new(string)); err != nil {
+		t.Fatal(err)
+	}
+	e.holdFor(held, "old")
+	// Another build does not touch the held output.
+	if e.count("available") != 1 || e.count("reserved") != 1 {
+		t.Fatalf("available %d reserved %d", e.count("available"), e.count("reserved"))
+	}
+	ms := []BatchMember{{ID: "a", To: e.dest, Amount: 30_000, ResendOf: "old"}, {ID: "b", To: e.dest, Amount: 30_000, ResendOf: "old"}, {ID: "c", To: e.dest, Amount: 30_000}}
+	b, err := e.buildBatch("new", ms, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := e.payload(b.Tx)
+	if b.Funded != 3 || len(p.Inputs) != 2 || p.Inputs[0].TxID != held || p.Inputs[1].TxID != other {
+		t.Fatalf("funded %d inputs %+v: the held output goes first, then the oldest available", b.Funded, p.Inputs)
+	}
+
+	// Never part of a group: with only the held output (100,000), a and b (60,000 each) cannot both be paid, and paying a alone is not allowed.
+	e2 := newWEnvWith(t, func(c *Config) { c.MaxTxFeeSats = 100_000 })
+	h2 := e2.fund(100_000)
+	e2.holdFor(h2, "old")
+	ms = []BatchMember{{ID: "a", To: e2.dest, Amount: 60_000, ResendOf: "old"}, {ID: "b", To: e2.dest, Amount: 60_000, ResendOf: "old"}}
+	if _, err := e2.buildBatch("new", ms, true); !errors.Is(err, chain.ErrNotEnoughOutputs) {
+		t.Fatalf("a group split in two: %v", err)
+	}
+	if e2.count("reserved") != 1 {
+		t.Fatalf("reserved %d: only the held output should be reserved, and for the old batch", e2.count("reserved"))
+	}
+	// A member whose held output is missing waits; a plain member ahead of it is not blocked by it.
+	e2.fund(100_000)
+	ms = []BatchMember{{ID: "p", To: e2.dest, Amount: 10_000}, {ID: "a", To: e2.dest, Amount: 10_000, ResendOf: "gone"}}
+	if b, err := e2.buildBatch("p-only", ms, true); err != nil || b.Funded != 1 {
+		t.Fatalf("funded %d, %v: the member behind a missing hold must wait, the one before it is paid", b.Funded, err)
+	}
+	// Released, the output is available again.
+	tx, _ := e2.a.pool.Begin(context.Background())
+	if err := e2.a.ReleaseResend(context.Background(), tx, "old"); err != nil {
+		t.Fatal(err)
+	}
+	tx.Commit(context.Background())
+}

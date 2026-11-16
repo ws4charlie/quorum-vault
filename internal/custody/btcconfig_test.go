@@ -113,3 +113,58 @@ func TestBTCConfigConsolidation(t *testing.T) {
 		}
 	}
 }
+
+// Batching is off unless a config turns it on; its settings default, are read per shard, and the fee caps must reach the rate ceiling for the largest batch.
+func TestBTCConfigBatching(t *testing.T) {
+	xpub := xpubFor(t, &chaincfg.RegressionNetParams)
+	one, _ := btc.DeriveHotAddress("regtest", xpub, 0)
+	build := func(b *BatchingFile, shard *BatchingFile, change func(*BTCFile)) (*Config, error) {
+		f := btcFile("regtest", xpub)
+		f.Chain.BTC.HotShards = []BTCShardFile{{Address: one, Path: []uint32{1, 0}, Batching: shard}}
+		f.Chain.BTC.Batching = b
+		f.Chain.BTC.MaxTxFeeSats = 300_000 // the default 150,000 cannot reach 100 sat/vB for 20 inputs and 20 payments: that is refused below
+		if change != nil {
+			change(f.Chain.BTC)
+		}
+		return f.Build()
+	}
+	c, err := build(nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.PartitionKey("BTC", 0).String()
+	if c.BatchingOf(p).Enabled || c.BatchingOf(p).Active() {
+		t.Fatal("batching is on without being asked")
+	}
+	c, err = build(&BatchingFile{Enabled: true}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := c.BatchingOf(p); !b.Active() || b.MaxOutputs != 20 || b.MaxWait.Minutes() != 10 || b.MaxInFlight != 1 {
+		t.Fatalf("defaults: %+v", b)
+	}
+	// max_wait 0 is one withdrawal per transaction: on, but not active.
+	c, err = build(&BatchingFile{Enabled: true, MaxWait: "0s"}, nil, nil)
+	if err != nil || c.BatchingOf(p).Active() {
+		t.Fatalf("max_wait 0: %v %+v", err, c.BatchingOf(p))
+	}
+	// A shard overrides the section.
+	c, err = build(&BatchingFile{Enabled: true, MaxOutputs: 5}, &BatchingFile{Enabled: false}, nil)
+	if err != nil || c.BatchingOf(p).Enabled {
+		t.Fatalf("override: %v %+v", err, c.BatchingOf(p))
+	}
+	if _, err := build(&BatchingFile{Enabled: true, MaxWait: "soon"}, nil, nil); err == nil {
+		t.Fatal("a max_wait that is not a duration was accepted")
+	}
+	if _, err := build(&BatchingFile{Enabled: true, MaxOutputs: -1}, nil, nil); err == nil {
+		t.Fatal("max_outputs -1 was accepted")
+	}
+	// 50 payments and 20 inputs at 100 sat/vB need 355,200 sats of fee cap: 300,000 is refused at start-up, naming the size.
+	_, err = build(&BatchingFile{Enabled: true, MaxOutputs: 50}, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "50 payment output(s)") {
+		t.Fatalf("a fee cap that cannot reach the rate ceiling for a full batch: %v", err)
+	}
+	if _, err := build(&BatchingFile{Enabled: true, MaxOutputs: 50}, nil, func(b *BTCFile) { b.MaxTxFeeSats = 400_000 }); err != nil {
+		t.Fatal(err)
+	}
+}

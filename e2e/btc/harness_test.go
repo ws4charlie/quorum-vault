@@ -453,6 +453,17 @@ type opts struct {
 	consolidateAbove   int
 	consolidateMaxRate uint64
 	gwConsolidations   int
+	// batching turns batching on for the hot shard (it needs withdraw).
+	batching *batchingOpts
+}
+
+// batchingOpts are the batching settings of a test: the core's max_outputs, max_wait ("10m", "0s" for none) and max_in_flight, and the signing zone's own
+// ceiling on the payments of a batch (default: twice max_outputs).
+type batchingOpts struct {
+	outputs     int
+	wait        string
+	inFlight    int
+	zoneOutputs int
 }
 
 func freePort(t *testing.T) int {
@@ -642,6 +653,15 @@ func newSystem(t *testing.T, o opts) *system {
 	t.Cleanup(tc.Close)
 	t.Cleanup(func() { // the workflows outlive their worker: end them with the test
 		ids := []string{workflow.ScanID(s.chain), workflow.ReconcilerID(s.chain), workflow.PlannerID(s.chain)}
+		if rows, err := s.pool.Query(context.Background(), `SELECT id FROM btc_batches`); err == nil {
+			for rows.Next() {
+				var id string
+				if rows.Scan(&id) == nil {
+					ids = append(ids, id)
+				}
+			}
+			rows.Close()
+		}
 		if rows, err := s.pool.Query(context.Background(), `SELECT id FROM sweeps`); err == nil {
 			for rows.Next() {
 				var id string

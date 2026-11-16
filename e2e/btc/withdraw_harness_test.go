@@ -48,6 +48,9 @@ func (s *system) setupWithdrawals(o opts) {
 	if o.maxFeeRate > 0 {
 		s.cf.Chain.BTC.MaxFeeRate = o.maxFeeRate
 	}
+	if b := o.batching; b != nil {
+		s.cf.Chain.BTC.Batching = &custody.BatchingFile{Enabled: true, MaxOutputs: b.outputs, MaxWait: b.wait, MaxInFlight: b.inFlight}
+	}
 	s.cf.Withdrawal.Tiers = map[string][]custody.TierFile{"BTC": {{MinAmount: "0", Approvals: 1, Auto: true}, {MinAmount: btcTier2, Approvals: 2}}}
 	s.cf.Withdrawal.HotWait = "4m"
 	s.cf.Withdrawal.SignTimeout = "20s"
@@ -119,6 +122,7 @@ func (s *system) setupWithdrawals(o opts) {
 			MPC: &gateway.MPCSignerFile{Address: s.mpc.CallerA, CertFile: crt, KeyFile: key, ServerPin: s.mpc.CertA.Pin}}},
 		Chains: map[string]gateway.ChainFile{s.chain: {Family: "btc", WithdrawalsPerHour: 100000, SweepsPerHour: sweepsPerHour, CancelsPerHour: 1000, ToColdPerHour: 1000, ConsolidationsPerHour: consolidations,
 			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: s.xpub, ColdAddresses: map[string]string{"omnibus/native": s.coldAddr}, MaxTxFeeSats: s.zoneMaxTx(o), MaxFeeRate: s.zoneFeeRate(o), MaxInputs: 20,
+				MaxBatchOutputs: zoneBatchOutputs(o), MaxBatchValueSats: zoneBatchValue(o),
 				HotShards: map[string]gateway.HotShardFile{s.part: {Address: s.hotAddr, Path: []uint32{1, 0}}}},
 			Assets: map[string]gateway.AssetFile{"BTC": asset}}},
 	}
@@ -132,6 +136,25 @@ func (s *system) setupWithdrawals(o opts) {
 	_, s.gwGuard = gatewaytest.NewGuardDB(t)
 	_, cosGuard := gatewaytest.NewGuardDB(t)
 	s.mpc.StartCosigner(cosPath, cosGuard, s.gwGuard)
+}
+
+// zoneBatchOutputs is the zone's own ceiling on the payments of a batch (0: the zone signs no batches); zoneBatchValue its ceiling on their total.
+func zoneBatchOutputs(o opts) int {
+	b := o.batching
+	switch {
+	case b == nil:
+		return 0
+	case b.zoneOutputs > 0:
+		return b.zoneOutputs
+	}
+	return 2 * b.outputs
+}
+
+func zoneBatchValue(o opts) uint64 {
+	if o.batching == nil {
+		return 0
+	}
+	return 10_000_000_000 // above the zone's per-transaction cap of 10 BTC, below its daily cap
 }
 
 // zoneFeeRate is the signing zone's max_fee_rate. The zone judges the first send of a withdrawal against its own caps, so the core's reserve must
