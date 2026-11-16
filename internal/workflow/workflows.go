@@ -959,6 +959,9 @@ func BatchWorkflow(ctx workflow.Context, in Input) error {
 			if err == nil {
 				break
 			}
+			if isType(err, errMemberRemoved) {
+				continue // a withdrawal that cannot be paid was parked and taken out: look at the batch again without it
+			}
 			if isType(err, errNoOutputs) {
 				if !workflow.Now(ctx).Before(deadline) {
 					_, derr := discard("not enough available outputs in time: "+err.Error(), false)

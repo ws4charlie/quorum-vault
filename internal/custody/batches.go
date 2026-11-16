@@ -3,6 +3,7 @@ package custody
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -517,7 +518,7 @@ func (s *Service) BuildBatchJob(ctx context.Context, id string) (string, error) 
 		}
 		built, err := bb.BuildBatch(ctx, tx, id, b.PartitionID, members)
 		if err != nil {
-			return err
+			return err // a member that cannot be paid at all comes back as chain.BatchMemberError: see below
 		}
 		// The members behind the funded prefix go back to the queue, at their place.
 		for i := built.Funded; i < len(ws); i++ {
@@ -551,7 +552,38 @@ func (s *Service) BuildBatchJob(ctx context.Context, id string) (string, error) 
 		}
 		return emit(ctx, tx, outbox.TopicWithdrawals, id, "batch.signing", map[string]any{"job": jobID, "members": len(ws)})
 	})
+	var me *chain.BatchMemberError
+	if errors.As(err, &me) {
+		// The second look at the destinations, at the build itself: a member that passed when the batch was sealed and cannot be paid now is taken out
+		// of the batch and parked in a transaction of its own (the failed build rolled back), and the build is tried again without it.
+		if perr := s.removeBatchMember(ctx, id, me); perr != nil {
+			return "", perr
+		}
+		return "", fmt.Errorf("%w: %s: %v", ErrMemberRemoved, me.ID, me.Err)
+	}
 	return jobID, err
+}
+
+// removeBatchMember parks a withdrawal that cannot be paid and takes it out of its sealed batch; a batch left with nobody is discarded.
+func (s *Service) removeBatchMember(ctx context.Context, batchID string, me *chain.BatchMemberError) error {
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE withdrawals SET batch_id=NULL, failure_reason=$2, updated_at=now() WHERE id=$1 AND batch_id=$3`,
+			me.ID, ParkedPrefix+" destination check before signing: "+me.Err.Error(), batchID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM btc_batch_items WHERE batch_id=$1 AND withdrawal_id=$2`, batchID, me.ID); err != nil {
+			return err
+		}
+		var left int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM btc_batch_items WHERE batch_id=$1`, batchID).Scan(&left); err != nil {
+			return err
+		}
+		if left == 0 {
+			_, err := tx.Exec(ctx, `UPDATE btc_batches SET status='discarded', reason='no member left to pay', updated_at=now() WHERE id=$1 AND status='sealed'`, batchID)
+			return err
+		}
+		return nil
+	})
 }
 
 // RecordBatchBroadcast stores the hash of the first attempt that was sent and marks the batch and its members broadcast. Repeating it changes nothing.

@@ -165,10 +165,15 @@ func TestBatchMaxInFlightHoldsTheThirdBatch(t *testing.T) {
 
 // max_wait 0 is today's behaviour: no queue, one transaction per withdrawal, no batch.
 func TestBatchMaxWaitZeroIsOneWithdrawalPerTransaction(t *testing.T) {
-	s := batchSystem(t, opts{}, batchingOpts{outputs: 3, wait: "0s", inFlight: 1}, 100_000_000)
+	s := batchSystem(t, opts{}, batchingOpts{outputs: 3, wait: "0s", inFlight: 1}, 50_000_000, 50_000_000) // two outputs: the two build side by side
 	a, b := s.pay(5_000_000), s.pay(6_000_000)
 	s.settle(a.ID)
-	s.settle(b.ID)
+	// b was built beside a, so the blocks that settled a may have settled b too.
+	s.waitFor(60*time.Second, "b is sent", func() bool { st := s.wdRow(b.ID).Status; return st == "broadcast" || st == "confirmed" })
+	if s.wdRow(b.ID).Status == "broadcast" {
+		s.node.mine(2, "")
+	}
+	s.waitWd(b.ID, "confirmed", 60*time.Second)
 	if n := len(s.batchRows()); n != 0 {
 		t.Fatalf("%d batches", n)
 	}

@@ -2,6 +2,7 @@ package chain
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -49,3 +50,13 @@ type BatchBuilder interface {
 	ReleaseResend(ctx context.Context, tx pgx.Tx, oldBatchID string) error
 	BatchShares(ctx context.Context, q Querier, batchID, txid string, n int, fee uint64) ([]uint64, error)
 }
+
+// BatchMemberError says one member of a batch cannot be paid at all (a destination that is not an address of the network, an amount below dust): the
+// batch is to be built again without that withdrawal.
+type BatchMemberError struct {
+	ID  string
+	Err error
+}
+
+func (e *BatchMemberError) Error() string { return fmt.Sprintf("batch member %s: %v", e.ID, e.Err) }
+func (e *BatchMemberError) Unwrap() error { return e.Err }

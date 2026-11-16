@@ -50,10 +50,10 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 		seen[m.ID] = true
 		d, err := DecodeAddress(m.To, a.cfg.params)
 		if err != nil {
-			return BatchBuild{}, fmt.Errorf("btc: batch member %s: destination: %w", m.ID, err)
+			return BatchBuild{}, &chain.BatchMemberError{ID: m.ID, Err: fmt.Errorf("destination: %w", err)}
 		}
 		if m.Amount < DustLimit(d.Kind) {
-			return BatchBuild{}, fmt.Errorf("btc: batch member %s: amount %d is below the dust limit %d of %s", m.ID, m.Amount, DustLimit(d.Kind), d.Kind)
+			return BatchBuild{}, &chain.BatchMemberError{ID: m.ID, Err: fmt.Errorf("amount %d is below the dust limit %d of %s", m.Amount, DustLimit(d.Kind), d.Kind)}
 		}
 		if scripts[i], err = OutputScript(m.To, a.cfg.params); err != nil {
 			return BatchBuild{}, err

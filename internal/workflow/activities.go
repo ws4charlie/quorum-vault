@@ -40,14 +40,15 @@ func QueueFor(chain string) string { return DefaultTaskQueue + "-" + chain }
 
 // Error types the workflows branch on.
 const (
-	errExpired     = "expired"
-	errFrozen      = "sweep_frozen"
-	errNonceOpen   = "nonce_open"
-	errBadRequest  = "bad_request"
-	errCannotBump  = "cannot_bump"  // no replacement or cancel can be built
-	errSweepFee    = "sweep_fee"    // the fee rate does not allow this sweep now
-	errNoOutputs   = "no_outputs"   // too few available outputs: retryable by waiting
-	errBatchLocked = "batch_locked" // a withdrawal in a signed batch cannot be cancelled alone
+	errExpired       = "expired"
+	errFrozen        = "sweep_frozen"
+	errNonceOpen     = "nonce_open"
+	errBadRequest    = "bad_request"
+	errCannotBump    = "cannot_bump"    // no replacement or cancel can be built
+	errSweepFee      = "sweep_fee"      // the fee rate does not allow this sweep now
+	errNoOutputs     = "no_outputs"     // too few available outputs: retryable by waiting
+	errBatchLocked   = "batch_locked"   // a withdrawal in a signed batch cannot be cancelled alone
+	errMemberRemoved = "member_removed" // a withdrawal that cannot be paid was taken out of its batch: build again
 )
 
 // Deps are what activities need.
@@ -97,6 +98,8 @@ func nonRetry(err error) error {
 		typ = errNoOutputs
 	case errors.Is(err, custody.ErrBatchLocked):
 		typ = errBatchLocked
+	case errors.Is(err, custody.ErrMemberRemoved):
+		typ = errMemberRemoved
 	case errors.Is(err, custody.ErrInvalid), errors.Is(err, ledger.ErrInsufficientFunds), errors.Is(err, ledger.ErrIdempotencyConflict):
 		typ = errBadRequest
 	default:
@@ -954,6 +957,9 @@ func (a *Activities) PrepareBatch(ctx context.Context, id string) (int, error) {
 // BuildBatchJob builds the batch's transaction for the prefix the coins can fund and enqueues its sign job in one transaction.
 func (a *Activities) BuildBatchJob(ctx context.Context, id string) (string, error) {
 	job, err := a.D.Svc.BuildBatchJob(ctx, id)
+	if errors.Is(err, custody.ErrMemberRemoved) {
+		a.log().Error("ALERT: a withdrawal failed the destination check before its batch was signed; parked", "batch", id, "error", err.Error())
+	}
 	if err != nil {
 		a.alertReserve("batch", id, err)
 		return "", nonRetry(err)

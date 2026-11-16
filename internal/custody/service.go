@@ -66,6 +66,7 @@ var (
 	ErrExpired             = errors.New("custody: the approval window has passed")
 	ErrSweepFrozen         = errors.New("custody: sweeping is frozen")
 	ErrCursorMoved         = errors.New("custody: scan cursor moved")
+	ErrMemberRemoved       = errors.New("custody: a withdrawal that cannot be paid was taken out of the batch")
 	ErrBatchLocked         = errors.New("custody: the withdrawal is in a batch that was signed: cancel the whole batch, not one withdrawal")
 )
 
