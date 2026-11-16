@@ -58,7 +58,7 @@ func Lib(t testing.TB) *hsm.Lib {
 	if _, err := os.Stat(path); err != nil {
 		unavailable(t, "pkcs11 library %s not found (install SoftHSM2 or set QV_PKCS11_LIB)", path)
 	}
-	if os.Getenv("SOFTHSM2_CONF") == "" && hsm.RepoSoftHSMConf() == "" {
+	if hsm.SoftHSMConf() == "" {
 		unavailable(t, "no SoftHSM config: run `make setup` (scripts/setup-softhsm.sh) or set SOFTHSM2_CONF")
 	}
 	lib, err := hsm.LoadLib(path)

@@ -40,6 +40,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
+	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 
@@ -86,8 +87,8 @@ func SoftHSMEnv() []string {
 		panic(err)
 	}
 	env := []string{"QV_HSM_PIN=" + pin}
-	if os.Getenv("SOFTHSM2_CONF") == "" {
-		env = append(env, "SOFTHSM2_CONF="+filepath.Join(RepoRoot(), "data", "softhsm", "softhsm2.conf"))
+	if conf := hsm.SoftHSMConf(); conf != "" {
+		env = append(env, "SOFTHSM2_CONF="+conf)
 	}
 	return env
 }
