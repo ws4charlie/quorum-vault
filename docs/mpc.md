@@ -33,5 +33,8 @@ A route can only make signing slower or unavailable. Every pair still includes B
 ## A failed check freezes the key
 If a proof does not verify, a message cannot be read, or a final signature is wrong, the parties may be talking to a bad peer. The key is then frozen on every party that holds it. Nothing is deleted, withdrawals wait with their holds, and only an operator's signed unfreeze lifts it. A party that is merely slow or offline is not a freeze. See the [freeze runbook](runbooks/mpc-keyset-freeze.md).
 
+## Failures are counted per suspect
+Every party counts the sessions that failed, by the other party involved and by the kind of failure, and the gateway counts failed sign calls by pair. A monitoring system outside the signing zone collects the counts and alerts a person when one party keeps showing up. The named party is only a suspect, because the protocol cannot say who caused a failure, and nothing in the signing zone acts on the counts: only people do ([runbook](runbooks/mpc-failures.md)).
+
 ## Shares are sealed, backed up and refreshed
 Each share is encrypted under a key that never leaves the party's own HSM token, so a stolen disk gives nothing. A refresh gives every party new shares for the same public key, and a crash during it ends on one working generation. A lost party is rebuilt from its backup ([runbook](runbooks/mpc-backup-restore.md)).

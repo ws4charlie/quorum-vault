@@ -20,6 +20,8 @@ would give a hostile peer more tries. Availability problems (a party down, a tim
 
 ## Investigate (before anything else)
 
+0. The failure counters show which party the failed sessions point at and whether it is the first or one of many ([mpc-failures.md](mpc-failures.md)). The named party is a suspect only.
+
 1. Which keyset, which operation, which job: the freeze log line has `keyset_id`, `op`, `job_id`, `peer_reported` (true: the
    other party found it) and the message.
 2. Both parties' logs around that time. Is the network path between A and B under your control (mTLS, pinned certificates)? A
