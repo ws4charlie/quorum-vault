@@ -1,6 +1,6 @@
 # Spike: write-once storage for audit heads
 
-Checked 2026-11-15. Status: **MinIO is not usable as the default; the choice of store is open (see "Decision needed").**
+Checked 2026-11-15/16. Status: **decided (human, 2026-11-16): local and CI use SeaweedFS pinned by digest; production targets AWS S3 Object Lock. MinIO is not used.**
 
 ## MinIO today
 - The `minio/minio` repository is archived (read-only since 2026-04-25). Its README says it is no longer maintained, ships source only, and points to the commercial AIStor. Source licence: AGPLv3. [github.com/minio/minio](https://github.com/minio/minio)
@@ -26,6 +26,10 @@ Local test use of any of these proves our code against an S3 Object Lock API, no
 ## What this does not give
 It shows that a head existed and was not altered after it was archived. It does not show the chain is complete: a chain that was cut or rewritten before its next head was archived is not detected, and a head archived while the chain was already wrong is kept as it was.
 
-## Decision needed (lead)
-1. Local/CI store: **SeaweedFS (recommended)**, pinned by digest, because it is Apache-2.0, has an official maintained image and implements COMPLIANCE lock. Other choices: Ceph (heavy), RustFS (young), or a self-built MinIO from archived source (not recommended).
-2. Production target: the archiver speaks plain S3 (Object Lock API), so production can be AWS S3 or any assessed store. Say which, so the runbook and the retention default name it.
+## Decision and what was proven on SeaweedFS
+- Local/CI store: `chrislusf/seaweedfs:4.53` pinned by the digest of its multi-arch index in `docker-compose.yml` (profile `archive`); the tests start their own container from that same line. Production: AWS S3 Object Lock. The archiver speaks plain S3, so any store with an Object Lock API and an independent compliance-mode assessment can replace it.
+- `internal/auditchain/archive_s3_test.go` runs against the real store. In COMPLIANCE mode, during retention, **both the archiver's identity and the root identity are refused**: deleting the locked version (also with bypass-governance), shortening the retention, switching it to governance mode, deleting the bucket. A control test shows the same bypass **succeeds** in GOVERNANCE mode, so the refusals are the lock and not a broken test.
+- What the store allows, and how the code deals with it: a plain write over an existing key adds a version, and a delete without a version id adds a delete marker. Neither touches the locked version. The archiver never writes a key twice (lookup, then a conditional `If-None-Match` write), and verification reads **every version** of every object and fails on content that does not belong under its key, so a marker or a forged newer version cannot hide or replace an archived head.
+- SeaweedFS identities are coarse (Read, Write, List, Tagging, Admin; Write includes delete). The archiver needs `Admin` there only to read the bucket's lock configuration at start, so on SeaweedFS the lock, not the identity, is what stops deletes. On AWS the policy in the runbook denies delete, retention, lock and lifecycle changes outright.
+- Each head is one object, keyed by source, count and hash, so a head republished unchanged every minute is one object. Verification lists and reads all of them; it is linear in the number of distinct heads.
+- Not covered: SeaweedFS has no independent assessment we could find, so nothing here is a SEC 17a-4(f), FINRA 4511 or CFTC 1.31 claim. For one, the production store has to be an assessed one (S3 with Object Lock in COMPLIANCE mode, or an assessed appliance), and counsel has to read the assessment against QuorumVault's actual duties.

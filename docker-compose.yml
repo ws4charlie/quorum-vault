@@ -180,6 +180,38 @@ services:
       timeout: 3s
       retries: 60
 
+  # ---- Audit archive (profile "archive"; `docker compose --profile archive up -d --wait seaweedfs`) ----
+  # S3 store with Object Lock for qv-anchor-archiver (docs/runbooks/audit-archive.md, docs/spikes/audit-worm.md). Host port QV_ARCHIVE_PORT (default
+  # 18333). Two identities, both from the environment (nothing is committed): root (QV_ARCHIVE_ROOT_ACCESS_KEY / _SECRET_KEY, creates the bucket)
+  # and the archiver (QV_ARCHIVE_ACCESS_KEY / _SECRET_KEY; SeaweedFS needs its "Admin" action to let it READ the bucket lock configuration at start; the lock, not the identity, is what stops deletes here). The bucket is created by the operator with Object Lock; the
+  # archiver refuses to start on a bucket that is not locked in COMPLIANCE mode. Data in the `archive-data` volume. The tests start their own
+  # container from this same image. Pinned: chrislusf/seaweedfs 4.53 (2026-11-16), by digest of the multi-arch index (tests read this line).
+  seaweedfs:
+    profiles: ["archive"]
+    image: chrislusf/seaweedfs:4.53@sha256:ccad23e18639c8b98cee17e7100b95830a06077b56d8e5b006d6dcf8ec5e94a0
+    environment:
+      ROOT_AK: ${QV_ARCHIVE_ROOT_ACCESS_KEY:-}
+      ROOT_SK: ${QV_ARCHIVE_ROOT_SECRET_KEY:-}
+      ARC_AK: ${QV_ARCHIVE_ACCESS_KEY:-}
+      ARC_SK: ${QV_ARCHIVE_SECRET_KEY:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        # empty keys would start a store anyone can write to; compose cannot require them for this profile only, so the container does
+        : "$${ROOT_AK:?set QV_ARCHIVE_ROOT_ACCESS_KEY}" "$${ROOT_SK:?set QV_ARCHIVE_ROOT_SECRET_KEY}" "$${ARC_AK:?set QV_ARCHIVE_ACCESS_KEY}" "$${ARC_SK:?set QV_ARCHIVE_SECRET_KEY}"
+        printf '{"identities":[{"name":"root","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]},{"name":"archiver","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Read","Write","List","Admin"]}]}' "$$ROOT_AK" "$$ROOT_SK" "$$ARC_AK" "$$ARC_SK" > /tmp/s3.json
+        exec /entrypoint.sh server -dir=/data -s3 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=256 -ip.bind=0.0.0.0
+    ports:
+      - "127.0.0.1:${QV_ARCHIVE_PORT:-18333}:8333"
+    volumes:
+      - archive-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --spider http://127.0.0.1:8333/ ; [ $$? -ne 4 ]"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # ---- Monitoring (profile "monitoring"; `make monitoring-up`) ----
   # Read-only Prometheus over monitoring/: scrapes the parties' metrics ports and the gateway's metrics file (through node-exporter's textfile
   # collector) and evaluates the MPC rules. No admin API, no lifecycle endpoint, config mounted read-only. Not part of `make setup` or the e2e
@@ -209,4 +241,5 @@ configs:
 
 volumes:
   pgdata:
+  archive-data:
   temporal-pgdata:

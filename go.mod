@@ -3,6 +3,11 @@ module github.com/ws4charlie/quorum-vault
 go 1.26.0
 
 require (
+	filippo.io/edwards25519 v1.1.0
+	github.com/aws/aws-sdk-go-v2 v1.48.0
+	github.com/aws/aws-sdk-go-v2/credentials v1.21.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.10
+	github.com/aws/smithy-go v1.28.9
 	github.com/btcsuite/btcd v0.24.2
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4
 	github.com/btcsuite/btcd/btcutil v1.1.6
@@ -12,6 +17,7 @@ require (
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/miekg/pkcs11 v1.1.2
 	github.com/twmb/franz-go v1.22.2
+	github.com/twmb/franz-go/pkg/kadm v1.18.0
 	github.com/ws4charlie/quorum-vault/mpc-party/api v0.0.0
 	go.temporal.io/api v1.64.1
 	go.temporal.io/sdk v1.50.0
@@ -20,7 +26,16 @@ require (
 	pgregory.net/rapid v1.3.0
 )
 
-require filippo.io/edwards25519 v1.1.0 // indirect
+require (
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.27 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.12 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.12 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.12 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.25 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.13 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.12 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.12 // indirect
+)
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
