@@ -357,6 +357,11 @@ var _ = proto.Marshal
 // the two of them and serve; signing among that pair compares generations in every OPEN anyway. The keyset is marked partial: the
 // moment the missing member's link is up again, A reconciles all three (and the returning member, which has not been reconciled,
 // stays UNAVAILABLE until then).
+//
+// The same pair path serves B and C when A is unreachable (B leads, C follows): only A records commit decisions, and only after
+// all three stored a candidate, so B and C can rule out a pending decision only when both are on the same current generation and
+// neither holds a candidate. Then nothing can be pending from A, and the target is that generation. In every other case they stay
+// unresolved, say why, and wait for A. No generation is promoted, dropped or deleted by a pair reconcile.
 
 func isLinkDown(err error) bool {
 	var f *Fail
@@ -391,6 +396,7 @@ func (s *Server) reconcileTWithFallback(ctx context.Context, id string) error {
 
 func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 	const name = "reconcile"
+	me := s.cfg.Role // A (the third member is away) or B (A is unreachable, role is C)
 	if s.link(role) == nil {
 		return errors.New("no link")
 	}
@@ -411,7 +417,7 @@ func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 	defer stream.CloseSend()
 	tr := newSessTransport(sid, stream, s.cfg.Limits.MaxFrameBytes, &s.stats)
 	go tr.pump()
-	open := &pb.Open{Op: pb.Op_OP_RECONCILE, KeysetId: id, Scheme: s.keysetScheme(id), Initiator: "A", Reason: "pair"}
+	open := &pb.Open{Op: pb.Op_OP_RECONCILE, KeysetId: id, Scheme: s.keysetScheme(id), Initiator: me, Reason: "pair"}
 	b, _ := proto.Marshal(open)
 	if err := stream.Send(&pb.Frame{SessionId: sid, Kind: pb.FrameKind_FRAME_KIND_OPEN, Payload: b}); err != nil {
 		return err
@@ -450,15 +456,16 @@ func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 		tr.sendFin(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_UNAVAILABLE, Message: why})
 		return errors.New(why)
 	}
-	switch {
-	case !aEx || !x.Exists || as.Current == 0 || as.Current != x.Current:
-		return refuse(fmt.Sprintf("cannot reconcile A with %s alone: generations %d and %d (a full reconciliation with the third member is needed)", role, as.Current, x.Current))
-	case as.Candidate != 0 || x.Candidate != 0 || as.Decision != 0:
-		return refuse("cannot reconcile A with " + role + " alone: a commit may be unfinished (a full reconciliation with the third member is needed)")
+	third := "the third member"
+	if me == "B" {
+		third = "party A"
+	}
+	if _, why := planPair(me, role, third, stateOf(as, aEx), x.peerKS, as.Decision); why != "" {
+		return refuse(why)
 	}
 	freeze := ""
 	if afz != "" {
-		freeze = "party A holds the keyset frozen: " + afz
+		freeze = "party " + me + " holds the keyset frozen: " + afz
 	} else if x.Frozen != "" {
 		freeze = "party " + role + " holds the keyset frozen: " + x.Frozen
 	}
@@ -478,11 +485,12 @@ func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 	if err != nil {
 		return err
 	}
-	digest := cbmpc.SelfTestDigestAlg(tk.Alg(), tk.PublicKey(), append(selfTestLabel(tk.Alg(), id, as.Current), []byte("|pair")...), 0, roleMember(role))
-	mesh := meshOf("A", map[string]*sessTransport{role: tr})
-	if _, err := tk.Sign(ctx, mesh, roleMember(role), 0, digest, s.opts()...); err != nil {
+	digest := cbmpc.SelfTestDigestAlg(tk.Alg(), tk.PublicKey(), append(selfTestLabel(tk.Alg(), id, as.Current), []byte("|pair")...), roleMember(me), roleMember(role))
+	mesh := meshOf(me, map[string]*sessTransport{role: tr})
+	failpoint("pair_lead_after_plan")
+	if _, err := tk.Sign(ctx, mesh, roleMember(role), roleMember(me), digest, s.opts()...); err != nil {
 		tr.sendFin(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, Message: "pair self-test after reconciliation failed"})
-		s.log.Error("ALERT self-test after reconciliation failed", "role", "A", "scheme", s.schemeLog(id), "keyset_id", id, "generation", as.Current, "pair", "A+"+role, "error", err.Error())
+		s.log.Error("ALERT self-test after reconciliation failed", "role", me, "scheme", s.schemeLog(id), "keyset_id", id, "generation", as.Current, "pair", me+"+"+role, "error", err.Error())
 		return err
 	}
 	fin, err := step()
@@ -493,6 +501,7 @@ func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 		tr.sendFin(&pb.Fin{Ok: false, Kind: pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC, Message: "public keys differ"})
 		return errors.New("public keys differ after pair reconciliation")
 	}
+	failpoint("pair_lead_before_confirm")
 	tr.sendFin(&pb.Fin{Ok: true, Confirm: true})
 	select {
 	case <-tr.done:
@@ -500,13 +509,13 @@ func (s *Server) reconcilePairWith(ctx context.Context, id, role string) error {
 	}
 	rt.setResolved(true)
 	rt.setPartial(true)
-	s.log.Warn("keyset reconciled with one member only: the third is unreachable; it is reconciled when it returns", "role", "A",
+	s.log.Warn("keyset reconciled with one member only: the third is unreachable; it is reconciled when it returns", "role", me,
 		"scheme", s.schemeLog(id), "keyset_id", id, "generation", as.Current, "with", role)
 	return nil
 }
 
-// reconcilePairFollow is the member's side of a pairwise reconciliation with A.
-func (s *Server) reconcilePairFollow(ctx context.Context, open *pb.Open, me string, control *sessTransport, sid string) error {
+// reconcilePairFollow is the member's side of a pairwise reconciliation with its leader: A, or B when A is unreachable (C only).
+func (s *Server) reconcilePairFollow(ctx context.Context, open *pb.Open, me, lead string, control *sessTransport, sid string) error {
 	id := open.KeysetId
 	rt := s.rt(id)
 	bail := func(f *Fail) error {
@@ -557,8 +566,9 @@ func (s *Server) reconcilePairFollow(ctx context.Context, open *pb.Open, me stri
 	if err != nil {
 		return bail(fromWrapper("reconcile", err))
 	}
-	mesh := meshOf(me, map[string]*sessTransport{"A": control})
-	if _, err := tk.Sign(ctx, mesh, 0, 0, cbmpc.SelfTestDigestAlg(tk.Alg(), tk.PublicKey(), append(selfTestLabel(tk.Alg(), id, p.Target), []byte("|pair")...), 0, roleMember(me)), s.opts()...); err != nil {
+	mesh := meshOf(me, map[string]*sessTransport{lead: control})
+	failpoint("pair_follow_after_plan")
+	if _, err := tk.Sign(ctx, mesh, roleMember(lead), roleMember(lead), cbmpc.SelfTestDigestAlg(tk.Alg(), tk.PublicKey(), append(selfTestLabel(tk.Alg(), id, p.Target), []byte("|pair")...), roleMember(lead), roleMember(me)), s.opts()...); err != nil {
 		return bail(fromWrapper("reconcile.selftest", err))
 	}
 	if err := control.sendFin(&pb.Fin{Ok: true, Result: tk.PublicKey()}); err != nil {
@@ -570,6 +580,71 @@ func (s *Server) reconcilePairFollow(ctx context.Context, open *pb.Open, me stri
 	}
 	rt.setResolved(true)
 	rt.setPartial(true)
-	s.log.Info("keyset reconciled with party A alone (the third member is unreachable)", "role", me, "scheme", s.schemeLog(id), "keyset_id", id, "generation", p.Target)
+	s.log.Info("keyset reconciled with one member only (the third is unreachable)", "role", me, "with", lead, "scheme", s.schemeLog(id), "keyset_id", id, "generation", p.Target)
 	return nil
+}
+
+// planPair decides whether two members may reconcile a keyset without the third. mine and theirs are the two members' reports,
+// decision is the leader's own recorded commit decision (only A ever has one). It returns the generation both are on, or the
+// reason it is not safe. Pure, unit-tested.
+func planPair(me, other, third string, mine, theirs peerKS, decision uint64) (uint64, string) {
+	switch {
+	case !mine.Exists || !theirs.Exists || mine.Current == 0 || mine.Current != theirs.Current:
+		return 0, fmt.Sprintf("cannot reconcile %s with %s alone: generations %d and %d, or one has no state (a full reconciliation with %s is needed)", me, other, mine.Current, theirs.Current, third)
+	case mine.Candidate != 0 || theirs.Candidate != 0 || decision != 0:
+		return 0, fmt.Sprintf("cannot reconcile %s with %s alone: a commit may be unfinished (a full reconciliation with %s is needed)", me, other, third)
+	}
+	return mine.Current, ""
+}
+
+// ---- B and C while A is unreachable ----
+
+// pairGrace is how long party B waits without any contact from A before it reconciles with C alone. A that is up reconnects within
+// about a second (the dial backoff is capped at one) and then reconciles an unresolved B within another; a pair reconcile earlier than
+// that would be safe too but pointless, because A's full reconciliation follows it anyway.
+const pairGrace = 6 * time.Second
+
+func (s *Server) noteContactFromA() { s.lastA.Store(time.Now().UnixNano()) }
+
+func (s *Server) aSilentFor() time.Duration {
+	return time.Since(time.Unix(0, s.lastA.Load()))
+}
+
+// pairLoopStep (party B, on the tick that keeps the link to C alive) starts a pair reconciliation with C for every unresolved
+// 2-of-3 keyset, when A has not been heard from for pairGrace. C only follows. B becomes unresolved after a restart or when C
+// reports it is unresolved or on another generation (coordinateSignT).
+func (s *Server) pairLoopStep(ctx context.Context) {
+	if s.aSilentFor() < pairGrace {
+		return
+	}
+	ids, err := s.store.List(ctx)
+	if err != nil {
+		return
+	}
+	for _, id := range ids {
+		st, err := s.store.State(ctx, id)
+		if err != nil || !isTScheme(st.Scheme) || s.rt(id).isResolved() {
+			continue
+		}
+		s.pairMu.Lock()
+		if s.pairBusy[id] || time.Since(s.pairLast[id]) < time.Second {
+			s.pairMu.Unlock()
+			continue
+		}
+		s.pairBusy[id] = true
+		s.pairLast[id] = time.Now()
+		s.pairMu.Unlock()
+		go func(id string) {
+			t0 := time.Now()
+			err := s.reconcilePairWith(ctx, id, "C")
+			s.pairMu.Lock()
+			s.pairBusy[id] = false
+			s.pairMu.Unlock()
+			if err != nil {
+				s.log.Warn("pair reconciliation with C pending: waiting for party A", "role", "B", "keyset_id", id, "error", err.Error())
+			} else {
+				s.log.Info("reconciliation finished", "role", "B", "keyset_id", id, "with", "C", "duration_ms", time.Since(t0).Milliseconds())
+			}
+		}(id)
+	}
 }
