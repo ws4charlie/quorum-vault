@@ -287,7 +287,7 @@ type BTCFile struct {
 	// core derives each address from the xpub at start and refuses one that does not match.
 	HotShards []BTCShardFile `json:"hot_shards"`
 	// SpendConfirmations is the depth at which a withdrawal settles (default 2). MaxInputs, FallbackFeeRate, MaxFeeRate (sat/vB) and
-	// MaxTxFeeSats bound what the builder makes, and must stay below the signing zone's own caps.
+	// MaxTxFeeSats bound what the builder makes, and must EQUAL the signing zone's (the zone checks the fee-bump reserve against its own caps).
 	SpendConfirmations uint64 `json:"spend_confirmations"`
 	MaxInputs          int    `json:"max_inputs"`
 	FallbackFeeRate    uint64 `json:"fallback_fee_rate"`

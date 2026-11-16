@@ -499,8 +499,10 @@ func TestColdMoveOneInputRefusedAfterAnotherWasSignedIsCancelled(t *testing.T) {
 	if got := s.hotPosted().Int64(); got != -(20_000_000 - fee) {
 		t.Fatalf("hot mirror %d, want %d", got, -(20_000_000 - fee))
 	}
-	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND NOT deposit AND NOT cold AND status='available' AND value=$2`, s.chain, 20_000_000-fee) != 1 {
-		t.Fatal("the cancel's output is not an available hot output")
+	// The cancel's coins came back to the hot wallet: its output is a hot output of the shard that is available, or already taken by a later move (the planner
+	// sees the shard above its high mark again as soon as the cancel is settled, and may reserve the output before this check).
+	if s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND txid=$2 AND NOT deposit AND NOT cold AND status IN ('available','reserved') AND value=$3`, s.chain, cancel, 20_000_000-fee) != 1 {
+		t.Fatal("the cancel's output is neither an available hot output nor held by a later move")
 	}
 	s.ledgerOK()
 }

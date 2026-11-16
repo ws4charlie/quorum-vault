@@ -44,13 +44,13 @@ type Config struct {
 	// SpendConfirmations is the depth at which a transaction of ours settles and its change is released (default 2). Our own transactions
 	// spend only our own inputs and nobody else can double-spend them, so a reorganization can only delay them.
 	SpendConfirmations uint64
-	// MaxInputs bounds the inputs of one transaction (default 20); the signing zone's cap must be at least as high.
+	// MaxInputs bounds the inputs of one transaction (default 20); the signing zone's must be the same.
 	MaxInputs int
 	// FallbackFeeRate is the fee rate in satoshis per virtual byte when the node has no estimate (default 5). MaxFeeRate is the ceiling
-	// (default 100), which must be below the signing zone's.
+	// (default 100), which must equal the signing zone's.
 	FallbackFeeRate uint64
 	MaxFeeRate      uint64
-	// MaxTxFeeSats is the most a transaction may pay in fee (default 150000, below the signing zone's cap; at least MaxFeeRate times the size of the largest transaction, see CheckFeeCaps).
+	// MaxTxFeeSats is the most a transaction may pay in fee (default 150000; at least MaxFeeRate times the size of the largest transaction, see CheckFeeCaps).
 	MaxTxFeeSats uint64
 	// SweepMaxFeeRate is the most a routine sweep pays per virtual byte (default MaxFeeRate; it must not be above it). Above it routine sweeps wait.
 	// SweepUrgentValue, in satoshis, is the amount from which a sweep goes regardless of that ceiling, up to MaxFeeRate (0: no such exception).
@@ -102,6 +102,13 @@ func CoinType(network string) uint32 {
 // AccountPath is the hardened path of the account key, m/84'/coin'/0', as the plain numbers mpc-party Node takes (the
 // hardened bit is implied).
 func AccountPath(network string) []uint32 { return []uint32{84, CoinType(network), 0} }
+
+// DefaultFeeCaps are the core's defaults for max_tx_fee_sats, max_fee_rate and max_inputs. The signing zone has no defaults and must carry the same
+// caps (the zone checks the fee-bump reserve against its own), so every shipped config states these numbers; a test holds them together.
+func DefaultFeeCaps() (maxTxFeeSats, maxFeeRate uint64, maxInputs int) {
+	c := Config{}.withDefaults()
+	return c.MaxTxFeeSats, c.MaxFeeRate, c.MaxInputs
+}
 
 func (c Config) withDefaults() Config {
 	if c.Confirmations == 0 {
