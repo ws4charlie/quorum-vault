@@ -10,7 +10,7 @@ import (
 // share of the fee, the shares add up to the fee the transaction paid, and the books balance.
 func TestBatchSealsByCountAndBooksEveryMemberOnce(t *testing.T) {
 	s := batchSystem(t, opts{}, batchingOpts{outputs: 3, wait: "10m", inFlight: 1}, 100_000_000)
-	ws := []bw{s.pay(5_000_000), s.pay(6_000_000), s.pay(7_000_000)}
+	ws := []bw{s.payQ(5_000_000), s.payQ(6_000_000), s.payQ(7_000_000)}
 	b := s.untilBatches("broadcast", 1, 90*time.Second)[0]
 	if len(b.Members) != 3 {
 		t.Fatalf("members %v", b.Members)
@@ -42,7 +42,7 @@ func TestBatchSealsByCountAndBooksEveryMemberOnce(t *testing.T) {
 // A batch seals when the oldest withdrawal has waited max_wait since its approval, not before.
 func TestBatchSealsByAge(t *testing.T) {
 	s := batchSystem(t, opts{}, batchingOpts{outputs: 5, wait: "8s", inFlight: 1}, 100_000_000)
-	ws := []bw{s.pay(5_000_000), s.pay(6_000_000)}
+	ws := []bw{s.payQ(5_000_000), s.payQ(6_000_000)}
 	s.holds(3*time.Second, "no batch before max_wait", func() bool { return len(s.batchRows()) == 0 })
 	b := s.untilBatches("broadcast", 1, 60*time.Second)[0]
 	if len(b.Members) != 2 {
@@ -62,7 +62,7 @@ func TestBatchSealsByAge(t *testing.T) {
 // the first is unconfirmed (it spends other, confirmed coins).
 func TestBatchSealsByCountThenByAge(t *testing.T) {
 	s := batchSystem(t, opts{}, batchingOpts{outputs: 2, wait: "8s", inFlight: 2}, 50_000_000, 50_000_000)
-	ws := []bw{s.pay(5_000_000), s.pay(6_000_000), s.pay(7_000_000)}
+	ws := []bw{s.payQ(5_000_000), s.payQ(6_000_000), s.payQ(7_000_000)}
 	bs := s.untilBatches("broadcast", 2, 90*time.Second)
 	if len(bs[0].Members) != 2 || len(bs[1].Members) != 1 || bs[1].Members[0] != ws[2].ID {
 		t.Fatalf("batches %+v", bs)
@@ -84,7 +84,7 @@ func TestBatchSealsByCountThenByAge(t *testing.T) {
 // First in, first out: withdrawals approved at the same time are ordered by id, and a head that cannot be funded holds everyone behind it, however small.
 func TestBatchFIFOWithEqualApprovalTimes(t *testing.T) {
 	s := batchSystem(t, opts{}, batchingOpts{outputs: 3, wait: "10m", inFlight: 1}, 100_000_000)
-	a, b := s.pay(1_000_000), s.pay(1_100_000)
+	a, b := s.payQ(1_000_000), s.payQ(1_100_000)
 	for _, w := range []bw{a, b} {
 		id := w.ID
 		s.waitFor(60*time.Second, "withdrawal "+id+" is queued", func() bool { r := s.wdRow(id); return r.Queued && r.Status == "approved" })
@@ -92,7 +92,7 @@ func TestBatchFIFOWithEqualApprovalTimes(t *testing.T) {
 	if _, err := s.pool.Exec(s.ctx, `UPDATE withdrawals SET queued_at = date_trunc('second', now()) - interval '30 seconds' WHERE id = ANY($1)`, []string{a.ID, b.ID}); err != nil {
 		t.Fatal(err)
 	}
-	c := s.pay(1_200_000) // the third fills the batch
+	c := s.payQ(1_200_000) // the third fills the batch
 	bt := s.untilBatches("broadcast", 1, 60*time.Second)[0]
 	first, second := a.ID, b.ID
 	if second < first {
@@ -111,7 +111,7 @@ func TestBatchAnUnfundableHeadBlocksTheOnesBehindIt(t *testing.T) {
 		vals[i] = 1_000_000
 	}
 	s.fundHotOutputs(vals...)
-	big, small := s.pay(10_000_000), s.pay(100_000)
+	big, small := s.payQ(10_000_000), s.payQ(100_000)
 	s.untilBatches("sealed", 1, 90*time.Second)
 	s.holds(8*time.Second, "nothing is paid while the head cannot be funded", func() bool {
 		return s.attempts("send") == 0 && s.utxoCount("reserved") == 0 && s.wdRow(small.ID).Status == "approved" && s.wdRow(big.ID).Status == "approved"
@@ -128,7 +128,7 @@ func TestBatchAnUnfundableHeadBlocksTheOnesBehindIt(t *testing.T) {
 // and is paid by the next batch.
 func TestBatchPrefixShrinksUnderMaxInputs(t *testing.T) {
 	s := batchSystem(t, opts{maxInputs: 2}, batchingOpts{outputs: 3, wait: "10s", inFlight: 1}, 3_000_000, 3_000_000, 3_000_000)
-	ws := []bw{s.pay(2_500_000), s.pay(2_500_000), s.pay(2_500_000)}
+	ws := []bw{s.payQ(2_500_000), s.payQ(2_500_000), s.payQ(2_500_000)}
 	b1 := s.untilBatches("broadcast", 1, 60*time.Second)[0]
 	if len(b1.Members) != 2 || b1.Members[0] != ws[0].ID || b1.Members[1] != ws[1].ID {
 		t.Fatalf("first batch %v", b1.Members)
@@ -147,7 +147,7 @@ func TestBatchPrefixShrinksUnderMaxInputs(t *testing.T) {
 // max_in_flight 2: two batches are signed and unconfirmed; the third waits until one confirms.
 func TestBatchMaxInFlightHoldsTheThirdBatch(t *testing.T) {
 	s := batchSystem(t, opts{}, batchingOpts{outputs: 1, wait: "10m", inFlight: 2}, 20_000_000, 20_000_000, 20_000_000)
-	ws := []bw{s.pay(1_000_000), s.pay(1_100_000), s.pay(1_200_000)}
+	ws := []bw{s.payQ(1_000_000), s.payQ(1_100_000), s.payQ(1_200_000)}
 	s.untilBatches("broadcast", 2, 90*time.Second)
 	s.holds(6*time.Second, "the third batch waits", func() bool {
 		return len(s.batchRows()) == 2 && s.wdRow(ws[2].ID).Batch == ""
@@ -187,11 +187,11 @@ func TestBatchMaxWaitZeroIsOneWithdrawalPerTransaction(t *testing.T) {
 // The core's destination rule is applied again when a batch is sealed: a withdrawal that fails it leaves the queue, parked with an alert, and the rest are paid.
 func TestBatchRescreenRemovesAWithdrawalAtSealTime(t *testing.T) {
 	s := batchSystem(t, opts{}, batchingOpts{outputs: 3, wait: "10m", inFlight: 1}, 100_000_000)
-	a, bad := s.pay(5_000_000), s.pay(6_000_000)
+	a, bad := s.payQ(5_000_000), s.payQ(6_000_000)
 	if _, err := s.pool.Exec(s.ctx, `UPDATE withdrawals SET to_address='not-an-address' WHERE id=$1`, bad.ID); err != nil {
 		t.Fatal(err)
 	}
-	c := s.pay(7_000_000)
+	c := s.payQ(7_000_000)
 	b := s.untilBatches("broadcast", 1, 90*time.Second)[0]
 	if len(b.Members) != 2 || b.Members[0] != a.ID || b.Members[1] != c.ID {
 		t.Fatalf("members %v: the bad withdrawal should not be in it", b.Members)
@@ -213,7 +213,7 @@ func TestBatchRescreenRemovesAWithdrawalAtSealTime(t *testing.T) {
 // are released and its members return to the queue; after three refusals none of which names a withdrawal they are parked, with an alert.
 func TestBatchRefusedByTheZoneIsDiscardedThenParked(t *testing.T) {
 	s := batchSystem(t, opts{}, batchingOpts{outputs: 3, wait: "10m", inFlight: 1, zoneOutputs: 2}, 100_000_000)
-	ws := []bw{s.pay(1_000_000), s.pay(1_100_000), s.pay(1_200_000)}
+	ws := []bw{s.payQ(1_000_000), s.payQ(1_100_000), s.payQ(1_200_000)}
 	s.waitFor(120*time.Second, "all three withdrawals are parked", func() bool {
 		for _, w := range ws {
 			if !strings.HasPrefix(s.wdRow(w.ID).Reason, "parked:") {

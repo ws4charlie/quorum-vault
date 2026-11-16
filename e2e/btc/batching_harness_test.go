@@ -48,6 +48,15 @@ func (s *system) pay(amount int64) bw {
 	return bw{wd: w, dest: dest, amount: amount}
 }
 
+// payQ is pay, then waits until the withdrawal is in the batch queue: withdrawals that go through it are queued in the order they were requested, which
+// the order of a batch (first approved, first paid) then shows.
+func (s *system) payQ(amount int64) bw {
+	s.t.Helper()
+	w := s.pay(amount)
+	s.waitFor(60*time.Second, "withdrawal "+w.ID+" is queued", func() bool { return s.wdRow(w.ID).Queued })
+	return w
+}
+
 // bt is a batch row.
 type bt struct {
 	ID, Status, Tx, Cancel string

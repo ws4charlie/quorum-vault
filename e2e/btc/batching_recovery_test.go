@@ -12,7 +12,7 @@ import (
 // reaches the cap exactly; a second is not built (one alert), and the replacement confirms: the fee booked is the replacement's and the shares add up to it.
 func TestBatchRecoveryBumpedToTheCap(t *testing.T) {
 	s := batchSystem(t, opts{noEstimate: true, fallbackRate: 1, stuckAfter: "5s", maxFeeRate: 2}, batchingOpts{outputs: 3, wait: "10m", inFlight: 1}, 100_000_000)
-	ws := []bw{s.pay(5_000_000), s.pay(6_000_000), s.pay(7_000_000)}
+	ws := []bw{s.payQ(5_000_000), s.payQ(6_000_000), s.payQ(7_000_000)}
 	b := s.untilBatches("broadcast", 1, 90*time.Second)[0]
 	orig, _ := s.firstAttempt("send")
 	s.waitAttempts("send", 2, 60*time.Second)
@@ -53,7 +53,7 @@ func TestBatchRecoveryBumpedToTheCap(t *testing.T) {
 // Any attempt may be the one that confirms: here the original does, after a replacement was built. The books use the original's fee and its outputs.
 func TestBatchRecoveryAnEarlierAttemptConfirms(t *testing.T) {
 	s := batchSystem(t, opts{noEstimate: true, fallbackRate: 1, stuckAfter: "5s"}, batchingOpts{outputs: 2, wait: "10m", inFlight: 1}, 100_000_000)
-	ws := []bw{s.pay(5_000_000), s.pay(6_000_000)}
+	ws := []bw{s.payQ(5_000_000), s.payQ(6_000_000)}
 	b := s.untilBatches("broadcast", 1, 90*time.Second)[0]
 	orig, rawOrig := s.firstAttempt("send")
 	s.waitAttempts("send", 2, 60*time.Second)
@@ -82,7 +82,7 @@ func TestBatchRecoveryAnEarlierAttemptConfirms(t *testing.T) {
 func TestBatchRecoveryCancelOneWithdrawalAtEachMoment(t *testing.T) {
 	s := batchSystem(t, opts{}, batchingOpts{outputs: 2, wait: "10m", inFlight: 1}, 100_000_000)
 	// 1. In the queue: it leaves, its hold goes, nobody else is touched.
-	w1 := s.pay(2_000_000)
+	w1 := s.payQ(2_000_000)
 	s.waitFor(30*time.Second, "w1 is queued", func() bool { return s.wdRow(w1.ID).Queued })
 	if code, out := s.reject(w1.ID, "changed my mind"); code != http.StatusOK {
 		t.Fatalf("cancel in the queue: %d %v", code, out)
@@ -96,7 +96,7 @@ func TestBatchRecoveryCancelOneWithdrawalAtEachMoment(t *testing.T) {
 
 	// 2. Sealed, built, not signed (the signing gateway is down): the batch is discarded, its coins released, the other member back in the queue.
 	s.gateway.stop()
-	w2, w3 := s.pay(2_100_000), s.pay(2_200_000)
+	w2, w3 := s.payQ(2_100_000), s.payQ(2_200_000)
 	b := s.untilBatches("signing", 1, 90*time.Second)[0]
 	if s.utxoCount("reserved") == 0 {
 		t.Fatal("the built batch holds no coins")
@@ -119,7 +119,7 @@ func TestBatchRecoveryCancelOneWithdrawalAtEachMoment(t *testing.T) {
 
 	// 3. The gateway is back; w4 fills the batch with w3 (first in, first out); once it is broadcast one withdrawal cannot be cancelled alone.
 	s.startGateway()
-	w4 := s.pay(2_300_000)
+	w4 := s.payQ(2_300_000)
 	b2 := s.untilBatches("broadcast", 1, 90*time.Second)[0]
 	if len(b2.Members) != 2 || b2.Members[0] != w3.ID || b2.Members[1] != w4.ID {
 		t.Fatalf("members %v, want w3 then w4", b2.Members)
@@ -138,7 +138,7 @@ func TestBatchRecoveryCancelOneWithdrawalAtEachMoment(t *testing.T) {
 // their place and a new batch that spends the cancel's output (the signing zone insists) pays each of them once. The first batch never confirms.
 func TestBatchRecoveryCancelTheWholeBatchAndTheSurvivorsAreSentOnce(t *testing.T) {
 	s := batchSystem(t, opts{}, batchingOpts{outputs: 2, wait: "10m", inFlight: 1}, 100_000_000)
-	ws := []bw{s.pay(5_000_000), s.pay(6_000_000)}
+	ws := []bw{s.payQ(5_000_000), s.payQ(6_000_000)}
 	b1 := s.untilBatches("broadcast", 1, 90*time.Second)[0]
 	if code, out := s.reject(ws[0].ID, "x"); code != http.StatusConflict {
 		t.Fatalf("one withdrawal of a broadcast batch: %d %v", code, out)
@@ -190,7 +190,7 @@ func got0(s *system, id string) int64 {
 // sent and at once replaced by its cancel; whichever way the race goes, the members are paid exactly once.
 func TestBatchRecoveryCancelRacesTheBroadcast(t *testing.T) {
 	s := batchSystem(t, opts{failpoint: "batch.after_job"}, batchingOpts{outputs: 2, wait: "10m", inFlight: 1}, 100_000_000)
-	ws := []bw{s.pay(5_000_000), s.pay(6_000_000)}
+	ws := []bw{s.payQ(5_000_000), s.payQ(6_000_000)}
 	b := s.untilBatches("signing", 1, 90*time.Second)[0]
 	s.waitExit(s.worker, "the worker after the batch was signed")
 	if code, out := s.cancelBatch(b.ID); code != http.StatusAccepted {
@@ -219,7 +219,7 @@ func TestBatchRecoveryCrashAtEveryBoundary(t *testing.T) {
 	} {
 		t.Run(tc.failpoint, func(t *testing.T) {
 			s := batchSystem(t, opts{failpoint: tc.failpoint}, batchingOpts{outputs: 2, wait: "10m", inFlight: 1}, 100_000_000)
-			ws := []bw{s.pay(5_000_000), s.pay(6_000_000)}
+			ws := []bw{s.payQ(5_000_000), s.payQ(6_000_000)}
 			if tc.mineFirst {
 				s.untilBatches("broadcast", 1, 90*time.Second)
 				s.node.mine(2, "")
