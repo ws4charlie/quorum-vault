@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
@@ -128,14 +129,38 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 					return reject(ReasonTx, "%v", err)
 				}
 			}
-			for _, m := range members {
+			// A member the zone signed before may come back only in a batch that spends an output of a cancel the zone signed for the member's
+			// latest batch: that output exists only if the cancel is in the chain, and the cancel conflicts with its batch on every input, so
+			// at most one of the two batches ever pays the member. Anything else (alone, in another batch, in a batch that does not spend the
+			// cancel's output) could pay twice.
+			cancels := map[string][]string{}
+			for i := range members {
+				m := &members[i]
 				prev, err := gt.Intent(ctx, m.ID)
 				if err != nil {
 					return err
 				}
-				if prev != nil {
-					return reject(ReasonMemberReused, "withdrawal %s was already signed (%s): an id is used once, and only a replacement or a cancel of its own batch may sign it again", m.ID, cmpOr(prev.BatchID, "alone"))
+				if prev == nil {
+					continue
 				}
+				if prev.Kind != "withdrawal" || prev.BatchID == "" {
+					return reject(ReasonMemberReused, "withdrawal %s was already signed alone: an id is used once", m.ID)
+				}
+				if !bytes.Equal(prev.Hash, m.Hash) {
+					return reject(ReasonIntentChanged, "withdrawal %s was signed with a different intent hash", m.ID)
+				}
+				outs, ok := cancels[prev.BatchID]
+				if !ok {
+					if outs, err = gt.CancelOutputs(ctx, prev.BatchID); err != nil {
+						return err
+					}
+					cancels[prev.BatchID] = outs
+				}
+				if !slices.ContainsFunc(outs, func(o string) bool { return slices.Contains(info.Claims, o) }) {
+					return reject(ReasonMemberReused, "withdrawal %s was already signed in batch %s: only a batch that spends an output of the cancel signed for %s may sign it again (cancels signed: %v)",
+						m.ID, prev.BatchID, prev.BatchID, outs)
+				}
+				m.Resend = true
 			}
 		}
 
@@ -151,19 +176,26 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 					return reject(ReasonExpired, "withdrawal %s: not_after %d is more than %s ahead", m.Intent.ID, na, d.cfg.MaxIntentAge)
 				}
 			}
+			fresh, freshTotal := 0, new(big.Int) // a member sent again was counted when it was first signed
+			for _, m := range members {
+				if !m.Resend {
+					fresh++
+					freshTotal.Add(freshTotal, m.Amount)
+				}
+			}
 			n, err := gt.CountSince(ctx, "withdrawal", now.Add(-time.Hour))
 			if err != nil {
 				return err
 			}
-			if n+len(members) > cc.WithdrawalsPerHour {
-				return reject(ReasonWithdrawRate, "%d withdrawals in the last hour plus the %d of this batch exceed the limit %d", n, len(members), cc.WithdrawalsPerHour)
+			if n+fresh > cc.WithdrawalsPerHour {
+				return reject(ReasonWithdrawRate, "%d withdrawals in the last hour plus the %d of this batch exceed the limit %d", n, fresh, cc.WithdrawalsPerHour)
 			}
 			sum, err := gt.WithdrawnSince(ctx, b.Asset, now.Add(-24*time.Hour))
 			if err != nil {
 				return err
 			}
-			if all := new(big.Int).Add(sum, total); all.Cmp(pol.DailyCap) > 0 {
-				return reject(ReasonDailyCap, "%s already withdrawn in 24h plus the batch's %s exceeds the cap %s", sum, total, pol.DailyCap)
+			if all := new(big.Int).Add(sum, freshTotal); all.Cmp(pol.DailyCap) > 0 {
+				return reject(ReasonDailyCap, "%s already withdrawn in 24h plus the batch's %s exceeds the cap %s", sum, freshTotal, pol.DailyCap)
 			}
 		}
 
@@ -175,11 +207,4 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 		return nil, err
 	}
 	return v, nil
-}
-
-func cmpOr(a, b string) string {
-	if a != "" {
-		return "in batch " + a
-	}
-	return b
 }

@@ -416,3 +416,52 @@ func TestBTCBatchCosignerDecidesTheSame(t *testing.T) {
 		t.Fatalf("err %v, want %s", err, ReasonMemberReused)
 	}
 }
+
+// The only way a withdrawal id the zone signed in a batch is signed again: a batch that spends an output of a cancel the zone signed for that
+// withdrawal's latest batch. The cancel is signed but never broadcast here: the zone cannot know that, and the rule holds all the same.
+func TestBTCBatchResendAfterACancel(t *testing.T) {
+	b := newBatchHarness(t, nil)
+	ms := b.threeMembers("m")
+	bt1 := b.batchOf("b1", ms...)
+	b.mustSignAll(b.batchJobs("b1", bt1, b.batchPayload(b.twoIn(1), ms, 2_000)))
+
+	cancelOf := func(id string, ins []btc.PayloadInput, total uint64) (btc.PayloadInput, []signjob.Job) {
+		p := btc.Payload{Version: 2, Inputs: ins, Outputs: []btc.PayloadOutput{{Address: b.hot0, Value: total - 3_000}}}
+		u, err := btc.BuildUnsigned(p, b.acct)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cin := signjob.Intent{Kind: "cancel", ID: "cancel:batch:" + id, PartitionID: btcPartition, Chain: btcChain, Asset: "BTC", To: b.hot0, Amount: "0"}
+		return btc.PayloadInput{TxID: u.TxID, Vout: 0, Value: total - 3_000, Path: []uint32{1, 0}, Sequence: btc.SequenceRBF}, b.jobs("c-"+id, cin, p)
+	}
+	out1, c1 := cancelOf("b1", b.twoIn(1), 600_000)
+
+	// Before the cancel is signed: the same members on other coins are refused.
+	other := b.batchOf("b2", ms...)
+	b.mustRefuse(b.batchJobs("b2-1", other, b.batchPayload(b.twoIn(5), ms, 2_000))[0], ReasonMemberReused)
+	b.mustSignAll(c1) // the cancel of b1 is signed (and, for the zone, may be broadcast any time)
+
+	// A batch on other coins is still refused: both could confirm.
+	b.mustRefuse(b.batchJobs("b2-2", other, b.batchPayload(b.twoIn(5), ms, 2_000))[0], ReasonMemberReused)
+	// One that spends the cancel's output, with a second coin, is signed, and the members move to it.
+	ins2 := []btc.PayloadInput{out1, btcIn(6, 0, 300_000, 1, 0)}
+	b.mustSignAll(b.batchJobs("b2", other, b.batchPayload(ins2, ms, 2_000)))
+	if got := b.guardCount(`batch_id='b2' AND kind='withdrawal'`); got != 3 {
+		t.Fatalf("%d members moved to b2", got)
+	}
+	if got := b.guardCount(`batch_id='b1' AND kind='withdrawal'`); got != 0 {
+		t.Fatalf("%d members left in b1", got)
+	}
+	// They were counted once: the hourly count is three withdrawals, not six.
+	if got := b.guardCount(`kind='withdrawal'`); got != 3 {
+		t.Fatalf("%d withdrawal rows", got)
+	}
+	// The same members once more, in b3 that spends the first cancel's output again: not what the rule asks for any more (b2 is their latest batch).
+	b3 := b.batchOf("b3", ms...)
+	b.mustRefuse(b.batchJobs("b3-1", b3, b.batchPayload([]btc.PayloadInput{btcIn(7, 0, 300_000, 1, 0), btcIn(8, 0, 300_000, 1, 0)}, ms, 2_000))[0], ReasonMemberReused)
+	// A chain of cancels: b2 is cancelled too (its inputs include the first cancel's output), and b3 must spend the second cancel's output.
+	out2, c2 := cancelOf("b2", ins2, 590_000+300_000)
+	b.mustSignAll(c2)
+	b.mustRefuse(b.batchJobs("b3-2", b3, b.batchPayload([]btc.PayloadInput{out1, btcIn(9, 0, 300_000, 1, 0)}, ms, 2_000))[0], ReasonMemberReused) // out1 belongs to the first cancel: b2, not b1, is the members' latest batch
+	b.mustSignAll(b.batchJobs("b3", b3, b.batchPayload([]btc.PayloadInput{out2, btcIn(10, 0, 300_000, 1, 0)}, ms, 2_000)))
+}
