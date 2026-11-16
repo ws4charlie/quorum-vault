@@ -13,6 +13,7 @@ import (
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/server"
+	"github.com/ws4charlie/quorum-vault/mpc-party/internal/testenv"
 )
 
 // waitFails waits until the party has counted at least min failures for the labels (a follower counts when its session returns).
@@ -102,7 +103,9 @@ func TestFailCountPartyDown(t *testing.T) {
 
 // A corrupted message (existing tamper proxy): CRYPTOGRAPHIC against the party the message came in from, on both ends of the link.
 func TestFailCountCryptographicOnEachLink(t *testing.T) {
+	prom := testenv.NewPromtool(t) // the alert is checked against the real counters; skips without promtool
 	tr := startTrio(t, trioOpts{proxyAB: true, proxyAC: true, proxyBC: true})
+	tr.alertFires(t, prom) // no failure yet: nothing fires
 	cases := []struct{ link, coord, follower, via, peer string }{
 		{"AB", "A", "B", "A", "B"},
 		{"AC", "A", "C", "A", "C"},
@@ -136,7 +139,38 @@ func TestFailCountCryptographicOnEachLink(t *testing.T) {
 		waitFails(t, tr, c.coord, "coordinator", "sign", c.follower, "CRYPTOGRAPHIC", 1)
 		waitFails(t, tr, c.follower, "follower", "sign", c.coord, "CRYPTOGRAPHIC", 1)
 		px.set(0, -1)
+		tr.alertFires(t, prom, c.coord, c.follower)
 	}
+}
+
+// alertFires feeds the parties' real counters to the repository's rules with promtool and checks that QVMpcPeerCryptographicFailures fires for
+// exactly the peers that have a cryptographic count (and both ends of the failed link are among them).
+func (tr *trio) alertFires(t *testing.T, prom *testenv.Promtool, ends ...string) {
+	t.Helper()
+	var texts []string
+	suspects := map[string]bool{}
+	for _, role := range []string{"A", "B", "C"} {
+		var b strings.Builder
+		tr.Srv[role].WriteMetrics(&b)
+		texts = append(texts, b.String())
+		for _, peer := range []string{"A", "B", "C"} {
+			if tr.Srv[role].FailureCountTotal("", "", peer, "CRYPTOGRAPHIC") > 0 {
+				suspects[peer] = true
+			}
+		}
+	}
+	for _, e := range ends {
+		if !suspects[e] {
+			t.Fatalf("party %s is not a suspect in any counter: %v", e, suspects)
+		}
+	}
+	var want []string
+	for _, p := range []string{"A", "B", "C"} {
+		if suspects[p] {
+			want = append(want, fmt.Sprintf(`kind="CRYPTOGRAPHIC",peer=%q,severity="page"`, p))
+		}
+	}
+	prom.TestRules(t, "mpc-blame.rules.yml", testenv.CounterFixture("mpc-blame.rules.yml", "QVMpcPeerCryptographicFailures", texts, want))
 }
 
 // The metrics port is read-only: GET /metrics only, counters only.
