@@ -163,28 +163,6 @@ func TestRecoveryStuckAtALowFeeAndTheOriginalConfirms(t *testing.T) {
 	s.ledgerOK()
 }
 
-// No change, no bump: an exact payment has nothing to pay a higher fee from. The workflow raises an ALERT, keeps waiting, never voids, and the
-// withdrawal settles when the transaction is mined.
-func TestRecoveryStuckWithNoChangeAlertsAndWaits(t *testing.T) {
-	s := newSystem(t, opts{withdraw: true, noEstimate: true, fallbackRate: 1, stuckAfter: "5s"})
-	s.fundHot(10_000_000 + feeAt(s, 1, 1)) // exactly the payment and the fee of a one-output transaction
-	s.deposit("c1", 30_000_000)
-	dest := s.node.fresh()
-	w := s.withdraw("ini", "k1", "c1", dest, 10_000_000)
-	s.waitWd(w.ID, "broadcast", 60*time.Second)
-	s.waitFor(60*time.Second, "the ALERT that it cannot be replaced", func() bool { return s.workerLogHas("cannot be replaced") })
-	s.holds(8*time.Second, "the withdrawal waits, it is not voided", func() bool { return s.getWd(w.ID).Status == "broadcast" })
-	if n := s.attempts("send"); n != 1 {
-		t.Fatalf("%d attempts: a transaction with no change cannot be replaced", n)
-	}
-	s.node.mine(2, "")
-	s.waitWd(w.ID, "confirmed", 60*time.Second)
-	if got := s.received(dest, 1); got != 10_000_000 {
-		t.Fatalf("received %d", got)
-	}
-	s.ledgerOK()
-}
-
 // One input is refused after another was signed: a signature exists, so the attempt cannot be forgotten. A cancel is built, signed and sent, spending
 // the same inputs back to the shard; the money is released only after it confirms; the half-signed transaction can no longer confirm.
 func TestRecoveryOneInputRefusedAfterAnotherWasSignedSendsACancel(t *testing.T) {
@@ -427,7 +405,7 @@ func TestRecoveryOutsideSpendOfAReservedOutputParks(t *testing.T) {
 // outsideSpend signs a withdrawal of one output through a gateway of its own (own guard database, the same signing zone config and MPC keys, so the same
 // party B cosigner) and sends it to the node. It stands for a key that signed outside this system.
 func (s *system) outsideSpend(txid string, vout uint32, value uint64, to string) {
-	in := signjob.Intent{Kind: "withdrawal", ID: "outside-1", PartitionID: s.part, Chain: s.chain, Asset: "BTC", To: to, Amount: fmt.Sprint(value - 3000), NotAfter: time.Now().Add(time.Hour).Unix()}
+	in := signjob.Intent{Kind: "withdrawal", ID: "outside-1", PartitionID: s.part, Chain: s.chain, Asset: "BTC", To: to, Amount: fmt.Sprint(value - 20_000), NotAfter: time.Now().Add(time.Hour).Unix()}
 	s.outsideSign(txid, vout, value, to, []uint32{1, 0}, in, true)
 }
 
@@ -468,6 +446,9 @@ func (s *system) outsideSign(txid string, vout uint32, value uint64, to string, 
 	}
 	p := btc.Payload{Version: 2, Inputs: []btc.PayloadInput{{TxID: txid, Vout: vout, Value: value, Path: path, Sequence: btc.SequenceRBF}},
 		Outputs: []btc.PayloadOutput{{Address: to, Value: value - 3000}}}
+	if in.Kind == "withdrawal" { // the zone wants change that can be bumped to the cap on the first send of a withdrawal: 20,000 sats of payment less than the output, 17,000 of change
+		p.Outputs = []btc.PayloadOutput{{Address: to, Value: value - 20_000}, {Address: s.hotAddr, Value: 17_000}}
+	}
 	built, err := btc.BuildUnsigned(p, s.acct)
 	if err != nil {
 		t.Fatal(err)

@@ -4,6 +4,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/btcsuite/btcd/wire"
+
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 )
 
 // Cancel escalation. A cancel (the same coins spent back to the hot wallet, built when one input of a withdrawal was refused after another was signed)
@@ -121,8 +125,15 @@ func TestRecoveryStuckCancelIsReplacedByAHigherCancel(t *testing.T) {
 // money stays held; once the node's minimum falls, the cancel goes through.
 func TestRecoveryCancelRefusedAboveTheCapAlertsOnceAndGoesThroughWhenTheMinimumFalls(t *testing.T) {
 	px := newFeeProxy(t)
-	const cap = 700
-	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "2s", maxTxFee: cap})
+	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "2s", maxFeeRate: 4})
+	// The cap of the cancel (two inputs, one output) is max_fee_rate x its size; it was a fixed 700 sats before (a valid config keeps the total cap at
+	// or above the rate ceiling for the largest transaction, so the rate is what binds).
+	cancelTx := wire.NewMsgTx(2)
+	cancelTx.AddTxIn(&wire.TxIn{})
+	cancelTx.AddTxIn(&wire.TxIn{})
+	script, _ := btc.OutputScript(s.hotAddr, s.acct.Params)
+	cancelTx.AddTxOut(wire.NewTxOut(1, script))
+	cap := 4 * btc.EstimateVSize(cancelTx)
 	px.setMin(10_000)
 	w, dest := s.brokenWithdrawal()
 	s.waitFor(150*time.Second, "the ALERT at the cap", func() bool { return s.workerLogCount("cannot be replaced") >= 1 })
