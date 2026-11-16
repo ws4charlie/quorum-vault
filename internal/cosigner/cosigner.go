@@ -16,10 +16,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
@@ -53,6 +55,9 @@ func (c *Cosigner) Decide(ctx context.Context, r wire.Request) wire.Response {
 		attrs = append(attrs, "reason", resp.Reason)
 	}
 	c.log.Info("cosigner decision", attrs...)
+	if !resp.Allow && strings.Contains(resp.Reason, btc.CapMismatchNote) {
+		c.log.Error("ALERT: the cosigner refused a first send because the core reserved less than the zone's fee caps need; the core and the zone fee caps must be equal (docs/runbooks/btc-fee-caps.md)", attrs...)
+	}
 	return resp
 }
 

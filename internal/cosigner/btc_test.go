@@ -186,7 +186,7 @@ func TestCosignerBTCFirstSendMustKeepTheBumpReserve(t *testing.T) {
 	const need = 100_000 + 35_530 + 294
 	short := e.pay(need/2, need/2-1, e.other, need-1-100_000-2_000)
 	r := e.request("s1", wd("short", e.other), short, 0, nil)
-	if got := e.c.Decide(context.Background(), r); got.Allow || !strings.HasPrefix(got.Reason, "tx_mismatch:") || !strings.Contains(got.Reason, "must keep at least 1 more") {
+	if got := e.c.Decide(context.Background(), r); got.Allow || !strings.HasPrefix(got.Reason, "tx_mismatch:") || !strings.Contains(got.Reason, "the zone needs at least 33824") {
 		t.Fatalf("%+v", got)
 	}
 	p := e.pay(need/2, need/2, e.other, need-100_000-2_000)

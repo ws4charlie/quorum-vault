@@ -266,11 +266,14 @@ func TestWithdrawalRefusedByTheZoneWhenTheCoreReservesTooLittle(t *testing.T) {
 	dest := s.node.fresh()
 	w := s.withdraw("ini", "k1", "c1", dest, 10_000_000)
 	got := s.waitWd(w.ID, "failed", 90*time.Second)
-	if !strings.Contains(got.Reason, "gateway refused") || !strings.Contains(got.Reason, "to be bumped up to the fee cap") {
+	if !strings.Contains(got.Reason, "gateway refused") || !strings.Contains(got.Reason, "core and zone fee caps differ") {
 		t.Fatalf("refused for another reason: %q", got.Reason)
 	}
 	if n := s.count(`SELECT count(*) FROM sign_jobs WHERE status='done'`); n != 0 {
 		t.Fatalf("%d jobs were signed", n)
+	}
+	if !fileContains(s.gateway.log, "ALERT: the zone refused a first send") || !strings.Contains(got.Reason, "the zone needs at least") {
+		t.Fatal("the mismatch is not named: want the zone's ALERT and the needed change in the reason")
 	}
 	if s.utxoCount("available") != 1 || s.utxoCount("reserved") != 0 || s.utxoCount("spent") != 0 {
 		t.Fatalf("outputs: available %d reserved %d spent %d", s.utxoCount("available"), s.utxoCount("reserved"), s.utxoCount("spent"))

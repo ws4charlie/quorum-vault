@@ -585,7 +585,7 @@ func TestBTCFirstSendMustKeepTheBumpReserve(t *testing.T) {
 		in := wdIntent("short-"+kind, to, 100_000)
 		in.Kind = kind
 		b.mustRefuse(b.jobs("s-"+kind, in, short, "auto")[0], ReasonTx)
-		if d := b.run(b.jobs("s2-"+kind, in, short, "auto")[0]); !strings.Contains(d.Reason, "must keep at least 1 more") {
+		if d := b.run(b.jobs("s2-"+kind, in, short, "auto")[0]); !strings.Contains(d.Reason, "the zone needs at least 33824") || !strings.Contains(d.Reason, btc.CapMismatchNote) {
 			t.Fatalf("%s: refused for another reason: %q", kind, d.Reason)
 		}
 	}

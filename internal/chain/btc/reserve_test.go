@@ -210,8 +210,8 @@ func TestZoneChecksTheFirstSendButNotItsReplacements(t *testing.T) {
 		want string
 	}{
 		"exactly enough":      {need, ""},
-		"one satoshi too few": {need - 1, "must keep at least 1 more"},
-		"far too little":      {pay + 1_410 + 300, "to be bumped up to the fee cap"},
+		"one satoshi too few": {need - 1, fmt.Sprintf("keeps %d sats of change; the zone needs at least %d", need-1-pay-1_410, need-pay-1_410)},
+		"far too little":      {pay + 1_410 + 300, CapMismatchNote},
 	} {
 		fee := uint64(1_410)
 		p, i := mk(tc.sum, pay, tc.sum-pay-fee)
