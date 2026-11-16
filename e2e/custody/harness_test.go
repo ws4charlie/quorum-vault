@@ -157,8 +157,18 @@ type opts struct {
 	// rebalance puts rebalance targets into the business config, so the worker's planner moves funds between shards by itself.
 	// Without it the worker plans no rebalance and a test calls PlanRebalances on the in-process service.
 	rebalance *rebalOpts
+	// route (mpc mode) turns on the gateway's routing of 2-of-3 signatures: health checks of the parties and the operators' preferred pair.
+	route *routeOpts
 	// gwRefuse makes the gateway (and the cosigner) refuse every job of one kind: "sweep", "to-cold" or "rebalance" (its per-hour limit is 0).
 	gwRefuse string
+}
+
+// routeOpts are the health rules of the mpc_route section (zero: the gateway's defaults).
+type routeOpts struct {
+	interval     string
+	failCount    int
+	window       string
+	recoverCount int
 }
 
 // rebalOpts are the rebalance targets of the business config: "ETH" or "USDT" for every shard, "ETH/1" for one (base units).
@@ -250,6 +260,7 @@ type system struct {
 	cf                        custody.File // the files as written, so a test can change one and restart
 	gf                        gateway.File
 	cosPath                   string
+	metricsPath               string // the gateway's MPC route metrics file (mpc mode with opts.route)
 	cosGuardDSN               string // B's cosigner's replay guard
 	cosCGuardDSN              string // C's cosigner's own replay guard
 	chainName                 string
@@ -571,6 +582,9 @@ func newSystem(t *testing.T, o opts) *system {
 		}
 		gf.Chains[s.chainName] = c
 	}
+	if mpcMode() && o.route != nil {
+		gf.MPCRoute = s.mpc.RouteFile(o.route.interval, o.route.failCount, o.route.window, o.route.recoverCount)
+	}
 	s.gf = gf
 	s.gwPath = filepath.Join(s.dir, "gateway.json")
 	writeJSON(t, s.gwPath, gf)
@@ -579,6 +593,7 @@ func newSystem(t *testing.T, o opts) *system {
 		// its own replay-guard database. It also reads the gateway's guard to see what the gateway reserved.
 		cf2 := gf
 		cf2.Signers = nil
+		cf2.MPCRoute = nil // routing is the gateway's business
 		cosPath := filepath.Join(s.dir, "cosigner.json")
 		s.cosPath = cosPath
 		writeJSON(t, cosPath, cf2)
@@ -831,8 +846,9 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 }
 
 func (s *system) startGateway() {
+	s.metricsPath = filepath.Join(s.dir, "mpc-metrics.prom")
 	s.gateway = s.spawn("qv-gateway", []string{"QV_HSM_PIN=" + hsmtest.PIN(s.t)},
-		"-config", s.gwPath, "-jobs-dsn", s.gatewayJobsDSN(), "-guard-dsn", s.guardDSN, "-interval", "200ms", "-lease", gatewayLease(s.o),
+		"-mpc-metrics-file", s.metricsPath, "-config", s.gwPath, "-jobs-dsn", s.gatewayJobsDSN(), "-guard-dsn", s.guardDSN, "-interval", "200ms", "-lease", gatewayLease(s.o),
 		"-worker-id", "gw-"+uuid.NewString()[:6], "-brokers", kafkaBrokers(), "-audit-source", s.auditSrc+"-gateway", "-anchor-interval", "2s")
 }
 

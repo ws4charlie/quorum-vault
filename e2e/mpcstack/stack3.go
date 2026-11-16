@@ -358,6 +358,20 @@ func (s *Stack3) GatewaySigner(sh Shard) gateway.SignerFile {
 		}}
 }
 
+// RouteFile is the gateway.json mpc_route section: the gateway probes the caller port of every party. The health rules are the arguments (empty or
+// zero: the defaults).
+func (s *Stack3) RouteFile(interval string, failCount int, window string, recoverCount int) *gateway.MPCRouteFile {
+	crt, key := s.CertGW.Write(s.t, s.Dir)
+	return &gateway.MPCRouteFile{
+		Parties: []gateway.MPCRouteParty{
+			{Name: "A", Address: s.CallerA, CertFile: crt, KeyFile: key, ServerPin: s.CertA.Pin},
+			{Name: "B", Address: s.CallerB, CertFile: crt, KeyFile: key, ServerPin: s.CertB.Pin},
+			{Name: "C", Address: s.CallerC, CertFile: crt, KeyFile: key, ServerPin: s.CertC.Pin},
+		},
+		ProbeInterval: interval, FailCount: failCount, FailWindow: window, RecoverCount: recoverCount,
+	}
+}
+
 // StartCosigner starts qv-cosigner next to B with its own config and replay-guard database; StartCosignerC next to C, with ITS own.
 func (s *Stack3) StartCosigner(cfgPath, guardDSN, gatewayGuardDSN string) {
 	s.t.Helper()

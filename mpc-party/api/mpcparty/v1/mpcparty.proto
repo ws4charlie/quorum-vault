@@ -88,10 +88,15 @@ message SignRequest {
   // Opaque package (signed intent, approvals) forwarded to party B, which hands it to its Authorizer before it
   // joins the protocol. The service does not interpret it.
   bytes intent_package = 5;
+  // 2-of-3 keysets only: the peer the caller wants this signature made with ("B" or "C"; for party A either, for party B only "C").
+  // Empty: the party's own order (A tries B, then C). A named peer is honoured or the call fails (UNAVAILABLE if the link is down):
+  // the party never swaps it silently. A party that predates this field ignores it, so the caller checks SignResponse.signed_with.
+  string peer = 6;
 }
 message SignResponse {
   bytes signature = 1;
   bool replayed = 2; // true if the stored signature of an earlier call with the same job_id was returned
+  string signed_with = 3; // 2-of-3: the peer that took part ("B" or "C"); empty on a replay (the stored signature does not record it)
 }
 
 message RefreshRequest {

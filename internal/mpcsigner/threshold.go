@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/ws4charlie/quorum-vault/internal/domain"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
@@ -39,10 +40,13 @@ type ThresholdConfig struct {
 	KeysetID     string
 	PublicKey    []byte // 65-byte uncompressed secp256k1 (the keyset's public key)
 	Coordinators []Coordinator
-	MaxRetries   int           // rounds beyond the first; default 3
-	Timeout      time.Duration // bounds one SignDigest including retries; default 30s
-	Logger       *slog.Logger
-	Dial         func(addr string, creds credentials.TransportCredentials) (*grpc.ClientConn, error) // tests
+	// Router, when set, chooses the pair of every job (operator's preferred pair, health fallback; see route.go) and the signer names the wanted
+	// peer in every request. Nil: the legacy order, coordinators as listed, each choosing its own peer.
+	Router     *Router
+	MaxRetries int           // rounds beyond the first; default 3
+	Timeout    time.Duration // bounds one SignDigest including retries; default 30s
+	Logger     *slog.Logger
+	Dial       func(addr string, creds credentials.TransportCredentials) (*grpc.ClientConn, error) // tests
 }
 
 // ThresholdSigner is a signer.Signer over a 2-of-3 keyset.
@@ -184,60 +188,137 @@ func (t *ThresholdSigner) SignDigest(ctx context.Context, digest [32]byte, opts 
 	req := &pb.SignRequest{KeyId: t.cfg.KeysetID, Algorithm: pb.Algorithm_ALGORITHM_ECDSA_SECP256K1, Digest: digest[:],
 		JobId: opts.JobID, IntentPackage: opts.IntentPackage}
 	start := time.Now()
-	resp, i, calls, err := t.call(ctx, req)
+	resp, st, calls, err := t.call(ctx, req)
 	if err != nil {
 		return signer.Result{}, err
 	}
+	if e := checkPeer(st, resp); e != nil {
+		return signer.Result{}, e
+	}
 	sig, perr := parseDER(resp.Signature)
 	if perr != nil {
-		return signer.Result{}, &Error{Kind: KindCryptographic, Message: "bad signature from party " + t.cfg.Coordinators[i].Name + ": " + perr.Error()}
+		return signer.Result{}, &Error{Kind: KindCryptographic, Message: "bad signature from party " + t.cfg.Coordinators[st.ci].Name + ": " + perr.Error()}
 	}
-	t.note(i)
-	return signer.Result{Sig: sig, Participants: []string{"mpc-" + strings.ToLower(t.cfg.Coordinators[i].Name), "mpc-2of3"},
-		Meta: map[string]any{"duration_ms": time.Since(start).Milliseconds(), "calls": calls, "coordinator": t.cfg.Coordinators[i].Name, "replayed": resp.Replayed}}, nil
+	t.note(st)
+	return signer.Result{Sig: sig, Participants: t.participants(st), Meta: t.meta(st, calls, start, resp)}, nil
 }
 
-// call runs req through the coordinators by the fallback rule and the retry composition above. It returns the first answer, the index of the
-// coordinator that gave it and how many calls were made; on failure the last classified error. The caller bounds ctx.
-func (t *thresholdCore) call(ctx context.Context, req *pb.SignRequest) (resp *pb.SignResponse, from, calls int, _ error) {
+// step is one attempt: the coordinator to call (an index into cfg.Coordinators) and the peer it must sign with ("" in the legacy order, where
+// the coordinator chooses). pair is empty in the legacy order.
+type step struct {
+	ci   int
+	peer string
+	pair Pair
+}
+
+// steps is the order of attempts for one job. With a Router: the plan's pairs (the effective pair first), each as its coordinator and wanted
+// peer; a pair whose coordinator is not configured is left out. Without: the coordinators as listed.
+func (t *thresholdCore) steps(ctx context.Context) (steps []step, plan Plan) {
+	if t.cfg.Router == nil {
+		for i := range t.cls {
+			steps = append(steps, step{ci: i})
+		}
+		return steps, Plan{}
+	}
+	plan = t.cfg.Router.Plan(ctx)
+	for _, p := range plan.Steps {
+		for i, c := range t.cfg.Coordinators {
+			if c.Name == p.Coordinator() {
+				steps = append(steps, step{ci: i, peer: p.Peer(), pair: p})
+			}
+		}
+	}
+	return steps, plan
+}
+
+// call runs req through the steps by the fallback rule and the retry composition above. It returns the first answer, the step that gave it and how
+// many calls were made; on failure the last classified error. The caller bounds ctx. The plan is taken once, when the job starts: a job already
+// signing finishes on its pair even if the operator or the health checks change the route meanwhile.
+func (t *thresholdCore) call(ctx context.Context, req *pb.SignRequest) (resp *pb.SignResponse, from step, calls int, _ error) {
+	steps, _ := t.steps(ctx)
+	if len(steps) == 0 {
+		return nil, step{}, 0, &Error{Kind: KindInternal, Message: "no configured coordinator can serve any pair of the route"}
+	}
 	var last error
 	pinned := -1 // set after an availability failure that happened once signing had started
 	for round := 0; round <= t.cfg.MaxRetries; round++ {
-		for i := range t.cls {
-			if pinned >= 0 && i != pinned {
+		down := map[int]bool{} // coordinators that did not answer at all this round: their other pairs are not tried
+		for si, st := range steps {
+			if pinned >= 0 && si != pinned || down[st.ci] {
 				continue
 			}
 			calls++
-			r, err := t.cls[i].Sign(ctx, req)
+			r := proto.Clone(req).(*pb.SignRequest) // the request differs only in the wanted peer
+			r.Peer = st.peer
+			rs, err := t.cls[st.ci].Sign(ctx, r)
 			if err == nil {
-				return r, i, calls, nil
+				return rs, st, calls, nil
 			}
 			last = classify(err)
 			var e *Error
 			if !errors.As(last, &e) || !e.SignerUnavailable() {
-				return nil, 0, calls, last // refused, cryptographic, frozen, internal: final, nobody else is asked
+				return nil, step{}, calls, last // refused, cryptographic, frozen, internal: final, nobody else is asked
 			}
 			if fallbackOK(e) {
-				if i+1 < len(t.cls) {
-					continue // failed before any signing message: the next coordinator, same round
+				if e.Kind == KindTransport {
+					down[st.ci] = true
+				}
+				if si+1 < len(steps) {
+					continue // failed before any signing message: the next pair, same round
 				}
 				break
 			}
-			pinned = i // signing had started on this coordinator: only it is retried
+			pinned = si // signing had started on this pair: only it is retried
 			break
 		}
 		select {
 		case <-ctx.Done():
-			return nil, 0, calls, last
+			return nil, step{}, calls, last
 		case <-time.After(time.Duration(100*(round+1)) * time.Millisecond):
 		}
 	}
-	return nil, 0, calls, last
+	return nil, step{}, calls, last
+}
+
+// checkPeer is the "no silent swap" rule for the pair A+C: an old party that does not know the wanted peer would sign with B and say nothing.
+// A response that names another peer than the one asked for, or none when the pair is A+C, is refused (the signature is not released).
+func checkPeer(st step, r *pb.SignResponse) *Error {
+	if st.peer == "" || r.Replayed { // a replay returns the stored signature, whichever pair made it
+		return nil
+	}
+	if r.SignedWith == st.peer || r.SignedWith == "" && st.pair != PairAC {
+		return nil
+	}
+	got := fmt.Sprintf("%q", r.SignedWith)
+	if r.SignedWith == "" {
+		got = "none named (the party may predate the wanted-peer field)"
+	}
+	return &Error{Kind: KindInternal, Message: fmt.Sprintf("party %s signed with peer %s although %q was asked for: not releasing the signature", st.pair.Coordinator(), got, st.peer)}
+}
+
+func (t *thresholdCore) participants(st step) []string {
+	c := strings.ToLower(t.cfg.Coordinators[st.ci].Name)
+	if st.pair == "" {
+		return []string{"mpc-" + c, "mpc-2of3"}
+	}
+	return []string{"mpc-" + c, "mpc-" + strings.ToLower(st.peer), "mpc-2of3"}
+}
+
+func (t *thresholdCore) meta(st step, calls int, start time.Time, resp *pb.SignResponse) map[string]any {
+	m := map[string]any{"duration_ms": time.Since(start).Milliseconds(), "calls": calls, "coordinator": t.cfg.Coordinators[st.ci].Name, "replayed": resp.Replayed}
+	if st.pair != "" {
+		m["pair"] = string(st.pair)
+	}
+	return m
 }
 
 // note records which coordinator signed and logs the transitions: one ALERT when the second coordinator starts being used, one INFO
-// when the first is back. Per transition, not per job.
-func (t *thresholdCore) note(i int) {
+// when the first is back. Per transition, not per job. With a Router the route logs its own transitions (route.go) and this does nothing.
+func (t *thresholdCore) note(st step) {
+	if t.cfg.Router != nil {
+		return
+	}
+	i := st.ci
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch {

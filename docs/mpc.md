@@ -23,6 +23,13 @@ A customer address needs a key tree, where one parent key yields a child key for
 
 A restarted party must be checked against the others before it signs. When A is down, B and C check each other, but only if both are on the same generation and no refresh is half done, since only A knows whether one was decided. Otherwise they wait for A, and A checks all three when it is back.
 
+## Which pair signs
+Operators choose which two parties sign by default: A and B, A and C, or B and C. The choice is signed by approvers with the keys they already use for approvals, and it is recorded in the signing zone's audit log. It takes effect on the next job, with no restart; a job already signing finishes with the pair it started with. Use it to take one party out for maintenance ([runbook](runbooks/mpc-signing-pair.md)).
+
+The gateway also checks the parties itself. It moves to another pair only after several failed checks in a short time, and returns to the chosen pair only after several good checks in a row, so a party that flaps does not make the route flap with it. One failed signature never moves the route. Waiting is the price: a party that has just died is still tried for a few seconds, and one that has just come back is trusted only after it has stayed up.
+
+A route can only make signing slower or unavailable. Every pair still includes B or C, and that party's own checker still reads every job, so no choice of pair, signed or not, lets a signature skip a check.
+
 ## A failed check freezes the key
 If a proof does not verify, a message cannot be read, or a final signature is wrong, the parties may be talking to a bad peer. The key is then frozen on every party that holds it. Nothing is deleted, withdrawals wait with their holds, and only an operator's signed unfreeze lifts it. A party that is merely slow or offline is not a freeze. See the [freeze runbook](runbooks/mpc-keyset-freeze.md).
 

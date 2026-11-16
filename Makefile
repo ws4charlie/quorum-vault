@@ -56,6 +56,7 @@ vet:
 
 build-gateway:
 	go build -o bin/qv-gateway ./cmd/qv-gateway
+	go build -o bin/qv-route ./cmd/qv-route
 
 build-relay:
 	go build -o bin/qv-relay ./cmd/qv-relay
@@ -96,7 +97,7 @@ test-e2e-evm:
 
 # The heavy tests, which pull-request CI leaves to the nightly run: every crash boundary, a component killed at each custody
 # boundary, the freeze test, and the link tests (kill mid-session, partition).
-E2E_EVM_FAILURE := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestRebalanceCrashAtEveryBoundary|TestRefillCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal
+E2E_EVM_FAILURE := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestRebalanceCrashAtEveryBoundary|TestRefillCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCRouteOneFailedSignatureDoesNotMoveIt
 test-e2e-evm-failure:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 40m -v -run '$(E2E_EVM_FAILURE)' ./e2e/custody/...
 
@@ -112,7 +113,7 @@ test-e2e-evm-latency:
 #   recovery     processes and links dying: gateway and relay restarts, a refresh under load, a worker crash at a boundary
 E2E_EVM_FLOWS := TestTwoApproversAndInitiatorCannotApprove|TestApprovalTimeoutVoidsTheHold|TestHumanRejectionVoids|TestInsufficientFundsIsRefused|TestFrozenFactoryDefersSweeps|TestGatewayRejectionReleasesNonceAndHold|TestDuplicateRequestsAndSignals|TestHappyPathETHAndToken|TestWorkflowReplayOfRecordedHistories|TestColdMoveRespectsOpenWithdrawals|TestColdMoveBelowLowRaisesOneAlert|TestRefillCeremonyEndToEnd|TestColdMoveExcessEthAndToken|TestMeasureClosedLoop|TestFiftyCustomersConcurrent|TestRefillImportAndReexportAttacks|TestRefillNotConfirming|TestFactoryAdminRotationCeremony|TestGuardianFreezeAndCeremonyUnfreeze|TestAdminRoleTransferTwoSteps|TestParkedRefillIsClosedByAnOperator|TestRebalanceFeedsADryShardAndWithdrawalsGoThere|TestRebalanceAndToColdDoNotFight|TestRebalanceNeverMovesReservedFunds|TestRebalanceTokenNeedsGasOnSource|TestReconcileCleanAtEveryStageOfAWithdrawal|TestReconcileCatchesATokenDifferenceInFlight|TestReconcileCleanAtEveryStageOfARebalance|TestReconcileCleanAtEveryStageOfARefill
 E2E_EVM_TX_FAILURES := TestRevertedWithdrawalVoidsAndRecordsFee|TestDroppedTransactionIsReplacedAndPaidOnce|TestConsumedNonceParksWithOneAlert|TestRestartedWorkflowAfterMinedReplacementSettlesOnce|TestStuckTransactionIsReplacedOnce|TestReconcileCleanWhileAWithdrawalIsReplaced|TestReconcileCleanWhileAWithdrawalIsCancelled|TestReconcileCleanWhileAWithdrawalReverts|TestMinedCancelBooksItsGas
-E2E_EVM_RECOVERY := TestGatewayAndRelayRestart|TestMPCRefreshDuringLiveWithdrawals|TestMPCOnePartyDownWithdrawalsContinue|TestMPCRestartOfAWhileCIsDown|TestCrashAtEveryBoundary|TestReconcileCleanAtEveryStageOfASweep|TestReconcileCleanAtEveryStageOfAColdMove
+E2E_EVM_RECOVERY := TestGatewayAndRelayRestart|TestMPCRefreshDuringLiveWithdrawals|TestMPCOnePartyDownWithdrawalsContinue|TestMPCRestartOfAWhileCIsDown|TestMPCRoutePreferredPairIsSignedAuditedAndHotSwitchable|TestMPCRouteFollowsHealthWithHysteresis|TestCrashAtEveryBoundary|TestReconcileCleanAtEveryStageOfASweep|TestReconcileCleanAtEveryStageOfAColdMove
 test-e2e-evm-flows:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' ./e2e/custody/...
 test-e2e-evm-tx-failures:

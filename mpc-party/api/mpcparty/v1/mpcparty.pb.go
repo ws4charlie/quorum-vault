@@ -759,6 +759,10 @@ type SignRequest struct {
 	// Opaque package (signed intent, approvals) forwarded to party B, which hands it to its Authorizer before it
 	// joins the protocol. The service does not interpret it.
 	IntentPackage []byte `protobuf:"bytes,5,opt,name=intent_package,json=intentPackage,proto3" json:"intent_package,omitempty"`
+	// 2-of-3 keysets only: the peer the caller wants this signature made with ("B" or "C"; for party A either, for party B only "C").
+	// Empty: the party's own order (A tries B, then C). A named peer is honoured or the call fails (UNAVAILABLE if the link is down):
+	// the party never swaps it silently. A party that predates this field ignores it, so the caller checks SignResponse.signed_with.
+	Peer          string `protobuf:"bytes,6,opt,name=peer,proto3" json:"peer,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -828,10 +832,19 @@ func (x *SignRequest) GetIntentPackage() []byte {
 	return nil
 }
 
+func (x *SignRequest) GetPeer() string {
+	if x != nil {
+		return x.Peer
+	}
+	return ""
+}
+
 type SignResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Signature     []byte                 `protobuf:"bytes,1,opt,name=signature,proto3" json:"signature,omitempty"`
-	Replayed      bool                   `protobuf:"varint,2,opt,name=replayed,proto3" json:"replayed,omitempty"` // true if the stored signature of an earlier call with the same job_id was returned
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Signature []byte                 `protobuf:"bytes,1,opt,name=signature,proto3" json:"signature,omitempty"`
+	Replayed  bool                   `protobuf:"varint,2,opt,name=replayed,proto3" json:"replayed,omitempty"` // true if the stored signature of an earlier call with the same job_id was returned
+	// 2-of-3: the peer that took part ("B" or "C"); empty on a replay (the stored signature does not record it)
+	SignedWith    string `protobuf:"bytes,3,opt,name=signed_with,json=signedWith,proto3" json:"signed_with,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -878,6 +891,13 @@ func (x *SignResponse) GetReplayed() bool {
 		return x.Replayed
 	}
 	return false
+}
+
+func (x *SignResponse) GetSignedWith() string {
+	if x != nil {
+		return x.SignedWith
+	}
+	return ""
 }
 
 type RefreshRequest struct {
@@ -1817,16 +1837,19 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\x0eDeriveResponse\x12\x15\n" +
 	"\x06key_id\x18\x01 \x01(\tR\x05keyId\x12\x1d\n" +
 	"\n" +
-	"public_key\x18\x02 \x01(\fR\tpublicKey\"\xb3\x01\n" +
+	"public_key\x18\x02 \x01(\fR\tpublicKey\"\xc7\x01\n" +
 	"\vSignRequest\x12\x15\n" +
 	"\x06key_id\x18\x01 \x01(\tR\x05keyId\x127\n" +
 	"\talgorithm\x18\x02 \x01(\x0e2\x19.qv.mpcparty.v1.AlgorithmR\talgorithm\x12\x16\n" +
 	"\x06digest\x18\x03 \x01(\fR\x06digest\x12\x15\n" +
 	"\x06job_id\x18\x04 \x01(\tR\x05jobId\x12%\n" +
-	"\x0eintent_package\x18\x05 \x01(\fR\rintentPackage\"H\n" +
+	"\x0eintent_package\x18\x05 \x01(\fR\rintentPackage\x12\x12\n" +
+	"\x04peer\x18\x06 \x01(\tR\x04peer\"i\n" +
 	"\fSignResponse\x12\x1c\n" +
 	"\tsignature\x18\x01 \x01(\fR\tsignature\x12\x1a\n" +
-	"\breplayed\x18\x02 \x01(\bR\breplayed\"^\n" +
+	"\breplayed\x18\x02 \x01(\bR\breplayed\x12\x1f\n" +
+	"\vsigned_with\x18\x03 \x01(\tR\n" +
+	"signedWith\"^\n" +
 	"\x0eRefreshRequest\x12\x1b\n" +
 	"\tkeyset_id\x18\x01 \x01(\tR\bkeysetId\x12/\n" +
 	"\x05admin\x18\x02 \x01(\v2\x19.qv.mpcparty.v1.AdminAuthR\x05admin\"9\n" +

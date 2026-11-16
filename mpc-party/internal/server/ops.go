@@ -30,6 +30,7 @@ type opResult struct {
 	public    []byte     // what the caller gets (root key, node, derived key); signature for sign
 	compare   []byte     // what both parties must agree on
 	signature []byte     // sign, party A only
+	with      string     // 2-of-3 sign: the peer that took part
 	cand      *candidate // DKG, Refresh: the new generation, waiting for the two-phase commit
 	cleanup   func()     // always called
 }

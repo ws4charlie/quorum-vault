@@ -102,3 +102,17 @@ CREATE OR REPLACE TRIGGER audit_log_no_update_delete
 CREATE OR REPLACE TRIGGER audit_log_no_truncate
     BEFORE TRUNCATE ON audit_log
     FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
+
+-- The operators' preferred signing pair for the 2-of-3 keysets (see route.go). Every row carries the signatures of configured, enabled approvers
+-- over (pair, seq, signed_at); the gateway checks them again every time it reads a row, so a row written by anyone else is ignored. Append-only.
+CREATE TABLE IF NOT EXISTS mpc_route_changes (
+    seq        bigint PRIMARY KEY,
+    pair       text NOT NULL,
+    signed_at  bigint NOT NULL,
+    signatures jsonb NOT NULL,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE TRIGGER mpc_route_changes_no_update_delete
+    BEFORE UPDATE OR DELETE ON mpc_route_changes
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
