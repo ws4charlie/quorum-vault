@@ -67,6 +67,19 @@ type FirstSendChecker interface {
 	CheckFirstSend(u chain.UnsignedTx, i signjob.Intent) error
 }
 
+// BatchPayment is one payment of a batch as the verified transaction says it: the canonical destination and the amount in base units.
+type BatchPayment struct {
+	Destination string
+	Amount      *big.Int
+}
+
+// BatchCodec is implemented by codecs of chains whose transactions can pay several withdrawals at once (Bitcoin). VerifyBatch checks that the
+// transaction pays exactly the members of the batch, in order, and nothing else, within the zone's own ceilings, and returns the payments as the
+// transaction says them (the destination policy reads them from here, not from the intents). A codec without it refuses batch jobs.
+type BatchCodec interface {
+	VerifyBatch(u chain.UnsignedTx, b signjob.Batch) ([]BatchPayment, error)
+}
+
 // Chain families the gateway knows. A configured family it does not know refuses to start.
 const (
 	FamilyEVM = "evm"

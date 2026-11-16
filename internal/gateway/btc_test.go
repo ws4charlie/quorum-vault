@@ -99,7 +99,10 @@ func foreignAddr(seed byte) string {
 	return s
 }
 
-func newBTCHarness(t *testing.T) *btcH {
+func newBTCHarness(t *testing.T) *btcH { return newBTCHarnessWith(t, nil) }
+
+// newBTCHarnessWith is newBTCHarness with a change to the chain's config (the zone's caps, ceilings and policy) before it is built.
+func newBTCHarnessWith(t *testing.T, tweak func(cf *ChainFile, b *btcH)) *btcH {
 	t.Helper()
 	h := newHarness(t)
 	ctx := context.Background()
@@ -131,6 +134,9 @@ func newBTCHarness(t *testing.T) *btcH {
 			ColdAddresses: map[string]string{"omnibus/native": b.cold, "segregated:acme/native": b.coldS}},
 		Assets: map[string]AssetFile{"BTC": {AnyDestination: true, PerTxCap: "100000000", DailyCap: "1000000000", Tiers: []TierFile{{"0", 1}},
 			ToColdDailyCap: "1000000000"}}}
+	if tweak != nil {
+		tweak(&cf, b)
+	}
 	cc, err := cf.build(btcChain, 4)
 	if err != nil {
 		t.Fatal(err)

@@ -155,6 +155,11 @@ type BTCFile struct {
 	MaxTxFeeSats  uint64            `json:"max_tx_fee_sats"`
 	MaxFeeRate    uint64            `json:"max_fee_rate"` // satoshis per virtual byte
 	MaxInputs     int               `json:"max_inputs"`
+	// MaxBatchOutputs and MaxBatchValueSats are the zone's own ceilings on one batch (one transaction paying several withdrawals): how many payments
+	// and how many satoshis in all. Both absent: the zone signs no batches. Both set: the fee caps above must reach max_fee_rate for a batch of that
+	// many payments (checked at start-up), and the value must lie between per_tx_cap and daily_cap of the BTC policy. The core cannot raise either.
+	MaxBatchOutputs   int    `json:"max_batch_outputs,omitempty"`
+	MaxBatchValueSats uint64 `json:"max_batch_value_sats,omitempty"`
 }
 
 // HotShardFile is one pinned hot shard.
@@ -176,7 +181,8 @@ func (cf ChainFile) buildBTC(name string, enabledApprovers int) (*ChainConfig, e
 		return nil, fmt.Errorf("gateway: config: chain %q: rate limits must be >= 0", name)
 	}
 	sc := btc.SigningConfig{Chain: name, Network: b.Network, AccountXpub: b.AccountXpub, HotShards: map[string]btc.HotShard{},
-		ColdAddresses: b.ColdAddresses, MaxTxFeeSats: b.MaxTxFeeSats, MaxFeeRate: b.MaxFeeRate, MaxInputs: b.MaxInputs}
+		ColdAddresses: b.ColdAddresses, MaxTxFeeSats: b.MaxTxFeeSats, MaxFeeRate: b.MaxFeeRate, MaxInputs: b.MaxInputs,
+		MaxBatchOutputs: b.MaxBatchOutputs, MaxBatchValue: b.MaxBatchValueSats}
 	for p, h := range b.HotShards {
 		sc.HotShards[p] = btc.HotShard{Address: h.Address, Path: h.Path}
 	}
@@ -194,6 +200,12 @@ func (cf ChainFile) buildBTC(name string, enabledApprovers int) (*ChainConfig, e
 	pol, err := af.build(name+"/"+btc.Native, enabledApprovers, v.Canonical)
 	if err != nil {
 		return nil, err
+	}
+	if v.BatchesEnabled() {
+		// A batch is a bounded loss of its own: at least one withdrawal at the per-transaction cap fits, and never more than a day's cap.
+		if val := new(big.Int).SetUint64(sc.MaxBatchValue); val.Cmp(pol.PerTxCap) < 0 || val.Cmp(pol.DailyCap) > 0 {
+			return nil, fmt.Errorf("gateway: config: chain %q: max_batch_value_sats %d must lie between per_tx_cap %s and daily_cap %s", name, sc.MaxBatchValue, pol.PerTxCap, pol.DailyCap)
+		}
 	}
 	return &ChainConfig{Name: name, Family: FamilyBTC, BTC: sc, Assets: map[string]AssetPolicy{btc.Native: pol},
 		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour,
