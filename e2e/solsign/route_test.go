@@ -99,6 +99,17 @@ func (s *stack) waitBack(role string) {
 	s.t.Fatalf("party %s is not back and reconciled", role)
 }
 
+func (s *stack) waitHealthy(party string) {
+	s.t.Helper()
+	want := fmt.Sprintf(`qv_mpc_party_healthy{party=%q} 1`, party)
+	for end := time.Now().Add(60 * time.Second); time.Now().Before(end); time.Sleep(200 * time.Millisecond) {
+		if b, _ := os.ReadFile(s.metrics); strings.Contains(string(b), want) {
+			return
+		}
+	}
+	s.t.Fatalf("party %s never became healthy in the metrics", party)
+}
+
 // withdraw signs and lands one SOL withdrawal from the hot shard.
 func (s *stack) withdraw(id string) {
 	s.t.Helper()
@@ -128,6 +139,7 @@ func TestPreferredPairSignsWithTheTwoPartiesOnly(t *testing.T) {
 
 	s.mpc.B.Start(t)
 	s.waitBack("B")
+	s.waitHealthy("B") // the gateway trusts a returning party only after the configured good checks; choosing B+C before that would be degraded on purpose
 	s.mpc.A.Kill()
 	s.setPair(mpcsigner.PairBC)
 	s.withdraw("bc1")
