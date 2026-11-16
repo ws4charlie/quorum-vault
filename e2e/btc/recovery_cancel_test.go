@@ -35,10 +35,12 @@ func (s *system) sendFee() int64 {
 func cancelsEscalate(t *testing.T, sends []proxySend, sendFee int64) {
 	t.Helper()
 	var top int64
+	seen := map[string]bool{}
 	for i, o := range sends {
-		if o.Verdict == "known" {
-			continue
+		if o.Verdict == "known" || seen[o.Txid] {
+			continue // the same transaction offered again (the first attempt is sent again when the node forgot it)
 		}
+		seen[o.Txid] = true
 		if o.Fee <= sendFee || o.Fee <= top {
 			t.Fatalf("offer %d pays %d: not above the send (%d) and the highest refused cancel (%d): %+v", i, o.Fee, sendFee, top, sends)
 		}
@@ -157,6 +159,7 @@ func TestRecoveryCancelNonFeeRefusalDoesNotEscalate(t *testing.T) {
 		t.Fatalf("%d ALERTs, want one", n)
 	}
 	refused := px.feesWith("other")
+	refused = refused[1:] // the first cancel stays as the owner's first attempt (stuck, not forgotten); the replacements after it are the refused ones
 	for _, f := range refused {
 		if f != refused[0] || f <= s.sendFee() {
 			t.Fatalf("refused fees %v: a refusal that is not about the fee must not change the fee (above the send's %d)", refused, s.sendFee())
@@ -166,6 +169,7 @@ func TestRecoveryCancelNonFeeRefusalDoesNotEscalate(t *testing.T) {
 		t.Fatalf("the withdrawal is %s: it waits for the cancel", got)
 	}
 	px.setOther("")
+	s.waitFor(120*time.Second, "the node takes a cancel", func() bool { return len(px.feesWith("taken")) >= 1 })
 	s.node.mine(2, "")
 	s.assertVoidedOnce(w, dest)
 }
