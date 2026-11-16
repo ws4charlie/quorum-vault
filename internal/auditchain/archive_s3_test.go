@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -85,16 +84,15 @@ func startStore(t *testing.T) *wormStore {
 	w := &wormStore{endpoint: fmt.Sprintf("http://127.0.0.1:%d", port)}
 	w.root = ArchiveConfig{Endpoint: w.endpoint, AccessKey: "root" + randHex(t, 6), SecretKey: randHex(t, 16), PathStyle: true}
 	w.archiver = ArchiveConfig{Endpoint: w.endpoint, AccessKey: "arc" + randHex(t, 6), SecretKey: randHex(t, 16), PathStyle: true}
-	cfg := filepath.Join(t.TempDir(), "s3.json")
-	conf := fmt.Sprintf(`{"identities":[{"name":"root","credentials":[{"accessKey":%q,"secretKey":%q}],"actions":["Admin","Read","Write","List","Tagging"]},`+
-		`{"name":"archiver","credentials":[{"accessKey":%q,"secretKey":%q}],"actions":["Read","Write","List","Admin"]}]}`,
-		w.root.AccessKey, w.root.SecretKey, w.archiver.AccessKey, w.archiver.SecretKey)
-	if err := os.WriteFile(cfg, []byte(conf), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// The identities are written inside the container from the environment, as docker-compose.yml does: a bind mount would name a path of
+	// this process, which is not the daemon's path when the tests run in a container (CI) next to the daemon.
+	script := `printf '{"identities":[{"name":"root","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]},` +
+		`{"name":"archiver","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Read","Write","List","Admin"]}]}' "$ROOT_AK" "$ROOT_SK" "$ARC_AK" "$ARC_SK" > /tmp/s3.json && ` +
+		`exec /entrypoint.sh server -dir=/data -s3 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=64 -ip.bind=0.0.0.0`
 	name := "qv-worm-" + randHex(t, 4)
-	out, err := exec.Command("docker", "run", "-d", "--name", name, "-p", fmt.Sprintf("127.0.0.1:%d:8333", port), "-v", cfg+":/etc/s3.json:ro",
-		img, "server", "-dir=/data", "-s3", "-s3.config=/etc/s3.json", "-master.volumeSizeLimitMB=64", "-ip.bind=0.0.0.0").CombinedOutput()
+	out, err := exec.Command("docker", "run", "-d", "--name", name, "-p", fmt.Sprintf("127.0.0.1:%d:8333", port),
+		"-e", "ROOT_AK="+w.root.AccessKey, "-e", "ROOT_SK="+w.root.SecretKey, "-e", "ARC_AK="+w.archiver.AccessKey, "-e", "ARC_SK="+w.archiver.SecretKey,
+		"--entrypoint", "/bin/sh", img, "-c", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker run: %v\n%s", err, out)
 	}
