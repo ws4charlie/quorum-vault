@@ -44,9 +44,9 @@ func (s *system) setupWithdrawals(o opts) {
 	s.cf.Chain.BTC.HotShards = []custody.BTCShardFile{{Address: s.hotAddr, Path: []uint32{1, 0}}}
 	s.cf.Chain.BTC.SpendConfirmations = 2
 	s.cf.Chain.BTC.MaxFeeRate = 50
-	s.cf.Chain.BTC.MaxTxFeeSats = 50_000
-	if o.maxTxFee > 0 {
-		s.cf.Chain.BTC.MaxTxFeeSats = o.maxTxFee
+	s.cf.Chain.BTC.MaxTxFeeSats = 100_000 // at least max_fee_rate x the largest transaction (20 inputs: 50 x 1445 = 72,250): the start-up check
+	if o.maxFeeRate > 0 {
+		s.cf.Chain.BTC.MaxFeeRate = o.maxFeeRate
 	}
 	s.cf.Withdrawal.Tiers = map[string][]custody.TierFile{"BTC": {{MinAmount: "0", Approvals: 1, Auto: true}, {MinAmount: btcTier2, Approvals: 2}}}
 	s.cf.Withdrawal.HotWait = "4m"
@@ -118,7 +118,7 @@ func (s *system) setupWithdrawals(o opts) {
 		Signers: map[string]gateway.SignerFile{s.part: {Backend: "mpc", KeysetID: s.mpc.KeysetID, HardenedPath: btc.AccountPath("regtest"),
 			MPC: &gateway.MPCSignerFile{Address: s.mpc.CallerA, CertFile: crt, KeyFile: key, ServerPin: s.mpc.CertA.Pin}}},
 		Chains: map[string]gateway.ChainFile{s.chain: {Family: "btc", WithdrawalsPerHour: 100000, SweepsPerHour: sweepsPerHour, CancelsPerHour: 1000, ToColdPerHour: 1000, ConsolidationsPerHour: consolidations,
-			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: s.xpub, ColdAddresses: map[string]string{"omnibus/native": s.coldAddr}, MaxTxFeeSats: 100_000, MaxFeeRate: 200, MaxInputs: 20,
+			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: s.xpub, ColdAddresses: map[string]string{"omnibus/native": s.coldAddr}, MaxTxFeeSats: s.zoneMaxTx(o), MaxFeeRate: s.zoneFeeRate(o), MaxInputs: 20,
 				HotShards: map[string]gateway.HotShardFile{s.part: {Address: s.hotAddr, Path: []uint32{1, 0}}}},
 			Assets: map[string]gateway.AssetFile{"BTC": asset}}},
 	}
@@ -132,6 +132,24 @@ func (s *system) setupWithdrawals(o opts) {
 	_, s.gwGuard = gatewaytest.NewGuardDB(t)
 	_, cosGuard := gatewaytest.NewGuardDB(t)
 	s.mpc.StartCosigner(cosPath, cosGuard, s.gwGuard)
+}
+
+// zoneFeeRate is the signing zone's max_fee_rate. The zone judges the first send of a withdrawal against its own caps, so the core's reserve must
+// cover them: the two have the same caps, as a deployment keeps them (opts.zoneFeeRate makes the zone's higher, to show a core that reserves too little
+// is refused).
+func (s *system) zoneFeeRate(o opts) uint64 {
+	if o.zoneFeeRate > 0 {
+		return o.zoneFeeRate
+	}
+	return s.cf.Chain.BTC.MaxFeeRate
+}
+
+// zoneMaxTx is the zone's max_tx_fee_sats: the core's, or enough for the largest transaction at a higher zone rate.
+func (s *system) zoneMaxTx(o opts) uint64 {
+	if o.zoneFeeRate > 0 {
+		return 300_000 // 20 inputs at 200 sat/vB is 289,000
+	}
+	return s.cf.Chain.BTC.MaxTxFeeSats
 }
 
 // setConsolidation turns consolidation on in the business config: the shard is merged when it holds more than above available outputs, at a fee rate of at

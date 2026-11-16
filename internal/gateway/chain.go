@@ -12,6 +12,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
+	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
 // TxInfo is what the replay guard and the policy need from a built transaction,
@@ -57,6 +58,13 @@ type ChainCodec interface {
 	Canonical(address string) (string, error)
 	// FeesRaised reports whether next may replace a transaction signed with prev: no component lower, at least one higher.
 	FeesRaised(prev, next []*big.Int) bool
+}
+
+// FirstSendChecker is an optional codec rule for the first transaction of an intent (the intent is not known to the replay guard yet), on top of
+// Verify. Bitcoin uses it for the fee-bump reserve: the first send of a withdrawal must keep enough change to be bumped to the zone's own fee cap.
+// Replacements and cancels of a known intent are not checked again.
+type FirstSendChecker interface {
+	CheckFirstSend(u chain.UnsignedTx, i signjob.Intent) error
 }
 
 // Chain families the gateway knows. A configured family it does not know refuses to start.

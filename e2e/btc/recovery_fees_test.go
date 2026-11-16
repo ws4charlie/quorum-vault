@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 )
 
 // Fee escalation. A replacement the node refuses for a fee that is too low must not be built again at the same fee: the next one pays more than the
@@ -109,7 +111,7 @@ func TestRecoveryFeeRefusedBumpsEscalateAcrossARestartAndPastMaxReplacements(t *
 	}
 	strictlyAbove(t, px.offered())
 	for _, o := range px.offered() {
-		if o.Fee > 50_000 || o.Fee > 50*f0 { // max_tx_fee_sats, and max_fee_rate 50 sat/vB: f0 is the size of the transaction at 1 sat/vB
+		if o.Fee > 100_000 || o.Fee > 50*f0 { // max_tx_fee_sats, and max_fee_rate 50 sat/vB: f0 is the size of the transaction at 1 sat/vB
 			t.Fatalf("a fee of %d is above the caps", o.Fee)
 		}
 		if o.Verdict == "taken" && o.Fee > f0 && o.Fee <= before[len(before)-1] {
@@ -141,12 +143,14 @@ func TestRecoveryFeeRefusedBumpsEscalateAcrossARestartAndPastMaxReplacements(t *
 // settles.
 func TestRecoveryFeeRefusedAboveTheCapAlertsOnceAndRetriesWhenTheMinimumFalls(t *testing.T) {
 	px := newFeeProxy(t)
-	const cap = 450 // sats: 3 x 141 fits, 4 x 141 does not
-	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "2s", maxTxFee: cap})
+	// The cap is max_fee_rate x the size: 4 sat/vB, so 4 x f0 (f0 is the size, the fee at 1 sat/vB). A valid config keeps max_tx_fee_sats at or above that
+	// for the largest transaction, so the rate is what binds; it was a fixed 450 sats before.
+	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "2s", maxFeeRate: 4})
 	w, dest := s.stuckWithdrawal(px)
 	f0 := s.firstFee(px)
-	if 3*f0 > cap || 4*f0 <= cap {
-		t.Fatalf("the first attempt pays %d: the cap of %d is meant to fit three times that and not four", f0, cap)
+	cap := 4 * f0
+	if 3*f0 > cap || 4*f0 < cap {
+		t.Fatalf("the first attempt pays %d: the cap of %d is meant to fit three times that and exactly four", f0, cap)
 	}
 	px.setMin(1000) // far above the cap
 	s.waitFor(120*time.Second, "the ALERT at the cap", func() bool { return s.workerLogCount("cannot be replaced") >= 1 })
@@ -154,7 +158,7 @@ func TestRecoveryFeeRefusedAboveTheCapAlertsOnceAndRetriesWhenTheMinimumFalls(t 
 		return s.getWd(w.ID).Status == "broadcast" && s.workerLogCount("cannot be replaced") == 1
 	})
 	refused := px.feesWith("fee")
-	// 2 x f0 and 3 x f0 are the steps; the next step (4 x f0) is over the cap, so the attempt at the cap itself is made, and refused, before the ALERT.
+	// 2 x f0 and 3 x f0 are the steps; the next step is the cap itself (4 x f0), made, and refused, before the ALERT.
 	if len(refused) != 3 || refused[1] <= refused[0] || refused[2] != cap {
 		t.Fatalf("refused %v: want two increasing steps, then exactly the cap of %d, then nothing", refused, cap)
 	}
@@ -255,6 +259,74 @@ func TestRecoveryNonFeeRefusalDoesNotEscalate(t *testing.T) {
 	s.node.mine(2, "")
 	s.waitWd(w.ID, "confirmed", 60*time.Second)
 	if got := s.received(dest, 1); got != 10_000_000 {
+		t.Fatalf("received %d", got)
+	}
+	s.ledgerOK()
+	s.reconcileClean()
+}
+
+// Every withdrawal can be bumped to the cap with its own inputs: a shard that holds exactly the payment and the fee-bump reserve builds the transaction, a
+// node that refuses every fee has it bumped (with the same inputs, from the change) to exactly the cap for its size, and the next step is the cap ALERT, once,
+// never a refusal for dust or a missing change output. When the node's minimum falls it goes through; the fee booked is the confirmed attempt's and the
+// change coin is sum - payment - fee. The cap is the rate ceiling times the size: with a valid config the total cap is never the lower one.
+func TestRecoveryBumpsToExactlyTheFeeCapFromTheLeastChangeThenAlerts(t *testing.T) {
+	px := newFeeProxy(t)
+	s := newSystem(t, opts{withdraw: true, proxy: px, fallbackRate: 1, stuckAfter: "2s", maxFeeRate: 10})
+	vs := feeAt(s, 2, 1) // one input, the payment and the change, at 1 sat/vB
+	capSats := 10 * vs
+	const pay = 10_000_000
+	sum := int64(pay) + capSats + int64(btc.DustLimit(btc.KindP2WPKH)) // exactly the reserve
+	s.fundHot(sum)
+	s.deposit("c1", 30_000_000)
+	dest := s.node.fresh()
+	w := s.withdraw("ini", "k1", "c1", dest, pay)
+	s.waitWd(w.ID, "broadcast", 60*time.Second)
+	f0 := s.firstFee(px)
+	if f0 != vs {
+		t.Fatalf("the first attempt pays %d, want %d (1 sat/vB)", f0, vs)
+	}
+	px.setMin(1_000_000) // far above the cap: every bump is refused for the fee
+	s.waitFor(240*time.Second, "the ALERT at the cap", func() bool { return s.workerLogCount("cannot be replaced") >= 1 })
+	s.holds(15*time.Second, "waiting at the cap: nothing voided, one ALERT", func() bool {
+		return s.getWd(w.ID).Status == "broadcast" && s.workerLogCount("cannot be replaced") == 1
+	})
+	refused := px.feesWith("fee")
+	if len(refused) < 3 || refused[len(refused)-1] != capSats {
+		t.Fatalf("refused %v: the last attempt must pay exactly the cap %d", refused, capSats)
+	}
+	for i, f := range refused {
+		if f > capSats || (i > 0 && f <= refused[i-1]) {
+			t.Fatalf("refused %v: fees must rise strictly and never pass the cap %d", refused, capSats)
+		}
+	}
+	for _, sub := range []string{"cannot pay", "no change output", "below dust"} {
+		if n := s.workerLogCount(sub); n != 0 {
+			t.Fatalf("the worker logged %q %d times: a bump was refused for want of change", sub, n)
+		}
+	}
+	if n := s.utxoCount("reserved"); n != 1 {
+		t.Fatalf("%d outputs reserved, want the one input all attempts share", n)
+	}
+	px.setMin(1) // the market falls: a fee under the cap goes through
+	s.waitFor(120*time.Second, "the node takes a replacement", func() bool {
+		for _, o := range px.offered() {
+			if o.Verdict == "taken" && o.Fee > f0 {
+				return true
+			}
+		}
+		return false
+	})
+	s.node.mine(2, "")
+	s.waitWd(w.ID, "confirmed", 60*time.Second)
+	taken := px.feesWith("taken")
+	last := taken[len(taken)-1]
+	if got := s.withdrawalFee(w.ID); got != last {
+		t.Fatalf("booked fee %d, the confirmed transaction paid %d", got, last)
+	}
+	if s.utxoCount("available") != 1 || s.utxoValue("available") != sum-pay-last {
+		t.Fatalf("change coin: %d outputs worth %d, want one worth %d", s.utxoCount("available"), s.utxoValue("available"), sum-pay-last)
+	}
+	if got := s.received(dest, 1); got != pay {
 		t.Fatalf("received %d", got)
 	}
 	s.ledgerOK()

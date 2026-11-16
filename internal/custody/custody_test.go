@@ -2,6 +2,7 @@ package custody
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"os"
@@ -11,7 +12,9 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
+	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 )
 
@@ -413,5 +416,44 @@ func TestVoidRefusesWhileTheNonceIsLive(t *testing.T) {
 	bal, _ = s.Led.Balance(ctx, s.Pool, custAcct("c1", testChain, "ETH"))
 	if bal.Held.Sign() != 0 || bal.Available().Cmp(big.NewInt(1000)) != 0 {
 		t.Fatalf("after the void: %+v", bal)
+	}
+}
+
+// The core and the signing zone must carry the same Bitcoin fee caps: the zone checks each first send's fee-bump reserve against its own caps, so a core
+// with lower ones has every withdrawal refused. Every shipped example states the core's defaults, and this test fails when one of them drifts.
+func TestShippedConfigsAgreeOnBitcoinFeeCaps(t *testing.T) {
+	maxTx, maxRate, maxInputs := btc.DefaultFeeCaps()
+	zone, err := gateway.LoadConfig("../gateway/config.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for name, ch := range zone.Chains {
+		if ch.Family != gateway.FamilyBTC {
+			continue
+		}
+		n++
+		if ch.BTC.MaxTxFeeSats != maxTx || ch.BTC.MaxFeeRate != maxRate || ch.BTC.MaxInputs != maxInputs {
+			t.Errorf("gateway example chain %q: max_tx_fee_sats %d, max_fee_rate %d, max_inputs %d; the core's defaults are %d, %d, %d: core and zone fee caps must be equal",
+				name, ch.BTC.MaxTxFeeSats, ch.BTC.MaxFeeRate, ch.BTC.MaxInputs, maxTx, maxRate, maxInputs)
+		}
+	}
+	if n == 0 {
+		t.Fatal("the gateway example has no Bitcoin chain to check")
+	}
+	// A core example that sets its own Bitcoin caps must set the same ones (the current one is not a Bitcoin chain, so it takes the defaults).
+	b, err := os.ReadFile("config.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f File
+	if err := json.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	if f.Chain.BTC != nil {
+		c := f.Chain.BTC
+		if (c.MaxTxFeeSats != 0 && c.MaxTxFeeSats != maxTx) || (c.MaxFeeRate != 0 && c.MaxFeeRate != maxRate) || (c.MaxInputs != 0 && c.MaxInputs != maxInputs) {
+			t.Errorf("core example sets fee caps %d, %d, %d; the gateway example and the defaults use %d, %d, %d", c.MaxTxFeeSats, c.MaxFeeRate, c.MaxInputs, maxTx, maxRate, maxInputs)
+		}
 	}
 }

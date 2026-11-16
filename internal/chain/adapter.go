@@ -338,6 +338,11 @@ var (
 // retryable: outputs may free up or arrive, so the withdrawal waits.
 var ErrNotEnoughOutputs = errors.New("chain: not enough available outputs")
 
+// ErrFeeReserve marks (next to ErrNotEnoughOutputs, which a builder wraps with it) the case where the available outputs do cover the payment and today's fee but not the headroom a
+// later fee bump needs (Bitcoin: the fee cap for the final size plus dust, kept in change). It is retryable like its parent: the withdrawal waits,
+// and the alert says how much more would release it.
+var ErrFeeReserve = errors.New("chain: the available outputs cannot also keep the fee-bump reserve")
+
 // ScannedBlock is the height and hash of a block a scan read.
 type ScannedBlock struct {
 	Height uint64

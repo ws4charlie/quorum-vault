@@ -76,7 +76,7 @@ func newBTCEnv(t *testing.T) *btcEnv {
 	f := gateway.File{
 		Approvers: map[string]gateway.ApproverFile{"alice": {PublicKey: hex.EncodeToString(pub), Enabled: true}},
 		Chains: map[string]gateway.ChainFile{btcChain: {Family: "btc", WithdrawalsPerHour: 100, SweepsPerHour: 100, CancelsPerHour: 100, ConsolidationsPerHour: 2,
-			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: xpub.String(), MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
+			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: xpub.String(), MaxTxFeeSats: 50_000, MaxFeeRate: 170, MaxInputs: 3,
 				HotShards:     map[string]gateway.HotShardFile{e.part: {Address: e.hot0, Path: []uint32{1, 0}}, e.part1: {Address: e.hot1, Path: []uint32{1, 1}}, e.partS: {Address: e.hotS, Path: []uint32{1, 2}}},
 				ColdAddresses: map[string]string{"omnibus/native": e.cold, "segregated:acme/native": e.coldS}},
 			Assets: map[string]gateway.AssetFile{"BTC": {AnyDestination: true, PerTxCap: "100000000", DailyCap: "1000000000", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}}}}},
@@ -179,6 +179,26 @@ func TestCosignerBTCTwoInputs(t *testing.T) {
 	e.allow(e.request("w1", wd("wi1", e.other), p, 1, nil)) // a retry of the same digest
 }
 
+// Party B applies the fee-bump reserve to the first send with its own caps (170 sat/vB x 209 vbytes = 35,530, under 50,000): change that cannot be
+// bumped to the cap is refused, exactly enough is allowed, and a replacement of the signed send down to the cap is allowed.
+func TestCosignerBTCFirstSendMustKeepTheBumpReserve(t *testing.T) {
+	e := newBTCEnv(t)
+	const need = 100_000 + 35_530 + 294
+	short := e.pay(need/2, need/2-1, e.other, need-1-100_000-2_000)
+	r := e.request("s1", wd("short", e.other), short, 0, nil)
+	if got := e.c.Decide(context.Background(), r); got.Allow || !strings.HasPrefix(got.Reason, "tx_mismatch:") || !strings.Contains(got.Reason, "the zone needs at least 33824") {
+		t.Fatalf("%+v", got)
+	}
+	p := e.pay(need/2, need/2, e.other, need-100_000-2_000)
+	e.allow(e.request("w1", wd("wi1", e.other), p, 0, nil))
+	e.allow(e.request("w1", wd("wi1", e.other), p, 1, nil))
+	for n, fee := range []uint64{20_000, 35_530} {
+		r := p
+		r.Outputs = []btc.PayloadOutput{p.Outputs[0], {Address: e.hot0, Value: need - 100_000 - fee}}
+		e.allow(e.request(fmt.Sprintf("bump%d", n), wd("wi1", e.other), r, 0, nil))
+	}
+}
+
 // The rogue gateway names the wrong key: the key of input 1 for input 0. Party B's check is against the key derived from its own xpub.
 func TestCosignerBTCRefusesAKeyThatIsNotTheInputs(t *testing.T) {
 	e := newBTCEnv(t)
@@ -262,7 +282,7 @@ func TestCosignerBTCRefusesTwoHotShardsInOnePool(t *testing.T) {
 	f := gateway.File{
 		Approvers: map[string]gateway.ApproverFile{"alice": {PublicKey: hex.EncodeToString(make([]byte, 32)), Enabled: true}},
 		Chains: map[string]gateway.ChainFile{btcChain: {Family: "btc", WithdrawalsPerHour: 100,
-			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: e.xpubStr, MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
+			BTC: &gateway.BTCFile{Network: "regtest", AccountXpub: e.xpubStr, MaxTxFeeSats: 50_000, MaxFeeRate: 170, MaxInputs: 3,
 				HotShards: map[string]gateway.HotShardFile{e.part: {Address: e.hot0, Path: []uint32{1, 0}}, "qv-us/btc-cos/BTC/hot/omnibus/1": {Address: e.hot1, Path: []uint32{1, 1}}}},
 			Assets: map[string]gateway.AssetFile{"BTC": {AnyDestination: true, PerTxCap: "1", DailyCap: "1", Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}}}}},
 	}

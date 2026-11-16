@@ -158,7 +158,8 @@ func TestFeeRefusalsStopAtTheCapAndRetryWhenTheMarketFalls(t *testing.T) {
 		{"max_fee_rate", func(c *Config) { c.FallbackFeeRate, c.MaxFeeRate = 1, 4 }, func(vs uint64) uint64 { return 4 * vs }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newWEnvWith(t, tc.cfg)
+			e := newWEnv(t)
+			tc.cfg(&e.a.cfg.Config) // set on the adapter: a validated config can no longer make the total cap bind below the rate cap
 			e.node.mempoolMin = 40
 			e.fund(1_000_000)
 			orig, _ := e.broadcastOne("w1", 40_000)
@@ -258,7 +259,8 @@ func TestClassifySendFeeRefusals(t *testing.T) {
 // No refusals at all: a transaction that is only stuck is still raised up to the cap, not left a step short of it. Accepted just under the cap, the next
 // step over it: the replacement pays exactly the cap; the one after that cannot be built.
 func TestBumpReachesTheCapWithoutRefusals(t *testing.T) {
-	e := newWEnvWith(t, func(c *Config) { c.MaxTxFeeSats = 3000 })
+	e := newWEnv(t)
+	e.a.cfg.MaxTxFeeSats = 3000 // set on the adapter: a validated config can no longer make the total cap bind below the rate cap
 	e.fund(1_000_000)
 	orig, _ := e.broadcastOne("w1", 40_000)
 	last := e.fee(orig)

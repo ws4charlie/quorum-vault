@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
+	"github.com/ws4charlie/quorum-vault/internal/gateway"
 )
 
 // withdrawalSystem is a system with the whole withdrawal path, a funded hot shard, and a customer with a deposit.
@@ -189,12 +193,14 @@ func feeOf(s *system, outputs int) int64 {
 	return btc.EstimateVSize(tx) * 5
 }
 
-// An exact amount leaves nothing for change: one output. Change at dust goes to the fee, and the fee actually paid is booked.
-func TestExactAmountAndChangeAtDust(t *testing.T) {
+// A withdrawal keeps the fee-bump reserve in change: a shard that holds exactly the payment and the reserve (the fee cap for the final size plus dust) builds,
+// pays today's fee, and keeps a change output that a bump to the cap leaves at dust. The fee booked is the one paid and the change coin is
+// sum - payment - fee. (This replaces the exact-amount and dust-change cases, which cannot arise any more: every withdrawal has a change output.)
+func TestWithdrawalKeepsTheBumpReserveInChange(t *testing.T) {
 	s := newSystem(t, opts{withdraw: true, noEstimate: true})
-	s.cf.Withdrawal.HotWait = "3m"
-	fee1, fee2 := feeOf(s, 1), feeOf(s, 2)
-	s.fundHot(10_000_000 + fee1) // exactly the payment and the fee of a one-output transaction
+	vs := uint64(feeOf(s, 2) / 5) // one input, the payment and the change
+	need := btc.ReserveNeed(10_000_000, vs*5, vs, 100_000, 50)
+	s.fundHot(int64(need)) // exactly the payment and the reserve
 	s.deposit("c1", 30_000_000)
 	dest := s.node.fresh()
 	w := s.withdraw("ini", "exact", "c1", dest, 10_000_000)
@@ -202,25 +208,125 @@ func TestExactAmountAndChangeAtDust(t *testing.T) {
 	if got := s.received(dest, 1); got != 10_000_000 {
 		t.Fatalf("received %d", got)
 	}
-	if s.utxoCount("available") != 0 || s.withdrawalFee(w.ID) != fee1 {
-		t.Fatalf("exact: available %d, fee %d (want %d)", s.utxoCount("available"), s.withdrawalFee(w.ID), fee1)
+	fee := s.withdrawalFee(w.ID)
+	if fee != int64(vs*5) {
+		t.Fatalf("fee %d, want today's %d", fee, vs*5)
 	}
 	var outs int
 	s.pool.QueryRow(s.ctx, `SELECT jsonb_array_length(payload->'outputs') FROM btc_attempts WHERE chain=$1 AND owner_id=$2`, s.chain, w.ID).Scan(&outs)
-	if outs != 1 {
-		t.Fatalf("%d outputs, want one", outs)
+	if outs != 2 {
+		t.Fatalf("%d outputs, want the payment and the change", outs)
 	}
-	// Dust: 100 sats would be left over, below the dust limit: they are fee.
-	s.fundHot(10_000_000 + fee2 + 100)
-	w2 := s.withdraw("ini", "dust", "c1", dest, 10_000_000)
-	s.settle(w2.ID)
-	if got := s.withdrawalFee(w2.ID); got != fee2+100 {
-		t.Fatalf("dust: fee %d, want %d", got, fee2+100)
+	change := int64(need) - 10_000_000 - fee
+	if s.utxoCount("available") != 1 || s.utxoValue("available") != change {
+		t.Fatalf("available %d outputs worth %d, want one worth %d", s.utxoCount("available"), s.utxoValue("available"), change)
 	}
-	if s.utxoCount("available") != 0 {
-		t.Fatalf("dust change became an output")
+	if left := change - int64(btc.FeeCap(100_000, 50, vs)-uint64(fee)); left != int64(btc.DustLimit(btc.KindP2WPKH)) {
+		t.Fatalf("a bump to the cap would leave %d of change, want exactly dust", left)
 	}
 	s.ledgerOK()
+	s.reconcileClean()
+}
+
+// A thin shard: the coins cover the payment and today's fee but not the reserve. Nothing is reserved, no transaction is built, one ALERT names the
+// reserve and the amount that releases it (however many times the build is tried), and a refill releases it.
+func TestWithdrawalWaitsForTheFeeBumpReserveAndAlertsOnce(t *testing.T) {
+	s := newSystem(t, opts{withdraw: true, noEstimate: true})
+	vs := uint64(feeOf(s, 2) / 5)
+	need := btc.ReserveNeed(10_000_000, vs*5, vs, 100_000, 50)
+	s.fundHot(int64(need) - 1) // one satoshi short of the reserve; plenty for the payment and the fee
+	s.deposit("c1", 30_000_000)
+	dest := s.node.fresh()
+	w := s.withdraw("ini", "thin", "c1", dest, 10_000_000)
+	s.waitFor(90*time.Second, "the ALERT for the reserve", func() bool { return s.workerLogCount("waiting for the fee-bump reserve") >= 1 })
+	s.holds(20*time.Second, "waiting for the reserve: nothing reserved or built, one ALERT", func() bool {
+		st := s.getWd(w.ID).Status
+		return st != "failed" && st != "signing" && st != "broadcast" && st != "confirmed" && s.utxoCount("reserved") == 0 &&
+			s.count(`SELECT count(*) FROM btc_attempts WHERE chain=$1`, s.chain) == 0 && s.workerLogCount("waiting for the fee-bump reserve") == 1
+	})
+	if !s.workerLogHas("one more output of at least") {
+		t.Fatal("the ALERT does not say what releases the withdrawal")
+	}
+	s.fundHot(1_000_000) // a refill
+	s.settle(w.ID)
+	if got := s.received(dest, 1); got != 10_000_000 {
+		t.Fatalf("received %d", got)
+	}
+	s.ledgerOK()
+	s.reconcileClean()
+}
+
+// The signing zone judges the first send against its own caps: a core whose reserve is smaller than the zone's (here the zone's fee rate ceiling is four
+// times the core's) builds a send the zone refuses, nothing is signed, and the money is released. The two keep the same caps in a deployment.
+func TestWithdrawalRefusedByTheZoneWhenTheCoreReservesTooLittle(t *testing.T) {
+	s := newSystem(t, opts{withdraw: true, noEstimate: true, zoneFeeRate: 200})
+	vs := uint64(feeOf(s, 2) / 5)
+	s.fundHot(int64(btc.ReserveNeed(10_000_000, vs*5, vs, 100_000, 50))) // exactly the core's reserve: 50 sat/vB, a quarter of what the zone wants
+	s.deposit("c1", 30_000_000)
+	dest := s.node.fresh()
+	w := s.withdraw("ini", "k1", "c1", dest, 10_000_000)
+	got := s.waitWd(w.ID, "failed", 90*time.Second)
+	if !strings.Contains(got.Reason, "gateway refused") || !strings.Contains(got.Reason, "core and zone fee caps differ") {
+		t.Fatalf("refused for another reason: %q", got.Reason)
+	}
+	if n := s.count(`SELECT count(*) FROM sign_jobs WHERE status='done'`); n != 0 {
+		t.Fatalf("%d jobs were signed", n)
+	}
+	if !fileContains(s.gateway.log, "ALERT: the zone refused a first send") || !strings.Contains(got.Reason, "the zone needs at least") {
+		t.Fatal("the mismatch is not named: want the zone's ALERT and the needed change in the reason")
+	}
+	if s.utxoCount("available") != 1 || s.utxoCount("reserved") != 0 || s.utxoCount("spent") != 0 {
+		t.Fatalf("outputs: available %d reserved %d spent %d", s.utxoCount("available"), s.utxoCount("reserved"), s.utxoCount("spent"))
+	}
+	if a := s.available("c1").Int64(); a != 30_000_000 {
+		t.Fatalf("customer has %d after the void", a)
+	}
+	s.ledgerOK()
+}
+
+// Fee caps that cannot let the largest transaction reach the rate ceiling refuse to start, in the core and in the signing zone, and the message shows
+// the numbers and the fix.
+func TestWithdrawalInconsistentFeeCapsRefuseToStartInTheCoreAndTheZone(t *testing.T) {
+	s := newSystem(t, opts{withdraw: true})
+	refuses := func(name string, p *proc, want string) {
+		t.Helper()
+		s.waitExit(p, name)
+		b, _ := os.ReadFile(p.log)
+		if p.err == nil || !strings.Contains(string(b), want) {
+			t.Fatalf("%s: exit %v, log %q, want a refusal containing %q", name, p.err, b, want)
+		}
+	}
+	// The core: 20 inputs at 50 sat/vB is 72,250 sats.
+	var cf custody.File
+	raw, _ := os.ReadFile(s.cfgPath)
+	if err := json.Unmarshal(raw, &cf); err != nil {
+		t.Fatal(err)
+	}
+	cf.Chain.BTC.MaxTxFeeSats = 50_000
+	bad := filepath.Join(s.dir, "bad-core.json")
+	b, _ := json.Marshal(cf)
+	if err := os.WriteFile(bad, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	core := s.spawn("qv-core", "-config", bad, "-dsn", s.bizDSN, "-addr", fmt.Sprintf("127.0.0.1:%d", freePort(t)), "-task-queue", s.queue)
+	refuses("qv-core with a low max_tx_fee_sats", core, "raise max_tx_fee_sats to at least 72250")
+	// The zone: the same, from the gateway's own config.
+	var gf gateway.File
+	raw, _ = os.ReadFile(s.gwPath)
+	if err := json.Unmarshal(raw, &gf); err != nil {
+		t.Fatal(err)
+	}
+	ch := gf.Chains[s.chain]
+	ch.BTC.MaxTxFeeSats = 50_000
+	gf.Chains[s.chain] = ch
+	badGW := filepath.Join(s.dir, "bad-gateway.json")
+	b, _ = json.Marshal(gf)
+	if err := os.WriteFile(badGW, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := strings.Replace(s.bizDSN, "//qv@", "//qv_gateway@", 1)
+	gw := s.spawn("qv-gateway", "-config", badGW, "-jobs-dsn", jobs, "-guard-dsn", s.gwGuard, "-interval", "200ms", "-lease", s.lease, "-worker-id", "gw-bad")
+	refuses("qv-gateway with a low max_tx_fee_sats", gw, "raise max_tx_fee_sats to at least 72250")
 }
 
 // Many withdrawals against few outputs: none picks an output twice, none fails; each builds, or waits for an output to free up (change of an

@@ -24,7 +24,8 @@ func (e *wEnv) buildCold(id string, amount int64) (chain.UnsignedTx, error) {
 	return u, err
 }
 
-// MaxMove is what the oldest max_inputs available outputs can carry after the fee; a reserved output is not counted.
+// MaxMove is what the oldest max_inputs available outputs can carry after the fee-bump reserve (the fee cap for the size, plus dust, stay in the shard);
+// a reserved output is not counted.
 func TestMaxMoveCountsOnlyAvailableOutputsUpToMaxInputs(t *testing.T) {
 	e := newWEnv(t) // max_inputs 5, fee rate 10
 	if m, err := e.a.MaxMove(context.Background(), wPart); err != nil || m.Sign() != 0 {
@@ -33,7 +34,8 @@ func TestMaxMoveCountsOnlyAvailableOutputsUpToMaxInputs(t *testing.T) {
 	for i := 0; i < 7; i++ {
 		e.fund(1_000_000)
 	}
-	fee := vsize(5, e.a.sinkShard().script, make([]byte, 34)) * 10
+	vs := vsize(5, e.a.sinkShard().script, make([]byte, 34))
+	fee := ReserveNeed(0, vs*10, vs, 25_000, 50) // what the move leaves in the shard; was the fee alone before the reserve existed
 	m, err := e.a.MaxMove(context.Background(), wPart)
 	if err != nil || m.Uint64() != 5_000_000-fee {
 		t.Fatalf("max move %v, want %d (%v)", m, 5_000_000-fee, err)

@@ -130,7 +130,8 @@ func TestStuckCancelIsReplacedByAHigherCancel(t *testing.T) {
 // A refused send does not raise a cancel (a cancel only has to beat what the node holds), and a cancel at the cap is ErrCannotBump until the cap
 // allows it (one ALERT in the workflow, nothing voided); a non-fee refusal changes no fee.
 func TestCancelEscalationCapAndNonFeeRefusal(t *testing.T) {
-	e := newWEnvWith(t, func(c *Config) { c.MaxTxFeeSats = 3000 })
+	e := newWEnv(t)
+	e.a.cfg.MaxTxFeeSats = 3000 // a validated config can no longer make the total cap bind below the rate cap, so the test sets it on the adapter
 	e.fund(1_000_000)
 	orig, _ := e.broadcastOne("w1", 40_000)
 	live := e.fee(orig)

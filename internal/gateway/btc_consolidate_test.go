@@ -104,9 +104,9 @@ func TestBTCConsolidationRateLimit(t *testing.T) {
 func TestBTCConsolidationFeeIsBoundedByTheCap(t *testing.T) {
 	b := newBTCHarness(t)
 	p, in := b.consolidation("f1", 300, 3)
-	p.Outputs[0].Value = 90_000 - 50_000 // the cap is 50,000 sats; that is a rate above 1000 sat/vB? no: ~270 vB, so 185 sat/vB, under max_fee_rate 1000
+	p.Outputs[0].Value = 90_000 - 41_820 // the fee limit of 246 vB is 170 sat/vB: 41,820 sats, under the 50,000 sats cap (a valid config keeps the cap above max_fee_rate x the largest size)
 	b.mustSignAll(b.jobs("f1", in, p))
 	q, qin := b.consolidation("f2", 310, 3)
-	q.Outputs[0].Value = 90_000 - 50_001
+	q.Outputs[0].Value = 90_000 - 41_821
 	b.mustRefuse(b.jobs("f2", qin, q)[0], ReasonTx)
 }

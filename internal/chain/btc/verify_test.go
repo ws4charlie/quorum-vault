@@ -360,7 +360,7 @@ func TestCanonicalRejectsAnotherNetwork(t *testing.T) {
 func TestVerifierConfigRefusals(t *testing.T) {
 	f := newFixture(t)
 	base := SigningConfig{Chain: vChain, Network: "regtest", AccountXpub: acctXpub(f.acct), HotShards: map[string]HotShard{pOmni0: {Address: f.hot0, Path: []uint32{1, 0}}},
-		MaxTxFeeSats: 1, MaxFeeRate: 1, MaxInputs: 1}
+		MaxTxFeeSats: 200, MaxFeeRate: 1, MaxInputs: 1}
 	if _, err := NewVerifier(base); err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +394,7 @@ func TestVerifierConfigRefusals(t *testing.T) {
 // Two hot shards in one pool are a configuration mistake, and the message names the pool.
 func TestVerifierRefusesTwoHotShardsInOnePool(t *testing.T) {
 	f := newFixture(t)
-	cfg := SigningConfig{Chain: vChain, Network: "regtest", AccountXpub: acctXpub(f.acct), MaxTxFeeSats: 1, MaxFeeRate: 1, MaxInputs: 1,
+	cfg := SigningConfig{Chain: vChain, Network: "regtest", AccountXpub: acctXpub(f.acct), MaxTxFeeSats: 200, MaxFeeRate: 1, MaxInputs: 1,
 		HotShards: map[string]HotShard{pOmni0: {Address: f.hot0, Path: []uint32{1, 0}}, "qv-us/btc-v/BTC/hot/omnibus/1": {Address: f.hot1, Path: []uint32{1, 1}}}}
 	if _, err := NewVerifier(cfg); err == nil || !strings.Contains(err.Error(), `pool "omnibus" has two hot shards`) {
 		t.Fatalf("two omnibus shards: %v", err)

@@ -412,8 +412,10 @@ type opts struct {
 	withdraw bool
 	// failpoint arms the first worker ("withdrawal.after_build", ...): it exits there, and the test restarts it without.
 	failpoint string
-	// maxTxFee is the builder's fee cap in satoshis (default 50000, withdrawals only).
-	maxTxFee uint64
+	// maxFeeRate is the builder's fee rate ceiling in sat/vB (default 50, withdrawals only): the fee cap of a transaction is that times its size (a valid
+	// config keeps max_tx_fee_sats at or above the ceiling for the largest transaction, so the rate is what binds). zoneFeeRate is the signing zone's
+	// (default: the builder's).
+	maxFeeRate, zoneFeeRate uint64
 	// fallbackRate is the builder's fee rate in sat/vB when the node has no estimate (default 5); stuckAfter how long a broadcast transaction may wait
 	// before it is bumped (default 10m, so a test that does not bump never does); lease how long the gateway keeps a claimed job (default 30s).
 	fallbackRate uint64

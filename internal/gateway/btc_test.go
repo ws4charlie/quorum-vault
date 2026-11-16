@@ -125,7 +125,7 @@ func newBTCHarness(t *testing.T) *btcH {
 	b.dep, _ = acct.Address([]uint32{0, 5})
 
 	cf := ChainFile{Family: "btc", WithdrawalsPerHour: 1000, SweepsPerHour: 1000, CancelsPerHour: 1000, ToColdPerHour: 1000, ConsolidationsPerHour: 2,
-		BTC: &BTCFile{Network: "regtest", AccountXpub: xpub.String(), MaxTxFeeSats: 50_000, MaxFeeRate: 1000, MaxInputs: 4,
+		BTC: &BTCFile{Network: "regtest", AccountXpub: xpub.String(), MaxTxFeeSats: 50_000, MaxFeeRate: 170, MaxInputs: 3,
 			HotShards: map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 0}}, btcPart1: {Address: b.hot1, Path: []uint32{1, 1}},
 				btcPartSeg: {Address: b.hotS, Path: []uint32{1, 2}}},
 			ColdAddresses: map[string]string{"omnibus/native": b.cold, "segregated:acme/native": b.coldS}},
@@ -402,7 +402,7 @@ func TestBTCGatewayConfigRefusals(t *testing.T) {
 	b := newBTCHarness(t)
 	good := b.gw.cfg.Chains[btcChain].BTC
 	mk := func(mut func(c *ChainFile)) error {
-		cf := ChainFile{Family: "btc", WithdrawalsPerHour: 10, BTC: &BTCFile{Network: "regtest", AccountXpub: good.AccountXpub, MaxTxFeeSats: 1, MaxFeeRate: 1, MaxInputs: 1,
+		cf := ChainFile{Family: "btc", WithdrawalsPerHour: 10, BTC: &BTCFile{Network: "regtest", AccountXpub: good.AccountXpub, MaxTxFeeSats: 200, MaxFeeRate: 1, MaxInputs: 1,
 			HotShards: map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 0}}}},
 			Assets: map[string]AssetFile{"BTC": {AnyDestination: true, PerTxCap: "10", DailyCap: "10", Tiers: []TierFile{{"0", 1}}}}}
 		mut(&cf)
@@ -414,8 +414,9 @@ func TestBTCGatewayConfigRefusals(t *testing.T) {
 	}
 	main := "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	for name, mut := range map[string]func(c *ChainFile){
-		"mainnet network with a regtest key": func(c *ChainFile) { c.BTC.Network = "mainnet" },
-		"wrong-network cold address":         func(c *ChainFile) { c.BTC.ColdAddresses = map[string]string{"omnibus/native": main} },
+		"mainnet network with a regtest key":                           func(c *ChainFile) { c.BTC.Network = "mainnet" },
+		"max_tx_fee_sats below max_fee_rate x the largest transaction": func(c *ChainFile) { c.BTC.MaxTxFeeSats, c.BTC.MaxFeeRate, c.BTC.MaxInputs = 10_000, 100, 4 },
+		"wrong-network cold address":                                   func(c *ChainFile) { c.BTC.ColdAddresses = map[string]string{"omnibus/native": main} },
 		"wrong-network allowlist entry": func(c *ChainFile) {
 			a := c.Assets["BTC"]
 			a.AnyDestination, a.WithdrawalDestinations = false, []string{main}
@@ -433,7 +434,7 @@ func TestBTCGatewayConfigRefusals(t *testing.T) {
 		}
 	}
 	// The allowlist holds canonical strings: upper-case bech32 means the same address.
-	cf := ChainFile{Family: "btc", WithdrawalsPerHour: 10, BTC: &BTCFile{Network: "regtest", AccountXpub: good.AccountXpub, MaxTxFeeSats: 1, MaxFeeRate: 1, MaxInputs: 1,
+	cf := ChainFile{Family: "btc", WithdrawalsPerHour: 10, BTC: &BTCFile{Network: "regtest", AccountXpub: good.AccountXpub, MaxTxFeeSats: 200, MaxFeeRate: 1, MaxInputs: 1,
 		HotShards: map[string]HotShardFile{btcPartition: {Address: b.hot0, Path: []uint32{1, 0}}}},
 		Assets: map[string]AssetFile{"BTC": {WithdrawalDestinations: []string{strings.ToUpper(b.other)}, PerTxCap: "10", DailyCap: "10", Tiers: []TierFile{{"0", 1}}}}}
 	cc, err := cf.build(btcChain, 4)
@@ -565,4 +566,39 @@ func TestBTCCancelMayOnlySpendWhatIsClaimed(t *testing.T) {
 	// It cannot be done twice by another intent: the claims are the cancel's now.
 	fee = 12_000
 	b.mustRefuse(cancelTo(btcPartition, b.hot0, pa.Inputs, "k9")[0], ReasonNonceCancel)
+}
+
+// The zone's own fee-bump reserve: the first send of a withdrawal or a hot-to-cold move must keep enough change to be bumped up to the zone's cap
+// (here 170 sat/vB x 209 vbytes = 35,530 sats, under the 50,000 sats cap), however the core decided. A refusal is recorded and no key signs. Once
+// the first send is signed, replacements down to the cap are signed as before, and a cancel is never judged by it.
+func TestBTCFirstSendMustKeepTheBumpReserve(t *testing.T) {
+	b := newBTCHarness(t)
+	const need = 100_000 + 35_530 + 294 // payment + fee cap of the 209 vbyte transaction + dust change
+	short := b.twoInputs(need/2, need/2-1, b.other, need-1-100_000-2_000)
+	before := b.tree.calls.Load()
+	for _, kind := range []string{"withdrawal", "to-cold"} {
+		to := b.other
+		if kind == "to-cold" {
+			to = b.cold
+			short.Outputs[0].Address = b.cold
+		}
+		in := wdIntent("short-"+kind, to, 100_000)
+		in.Kind = kind
+		b.mustRefuse(b.jobs("s-"+kind, in, short, "auto")[0], ReasonTx)
+		if d := b.run(b.jobs("s2-"+kind, in, short, "auto")[0]); !strings.Contains(d.Reason, "the zone needs at least 33824") || !strings.Contains(d.Reason, btc.CapMismatchNote) {
+			t.Fatalf("%s: refused for another reason: %q", kind, d.Reason)
+		}
+	}
+	if b.tree.calls.Load() != before {
+		t.Fatal("a key signed a send that cannot be bumped to the cap")
+	}
+	// Exactly the reserve: signed. Then every replacement down to the cap is signed.
+	p := b.twoInputs(need/2, need/2, b.other, need-100_000-2_000)
+	in := wdIntent("w1", b.other, 100_000)
+	b.mustSignAll(b.jobs("w1", in, p, "auto"))
+	for n, fee := range []uint64{4_000, 20_000, 35_530} {
+		r := p
+		r.Outputs = []btc.PayloadOutput{p.Outputs[0], {Address: b.hot0, Value: need - 100_000 - fee}}
+		b.mustSignAll(b.jobs(fmt.Sprintf("bump%d", n), in, r, "auto"))
+	}
 }

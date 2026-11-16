@@ -65,9 +65,9 @@ type utxo struct {
 	value uint64
 }
 
-// oldestCannotCarry reports whether the oldest max_inputs available outputs of the partition cannot pay the amount and the fee (no prefix of them
+// oldestCannotCarry reports whether the oldest max_inputs available outputs of the partition cannot pay the amount, the fee and the fee-bump reserve (no prefix of them
 // does) while the partition holds more outputs than that, so that taking the largest ones is the only way to pay. Nothing is locked or reserved.
-func (a *Adapter) oldestCannotCarry(ctx context.Context, tx pgx.Tx, partitionID string, amount uint64, destScript []byte, rate uint64) (bool, error) {
+func (a *Adapter) oldestCannotCarry(ctx context.Context, tx pgx.Tx, partitionID string, amount uint64, destScript, changeScript []byte, rate uint64) (bool, error) {
 	rows, err := tx.Query(ctx, `SELECT value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit
 		ORDER BY created_at, txid, vout LIMIT $3`, a.cfg.Chain, partitionID, a.cfg.MaxInputs+1)
 	if err != nil {
@@ -85,7 +85,7 @@ func (a *Adapter) oldestCannotCarry(ctx context.Context, tx pgx.Tx, partitionID 
 			return true, rows.Err() // more outputs than one transaction takes, and no prefix of the oldest ones covered the payment
 		}
 		sum += uint64(v)
-		if sum >= amount+vsize(n, destScript)*rate {
+		if vs := vsize(n, destScript, changeScript); sum >= ReserveNeed(amount, vs*rate, vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate) {
 			return false, nil
 		}
 	}
@@ -94,8 +94,12 @@ func (a *Adapter) oldestCannotCarry(ctx context.Context, tx pgx.Tx, partitionID 
 
 // BuildWithdrawal builds the transaction of a withdrawal inside the caller's transaction: it selects the partition's own available outputs, oldest
 // first (or, when the oldest max_inputs cannot carry the payment, the largest first), one at a time with FOR UPDATE SKIP LOCKED, reserving each at once, so two builds never pick one output and a rolled-back build reserves
-// nothing. The payment is the first output, change (when it is above dust) the second, to the shard's own address. A change at or under the dust limit
-// goes to the fee. If the available outputs cannot pay the amount and the fee, it returns chain.ErrNotEnoughOutputs: the withdrawal waits.
+// nothing. The payment is the first output, change the second, to the shard's own address.
+//
+// It keeps the fee-bump reserve (reserve.go): the inputs must hold the payment, the fee cap for the final size and one dust change, so the
+// transaction can be bumped to the cap with its own inputs. It keeps adding inputs until that holds. If the available outputs cannot, it returns
+// chain.ErrNotEnoughOutputs (also wrapping chain.ErrFeeReserve when the payment and today's fee alone would have been covered, with how much more
+// releases it): the withdrawal waits and nothing stays reserved.
 func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.WithdrawalIntent) (chain.UnsignedTx, error) {
 	kind := w.OwnerKind
 	if kind == "" {
@@ -131,7 +135,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 	// the shard holds more, it takes the largest instead (a shard fed by many small outputs stays spendable). A hot-to-cold move keeps eating the oldest.
 	order := "created_at, txid, vout"
 	if kind == "withdrawal" {
-		largest, err := a.oldestCannotCarry(ctx, tx, w.PartitionID, amount, destScript, rate)
+		largest, err := a.oldestCannotCarry(ctx, tx, w.PartitionID, amount, destScript, sh.script, rate)
 		if err != nil {
 			return chain.UnsignedTx{}, err
 		}
@@ -142,20 +146,42 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 
 	var picked []utxo
 	var sum uint64
+	need := func(n int) (uint64, uint64) { // what n inputs must hold, and the size it was computed for
+		vs := vsize(n, destScript, sh.script)
+		return ReserveNeed(amount, feeFor(n, destScript, sh.script), vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate), vs
+	}
+	// short builds the error of a build that cannot go on with n inputs holding sum: the reserve when the payment and today's fee alone are covered.
+	short := func(n int, sum uint64, why string) error {
+		want, vs := need(n)
+		if n == 0 || sum < amount+feeFor(n, destScript) {
+			return fmt.Errorf("%w: %s", chain.ErrNotEnoughOutputs, why)
+		}
+		// The payment and today's fee are covered, the reserve is not. What releases it: one more output, which also adds its own input to the size.
+		release := fmt.Sprintf("the %d inputs of at most are all taken: larger outputs are needed", n)
+		if n < a.cfg.MaxInputs {
+			next, _ := need(n + 1)
+			release = fmt.Sprintf("one more output of at least %d sats releases it", next-sum)
+		}
+		return fmt.Errorf("%w: %w: %s holds %d sats in %d inputs for a payment of %d plus fee %d, and the reserve to bump it up to the fee cap (%d sats for %d vbytes, plus %d dust change) needs %d in all: %s",
+			chain.ErrNotEnoughOutputs, chain.ErrFeeReserve, w.PartitionID, sum, n, amount, feeFor(n, destScript, sh.script),
+			FeeCap(a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate, vs), vs, changeDust, want, release)
+	}
 	for {
-		// Enough for the payment alone (no change)?
-		if len(picked) > 0 && sum >= amount+feeFor(len(picked), destScript) {
-			break
+		// Enough for the payment, today's fee, and the reserve in change?
+		if len(picked) > 0 {
+			if want, _ := need(len(picked)); sum >= want {
+				break
+			}
 		}
 		if len(picked) >= a.cfg.MaxInputs {
-			return chain.UnsignedTx{}, fmt.Errorf("%w: %d inputs of at most %d cover %d of %d sats plus fee", chain.ErrNotEnoughOutputs, len(picked), a.cfg.MaxInputs, sum, amount)
+			return chain.UnsignedTx{}, short(len(picked), sum, fmt.Sprintf("%d inputs of at most %d cover %d of %d sats plus fee", len(picked), a.cfg.MaxInputs, sum, amount))
 		}
 		var u utxo
 		var v int64
 		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit
 			ORDER BY `+order+` LIMIT 1 FOR UPDATE SKIP LOCKED`, a.cfg.Chain, w.PartitionID).Scan(&u.txid, &u.vout, &v)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats available in %s, %d needed plus fee", chain.ErrNotEnoughOutputs, sum, w.PartitionID, amount)
+			return chain.UnsignedTx{}, short(len(picked), sum, fmt.Sprintf("%d sats available in %s, %d needed plus fee", sum, w.PartitionID, amount))
 		}
 		if err != nil {
 			return chain.UnsignedTx{}, err
@@ -174,11 +200,10 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 		p.Inputs = append(p.Inputs, PayloadInput{TxID: u.txid, Vout: u.vout, Value: u.value, Path: sh.path, Sequence: SequenceRBF})
 	}
 	p.Outputs = []PayloadOutput{{Address: dest.Canonical, Value: amount}}
-	fee := sum - amount // no change: everything left is fee
-	if change := int64(sum) - int64(amount) - int64(feeFor(len(picked), destScript, sh.script)); change >= int64(changeDust) {
-		p.Outputs = append(p.Outputs, PayloadOutput{Address: sh.address, Value: uint64(change)})
-		fee = sum - amount - uint64(change)
-	}
+	// The selection guarantees change of at least the dust limit above today's fee: a withdrawal always has a change output to bump from.
+	fee := feeFor(len(picked), destScript, sh.script)
+	change := sum - amount - fee
+	p.Outputs = append(p.Outputs, PayloadOutput{Address: sh.address, Value: change})
 	if fee > a.cfg.MaxTxFeeSats {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats against the cap %d", ErrFeeTooHigh, fee, a.cfg.MaxTxFeeSats)
 	}
