@@ -25,7 +25,7 @@ groups:
       # few at once and stays below it; a flaky link or host keeps going. The alert needs it to hold for 10 minutes. A party the health checks already
       # route away from is left to QVMpcPartyUnhealthy.
       - record: qv_mpc_blame:threshold
-        expr: vector(5)
+        expr: vector(500)
         labels: {name: availability_5m}
       # refusals by a cosigner (REFUSED): in 1 hour. Policy refusals happen in normal life, so this is a ticket and not a page; a burst of them means the
       # asking party or the gateway sends requests the cosigner's policy does not allow.
