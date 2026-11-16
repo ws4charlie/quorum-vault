@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -131,6 +132,9 @@ func (d *Decider) DecideKey(ctx context.Context, job signjob.Job, key SignerKey)
 }
 
 func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, arec *auditRecord) (*Verdict, error) {
+	if signjob.IsBatch(job.Intent) {
+		return d.decideBatch(ctx, job, key, arec)
+	}
 	// 1. Intent.
 	intent, err := parseIntent(job)
 	if err != nil {
@@ -188,6 +192,10 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 		if err != nil {
 			return err
 		}
+		if rec != nil && (rec.BatchID != "" || rec.Kind == signjob.KindBatch) {
+			// An id the zone signed inside a batch (or a batch's own id) is never a single withdrawal's.
+			return reject(ReasonMemberReused, "%s was signed as part of batch %s: a withdrawal id is used once, in one batch", intent.ID, cmp.Or(rec.BatchID, rec.ID))
+		}
 		known := rec != nil && bytes.Equal(rec.Hash, hash[:])
 		if rec == nil {
 			if fc, ok := codec.(FirstSendChecker); ok {
@@ -206,42 +214,50 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 		// 5. Replay guard.
 		rel := Release{IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
 			Sender: info.Sender, PartitionID: intent.PartitionID, Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: guardKey, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
-		prior, err := d.replay(ctx, gt, intent, rec, codec, &rel)
-		if err != nil {
-			return err
-		}
-		if prior != nil {
-			if prior.Signature != nil {
-				v.Signature, v.Replayed = prior.Signature, true // signed before: return it, never sign again
-				return gt.audit(ctx, *arec, EventSignReplayed)
-			}
-			if d.mode == ModeGateway && now.Sub(prior.Reserved) < d.cfg.SignTimeout {
-				return errInProgress // another worker is signing this digest
-			}
-			v.NeedSign = true // a stale reservation (gateway) or a retry of the same digest (cosigner)
-			if err := gt.Touch(ctx, guardKey, now); err != nil {
-				return err
-			}
-			return gt.audit(ctx, *arec, EventSignAllowed)
-		}
-
-		// 6a. Reserve.
-		if key.none() {
-			return fmt.Errorf("%w: no signer for partition %q", errSigner, job.PartitionID)
-		}
-		if err := checkSigner(codec, info, key); err != nil {
-			return fmt.Errorf("%w: %v", errSigner, err)
-		}
-		v.NeedSign = true
-		if err := gt.Record(ctx, rel); err != nil {
-			return err
-		}
-		return gt.audit(ctx, *arec, EventSignAllowed)
+		return d.admit(ctx, gt, codec, job, intent, rec, &rel, info, key, v, arec, now)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return v, nil
+}
+
+// admit is step 5 and 6a for one job, inside the guard transaction: the replay rules against what the guard has recorded, then either the stored
+// signature (or a retry of a reservation) or the reservation of the digest. A single intent and a batch take the same path.
+func (d *Decider) admit(ctx context.Context, gt *GuardTx, codec ChainCodec, job signjob.Job, intent signjob.Intent, rec *IntentRecord, rel *Release,
+	info TxInfo, key SignerKey, v *Verdict, arec *auditRecord, now time.Time) error {
+	guardKey := rel.Digest
+	prior, err := d.replay(ctx, gt, intent, rec, codec, rel)
+	if err != nil {
+		return err
+	}
+	if prior != nil {
+		if prior.Signature != nil {
+			v.Signature, v.Replayed = prior.Signature, true // signed before: return it, never sign again
+			return gt.audit(ctx, *arec, EventSignReplayed)
+		}
+		if d.mode == ModeGateway && now.Sub(prior.Reserved) < d.cfg.SignTimeout {
+			return errInProgress // another worker is signing this digest
+		}
+		v.NeedSign = true // a stale reservation (gateway) or a retry of the same digest (cosigner)
+		if err := gt.Touch(ctx, guardKey, now); err != nil {
+			return err
+		}
+		return gt.audit(ctx, *arec, EventSignAllowed)
+	}
+
+	// 6a. Reserve.
+	if key.none() {
+		return fmt.Errorf("%w: no signer for partition %q", errSigner, job.PartitionID)
+	}
+	if err := checkSigner(codec, info, key); err != nil {
+		return fmt.Errorf("%w: %v", errSigner, err)
+	}
+	v.NeedSign = true
+	if err := gt.Record(ctx, *rel); err != nil {
+		return err
+	}
+	return gt.audit(ctx, *arec, EventSignAllowed)
 }
 
 // payloadHash identifies the transaction a job belongs to: the jobs of one transaction (one per signature) share it.

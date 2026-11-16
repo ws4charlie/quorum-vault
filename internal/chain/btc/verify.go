@@ -38,6 +38,11 @@ type SigningConfig struct {
 	MaxTxFeeSats  uint64 // the most a transaction may pay in fee
 	MaxFeeRate    uint64 // the most it may pay per virtual byte, in satoshis
 	MaxInputs     int    // the most inputs a transaction may have
+	// MaxBatchOutputs is the zone's own ceiling on the payments of one batch, and MaxBatchValue its ceiling on their total in satoshis. Neither
+	// comes from the core and the core cannot raise them. 0 and 0: the zone signs no batches. When the first is set the second must be too, and the
+	// fee caps must reach max_fee_rate for the largest batch (CheckFeeCaps).
+	MaxBatchOutputs int
+	MaxBatchValue   uint64
 }
 
 // Verifier implements chain.TxVerifier from SigningConfig alone.
@@ -68,7 +73,11 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 	if cfg.MaxTxFeeSats == 0 || cfg.MaxFeeRate == 0 || cfg.MaxInputs <= 0 {
 		return nil, errors.New("btc: max_tx_fee_sats, max_fee_rate and max_inputs are required and must be positive")
 	}
-	if err := CheckFeeCaps("signing zone", cfg.MaxTxFeeSats, cfg.MaxFeeRate, cfg.MaxInputs, 1); err != nil { // batching adds its output limit here
+	if cfg.MaxBatchOutputs < 0 || (cfg.MaxBatchOutputs == 0) != (cfg.MaxBatchValue == 0) {
+		return nil, errors.New("btc: max_batch_outputs and max_batch_value_sats are both set (batches allowed) or both unset (none)")
+	}
+	// The largest transaction the zone signs sets the size the caps must reach: one payment, or a full batch.
+	if err := CheckFeeCaps("signing zone", cfg.MaxTxFeeSats, cfg.MaxFeeRate, cfg.MaxInputs, max(1, cfg.MaxBatchOutputs)); err != nil {
 		return nil, err
 	}
 	if len(cfg.HotShards) == 0 {
@@ -354,7 +363,7 @@ const CapMismatchNote = "core and zone fee caps differ: they must be equal"
 // same inputs, smaller change, fee under the cap); the caller decides which send is the first, by the intent not being known yet. Other kinds pass.
 // The last output is the change to the partition's own shard and the ones before it are payments, so a list of k payments uses it unchanged.
 func (v *Verifier) CheckFirstSend(u chain.UnsignedTx, i signjob.Intent) error {
-	if i.Kind != "withdrawal" && i.Kind != "to-cold" {
+	if i.Kind != "withdrawal" && i.Kind != "to-cold" && i.Kind != signjob.KindBatch {
 		return nil
 	}
 	pr, err := v.Parse(u)

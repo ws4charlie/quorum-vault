@@ -10,13 +10,17 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
+	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
 // BTCCodec is the ChainCodec of one Bitcoin chain. Verification, the guard's claims and the signing key of every input all come
 // from the signing zone's own account xpub and config, never from the payload or the business zone.
 type BTCCodec struct{ *btc.Verifier }
 
-var _ ChainCodec = (*BTCCodec)(nil)
+var (
+	_ ChainCodec = (*BTCCodec)(nil)
+	_ BatchCodec = (*BTCCodec)(nil)
+)
 
 // NewBTCCodec builds the codec from the signing-zone chain config.
 func NewBTCCodec(cfg btc.SigningConfig) (*BTCCodec, error) {
@@ -36,6 +40,19 @@ func (c *BTCCodec) Decode(u chain.UnsignedTx) (TxInfo, error) {
 	}
 	return TxInfo{Sender: i.Sender, Destination: i.Destination, Claims: i.Claims, Pins: i.Pins, Identity: i.Identity, SignerKey: i.SignerKey,
 		Fees: []*big.Int{new(big.Int).SetUint64(i.Fee)}}, nil
+}
+
+// VerifyBatch implements BatchCodec.
+func (c *BTCCodec) VerifyBatch(u chain.UnsignedTx, b signjob.Batch) ([]BatchPayment, error) {
+	pays, err := c.Verifier.VerifyBatch(u, b)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]BatchPayment, len(pays))
+	for i, p := range pays {
+		out[i] = BatchPayment{Destination: p.Destination, Amount: new(big.Int).SetUint64(p.Amount)}
+	}
+	return out, nil
 }
 
 // OwnsSender implements ChainCodec: the sender is a derivation path on a branch the zone signs for.

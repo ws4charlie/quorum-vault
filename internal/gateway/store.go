@@ -55,6 +55,8 @@ type IntentRecord struct {
 	PartitionID string
 	// Claims is what the intent's transaction consumes, as the codec named it (EVM: one claim, sender plus nonce).
 	Claims []string
+	// BatchID is the batch this withdrawal was signed in; empty for a single withdrawal and for the batch's own row.
+	BatchID string
 }
 
 // SigRecord is a signed_digests row.
@@ -115,8 +117,8 @@ func parseBig(s string) *big.Int {
 // Intent returns the record of an intent ID, or nil.
 func (t *GuardTx) Intent(ctx context.Context, id string) (*IntentRecord, error) {
 	var r IntentRecord
-	err := t.tx.QueryRow(ctx, `SELECT intent_id, intent_hash, kind, sender, COALESCE(partition_id, ''), COALESCE(claims, '{}') FROM signed_intents WHERE intent_id=$1`, id).
-		Scan(&r.ID, &r.Hash, &r.Kind, &r.Sender, &r.PartitionID, &r.Claims)
+	err := t.tx.QueryRow(ctx, `SELECT intent_id, intent_hash, kind, sender, COALESCE(partition_id, ''), COALESCE(claims, '{}'), COALESCE(batch_id, '') FROM signed_intents WHERE intent_id=$1`, id).
+		Scan(&r.ID, &r.Hash, &r.Kind, &r.Sender, &r.PartitionID, &r.Claims, &r.BatchID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -218,6 +220,15 @@ type Release struct {
 	NewIntent   bool      // false: another signature for an intent already recorded
 	NewClaims   []string  // claims nobody holds yet, taken by this intent
 	TakeClaims  []string  // a cancel taking over the claims of a different intent
+	// Members are the withdrawals of a batch, recorded as rows of their own when the batch is first reserved (NewIntent).
+	Members []MemberRelease
+}
+
+// MemberRelease is one withdrawal of a batch as the guard records it.
+type MemberRelease struct {
+	ID     string
+	Hash   []byte
+	Amount *big.Int
 }
 
 // pinOf is the pin of claim c (empty when the release has none).
@@ -250,6 +261,13 @@ func (t *GuardTx) Record(ctx context.Context, r Release) error {
 			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10)`,
 			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.PartitionID, r.At); err != nil {
 			return fmt.Errorf("record intent: %w", err)
+		}
+		for _, m := range r.Members {
+			if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at, batch_id)
+				VALUES ($1,$2,'withdrawal',$3,$4,$5::numeric,$6,'{}',$7,$8,$9)`,
+				m.ID, m.Hash, t.chain, r.Asset, m.Amount.String(), r.Sender, r.PartitionID, r.At, r.IntentID); err != nil {
+				return fmt.Errorf("record batch member %s: %w", m.ID, err)
+			}
 		}
 	}
 	fees := make([]string, len(r.Fees))

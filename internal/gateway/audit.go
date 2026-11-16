@@ -35,6 +35,7 @@ type auditRecord struct {
 	intent    *intentFacts
 	approvers []string
 	reason    string
+	members   []memberFacts // a batch: its withdrawals, each with its approvers
 }
 
 type intentFacts struct {
@@ -55,6 +56,9 @@ func (r auditRecord) event(typ string) (domain.AuditEvent, error) {
 	if f := r.intent; f != nil {
 		p["intent"], p["kind"], p["asset"], p["amount"], p["sender"], p["claims"] = f.ID, f.Kind, f.Asset, f.Amount, f.Sender, f.Claims
 		p["intent_hash"] = hex.EncodeToString(f.IntentHash)
+	}
+	if r.members != nil {
+		p["members"] = r.members
 	}
 	if r.approvers != nil {
 		p["approvers"] = r.approvers
