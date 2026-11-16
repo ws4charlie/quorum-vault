@@ -2,6 +2,7 @@
 /data/
 *.sealed
 .env
+/.mpc-metrics/
 *.test
 coverage.out
 .DS_Store

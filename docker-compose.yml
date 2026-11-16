@@ -1,4 +1,4 @@
-# Host ports can be moved with QV_PG_PORT, QV_ANVIL_PORT, QV_TEMPORAL_PORT, QV_KAFKA_PORT, QV_BTC_PORT and QV_SOL_PORT (scripts/e2e-all.sh runs
+# Host ports can be moved with QV_PG_PORT, QV_ANVIL_PORT, QV_TEMPORAL_PORT, QV_KAFKA_PORT, QV_BTC_PORT, QV_SOL_PORT and QV_PROM_PORT (scripts/e2e-all.sh runs
 # several isolated sets side by side); with none set they are the fixed ports below.
 # Dev-only services, reachable only from this machine. Postgres: no password
 # (trust auth).
@@ -179,6 +179,28 @@ services:
       interval: 2s
       timeout: 3s
       retries: 60
+
+  # ---- Monitoring (profile "monitoring"; `make monitoring-up`) ----
+  # Read-only Prometheus over monitoring/: scrapes the parties' metrics ports and the gateway's metrics file (through node-exporter's textfile
+  # collector) and evaluates the MPC rules. No admin API, no lifecycle endpoint, config mounted read-only. Not part of `make setup` or the e2e
+  # lanes. Pinned: prom/prometheus v3.5.0 (2026-11-15; monitoring/rules_test.go reads this tag), prom/node-exporter v1.9.1 (2026-11-15).
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - ./monitoring:/etc/prometheus:ro
+    ports:
+      - "127.0.0.1:${QV_PROM_PORT:-19090}:9090"
+
+  # The gateway writes its MPC metrics file (qv-gateway -mpc-metrics-file) into QV_MPC_METRICS_DIR; only the textfile collector runs.
+  node-exporter:
+    profiles: ["monitoring"]
+    image: prom/node-exporter:v1.9.1
+    command: ["--collector.disable-defaults", "--collector.textfile", "--collector.textfile.directory=/mpc-metrics"]
+    volumes:
+      - ${QV_MPC_METRICS_DIR:-./.mpc-metrics}:/mpc-metrics:ro
 
 # The server image needs a dynamic-config file; an empty one means defaults.
 configs:
