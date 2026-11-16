@@ -2,6 +2,7 @@ package btc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -99,25 +100,46 @@ func TestBuildReplacementRule(t *testing.T) {
 	}
 }
 
-// Nothing to pay more from: no change output, change that would fall to dust, a fee above the cap. Each is chain.ErrCannotBump.
+// rewriteLast changes the payload of the newest attempt of owner w1 in the database, to make an attempt a build can no longer produce (a withdrawal
+// built before the fee-bump reserve existed, still in flight): one with no change, change near dust, or inputs that hold little.
+func (e *wEnv) rewriteLast(f func(p *Payload)) {
+	e.t.Helper()
+	var raw []byte
+	var txid string
+	if err := e.a.pool.QueryRow(context.Background(), `SELECT payload, txid FROM btc_attempts WHERE chain='btc-t' AND owner_id='w1' ORDER BY created_at DESC LIMIT 1`).Scan(&raw, &txid); err != nil {
+		e.t.Fatal(err)
+	}
+	p, err := DecodePayload(raw)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	f(&p)
+	nb, _ := json.Marshal(p)
+	if _, err := e.a.pool.Exec(context.Background(), `UPDATE btc_attempts SET payload=$3::jsonb WHERE chain='btc-t' AND txid=$2 AND owner_id=$1`, "w1", txid, string(nb)); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// Nothing to pay more from: no change output, change that would fall to dust, a fee above the cap. Each is chain.ErrCannotBump. (A build keeps the
+// fee-bump reserve in change now, so the first two are attempts made before it existed: the test rewrites the stored attempt.)
 func TestBuildReplacementCannotBump(t *testing.T) {
-	// No change: the exact amount.
+	// No change.
 	e := newWEnv(t)
-	fee1 := uint64(vsize(1, mustScript(t, e.dest))) * 10
-	e.fund(int64(40_000 + fee1))
+	e.fund(100_000)
 	if _, err := e.build("w1", 40_000, true); err != nil {
 		t.Fatal(err)
 	}
+	e.rewriteLast(func(p *Payload) { p.Outputs = p.Outputs[:1] })
 	if _, err := e.replace(); !errors.Is(err, chain.ErrCannotBump) {
 		t.Fatalf("no change output: %v", err)
 	}
 	// Change that would fall to dust.
 	e = newWEnv(t)
-	fee2 := uint64(vsize(1, mustScript(t, e.dest), mustScript(t, e.hot))) * 10
-	e.fund(int64(40_000 + fee2 + 300)) // 300 sats of change, above dust (294), but a bump needs more than 6
+	e.fund(100_000)
 	if u, err := e.build("w1", 40_000, true); err != nil || len(e.payload(u).Outputs) != 2 {
 		t.Fatalf("setup: %v", err)
 	}
+	e.rewriteLast(func(p *Payload) { p.Outputs[1].Value = 300 }) // 300 sats of change, above dust (294), but a bump needs more than 6
 	if _, err := e.replace(); !errors.Is(err, chain.ErrCannotBump) {
 		t.Fatalf("change would fall to dust: %v", err)
 	}
@@ -189,11 +211,11 @@ func TestBuildCancelAndSettle(t *testing.T) {
 // Inputs that cannot pay a cancel's fee: chain.ErrCannotBump (the workflow parks).
 func TestBuildCancelNeedsInputsThatCanPayIt(t *testing.T) {
 	e := newWEnv(t)
-	fee1 := uint64(vsize(1, mustScript(t, e.dest))) * 10
-	e.fund(int64(300 + fee1)) // an exact payment of 300 sats (just above dust): the inputs hold little beyond it
+	e.fund(100_000)
 	if _, err := e.build("w1", 300, true); err != nil {
 		t.Fatal(err)
 	}
+	e.rewriteLast(func(p *Payload) { p.Inputs[0].Value = 1_400 }) // an attempt made before the reserve existed: the inputs hold little beyond the payment
 	if _, err := e.cancel(); !errors.Is(err, chain.ErrCannotBump) {
 		t.Fatalf("%v", err)
 	}

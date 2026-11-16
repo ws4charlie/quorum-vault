@@ -34,7 +34,7 @@ func (a *Adapter) nextFee(ctx context.Context, oldFee, vs uint64) uint64 {
 }
 
 // feeCap is the most a transaction of vs virtual bytes may pay: the fee cap and the fee rate ceiling, whichever is lower.
-func (a *Adapter) feeCap(vs uint64) uint64 { return min(a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate*vs) }
+func (a *Adapter) feeCap(vs uint64) uint64 { return FeeCap(a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate, vs) }
 
 func (a *Adapter) checkFee(fee, vs uint64) error {
 	if fee > a.feeCap(vs) {

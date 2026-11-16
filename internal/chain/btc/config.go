@@ -50,7 +50,7 @@ type Config struct {
 	// (default 100), which must be below the signing zone's.
 	FallbackFeeRate uint64
 	MaxFeeRate      uint64
-	// MaxTxFeeSats is the most a transaction may pay in fee (default 100000, below the signing zone's cap).
+	// MaxTxFeeSats is the most a transaction may pay in fee (default 150000, below the signing zone's cap; at least MaxFeeRate times the size of the largest transaction, see CheckFeeCaps).
 	MaxTxFeeSats uint64
 	// SweepMaxFeeRate is the most a routine sweep pays per virtual byte (default MaxFeeRate; it must not be above it). Above it routine sweeps wait.
 	// SweepUrgentValue, in satoshis, is the amount from which a sweep goes regardless of that ceiling, up to MaxFeeRate (0: no such exception).
@@ -123,7 +123,7 @@ func (c Config) withDefaults() Config {
 		c.MaxFeeRate = 100
 	}
 	if c.MaxTxFeeSats == 0 {
-		c.MaxTxFeeSats = 100_000
+		c.MaxTxFeeSats = 150_000
 	}
 	if c.SweepMaxFeeRate == 0 {
 		c.SweepMaxFeeRate = c.MaxFeeRate
@@ -238,6 +238,11 @@ func (c Config) validated() (*validatedConfig, error) {
 		if c.ConsolidateMaxFeeRate > c.SweepMaxFeeRate {
 			return nil, errors.New("btc: config: consolidate_max_fee_rate is above sweep_max_fee_rate")
 		}
+	}
+	// Every send keeps a fee-bump reserve (reserve.go): the fee cap must let the largest transaction reach the rate ceiling. Batching adds its output
+	// limit here (the second size argument, 1 payment today).
+	if err := CheckFeeCaps("config", c.MaxTxFeeSats, c.MaxFeeRate, c.MaxInputs, 1); err != nil {
+		return nil, err
 	}
 	// The form of an address this config derives must belong to the network it names.
 	probe, err := v.addressAt(0)

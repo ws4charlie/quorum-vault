@@ -68,6 +68,9 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 	if cfg.MaxTxFeeSats == 0 || cfg.MaxFeeRate == 0 || cfg.MaxInputs <= 0 {
 		return nil, errors.New("btc: max_tx_fee_sats, max_fee_rate and max_inputs are required and must be positive")
 	}
+	if err := CheckFeeCaps("signing zone", cfg.MaxTxFeeSats, cfg.MaxFeeRate, cfg.MaxInputs, 1); err != nil { // batching adds its output limit here
+		return nil, err
+	}
 	if len(cfg.HotShards) == 0 {
 		return nil, errors.New("btc: no hot shards")
 	}
@@ -337,6 +340,40 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		}
 	default:
 		return reject("intent kind %q", i.Kind)
+	}
+	return nil
+}
+
+// CheckFirstSend is the zone's own fee-bump reserve rule (reserve.go) for the first send of a withdrawal or a hot-to-cold move: the change must be
+// large enough to bump the transaction to the zone's own fee cap, change >= zoneFeeCap(vs) - fee + dust, whatever the core reserved. A core that is
+// buggy or compromised cannot then build sends that can never be bumped. Replacements and cancels are not judged here (they keep Verify's checks:
+// same inputs, smaller change, fee under the cap); the caller decides which send is the first, by the intent not being known yet. Other kinds pass.
+// The last output is the change to the partition's own shard and the ones before it are payments, so a list of k payments uses it unchanged.
+func (v *Verifier) CheckFirstSend(u chain.UnsignedTx, i signjob.Intent) error {
+	if i.Kind != "withdrawal" && i.Kind != "to-cold" {
+		return nil
+	}
+	pr, err := v.Parse(u)
+	if err != nil {
+		return err
+	}
+	own, ok := v.shard[i.PartitionID]
+	if !ok {
+		return reject("partition %q has no pinned hot shard", i.PartitionID)
+	}
+	n := len(pr.Payload.Outputs)
+	if n < 2 || pr.outs[n-1].Canonical != own.addr {
+		return reject("%s has no change output to the partition's own shard: it could not be bumped to the fee cap", i.Kind)
+	}
+	var payments uint64
+	for _, o := range pr.Payload.Outputs[:n-1] {
+		payments += o.Value
+	}
+	vs := uint64(EstimateVSize(pr.Built.Tx))
+	if short := ReserveShortfall(pr.Sum, payments, pr.Fee, vs, v.cfg.MaxTxFeeSats, v.cfg.MaxFeeRate); short > 0 {
+		change := pr.Payload.Outputs[n-1].Value
+		return reject("%s keeps %d sats of change with a fee of %d: to be bumped up to the fee cap of %d sats (%d vbytes) it must keep at least %d more", i.Kind, change, pr.Fee,
+			FeeCap(v.cfg.MaxTxFeeSats, v.cfg.MaxFeeRate, vs), vs, short)
 	}
 	return nil
 }

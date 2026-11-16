@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -61,6 +62,8 @@ type Deps struct {
 // Activities is the activity set. Register one instance with the worker.
 type Activities struct {
 	D Deps
+	// reserveAlerted: owner kind/id -> true once the fee-bump reserve ALERT was given by this process (one per owner, not one per poll).
+	reserveAlerted sync.Map
 	// haltAlerted: the "scan halted" ALERT was given by this process (one per process, not one per scan pass).
 	haltAlerted atomic.Bool
 }
@@ -265,10 +268,22 @@ func (a *Activities) ReserveHot(ctx context.Context, id string) (bool, error) {
 	return ok, err
 }
 
+// alertReserve gives the ALERT for a build that waits only because the available outputs cannot keep the fee-bump reserve, once per owner (the
+// build is retried every poll). The error text names the reserve and the amount that releases it.
+func (a *Activities) alertReserve(kind, id string, err error) {
+	if !errors.Is(err, chain.ErrFeeReserve) {
+		return
+	}
+	if _, seen := a.reserveAlerted.LoadOrStore(kind+"/"+id, true); !seen {
+		a.log().Error("ALERT: waiting for the fee-bump reserve; the hot wallet needs more available outputs (a refill releases it)", "owner", kind+" "+id, "error", err.Error())
+	}
+}
+
 // BuildWithdrawalJob builds the transaction and enqueues the sign job in one transaction.
 func (a *Activities) BuildWithdrawalJob(ctx context.Context, id string) (string, error) {
 	job, err := a.D.Svc.BuildWithdrawalJob(ctx, id)
 	if err != nil {
+		a.alertReserve("withdrawal", id, err)
 		return "", nonRetry(err)
 	}
 	Hit("withdrawal", "after_build")
@@ -525,6 +540,7 @@ func (a *Activities) LoadColdMove(ctx context.Context, id string) (ColdState, er
 func (a *Activities) BuildColdMoveJob(ctx context.Context, id string) (string, error) {
 	job, err := a.D.Svc.BuildColdMoveJob(ctx, id)
 	if err != nil {
+		a.alertReserve(custody.OwnerKindToCold, id, err)
 		return "", nonRetry(err)
 	}
 	Hit(custody.OwnerKindToCold, "after_build")

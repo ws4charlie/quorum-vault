@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,7 +57,7 @@ func newWEnvWith(t *testing.T, change func(*Config)) *wEnv {
 	dest := foreignDest()
 	pool := dbtest.New(t)
 	cfg := Config{Chain: "btc-t", Network: "regtest", RPCURL: node.srv.URL, AccountXpub: xpub.String(),
-		HotShards: []HotShardConfig{{PartitionID: wPart, Address: hot, Path: []uint32{1, 0}}}, MaxInputs: 5, FallbackFeeRate: 10, MaxFeeRate: 50, MaxTxFeeSats: 20_000}
+		HotShards: []HotShardConfig{{PartitionID: wPart, Address: hot, Path: []uint32{1, 0}}}, MaxInputs: 5, FallbackFeeRate: 10, MaxFeeRate: 50, MaxTxFeeSats: 25_000}
 	if change != nil {
 		change(&cfg)
 	}
@@ -164,41 +165,38 @@ func mustScript(t *testing.T, addr string) []byte {
 	return s
 }
 
-// Exact amount: nothing left for change, one output. Change at dust: it goes to the fee.
-func TestBuildWithdrawalExactAmountAndDustChange(t *testing.T) {
+// The fee-bump reserve: the inputs must hold the payment, the fee cap for the final size and one dust change. One satoshi less and the build waits
+// with chain.ErrFeeReserve (also ErrNotEnoughOutputs) and reserves nothing; at exactly the need it builds, with a change output of fee-cap room.
+// (This replaces the old exact-amount and dust-change cases: a withdrawal always has a change output now.)
+func TestBuildWithdrawalKeepsTheFeeBumpReserveInChange(t *testing.T) {
 	e := newWEnv(t)
-	fee1 := uint64(vsize(1, mustScript(t, e.dest))) * 10
-	e.fund(int64(100_000 + fee1))
+	vs := vsize(1, mustScript(t, e.dest), mustScript(t, e.hot))
+	need := ReserveNeed(100_000, vs*10, vs, 25_000, 50)
+	if want := 100_000 + min(25_000, 50*vs) + 294; need != want {
+		t.Fatalf("need %d, want payment + fee cap + dust = %d", need, want)
+	}
+	e.fund(int64(need - 1))
+	if _, err := e.build("short", 100_000, true); !errors.Is(err, chain.ErrFeeReserve) || !errors.Is(err, chain.ErrNotEnoughOutputs) {
+		t.Fatalf("one satoshi short of the reserve: %v", err)
+	} else if !strings.Contains(err.Error(), "reserve") || !strings.Contains(err.Error(), "releases it") {
+		t.Fatalf("the error does not name the reserve and what releases it: %v", err)
+	}
+	if e.count("available") != 1 || e.count("reserved") != 0 {
+		t.Fatal("a build that waits for the reserve reserved outputs")
+	}
+	e = newWEnv(t) // a shard that holds exactly the need
+	e.fund(int64(need))
 	u, err := e.build("exact", 100_000, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := e.payload(u); len(p.Outputs) != 1 || p.Outputs[0].Value != 100_000 {
-		t.Fatalf("%+v", p.Outputs)
+	p := e.payload(u)
+	if len(p.Inputs) != 1 || len(p.Outputs) != 2 || p.Outputs[1].Address != e.hot {
+		t.Fatalf("%+v", p)
 	}
-	// 100 sats of change is below the dust limit (294): it is not an output, it is fee.
-	e2 := newWEnv(t)
-	fee2 := uint64(vsize(1, mustScript(t, e2.dest), mustScript(t, e2.hot))) * 10
-	e2.fund(int64(100_000 + fee2 + 100))
-	u, err = e2.build("dust", 100_000, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := e2.payload(u)
-	if len(p.Outputs) != 1 {
-		t.Fatalf("dust change became an output: %+v", p.Outputs)
-	}
-	var f int64
-	e2.a.pool.QueryRow(context.Background(), `SELECT fee FROM btc_attempts WHERE chain='btc-t' AND owner_id='dust'`).Scan(&f)
-	if f != int64(p.Inputs[0].Value)-100_000 {
-		t.Fatalf("fee %d, want everything but the payment", f)
-	}
-	// Change just above dust is an output.
-	e3 := newWEnv(t)
-	e3.fund(int64(100_000 + uint64(vsize(1, mustScript(t, e3.dest), mustScript(t, e3.hot)))*10 + 294))
-	u, _ = e3.build("above", 100_000, true)
-	if p := e3.payload(u); len(p.Outputs) != 2 || p.Outputs[1].Value != 294 {
-		t.Fatalf("%+v", p.Outputs)
+	fee := vs * 10
+	if want := need - 100_000 - fee; p.Outputs[1].Value != want {
+		t.Fatalf("change %d, want %d", p.Outputs[1].Value, want)
 	}
 }
 
@@ -215,7 +213,7 @@ func TestBuildWithdrawalNotEnoughOutputs(t *testing.T) {
 	// More inputs than max_inputs would be needed even from the largest outputs: also "not enough" (a consolidation makes room, later).
 	e = newWEnv(t)
 	for i := 0; i < 6; i++ {
-		e.fund(20_000)
+		e.fund(21_000)
 	}
 	if _, err := e.build("w", 110_000, false); !errors.Is(err, chain.ErrNotEnoughOutputs) {
 		t.Fatalf("six small outputs, five inputs at most: %v", err)
@@ -240,7 +238,7 @@ func TestBuildWithdrawalFallsBackToTheLargestOutputs(t *testing.T) {
 	e.fund(30_000)
 
 	// A payment the oldest outputs can carry is paid by them, as before.
-	u, err := e.build("fits", 25_000, false)
+	u, err := e.build("fits", 15_000, false)
 	if err != nil {
 		t.Fatal(err)
 	}
