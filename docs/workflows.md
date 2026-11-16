@@ -19,7 +19,7 @@ A step that runs again must do the same thing, not a second thing. The job keeps
 | After the confirmation, before the books are updated | The books are updated once |
 
 ## The outbox: events leave only with the change
-Every change that other systems should hear about writes an event in the same database transaction as the change. A relay then sends the events to Kafka, at least once. The event exists exactly when the change does, and a crash can only delay it.
+Every change that other systems should hear about writes an event in the same database transaction as the change. A relay then sends the events to Kafka, at least once. The event exists exactly when the change does, and a crash can only delay it. Published rows are kept for a retention period (30 days by default, never less than 7), then removed; the audit chain keeps the record.
 
 ## The watchdog restarts loops that stall
 Some jobs are loops that never end: scanning the chains, planning sweeps, planning moves to cold. If one stops making progress, the watchdog raises an alert, ends it and starts it again.
