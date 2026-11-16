@@ -2,7 +2,7 @@
 #
 #   clang-20 + cmake + ninja   mpc-party/scripts/install-toolchain-linux.sh   (the same script a developer runs on Linux)
 #   cb-mpc at the pinned commit mpc-party/scripts/fetch-build-cbmpc.sh at mpc-party/cbmpc.pin   (the same recipe as `make mpc-build`)
-#   SoftHSM2, make, jq, git, curl, Go (the highest version a go.mod asks for), the docker CLI with the compose plugin (the tests restart the compose bitcoind)
+#   SoftHSM2, make, jq, git, curl, promtool (v3.5.0, pinned by checksum), Go (the highest version a go.mod asks for), the docker CLI with the compose plugin (the tests restart the compose bitcoind)
 #
 # Tools and libraries only. No SoftHSM token, PIN, key, share, certificate or .env value is in any layer: the tokens are made at job time by
 # scripts/setup-softhsm.sh, in the checkout. The image is public (the repository is): nothing private may ever be added here.
@@ -47,6 +47,22 @@ RUN set -eu; \
 # 4. The docker CLI and the compose plugin (the recovery tests run `docker compose restart bitcoind` against the runner's daemon).
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=dockercli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+
+# 5. promtool, from the official Prometheus release at the version docker-compose.yml pins (prom/prometheus:v3.5.0), checked against the SHA-256 checked in
+#    here (from the release's sha256sums.txt). Only the promtool binary is kept. The rule checks and rule unit tests of monitoring/ run with it.
+ARG PROMETHEUS_VERSION=3.5.0
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) want=e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a ;; \
+      arm64) want=173389cc42bf09c4e6e54cb53fa07a5a835d7c261e14775d2183181d6e385d1c ;; \
+      *) echo "no pinned promtool checksum for $arch" >&2; exit 1 ;; \
+    esac; \
+    d="prometheus-${PROMETHEUS_VERSION}.linux-${arch}"; \
+    curl -fsSLo /tmp/prom.tgz "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${d}.tar.gz"; \
+    echo "$want  /tmp/prom.tgz" | sha256sum -c -; \
+    tar -C /usr/local/bin --strip-components=1 -xzf /tmp/prom.tgz "${d}/promtool"; rm -f /tmp/prom.tgz; \
+    promtool --version | grep -q "version ${PROMETHEUS_VERSION}"
 
 ENV PATH=/usr/local/go/bin:$PATH \
     GOTOOLCHAIN=local \
