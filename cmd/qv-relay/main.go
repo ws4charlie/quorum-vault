@@ -47,6 +47,9 @@ func run(log *slog.Logger) error {
 	if *dsn == "" || *brokers == "" {
 		return fmt.Errorf("-dsn and -brokers are required")
 	}
+	if _, err := outbox.NewPruner(nil, outbox.PruneOptions{Retention: *pruneRetention}); err != nil {
+		return err // retention below the hard minimum: refused before anything starts
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	pool, err := pgxpool.New(ctx, *dsn)
