@@ -91,6 +91,12 @@ func unsignedOf(chainName string, built *Unsigned, raw []byte, partition string,
 // BuildReplacement builds the fee bump of the owner's newest attempt: the same inputs and the same payment, less change, a higher fee (see the rule
 // above). Without a change output, or when the change would fall to dust, it returns chain.ErrCannotBump: the attempt cannot be bumped.
 func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	// An owner whose cancel was built is on its cancel track: its replacements raise the cancel, not the send (see BuildCancel).
+	if cancelling, err := a.isCancelling(ctx, tx, ownerKind, ownerID); err != nil {
+		return chain.UnsignedTx{}, err
+	} else if cancelling {
+		return a.buildCancel(ctx, tx, ownerKind, ownerID)
+	}
 	if ownerKind == "sweep" {
 		return a.buildSweepReplacement(ctx, tx, ownerID)
 	}
@@ -134,6 +140,10 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 // back to the partition's own shard, one output, for a fee above the highest fee any attempt of the owner paid (so it replaces whichever is pending).
 // Once it confirms, no other transaction can spend those inputs, so a half-signed one can never confirm. It returns chain.ErrNotSupported when
 // nothing was built, and chain.ErrCannotBump when the inputs cannot pay for it.
+//
+// Building it also marks the owner as cancelling (a btc_refusals row under the owner kind "cancel:<kind>", see cancelKind): from then on
+// BuildReplacement raises the cancel, not the send, and the cancel has its own fee floor (the highest fee the node refused for a cancel), so that a
+// refused or stuck cancel escalates like a send, within the same caps.
 func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
 	if ownerKind != "withdrawal" && ownerKind != "sweep" && ownerKind != "to-cold" && ownerKind != OwnerKindConsolidate {
 		return chain.UnsignedTx{}, errLater
@@ -145,6 +155,24 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 	if n == 0 {
 		return chain.UnsignedTx{}, errLater
 	}
+	return a.buildCancel(ctx, tx, ownerKind, ownerID)
+}
+
+// cancelKind is the owner kind under which a cancel's refusals are kept. A cancel has its own row, not the send's: what the node refused for the
+// send says nothing about what a cancel must pay (a cancel only has to beat what the node holds), and a refused cancel must not raise the next send.
+// The row also marks the owner as cancelling (isCancelling).
+func cancelKind(ownerKind string) string { return "cancel:" + ownerKind }
+
+func (a *Adapter) isCancelling(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (bool, error) {
+	var yes bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM btc_refusals WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3)`, a.cfg.Chain, cancelKind(ownerKind), ownerID).Scan(&yes)
+	return yes, err
+}
+
+// buildCancel builds the owner's next cancel, the first or a replacement of the last one. Its fee is the replacement rule applied to the higher of
+// the highest accepted attempt of the owner (a send or a cancel: the node may hold any of them) and the highest fee the node refused for a cancel
+// (escalate), within the fee caps. When the inputs cannot pay what the next fee needs, it returns chain.ErrCannotBump.
+func (a *Adapter) buildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
 	p, _, err := a.lastSend(ctx, tx, ownerKind, ownerID)
 	if err != nil {
 		return chain.UnsignedTx{}, err
@@ -169,12 +197,29 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 		sum += in.Value
 	}
 	vs := vsize(len(p.Inputs), sh.script)
-	fee := a.nextFee(ctx, uint64(top), vs) // a cancel replaces what the node holds, so only accepted attempts count: refused fees do not raise it
-	if err := a.checkFee(fee, vs); err != nil {
+	limit := a.feeCap(vs)
+	if dust := DustLimit(KindP2WPKH); sum >= dust {
+		limit = min(limit, sum-dust)
+	} else {
+		limit = 0
+	}
+	// A refused cancel's fee floor is the cancel's own row (cancelKind). The row is written here, so that a cancel the node refuses (and that is
+	// deleted from the attempts) still marks the owner as cancelling.
+	ck := cancelKind(ownerKind)
+	if _, err := tx.Exec(ctx, `INSERT INTO btc_refusals (chain, owner_kind, owner_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, a.cfg.Chain, ck, ownerID); err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	if sum < fee+DustLimit(KindP2WPKH) {
-		return chain.UnsignedTx{}, fmt.Errorf("%w: the inputs hold %d sats, a cancel needs %d fee and an output", chain.ErrCannotBump, sum, fee)
+	fee, err := a.escalate(ctx, tx, ck, ownerID, uint64(top), vs, limit, func(fee uint64) error {
+		if err := a.checkFee(fee, vs); err != nil {
+			return err
+		}
+		if sum < fee+DustLimit(KindP2WPKH) {
+			return fmt.Errorf("%w: the inputs hold %d sats, a cancel needs %d fee and an output", chain.ErrCannotBump, sum, fee)
+		}
+		return nil
+	})
+	if err != nil {
+		return chain.UnsignedTx{}, err
 	}
 	c := Payload{Version: PayloadVersion, Inputs: p.Inputs, Outputs: []PayloadOutput{{Address: sh.address, Value: sum - fee}}}
 	built, raw, err := a.record(ctx, tx, ownerKind, ownerID, "cancel", c, fee)

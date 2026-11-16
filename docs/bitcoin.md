@@ -21,5 +21,7 @@ The build reserves coins from the hot wallet, pays the customer, and sends chang
 | One input refused after another was signed | A cancel spends the same coins back to the hot wallet |
 | The coins were spent by something we did not make | The withdrawal is parked with an alert |
 
+A replacement the node refuses for a fee that is too low is followed by one that pays more than the highest fee refused so far, even after a restart. A cancel does the same: if it is refused or stays unmined, the next cancel pays more than every earlier attempt and every refused cancel. Both stop at the fee caps, with one alert, and nothing is voided because of a cap.
+
 ## Consolidation merges small coins
 A wallet fed by many small payments can hold enough value, yet no single transaction can carry it. Consolidation merges the small coins into one before that happens, and a withdrawal keeps working meanwhile. Each partition has one hot shard.
