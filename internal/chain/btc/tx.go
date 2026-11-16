@@ -75,15 +75,19 @@ func (a *Adapter) Broadcast(ctx context.Context, s chain.SignedTx) (string, erro
 		return "", fmt.Errorf("btc: decode raw transaction: %w", err)
 	}
 	txid := tx.TxHash().String()
-	var ownerKind, ownerID string
+	var ownerKind, ownerID, attemptKind string
 	var fee int64
-	err := a.pool.QueryRow(ctx, `UPDATE btc_attempts SET broadcast_at = COALESCE(broadcast_at, now()), raw = $3, last_sent_at = now() WHERE chain=$1 AND txid=$2 RETURNING owner_kind, owner_id, fee`,
-		a.cfg.Chain, txid, s.Raw).Scan(&ownerKind, &ownerID, &fee)
+	err := a.pool.QueryRow(ctx, `UPDATE btc_attempts SET broadcast_at = COALESCE(broadcast_at, now()), raw = $3, last_sent_at = now() WHERE chain=$1 AND txid=$2 RETURNING owner_kind, owner_id, fee, kind`,
+		a.cfg.Chain, txid, s.Raw).Scan(&ownerKind, &ownerID, &fee, &attemptKind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("btc: %s is not a transaction this cell built", txid)
 	}
 	if err != nil {
 		return "", err
+	}
+	// What the node refuses about a cancel is kept apart from what it refuses about a send (cancelKind).
+	if attemptKind == "cancel" {
+		ownerKind = cancelKind(ownerKind)
 	}
 	h, serr := a.send(ctx, txid, s.Raw)
 	if serr == nil {
@@ -267,6 +271,16 @@ func (a *Adapter) Outcome(ctx context.Context, ownerKind, ownerID string) (chain
 	rf, err := a.refusalsOf(ctx, a.pool, ownerKind, ownerID)
 	if err != nil {
 		return chain.Outcome{}, err
+	}
+	// An owner on its cancel track is watched through the cancel's refusals (BuildCancel): they are what its replacements are about.
+	var cancelling bool
+	if err := a.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM btc_refusals WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3)`, a.cfg.Chain, cancelKind(ownerKind), ownerID).Scan(&cancelling); err != nil {
+		return chain.Outcome{}, err
+	}
+	if cancelling {
+		if rf, err = a.refusalsOf(ctx, a.pool, cancelKind(ownerKind), ownerID); err != nil {
+			return chain.Outcome{}, err
+		}
 	}
 	out.FeeRefusals, out.Refusal = rf.FeeRefusals, rf.Other
 	inBlock := false

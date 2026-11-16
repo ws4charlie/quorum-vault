@@ -92,9 +92,9 @@ func (a *Adapter) recordRefusal(ctx context.Context, ownerKind, ownerID string, 
 	return err
 }
 
-// forgetRefusals removes the row of an owner that is settled or released.
+// forgetRefusals removes the rows of an owner (its own and its cancel's) that is settled or released.
 func (a *Adapter) forgetRefusals(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) error {
-	_, err := tx.Exec(ctx, `DELETE FROM btc_refusals WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3`, a.cfg.Chain, ownerKind, ownerID)
+	_, err := tx.Exec(ctx, `DELETE FROM btc_refusals WHERE chain=$1 AND owner_kind IN ($2, $4) AND owner_id=$3`, a.cfg.Chain, ownerKind, ownerID, cancelKind(ownerKind))
 	return err
 }
 
