@@ -69,6 +69,16 @@ func DefaultLibPath() string {
 	return candidates[0]
 }
 
+// SoftHSMConf is the one rule for which SoftHSM config to use: SOFTHSM2_CONF
+// when it is set (a test lane or a developer's own store), else the repo-local
+// config (RepoSoftHSMConf), else "". Harnesses that start subprocesses use it.
+func SoftHSMConf() string {
+	if c := os.Getenv("SOFTHSM2_CONF"); c != "" {
+		return c
+	}
+	return RepoSoftHSMConf()
+}
+
 // RepoSoftHSMConf returns the absolute path of the repo-local SoftHSM config
 // (<repo root>/data/softhsm/softhsm2.conf, written by scripts/setup-softhsm.sh)
 // if it exists, else "". The repo root is the nearest ancestor of the working
@@ -105,7 +115,7 @@ func LoadLib(path string) (*Lib, error) {
 		return l, nil
 	}
 	if os.Getenv("SOFTHSM2_CONF") == "" {
-		if conf := RepoSoftHSMConf(); conf != "" {
+		if conf := SoftHSMConf(); conf != "" {
 			os.Setenv("SOFTHSM2_CONF", conf)
 		}
 	}

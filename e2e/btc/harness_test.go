@@ -472,7 +472,7 @@ func (s *system) spawnEnv(name string, env []string, args ...string) *proc {
 		s.t.Fatal(err)
 	}
 	cmd := exec.Command(filepath.Join(binDir, name), args...)
-	cmd.Env = append(append(os.Environ(), "SOFTHSM2_CONF="+hsm.RepoSoftHSMConf()), env...)
+	cmd.Env = append(append(os.Environ(), "SOFTHSM2_CONF="+hsm.SoftHSMConf()), env...)
 	cmd.Stdout, cmd.Stderr = lf, lf
 	mpcstack.Guard(cmd)
 	if err := cmd.Start(); err != nil {
