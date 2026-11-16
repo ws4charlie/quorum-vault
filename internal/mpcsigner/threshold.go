@@ -256,6 +256,9 @@ func (t *thresholdCore) call(ctx context.Context, req *pb.SignRequest) (resp *pb
 			}
 			last = classify(err)
 			var e *Error
+			if errors.As(last, &e) && st.pair != "" && t.cfg.Router != nil {
+				t.cfg.Router.NoteSignFailure(st.pair, e.Kind) // a count for the monitoring; nothing here reads it back
+			}
 			if !errors.As(last, &e) || !e.SignerUnavailable() {
 				return nil, step{}, calls, last // refused, cryptographic, frozen, internal: final, nobody else is asked
 			}

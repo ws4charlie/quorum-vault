@@ -76,6 +76,8 @@ type Router struct {
 	eff      Pair
 	prefErr  bool
 	degraded bool
+
+	fails *failureCounts // failed sign calls by pair and kind (read-only metrics)
 }
 
 func NewRouter(cfg RouterConfig) *Router {
@@ -83,7 +85,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	if lg == nil {
 		lg = slog.Default()
 	}
-	return &Router{cfg: cfg, log: lg, pref: PairAB, eff: PairAB}
+	return &Router{cfg: cfg, log: lg, pref: PairAB, eff: PairAB, fails: newFailureCounts()}
 }
 
 func (r *Router) usable(p Pair) bool { return r.cfg.Health == nil || r.cfg.Health.PairUsable(p) }
@@ -179,6 +181,7 @@ func (r *Router) WriteMetrics(ctx context.Context, w io.Writer, m *Monitor) {
 	fmt.Fprintln(w, "# HELP qv_mpc_route_degraded 1 when the effective pair is not the preferred one.")
 	fmt.Fprintln(w, "# TYPE qv_mpc_route_degraded gauge")
 	fmt.Fprintf(w, "qv_mpc_route_degraded %d\n", b2i(p.Effective != p.Preferred))
+	r.writeFailureMetrics(w)
 	if m != nil {
 		m.writeMetrics(w)
 	}
