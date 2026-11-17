@@ -61,6 +61,10 @@ func OwnerTrack(o Owner) Track {
 // CancelTrack is the track of the cancel that frees the owner's nonce.
 func CancelTrack(o Owner) Track { return Track("cancel:" + o.Kind + ":" + o.ID) }
 
+// CPFPTrack is the track of the CPFP child that pulls the owner's stuck send in. Its sign jobs are "<track>:r<n>", the n-th child or bump of the child;
+// the intent's ID is the track itself, so every bump of the child is the same intent for the signing zone.
+func CPFPTrack(o Owner) Track { return Track("cpfp:" + o.Kind + ":" + o.ID) }
+
 // FirstJob is the ID of the track's first job.
 func (t Track) FirstJob() string { return string(t) + ":a1" }
 
@@ -307,6 +311,45 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 	return id, err
 }
 
+// EnqueueCPFP builds the owner's CPFP child (n = 1) or the n-th bump of it, and enqueues it as the n-th job of the CPFP track. The intent is a cpfp of the
+// owner's own partition with no approval: the signing zone checks that the child spends the change of a send it signed, to the same shard, within its
+// package fee caps. It does nothing if that job already exists (a repeat after a crash). A chain without CPFP returns "" and no error.
+func (s *Service) EnqueueCPFP(ctx context.Context, o Owner, n int) (string, error) {
+	b, ok := s.Chain.(chain.CPFPBuilder)
+	if !ok {
+		return "", nil
+	}
+	t := CPFPTrack(o)
+	id := t.Replacement(n)
+	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		var have bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sign_jobs WHERE id=$1)`, id).Scan(&have); err != nil {
+			return err
+		}
+		if have {
+			return nil
+		}
+		u, err := b.BuildCPFP(ctx, tx, o.Kind, o.ID)
+		if err != nil {
+			return err
+		}
+		res, err := s.Chain.Reservation(ctx, tx, o.Kind, o.ID)
+		if err != nil {
+			return err
+		}
+		intent := signjob.Intent{Kind: "cpfp", ID: string(t), PartitionID: o.PartitionID, Chain: s.Cfg.Chain, Asset: s.Cfg.Native, To: res.Account, Amount: "0"}
+		ib, err := json.Marshal(intent)
+		if err != nil {
+			return err
+		}
+		return EnqueueUnsigned(ctx, tx, id, o.PartitionID, u, ib, nil)
+	})
+	if errors.Is(err, chain.ErrNotSupported) {
+		return "", nil
+	}
+	return id, err
+}
+
 // Attempt states, as the workflows see them. The values are recorded in workflow histories: never change them.
 const (
 	AttemptNone      = "none"      // nothing was ever broadcast for the owner
@@ -328,6 +371,8 @@ type AttemptOutcome struct {
 	// count as replacements, and the last refusal that a higher fee does not cure.
 	FeeRefusals int
 	Refusal     string
+	// Child: a CPFP child of the owner's newest send was broadcast and is not decided; the send is pulled in by it, not replaced.
+	Child bool
 }
 
 // AttemptState looks at all attempts through the chain cell (chain.Adapter.Outcome) and names the result as the
@@ -352,7 +397,7 @@ func (s *Service) AttemptState(ctx context.Context, o Owner) (AttemptOutcome, er
 	if oc.Attempts == 0 {
 		return AttemptOutcome{State: AttemptNone}, nil
 	}
-	return AttemptOutcome{State: AttemptPending, FeeRefusals: oc.FeeRefusals, Refusal: oc.Refusal}, nil
+	return AttemptOutcome{State: AttemptPending, FeeRefusals: oc.FeeRefusals, Refusal: oc.Refusal, Child: oc.Child}, nil
 }
 
 // ReservationOpen reports whether the owner still holds something on the chain side that is not final. While it

@@ -61,6 +61,21 @@ ALTER TABLE exclusive_claims ADD COLUMN IF NOT EXISTS pin text NOT NULL DEFAULT 
 ALTER TABLE signed_digests ADD COLUMN IF NOT EXISTS tx_identity text;
 CREATE INDEX IF NOT EXISTS signed_digests_identity ON signed_digests (tx_identity) WHERE tx_identity IS NOT NULL;
 
+-- The change of a transaction the zone signed (Bitcoin), as the zone itself parsed it: the facts a CPFP child is judged against (its size and fee, which output is
+-- the change and what it holds). One row per transaction identity; written when the transaction's first digest is reserved, only for the intents that keep a
+-- change (a withdrawal, a hot-to-cold move, a batch).
+CREATE TABLE IF NOT EXISTS signed_parents (
+    chain        text NOT NULL,
+    txid         text NOT NULL,
+    intent_id    text NOT NULL REFERENCES signed_intents (intent_id),
+    partition_id text NOT NULL,
+    vsize        bigint NOT NULL,
+    fee          bigint NOT NULL,
+    change_vout  integer NOT NULL,
+    change_value bigint NOT NULL,
+    PRIMARY KEY (chain, txid)
+);
+
 -- Upgrade of a guard database written by the nonce-only schema. Idempotent, and a no-op on a fresh database.
 -- An EVM claim is "<sender>#<nonce>", the sender in the form the codec reports (checksum case).
 UPDATE signed_intents SET claims = ARRAY[sender || '#' || nonce::text] WHERE claims IS NULL AND nonce IS NOT NULL;

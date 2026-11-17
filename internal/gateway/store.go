@@ -222,6 +222,23 @@ func (t *GuardTx) CancelOutputs(ctx context.Context, batchID string) ([]string, 
 	return out, rows.Err()
 }
 
+// Parent returns what the zone recorded about the change of the transaction txid, or nil if it signed none with a change.
+func (t *GuardTx) Parent(ctx context.Context, txid string) (*ParentRecord, error) {
+	var r ParentRecord
+	var vs, fee, cv int64
+	var vout int32
+	err := t.tx.QueryRow(ctx, `SELECT intent_id, partition_id, vsize, fee, change_vout, change_value FROM signed_parents WHERE chain=$1 AND txid=$2`, t.chain, txid).
+		Scan(&r.IntentID, &r.PartitionID, &vs, &fee, &vout, &cv)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.TxID, r.VSize, r.Fee, r.ChangeVout, r.ChangeValue = txid, uint64(vs), uint64(fee), uint32(vout), uint64(cv)
+	return &r, nil
+}
+
 // Release is everything recorded when a digest is reserved, before the signer
 // runs. Signature stays nil until Guard.Finish stores it.
 type Release struct {
@@ -243,6 +260,8 @@ type Release struct {
 	NewIntent   bool      // false: another signature for an intent already recorded
 	NewClaims   []string  // claims nobody holds yet, taken by this intent
 	TakeClaims  []string  // a cancel taking over the claims of a different intent
+	// Parent, when set, is recorded as the change of the transaction Identity (see ParentFacts).
+	Parent *ParentFacts
 	// Members are the withdrawals of a batch, recorded as rows of their own when the batch is first reserved (NewIntent).
 	Members []MemberRelease
 }
@@ -313,6 +332,12 @@ func (t *GuardTx) Record(ctx context.Context, r Release) error {
 	if _, err := t.tx.Exec(ctx, `INSERT INTO signed_digests (digest, intent_id, fees, payload_hash, tx_identity, signature, reserved_at, signed_at)
 		VALUES ($1,$2,$3::numeric[],$4,$5,$6,$7,NULL)`, r.Digest, r.IntentID, fees, r.PayloadHash, identity, r.Signature, r.At); err != nil {
 		return fmt.Errorf("record digest: %w", err)
+	}
+	if r.Parent != nil && r.Identity != "" {
+		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_parents (chain, txid, intent_id, partition_id, vsize, fee, change_vout, change_value) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			ON CONFLICT DO NOTHING`, t.chain, r.Identity, r.IntentID, r.PartitionID, int64(r.Parent.VSize), int64(r.Parent.Fee), int32(r.Parent.ChangeVout), int64(r.Parent.ChangeValue)); err != nil {
+			return fmt.Errorf("record parent: %w", err)
+		}
 	}
 	for _, c := range r.TakeClaims {
 		if _, err := t.tx.Exec(ctx, `UPDATE exclusive_claims SET intent_id=$3, kind=$4 WHERE chain=$1 AND claim=$2`, t.chain, c, r.IntentID, r.Kind); err != nil {

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
@@ -204,6 +205,12 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 				}
 			}
 		}
+		if intent.Kind == "cpfp" {
+			// A child is judged against what this zone itself signed, at every attempt (a bump of the child is judged again against the same parent).
+			if err := d.checkCPFP(ctx, gt, codec, u, intent, info); err != nil {
+				return err
+			}
+		}
 
 		// 4. Policy. Caps and rates are admitted once per intent; a known
 		// intent (resubmission, replacement) is not counted again.
@@ -214,12 +221,42 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 		// 5. Replay guard.
 		rel := Release{IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
 			Sender: info.Sender, PartitionID: intent.PartitionID, Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: guardKey, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
+		if intent.Kind == "withdrawal" || intent.Kind == "to-cold" {
+			rel.Parent = info.Parent // kinds that keep a change: a child may pull them in later
+		}
 		return d.admit(ctx, gt, codec, job, intent, rec, &rel, info, key, v, arec, now)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return v, nil
+}
+
+// checkCPFP is the rule of a child that pulls a stuck send in: the codec judges it against the guard's records of the transactions the zone signed,
+// by the identity of each transaction the child spends.
+func (d *Decider) checkCPFP(ctx context.Context, gt *GuardTx, codec ChainCodec, u chain.UnsignedTx, i signjob.Intent, info TxInfo) error {
+	cc, ok := codec.(CPFPCodec)
+	if !ok {
+		return reject(ReasonIntent, "chain %q does not sign cpfp children", i.Chain)
+	}
+	parents := map[string]ParentRecord{}
+	for _, claim := range info.Claims {
+		txid, _, _ := strings.Cut(claim, ":")
+		if _, seen := parents[txid]; seen {
+			continue
+		}
+		rec, err := gt.Parent(ctx, txid)
+		if err != nil {
+			return err
+		}
+		if rec != nil {
+			parents[txid] = *rec
+		}
+	}
+	if err := cc.CheckCPFP(u, i, parents); err != nil {
+		return reject(ReasonCPFP, "%v", err)
+	}
+	return nil
 }
 
 // admit is step 5 and 6a for one job, inside the guard transaction: the replay rules against what the guard has recorded, then either the stored
@@ -287,7 +324,7 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 		return i, reject(ReasonIntent, "intent has no id")
 	}
 	switch i.Kind {
-	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate", sol.KindNonceSetup, sol.KindNonceClose:
+	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate", "cpfp", sol.KindNonceSetup, sol.KindNonceClose:
 	default:
 		return i, reject(ReasonIntent, "intent kind %q", i.Kind)
 	}
@@ -466,6 +503,13 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 		if valid == 0 {
 			return reject(ReasonApprovals, "a nonce close needs an operator approval")
 		}
+		if !codec.OwnsSender(info.Sender) {
+			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
+		}
+	case "cpfp":
+		// Needs no approval: the chain verifier refused anything but a child that spends the shard's own coins back to the shard, and checkCPFP that one of them
+		// is the change of a send this zone signed and that the pair stays within the fee caps. The money stays where it is; at most the room under the
+		// caps is paid in fee, once per parent (the change is claimed by one intent). Approvals are ignored.
 		if !codec.OwnsSender(info.Sender) {
 			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
 		}

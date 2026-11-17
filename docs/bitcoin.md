@@ -19,11 +19,23 @@ Each send keeps enough in its change to be raised up to the fee cap, so a stuck 
 | Situation | Result |
 |---|---|
 | Stuck | Replaced by a transaction that spends the same coins for a higher fee, paid from the change |
+| Replacements used up, or the next fee is over the caps, and the transaction still does not confirm (CPFP on) | A child spends its change back to the hot wallet and pays for both |
 | No change to pay from (a transaction made before the reserve existed) | An alert; the withdrawal keeps waiting |
 | One input refused after another was signed | A cancel spends the same coins back to the hot wallet |
 | The coins were spent by something we did not make | The withdrawal is parked with an alert |
 
 A replacement the node refuses for a fee that is too low is followed by one that pays more than the highest fee refused so far, even after a restart. A cancel does the same: if it is refused or stays unmined, the next cancel pays more than every earlier attempt and every refused cancel. Both stop at the fee caps, with one alert, and nothing is voided because of a cap.
+
+## A child can pull a stuck send in
+Replacing a transaction needs a new signature for all of it and is limited to a few attempts. A second way out is a child: a new transaction that spends the stuck one's change back to the same hot wallet and pays a fee high enough for the pair to be worth mining. It is off by default and has to be switched on with a waiting time. It starts once the replacements are used up, or the next one would be over the caps, and the transaction has stayed unconfirmed for that time. It works for a single withdrawal and for a whole batch.
+
+It does not go beyond the caps. The pair together may not pay more than one transaction of their combined size may, and the child alone stays under the usual limits. A transaction that already pays the rate ceiling therefore leaves no room for a child: both are held to the same ceiling, and the pair cannot pay a higher rate than its first part. The core says so and does not build one.
+
+The signing zone needs no approval for a child, because it can only keep the money where it is. It signs only a child that has no payment, spends the change of a transaction it signed itself, pays back to that hot wallet, and stays within its own caps for the pair, computed from its own record of the parent. A second child of the same transaction, or a child of a change something else already spent, is refused.
+
+- **One child per transaction.** The child may be replaced by a child that pays more. A child never has a child.
+- **The send is not replaced any more** once its child was sent, because that would orphan it. A cancel is still possible: it replaces both, so it must pay more than the two together.
+- **Booking.** The child's fee is a cost of the withdrawal or batch it pulled in, booked with it once both confirm. Its output is the hot wallet's coin that takes the place of the change. If a cancel confirms instead, only the cancel's fee is booked.
 
 ## Batches pay several withdrawals in one transaction
 Batching is off by default. When an operator turns it on for a hot wallet, approved withdrawals wait in a queue, oldest approval first, and one transaction pays many of them. That saves fees, because the inputs and the change are paid for once.

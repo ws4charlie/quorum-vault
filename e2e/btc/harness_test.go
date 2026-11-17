@@ -426,6 +426,10 @@ type opts struct {
 	fallbackRate uint64
 	stuckAfter   string
 	lease        string
+	// maxReplacements is how many fee-bumped replacements a stuck send gets before RBF is exhausted (default 5); cpfpAfter how long after that a CPFP child
+	// takes over (default: no CPFP).
+	maxReplacements int
+	cpfpAfter       string
 	// sweep turns the sweep planner on (it needs withdraw: the gateway signs sweeps). By default the rule's floor is so high that nothing is ever
 	// swept, so tests of other things keep their outputs where they are. minSweep is the floor in satoshis, sweepK the fee multiple, maxInputs the
 	// input cap of a transaction, spendConf the spend depth (default 2).

@@ -788,6 +788,8 @@ type NonceResult struct {
 	// mempool and does not count against the limit on replacements; any other refusal is an ALERT. Absent in older histories: zero.
 	FeeRefusals int
 	Refusal     string
+	// Child: a CPFP child of the owner's newest send is in flight (Bitcoin). Absent in older histories: false.
+	Child bool
 }
 
 // WaitNonce polls every attempt of the owner for up to wait and returns
@@ -808,7 +810,7 @@ func (a *Activities) WaitNonce(ctx context.Context, o OwnerArg, wait time.Durati
 			return NonceResult{State: n.State}, nil
 		}
 		if time.Now().After(deadline) {
-			return NonceResult{State: n.State, FeeRefusals: n.FeeRefusals, Refusal: n.Refusal}, nil
+			return NonceResult{State: n.State, FeeRefusals: n.FeeRefusals, Refusal: n.Refusal, Child: n.Child}, nil
 		}
 		activity.RecordHeartbeat(ctx)
 		select {
@@ -882,6 +884,19 @@ func (a *Activities) ConsumedInfo(ctx context.Context, o OwnerArg) (string, erro
 func (a *Activities) EnqueueReplacement(ctx context.Context, o OwnerArg, track string, n int) (string, error) {
 	id, err := a.D.Svc.EnqueueReplacement(ctx, o.owner(), custody.Track(track), n)
 	return id, nonRetry(err)
+}
+
+// EnqueueCPFP builds and enqueues the n-th CPFP child (or bump of it) that pulls the owner's stuck send in (Bitcoin).
+func (a *Activities) EnqueueCPFP(ctx context.Context, o OwnerArg, n int) (string, error) {
+	id, err := a.D.Svc.EnqueueCPFP(ctx, o.owner(), n)
+	return id, nonRetry(err)
+}
+
+// BroadcastCPFP sends a signed CPFP child. It is not recorded as the owner's transaction: the child pays for the owner's own, it does not replace it.
+func (a *Activities) BroadcastCPFP(ctx context.Context, o OwnerArg, job string) error {
+	Hit(o.Kind, "cpfp_after_sign")
+	_, err := a.D.Svc.SubmitJob(ctx, job, o.owner())
+	return err
 }
 
 // EnqueueCancel builds and enqueues the cancel that frees what the owner reserved (EVM: its nonce). It returns "" on a
