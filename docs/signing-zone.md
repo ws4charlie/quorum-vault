@@ -10,10 +10,17 @@ The signing zone is the only part of QuorumVault that can move money. Think of i
 The core writes a job: what the approvers agreed to, in plain words (who gets how much of what), the transaction to sign, and the approvers' signatures. The zone fetches jobs itself; nothing outside can push one in.
 
 ## Every job is checked before any key signs
-1. Enough approvers signed it, and none of them is the person who asked.
+1. Enough different people approved it, and none of them is the person who asked. The signed statement names the requester, so the zone checks this itself; it does not take the core's word.
 2. The transaction, read back, does exactly what the approvers agreed to, and nothing more.
 3. The destination is one the zone's own rules allow.
 4. The same job was never signed with different content.
+
+## Who asked
+Every withdrawal, alone or inside a batch, carries the identity of the person who requested it, and approvers sign it with the rest. The zone refuses a job with no requester, and a job any of whose counted approvers is that person. Two keys that belong to one person count as one approver.
+
+Jobs nobody requests carry no requester, and the zone refuses one that has it: sweeps, consolidations, moves to cold, rebalances, cancels and nonce setup or close. They need no person's request: the first five are limited by the zone's own rules, and nonce work needs an operator's approval.
+
+An approval made before this rule (the older statement format) no longer counts. A job still carrying one is refused; see the [upgrade runbook](runbooks/intent-v2-upgrade.md).
 
 ## Two checkers that don't trust each other
 Parties B and C each have their own checker, with their own rules and their own records. Someone who takes over the gateway, party A or the business database still can't get a payment nobody approved.

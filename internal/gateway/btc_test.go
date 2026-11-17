@@ -227,7 +227,7 @@ func (b *btcH) mustRefuse(j signjob.Job, code string) {
 }
 
 func wdIntent(id, to string, amount uint64) signjob.Intent {
-	return signjob.Intent{Kind: "withdrawal", ID: id, Asset: "BTC", To: to, Amount: fmt.Sprint(amount)}
+	return signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: id, Asset: "BTC", To: to, Amount: fmt.Sprint(amount)}
 }
 
 // twoInputs is the transaction every guard test builds on: two inputs of the partition's own shard, of 150_000 sats, paying 100_000 to dest and 100_000 change.
@@ -590,6 +590,9 @@ func TestBTCFirstSendMustKeepTheBumpReserve(t *testing.T) {
 		}
 		in := wdIntent("short-"+kind, to, 100_000)
 		in.Kind = kind
+		if kind != "withdrawal" {
+			in.RequestedBy = "" // only a withdrawal has a requester
+		}
 		b.mustRefuse(b.jobs("s-"+kind, in, short, "auto")[0], ReasonTx)
 		if d := b.run(b.jobs("s2-"+kind, in, short, "auto")[0]); !strings.Contains(d.Reason, "the zone needs at least 33824") || !strings.Contains(d.Reason, btc.CapMismatchNote) {
 			t.Fatalf("%s: refused for another reason: %q", kind, d.Reason)

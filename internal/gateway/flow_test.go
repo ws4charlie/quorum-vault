@@ -17,7 +17,7 @@ func TestHappyWithdrawalsAndSweep(t *testing.T) {
 	if d.Outcome != OutcomeSigned {
 		t.Fatal(d.Outcome)
 	}
-	tin := signjob.Intent{Kind: "withdrawal", ID: "w-tok", Asset: "USDT", To: addrUser.Hex(), Amount: "2000000"}
+	tin := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-tok", Asset: "USDT", To: addrUser.Hex(), Amount: "2000000"}
 	h.mustSign(h.job("hw2", tin, h.tokenTx(addrUser, 2000000, 1), "alice", "bob"))
 	spec, from := h.sweepTx("cust-9", 2)
 	sin := signjob.Intent{Kind: "sweep", ID: "s-ok", Asset: "ETH", From: from.Hex(), To: addrDest.Hex(), Amount: "7"}
@@ -35,7 +35,7 @@ func TestStepOrder(t *testing.T) {
 	j.Intent = []byte(`{"Kind":"mint"}`)
 	h.mustReject(j, ReasonIntent)
 	// Step 2 before step 3: a bad tx with no approvals reports tx_mismatch.
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-so3", Asset: "ETH", To: addrUser.Hex(), Amount: "1"}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-so3", Asset: "ETH", To: addrUser.Hex(), Amount: "1"}
 	h.mustReject(h.job("so3", in, h.ethTx(addrEvil, 1, 0)), ReasonTx)
 	// Step 3 before step 4: over the cap and unapproved reports approval_invalid.
 	h.mustReject(h.withdrawal("so4", addrUser, 9999, 0), ReasonApprovals)

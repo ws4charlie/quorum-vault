@@ -247,7 +247,7 @@ func TestAttackExpiredApprovedIntentReenqueued(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 	// Approved, then the customer cancelled before signing: nothing was signed, so the guard has no record.
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-old", Asset: "ETH", To: addrEvil.Hex(), Amount: "100", NotAfter: h.clock().Add(time.Hour).Unix()}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-old", Asset: "ETH", To: addrEvil.Hex(), Amount: "100", NotAfter: h.clock().Add(time.Hour).Unix()}
 	old := h.job("ex0", in, h.ethTx(addrEvil, 100, 0), "auto")
 	h.put(old)
 	h.biz.Exec(ctx, `DELETE FROM sign_jobs`) // the hold was voided and the job dropped
@@ -264,7 +264,7 @@ func TestIntentNotAfterBounds(t *testing.T) {
 	h := newHarness(t)
 	now := h.clock()
 	mk := func(id string, na int64, nonce uint64) signjob.Job {
-		in := signjob.Intent{Kind: "withdrawal", ID: "w-" + id, Asset: "ETH", To: addrUser.Hex(), Amount: "100", NotAfter: na}
+		in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-" + id, Asset: "ETH", To: addrUser.Hex(), Amount: "100", NotAfter: na}
 		h.noExpiry = na == 0
 		defer func() { h.noExpiry = false }()
 		return h.job(id, in, h.ethTx(addrUser, 100, nonce), "auto")

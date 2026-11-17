@@ -334,7 +334,7 @@ func mustJSON(v any) []byte {
 }
 
 func (h *harness) withdrawal(id string, to common.Address, amount int64, nonce uint64, approvers ...string) signjob.Job {
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-" + id, Asset: "ETH", To: to.Hex(), Amount: fmt.Sprint(amount)}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-" + id, Asset: "ETH", To: to.Hex(), Amount: fmt.Sprint(amount)}
 	return h.job(id, in, h.ethTx(to, amount, nonce), approvers...)
 }
 

@@ -10,7 +10,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **M-of-N is simulated.** The cold signer checks operator signatures in software; a hardware HSM would enforce it itself.
 - **All parties run on one machine, run by one team.** The cryptographic separation is real. The operational separation is not.
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
-- **Identity is real in the API, simulated in the tests.** The core API needs an OpenID Connect token and uses its `sub` as the actor (see [identity](identity)). The test users and the dev Keycloak are test data, the automated tests log in without a passkey, and no real hardware key has been tried. `X-Actor` works only under a dev flag. There is still no UI, and the idle limit is enforced by the identity provider, not by the core.
+- **Identity is real in the API, simulated in the tests.** The core API needs an OpenID Connect token and uses its `sub` as the actor (see [identity](identity)). The test users and the dev Keycloak are test data, the automated tests log in without a passkey, and no real hardware key has been tried. `X-Actor` works only under a dev flag. There is still no UI, and the idle limit is enforced by the identity provider, not by the core. The signing zone also refuses an approval by the requester, and the requester it sees is the verified `sub` the core passes.
 - **No load test.** Numbers were measured on a laptop, not on target hardware. See [measurements](measurements).
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **Bitcoin has one hot shard per pool**, and so no rebalance.

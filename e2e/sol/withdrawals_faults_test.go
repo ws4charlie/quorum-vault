@@ -50,7 +50,7 @@ func (s *wdSys) cancelMsg(nonceIdx int, value [32]byte, price uint64) []byte {
 }
 
 func (s *wdSys) wdIntent(id string, to [32]byte, amount uint64) signjob.Intent {
-	return signjob.Intent{Kind: "withdrawal", ID: id, PartitionID: s.partSOL(), Chain: s.chain, Asset: "SOL", To: sol.Address(to), Amount: fmt.Sprint(amount),
+	return signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: id, PartitionID: s.partSOL(), Chain: s.chain, Asset: "SOL", To: sol.Address(to), Amount: fmt.Sprint(amount),
 		NotAfter: time.Now().Add(time.Hour).Unix()}
 }
 

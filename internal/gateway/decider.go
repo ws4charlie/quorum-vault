@@ -178,6 +178,12 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 	arec.intent = &intentFacts{ID: intent.ID, Kind: intent.Kind, Asset: intent.Asset, Amount: amount.String(), Sender: info.Sender,
 		Claims: info.Claims, IntentHash: hash[:]}
 	arec.approvers = approvers
+	if err := checkRequesterField(intent); err != nil {
+		return nil, err
+	}
+	if err := d.checkRequester(intent, approvers); err != nil {
+		return nil, err
+	}
 	if intent.Kind == "withdrawal" && valid == 0 {
 		return nil, reject(ReasonApprovals, "no valid approval from a configured, enabled approver")
 	}
@@ -337,9 +343,39 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 	return i, nil
 }
 
-// countApprovals counts distinct enabled, configured actors whose Ed25519
+// checkRequesterField is the shape rule of requested_by: a withdrawal (alone or as a batch member) names the person who asked for it; every other
+// kind is started by the system or by an operator's own approval and carries none, so a requester there is a sign of a confused or forged intent.
+// An intent written before v2 has no requester: it is refused here with that reason, and its approvals (over the v1 hash) would not verify anyway.
+func checkRequesterField(i signjob.Intent) error {
+	if i.Kind == "withdrawal" {
+		if i.RequestedBy == "" {
+			return reject(ReasonRequester, "withdrawal %s has no requested_by (an intent from before intent v2: see docs/runbooks/intent-v2-upgrade.md)", i.ID)
+		}
+		return nil
+	}
+	if i.RequestedBy != "" {
+		return reject(ReasonRequester, "a %s intent has no requester, but requested_by is %q", i.Kind, i.RequestedBy)
+	}
+	return nil
+}
+
+// checkRequester refuses a job one of whose counted approvers is the person who requested it. The comparison is on identity (the person), not on
+// the key's name, so a person with two keys cannot approve through the second.
+func (d *Decider) checkRequester(i signjob.Intent, approvers []string) error {
+	if i.RequestedBy == "" {
+		return nil
+	}
+	for _, a := range approvers {
+		if d.cfg.Approvers[a].Identity == i.RequestedBy {
+			return reject(ReasonRequester, "%s: approver %q is the requester %q: a requester cannot approve their own withdrawal", i.ID, a, i.RequestedBy)
+		}
+	}
+	return nil
+}
+
+// countApprovals counts distinct enabled, configured people whose Ed25519
 // signature over hash verifies. Unknown or disabled actors, bad signatures and
-// repeats of one actor count for nothing.
+// repeats of one person (the same actor, or two keys of one identity) count for nothing.
 func (d *Decider) countApprovals(hash []byte, approvals []signjob.Approval) int {
 	return len(d.validApprovers(hash, approvals))
 }
@@ -350,11 +386,11 @@ func (d *Decider) validApprovers(hash []byte, approvals []signjob.Approval) []st
 	out := []string{}
 	for _, a := range approvals {
 		ap, ok := d.cfg.Approvers[a.Actor]
-		if !ok || !ap.Enabled || seen[a.Actor] {
+		if !ok || !ap.Enabled || seen[ap.Identity] {
 			continue
 		}
 		if len(a.Signature) == ed25519.SignatureSize && ed25519.Verify(ap.Key, hash, a.Signature) {
-			seen[a.Actor] = true
+			seen[ap.Identity] = true
 			out = append(out, a.Actor)
 		}
 	}
