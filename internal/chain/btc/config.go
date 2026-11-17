@@ -67,6 +67,8 @@ type Config struct {
 	// positive and at most SweepMaxFeeRate.
 	ConsolidateAbove      int
 	ConsolidateMaxFeeRate uint64
+	// MaxBatchOutputs is the most payments any hot shard's batch may carry (0: no batching). The fee caps must let a batch of that size reach MaxFeeRate.
+	MaxBatchOutputs int
 }
 
 // HotShardConfig is one hot shard: the partition it serves, its address and the path of its key below the account.
@@ -248,7 +250,7 @@ func (c Config) validated() (*validatedConfig, error) {
 	}
 	// Every send keeps a fee-bump reserve (reserve.go): the fee cap must let the largest transaction reach the rate ceiling. Batching adds its output
 	// limit here (the second size argument, 1 payment today).
-	if err := CheckFeeCaps("config", c.MaxTxFeeSats, c.MaxFeeRate, c.MaxInputs, 1); err != nil {
+	if err := CheckFeeCaps("config", c.MaxTxFeeSats, c.MaxFeeRate, c.MaxInputs, max(1, c.MaxBatchOutputs)); err != nil {
 		return nil, err
 	}
 	// The form of an address this config derives must belong to the network it names.

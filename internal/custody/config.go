@@ -172,6 +172,8 @@ type Config struct {
 	Family string // FamilyEVM or FamilyBTC
 	EVM    evm.Config
 	BTC    btc.Config // the btc family
+	// Batch is the batching settings of each hot partition of the btc family (absent: off).
+	Batch  map[string]Batching
 	SOL    sol.Config // the sol family
 	SOLHot []string   // the sol family: the hot shard addresses in shard order
 	// SweepBatch and CloseQuiet: see SOLFile.
@@ -302,12 +304,68 @@ type BTCFile struct {
 	// positive and not above sweep_max_fee_rate.
 	ConsolidateAbove      int    `json:"consolidate_above"`
 	ConsolidateMaxFeeRate uint64 `json:"consolidate_max_fee_rate"`
+	// Batching is the default for every hot shard: several withdrawals in one transaction. Off unless it says enabled. A shard may override it.
+	Batching *BatchingFile `json:"batching,omitempty"`
+}
+
+// BatchingFile is the batching settings of a Bitcoin hot shard. Enabled false (the default) keeps one transaction per withdrawal. When it is on,
+// a batch seals when the oldest withdrawal in the queue has waited max_wait since its approval, or when max_outputs are queued, whichever comes
+// first; max_wait 0 means one withdrawal per transaction, sealed at once (the same as off). max_in_flight is how many batches of the shard may be
+// sealed or signed and not yet confirmed or cancelled at one time (at least 1). Defaults when enabled: max_outputs 20, max_wait "10m", max_in_flight 1.
+type BatchingFile struct {
+	Enabled     bool   `json:"enabled"`
+	MaxOutputs  int    `json:"max_outputs"`
+	MaxWait     string `json:"max_wait"`
+	MaxInFlight int    `json:"max_in_flight"`
 }
 
 // BTCShardFile is one hot shard of the btc family.
 type BTCShardFile struct {
 	Address string   `json:"address"`
 	Path    []uint32 `json:"path"` // [1, index]
+	// Batching overrides the section's batching for this shard's partition.
+	Batching *BatchingFile `json:"batching,omitempty"`
+}
+
+// Batching is the validated batching settings of one hot partition.
+type Batching struct {
+	Enabled     bool
+	MaxOutputs  int
+	MaxWait     time.Duration
+	MaxInFlight int
+}
+
+// Active reports whether withdrawals of the partition go through the batch queue: batching is on and max_wait is above zero (max_wait 0 is one
+// withdrawal per transaction, as before).
+func (b Batching) Active() bool { return b.Enabled && b.MaxWait > 0 }
+
+const (
+	defaultBatchOutputs = 20
+	defaultBatchWait    = 10 * time.Minute
+)
+
+func (f *BatchingFile) build(where string, base Batching) (Batching, error) {
+	if f == nil {
+		return base, nil
+	}
+	b := Batching{Enabled: f.Enabled, MaxOutputs: f.MaxOutputs, MaxWait: defaultBatchWait, MaxInFlight: f.MaxInFlight}
+	if f.MaxWait != "" {
+		d, err := time.ParseDuration(f.MaxWait)
+		if err != nil || d < 0 {
+			return b, fmt.Errorf("custody: config: %s: max_wait %q is not a duration of zero or more", where, f.MaxWait)
+		}
+		b.MaxWait = d
+	}
+	if b.MaxOutputs == 0 {
+		b.MaxOutputs = defaultBatchOutputs
+	}
+	if b.MaxInFlight == 0 {
+		b.MaxInFlight = 1
+	}
+	if b.Enabled && (b.MaxOutputs < 1 || b.MaxInFlight < 1) {
+		return b, fmt.Errorf("custody: config: %s: max_outputs and max_in_flight must be at least 1", where)
+	}
+	return b, nil
 }
 
 // SOLFile is the sol family's section of the business config. The core holds only the account node (public key and chain code).
@@ -412,8 +470,22 @@ func (c *Config) buildBTC(cf ChainFile) error {
 		SpendConfirmations: b.SpendConfirmations, MaxInputs: b.MaxInputs, FallbackFeeRate: b.FallbackFeeRate, MaxFeeRate: b.MaxFeeRate,
 		MaxTxFeeSats: b.MaxTxFeeSats, SweepMaxFeeRate: b.SweepMaxFeeRate, SweepUrgentValue: b.SweepUrgentValue,
 		ConsolidateAbove: b.ConsolidateAbove, ConsolidateMaxFeeRate: b.ConsolidateMaxFeeRate}
+	base, err := b.Batching.build("batching", Batching{})
+	if err != nil {
+		return err
+	}
+	c.Batch = map[string]Batching{}
 	for i, h := range b.HotShards {
-		c.BTC.HotShards = append(c.BTC.HotShards, btc.HotShardConfig{PartitionID: c.PartitionKey(btc.Native, i).String(), Address: h.Address, Path: h.Path})
+		p := c.PartitionKey(btc.Native, i).String()
+		c.BTC.HotShards = append(c.BTC.HotShards, btc.HotShardConfig{PartitionID: p, Address: h.Address, Path: h.Path})
+		bs, err := h.Batching.build(fmt.Sprintf("hot shard %d batching", i), base)
+		if err != nil {
+			return err
+		}
+		c.Batch[p] = bs
+		if bs.Enabled {
+			c.BTC.MaxBatchOutputs = max(c.BTC.MaxBatchOutputs, bs.MaxOutputs) // the fee caps must reach the rate ceiling for the largest batch (Validate)
+		}
 	}
 	if err := c.BTC.Validate(); err != nil {
 		return fmt.Errorf("custody: config: %w", err)
@@ -943,3 +1015,6 @@ func (c *Config) buildRebalance(rf RebalanceFile) error {
 	}
 	return nil
 }
+
+// BatchingOf returns the batching settings of a hot partition (the zero value, off, when it has none).
+func (c *Config) BatchingOf(partitionID string) Batching { return c.Batch[partitionID] }

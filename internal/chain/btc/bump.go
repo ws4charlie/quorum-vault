@@ -103,7 +103,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	if ownerKind == OwnerKindConsolidate {
 		return a.buildConsolidateReplacement(ctx, tx, ownerID)
 	}
-	if ownerKind != "withdrawal" && ownerKind != "to-cold" {
+	if ownerKind != "withdrawal" && ownerKind != "to-cold" && ownerKind != OwnerKindBatch {
 		return chain.UnsignedTx{}, errLater
 	}
 	p, oldFee, err := a.lastSend(ctx, tx, ownerKind, ownerID)
@@ -145,7 +145,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 // BuildReplacement raises the cancel, not the send, and the cancel has its own fee floor (the highest fee the node refused for a cancel), so that a
 // refused or stuck cancel escalates like a send, within the same caps.
 func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
-	if ownerKind != "withdrawal" && ownerKind != "sweep" && ownerKind != "to-cold" && ownerKind != OwnerKindConsolidate {
+	if ownerKind != "withdrawal" && ownerKind != "sweep" && ownerKind != "to-cold" && ownerKind != OwnerKindConsolidate && ownerKind != OwnerKindBatch {
 		return chain.UnsignedTx{}, errLater
 	}
 	var n int

@@ -44,6 +44,10 @@ type Service struct {
 
 	// planHook, set by tests only, is called inside a cold planner pass at the named stage ("balance read": the hot balance is read, the open refills are not yet).
 	planHook func(stage string)
+
+	// Screen, when set, is the destination rule the core applies again to every withdrawal of a batch when the batch is sealed and again when it is
+	// built, before anything is signed (the signing zone applies its own). A withdrawal it refuses is removed from the batch and parked with an alert.
+	Screen func(ctx context.Context, w Withdrawal) error
 }
 
 // New returns a Service. Led defaults to the Postgres ledger.
@@ -62,6 +66,8 @@ var (
 	ErrExpired             = errors.New("custody: the approval window has passed")
 	ErrSweepFrozen         = errors.New("custody: sweeping is frozen")
 	ErrCursorMoved         = errors.New("custody: scan cursor moved")
+	ErrMemberRemoved       = errors.New("custody: a withdrawal that cannot be paid was taken out of the batch")
+	ErrBatchLocked         = errors.New("custody: the withdrawal is in a batch that was signed: cancel the whole batch, not one withdrawal")
 )
 
 // InTx runs fn in a transaction, retrying on Postgres deadlock (40P01) and

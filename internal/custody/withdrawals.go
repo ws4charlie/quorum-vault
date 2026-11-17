@@ -53,6 +53,7 @@ type Withdrawal struct {
 	FailureReason string             `json:"failure_reason,omitempty"`
 	JobID         string             `json:"job_id,omitempty"`
 	Fee           string             `json:"fee,omitempty"`
+	BatchID       string             `json:"batch_id,omitempty"`
 }
 
 // Owner returns the withdrawal as a transaction owner.
@@ -61,14 +62,14 @@ func (w Withdrawal) Owner() Owner {
 }
 
 const wdCols = `id, customer_id, chain, asset, to_address, amount::text, partition_id, status, COALESCE(tx_hash,''), requested_by,
-	COALESCE(not_after,0), approvals, hot_reserved, COALESCE(failure_reason,''), COALESCE(job_id,''), COALESCE(fee::text,'')`
+	COALESCE(not_after,0), approvals, hot_reserved, COALESCE(failure_reason,''), COALESCE(job_id,''), COALESCE(fee::text,''), COALESCE(batch_id,'')`
 
 func scanWd(row pgx.Row) (Withdrawal, error) {
 	var w Withdrawal
 	var amt string
 	var ap []byte
 	err := row.Scan(&w.ID, &w.Customer, &w.Chain, &w.Asset, &w.To, &amt, &w.PartitionID, &w.Status, &w.TxHash, &w.RequestedBy,
-		&w.NotAfter, &ap, &w.HotReserved, &w.FailureReason, &w.JobID, &w.Fee)
+		&w.NotAfter, &ap, &w.HotReserved, &w.FailureReason, &w.JobID, &w.Fee, &w.BatchID)
 	if err != nil {
 		return w, err
 	}

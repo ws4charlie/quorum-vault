@@ -40,13 +40,15 @@ func QueueFor(chain string) string { return DefaultTaskQueue + "-" + chain }
 
 // Error types the workflows branch on.
 const (
-	errExpired    = "expired"
-	errFrozen     = "sweep_frozen"
-	errNonceOpen  = "nonce_open"
-	errBadRequest = "bad_request"
-	errCannotBump = "cannot_bump" // no replacement or cancel can be built
-	errSweepFee   = "sweep_fee"   // the fee rate does not allow this sweep now
-	errNoOutputs  = "no_outputs"  // too few available outputs: retryable by waiting
+	errExpired       = "expired"
+	errFrozen        = "sweep_frozen"
+	errNonceOpen     = "nonce_open"
+	errBadRequest    = "bad_request"
+	errCannotBump    = "cannot_bump"    // no replacement or cancel can be built
+	errSweepFee      = "sweep_fee"      // the fee rate does not allow this sweep now
+	errNoOutputs     = "no_outputs"     // too few available outputs: retryable by waiting
+	errBatchLocked   = "batch_locked"   // a withdrawal in a signed batch cannot be cancelled alone
+	errMemberRemoved = "member_removed" // a withdrawal that cannot be paid was taken out of its batch: build again
 )
 
 // Deps are what activities need.
@@ -94,6 +96,10 @@ func nonRetry(err error) error {
 		typ = errSweepFee
 	case errors.Is(err, chain.ErrNotEnoughOutputs):
 		typ = errNoOutputs
+	case errors.Is(err, custody.ErrBatchLocked):
+		typ = errBatchLocked
+	case errors.Is(err, custody.ErrMemberRemoved):
+		typ = errMemberRemoved
 	case errors.Is(err, custody.ErrInvalid), errors.Is(err, ledger.ErrInsufficientFunds), errors.Is(err, ledger.ErrIdempotencyConflict):
 		typ = errBadRequest
 	default:
@@ -227,6 +233,8 @@ type WdState struct {
 	NotAfter int64
 	Part     string
 	Parked   bool
+	// Queued: the withdrawal belongs to the batch queue (Bitcoin batching). Absent in older histories: false.
+	Queued bool
 }
 
 // LoadWithdrawal reads the withdrawal.
@@ -239,8 +247,12 @@ func (a *Activities) LoadWithdrawal(ctx context.Context, id string) (WdState, er
 	if err != nil {
 		return WdState{}, err
 	}
+	queued, err := a.D.Svc.InBatchQueue(ctx, id)
+	if err != nil {
+		return WdState{}, err
+	}
 	return WdState{Status: w.Status, Asset: w.Asset, Amount: w.Amount.String(), Required: st.Required, Auto: st.Auto, Have: st.Have,
-		Expired: st.Expired, NotAfter: w.NotAfter, Part: w.PartitionID, Parked: w.Parked()}, nil
+		Expired: st.Expired, NotAfter: w.NotAfter, Part: w.PartitionID, Parked: w.Parked(), Queued: queued}, nil
 }
 
 // AutoApprove adds the worker's automated approval if the amount is in the lowest tier.
@@ -724,6 +736,8 @@ func killKind(jobID string) (string, string) {
 		return custody.OwnerKindRebalance, jobID
 	case len(jobID) > 7 && jobID[:7] == "consol:":
 		return custody.OwnerKindConsolidate, jobID
+	case len(jobID) > 6 && jobID[:6] == "batch:":
+		return custody.OwnerKindBatch, jobID
 	}
 	return "cancel", jobID
 }
@@ -759,6 +773,8 @@ func (a *Activities) RecordBroadcast(ctx context.Context, o OwnerArg, txHash str
 		return a.D.Svc.RecordRebalanceBroadcast(ctx, o.ID, txHash)
 	case custody.OwnerKindConsolidate:
 		return a.D.Svc.RecordConsolidationBroadcast(ctx, o.ID, txHash)
+	case custody.OwnerKindBatch:
+		return a.D.Svc.RecordBatchBroadcast(ctx, o.ID, txHash)
 	}
 	return fmt.Errorf("unknown owner kind %q", o.Kind)
 }
@@ -815,6 +831,8 @@ func (a *Activities) Park(ctx context.Context, o OwnerArg, reason string) error 
 		return a.D.Svc.ParkRebalance(ctx, o.ID, reason)
 	case custody.OwnerKindConsolidate:
 		return a.D.Svc.ParkConsolidation(ctx, o.ID, reason)
+	case custody.OwnerKindBatch:
+		return a.D.Svc.ParkBatch(ctx, o.ID, reason)
 	}
 	return a.D.Svc.ParkSweep(ctx, o.ID, reason)
 }
@@ -881,4 +899,99 @@ func (d Deps) queue() string {
 		return DefaultTaskQueue
 	}
 	return d.Queue
+}
+
+// ---- batches (Bitcoin) ----
+
+// EnqueueForBatch puts the approved withdrawal in its shard's batch queue; false: the partition does not batch.
+func (a *Activities) EnqueueForBatch(ctx context.Context, id string) (bool, error) {
+	return a.D.Svc.EnqueueForBatch(ctx, id)
+}
+
+// QueueTick reads where a queued withdrawal stands, voiding it first if its approval is about to lapse while it waits.
+func (a *Activities) QueueTick(ctx context.Context, id string) (custody.QueueState, error) {
+	st, err := a.D.Svc.QueueTick(ctx, id)
+	return st, nonRetry(err)
+}
+
+// PlanBatches seals a batch on every shard that is due. It returns how many it sealed.
+func (a *Activities) PlanBatches(ctx context.Context) (int, error) {
+	stop := heartbeating(ctx)
+	defer stop()
+	bs, err := a.D.Svc.PlanBatches(ctx, a.log())
+	return len(bs), err
+}
+
+// StartOpenBatches starts a Batch workflow for every unfinished batch that has none running.
+func (a *Activities) StartOpenBatches(ctx context.Context) (int, error) {
+	open, err := a.D.Svc.OpenBatches(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, b := range open {
+		if err := a.start(ctx, b.ID, BatchWorkflow, Input{ID: b.ID, T: a.D.T}); err != nil {
+			return 0, fmt.Errorf("start batch %s: %w", b.ID, err)
+		}
+	}
+	return len(open), nil
+}
+
+// BatchState is a batch as its workflow needs it.
+type BatchState struct {
+	Status string
+	Part   string
+	Parked bool
+}
+
+// LoadBatch reads the batch.
+func (a *Activities) LoadBatch(ctx context.Context, id string) (BatchState, error) {
+	b, err := a.D.Svc.GetBatch(ctx, id)
+	return BatchState{Status: b.Status, Part: b.PartitionID, Parked: b.Parked()}, err
+}
+
+// PrepareBatch takes out of a sealed batch the members that can no longer go; it returns how many remain (-1: it is not sealed any more).
+func (a *Activities) PrepareBatch(ctx context.Context, id string) (int, error) {
+	return a.D.Svc.PrepareBatch(ctx, id, a.log())
+}
+
+// BuildBatchJob builds the batch's transaction for the prefix the coins can fund and enqueues its sign job in one transaction.
+func (a *Activities) BuildBatchJob(ctx context.Context, id string) (string, error) {
+	job, err := a.D.Svc.BuildBatchJob(ctx, id)
+	if errors.Is(err, custody.ErrMemberRemoved) {
+		a.log().Error("ALERT: a withdrawal failed the destination check before its batch was signed; parked", "batch", id, "error", err.Error())
+	}
+	if err != nil {
+		a.alertReserve("batch", id, err)
+		return "", nonRetry(err)
+	}
+	Hit(custody.OwnerKindBatch, "after_build")
+	return job, nil
+}
+
+// SettleBatch books a confirmed batch: every member once, with its fee share.
+func (a *Activities) SettleBatch(ctx context.Context, id, txHash string) error {
+	if err := a.D.Svc.SettleBatch(ctx, id, txHash); err != nil {
+		return nonRetry(err)
+	}
+	Hit(custody.OwnerKindBatch, "after_settle")
+	return nil
+}
+
+// SettleBatchCancel ends a batch whose cancel confirmed: the members return to the queue.
+func (a *Activities) SettleBatchCancel(ctx context.Context, id, cancelTx string) error {
+	if err := a.D.Svc.SettleBatchCancel(ctx, id, cancelTx); err != nil {
+		return nonRetry(err)
+	}
+	Hit(custody.OwnerKindBatch, "after_settle")
+	return nil
+}
+
+// DiscardBatch discards a batch nothing was signed for and returns its members to the queue; false: a signature may exist (a cancel is needed).
+func (a *Activities) DiscardBatch(ctx context.Context, id, reason string, refused bool) (bool, error) {
+	return a.D.Svc.DiscardBatch(ctx, id, reason, refused, a.log())
+}
+
+// BatchCancelRequested says whether an operator asked to cancel the whole batch.
+func (a *Activities) BatchCancelRequested(ctx context.Context, id string) (bool, error) {
+	return a.D.Svc.BatchCancelRequested(ctx, id)
 }

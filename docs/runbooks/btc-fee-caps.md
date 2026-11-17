@@ -17,3 +17,5 @@ Each withdrawal or hot-to-cold send keeps enough in change to be raised to the f
 
 ## Batches
 A signing zone that signs batches (several withdrawals in one transaction) has its own ceilings, `max_batch_outputs` and `max_batch_value_sats`, in the gateway and cosigner config. Both unset means no batches. The core cannot raise them. When they are set, the fee caps above must also let a batch of that many payments reach `max_fee_rate`: the largest batch needs `max_fee_rate` x its size in `max_tx_fee_sats`. A zone that cannot reach it stops at start-up with the numbers and the fix. With the default `max_inputs` of 20 and 50 payments, raise `max_tx_fee_sats` to at least 355200 (in the core too; the start-up message prints the exact number).
+
+The core checks its own `batching.max_outputs` the same way at start-up, so turning batching on with the default caps and 20 outputs also needs `max_tx_fee_sats` raised (in the core, the gateway and the cosigners). See also the [batch runbook](btc-batch.md).

@@ -25,5 +25,25 @@ Each send keeps enough in its change to be raised up to the fee cap, so a stuck 
 
 A replacement the node refuses for a fee that is too low is followed by one that pays more than the highest fee refused so far, even after a restart. A cancel does the same: if it is refused or stays unmined, the next cancel pays more than every earlier attempt and every refused cancel. Both stop at the fee caps, with one alert, and nothing is voided because of a cap.
 
+## Batches pay several withdrawals in one transaction
+Batching is off by default. When an operator turns it on for a hot wallet, approved withdrawals wait in a queue, oldest approval first, and one transaction pays many of them. That saves fees, because the inputs and the change are paid for once.
+
+A batch is sealed when the oldest withdrawal in the queue has waited the configured time, or when enough are queued, whichever comes first. It takes the longest run from the front of the queue that the wallet's confirmed coins can fund, with the same fee reserve as a single send. Nobody is skipped: if the first withdrawal cannot be funded, the batch waits. A limit on how many batches of one wallet are in flight keeps each batch on confirmed coins only. A wait of zero means one withdrawal per transaction, as before.
+
+Approval stays per withdrawal. The signing zone signs a batch only if every payment in it is exactly one withdrawal that was approved, in the same order, with at most one change back to the hot wallet, and within the zone's own limits on payments, total value and fee, which the core cannot raise. A withdrawal id the zone has signed is not signed again, except in a replacement of the same batch.
+
+| Situation | Result |
+|---|---|
+| Cancel one withdrawal in the queue | It leaves the queue; its hold is released |
+| Cancel one withdrawal of a batch nobody has signed | The batch is discarded and its coins released; the others return in the same order |
+| Cancel one withdrawal of a signed batch | Refused: only the whole batch can be cancelled |
+| Cancel the whole batch after it was signed | A cancel spends the same coins back to the hot wallet; the withdrawals return to the queue at their place and are paid again once, by a batch that spends the cancel's output |
+| Stuck batch | Replaced as a whole: same coins, same payments, less change, within the fee caps |
+| One withdrawal fails the destination check, before sealing or before signing | It is removed from the batch and parked with an alert |
+
+Each withdrawal is booked once, when the transaction confirms, with its own share of the fee. The shares add up to the real fee, and any attempt, not only the last, may be the one that confirms.
+
+A batch shows on the chain that its recipients were paid together, with the same inputs and one change. Turn batching on only if that is acceptable. What to do with a stuck or cancelled batch is in the [batch runbook](runbooks/btc-batch.md).
+
 ## Consolidation merges small coins
 A wallet fed by many small payments can hold enough value, yet no single transaction can carry it. Consolidation merges the small coins into one before that happens, and a withdrawal keeps working meanwhile. Each partition has one hot shard.

@@ -985,6 +985,82 @@ jobs:
       - name: make test-e2e-btc-consolidate
         run: ci/run-in-image.sh make test-e2e-btc-consolidate
 
+  # Bitcoin cell, batches of withdrawals (several in one transaction): sealing, first in first out, max_in_flight, the prefix under max_inputs, re-screening, the zone's ceiling.
+  e2e-btc-batching:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+          anvil: "false"
+          bitcoind: "true"
+      - name: make test-e2e-btc-batching
+        run: ci/run-in-image.sh make test-e2e-btc-batching
+
+  # Bitcoin cell, batches under failure: a bumped batch, the cancel of one withdrawal and of a whole batch, survivors paid once, a crash at every boundary.
+  e2e-btc-batching-recovery:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+          anvil: "false"
+          bitcoind: "true"
+      - name: make test-e2e-btc-batching-recovery
+        run: ci/run-in-image.sh make test-e2e-btc-batching-recovery
+
   # Bitcoin cell, refills from cold: the cold key in the qv-cold SoftHSM token, qv-cold as its own process, only files crossing.
   e2e-btc-refill:
     runs-on: ubuntu-24.04

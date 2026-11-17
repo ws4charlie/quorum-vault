@@ -220,6 +220,15 @@ func WithdrawalReconcilerWorkflow(ctx workflow.Context, in Input) error {
 		if err := call(ctx, opts(ctx), &n, a.StartOpenWithdrawals); err != nil {
 			return err
 		}
+		// Bitcoin batching: seal the batches that are due and start the ones sealed. A loop that began before this existed replays without the calls.
+		if workflow.GetVersion(ctx, "batching", workflow.DefaultVersion, 1) >= 1 {
+			if err := call(ctx, planOpts(ctx), &n, a.PlanBatches); err != nil {
+				return err
+			}
+			if err := call(ctx, opts(ctx), &n, a.StartOpenBatches); err != nil {
+				return err
+			}
+		}
 		if err := workflow.Sleep(ctx, in.T.PlanInterval); err != nil {
 			return err
 		}
@@ -236,6 +245,8 @@ const (
 	txReverted  txKind = "reverted"  // ... and reverted
 	txCancelled txKind = "cancelled" // a cancel mined; the owner's transaction never will
 	txRefused   txKind = "refused"   // the gateway refused (or failed twice); nothing was broadcast
+	// txCancelRequested: an operator asked to cancel the whole batch while it was waiting to confirm (batches only).
+	txCancelRequested txKind = "cancel_requested"
 )
 
 type txResult struct {
@@ -268,7 +279,7 @@ func waitJob(ctx workflow.Context, jobID string) (JobResult, error) {
 //	            failure -> txRefused
 //
 // record is called with each broadcast hash (the withdrawal or sweep row).
-func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, firstJob string, record bool) (txResult, error) {
+func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, firstJob string, record, watchCancel bool) (txResult, error) {
 	jobID := firstJob
 	for attempt := 1; ; attempt++ {
 		r, err := waitJob(ctx, jobID)
@@ -356,6 +367,15 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 			}
 			return txResult{}, temporal.NewNonRetryableApplicationError("nonce consumed by an unknown transaction", "nonce_consumed", nil)
 		}
+		if watchCancel {
+			var req bool
+			if err := call(ctx, opts(ctx), &req, a.BatchCancelRequested, o.ID); err != nil {
+				return txResult{}, err
+			}
+			if req {
+				return txResult{Kind: txCancelRequested}, nil
+			}
+		}
 		if n.Refusal != "" {
 			// Not about the fee, so a higher fee does not cure it: the replacement is built again as it was, up to the limit, and an operator looks.
 			alert("the node refused a replacement for a reason a higher fee does not cure: " + n.Refusal)
@@ -425,7 +445,7 @@ func cancelNonce(ctx workflow.Context, t Timings, o OwnerArg) (txResult, error) 
 		return txResult{Kind: txCancelled}, nil
 	}
 	ow := custody.Owner{Kind: o.Kind, ID: o.ID, PartitionID: o.Part}
-	r, err := driveTx(ctx, t, o, custody.CancelTrack(ow), cj, false)
+	r, err := driveTx(ctx, t, o, custody.CancelTrack(ow), cj, false, false)
 	if err != nil {
 		return r, err
 	}
@@ -458,6 +478,10 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 	o := OwnerArg{Kind: "withdrawal", ID: id, Part: st.Part}
 	void := func(reason, feeTx string) error {
 		return call(ctx, opts(ctx), nil, a.VoidWithdrawal, id, reason, feeTx)
+	}
+	// A withdrawal in the batch queue (Bitcoin batching) is carried by its shard's batches: the workflow only watches it until it is booked or ends.
+	if st.Queued {
+		return waitBatched(ctx, t, in)
 	}
 
 	// 2. Approvals. Skipped when the job already exists (a restarted workflow).
@@ -499,6 +523,17 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 			}
 		}
 
+		// Bitcoin batching: the withdrawal joins its shard's queue and a batch carries it. A workflow that began before this existed replays without the call.
+		if workflow.GetVersion(ctx, "batching", workflow.DefaultVersion, 1) >= 1 {
+			var queued bool
+			if err := call(ctx, opts(ctx), &queued, a.EnqueueForBatch, id); err != nil {
+				return err
+			}
+			if queued {
+				return waitBatched(ctx, t, in)
+			}
+		}
+
 		// 4. Build and enqueue, in one transaction.
 		for {
 			var job string
@@ -527,7 +562,7 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 
 	// 5-8. Sign, broadcast, confirm (replacing if stuck).
 	ow := custody.Owner{Kind: "withdrawal", ID: id, PartitionID: st.Part}
-	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true, false)
 	if err != nil {
 		return err
 	}
@@ -553,6 +588,25 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 		return void("cancelled", r.Hash)
 	}
 	return fmt.Errorf("unexpected outcome %q", r.Kind)
+}
+
+// waitBatched watches a withdrawal that a batch carries until it is booked, voided or parked. Everything that happens to it (sealing, signing,
+// broadcast, bumps, booking, a cancel) is done by the batch's own workflow and by the cancel API; this loop only voids it when its approval is about to
+// lapse while it still waits in the queue (QueueTick), and starts again (continue as new) now and then so that a long wait leaves a short history.
+func waitBatched(ctx workflow.Context, t Timings, in Input) error {
+	for i := 0; i < 200; i++ {
+		var qs custody.QueueState
+		if err := call(ctx, opts(ctx), &qs, a.QueueTick, in.ID); err != nil {
+			return err
+		}
+		if qs.Status == custody.WdConfirmed || qs.Status == custody.WdFailed || qs.Parked {
+			return nil
+		}
+		if err := workflow.Sleep(ctx, t.HotPoll); err != nil {
+			return err
+		}
+	}
+	return workflow.NewContinueAsNewError(ctx, WithdrawalWorkflow, in)
 }
 
 // awaitApprovals waits for enough approvals, a rejection, or the timeout. It
@@ -617,7 +671,7 @@ func SweepWorkflow(ctx workflow.Context, in Input) error {
 		workflow.GetLogger(ctx).Warn("could not build the sweep; it will be planned again", "sweep", id, "error", err.Error())
 		return call(ctx, opts(ctx), nil, a.FailSweep, id, "could not build: "+err.Error(), "")
 	}
-	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true, false)
 	if err != nil {
 		return err
 	}
@@ -685,7 +739,7 @@ func ColdMoveWorkflow(ctx workflow.Context, in Input) error {
 		workflow.GetLogger(ctx).Warn("could not build the cold move; it will be planned again", "cold_move", id, "error", err.Error())
 		return call(ctx, opts(ctx), nil, a.FailColdMove, id, "could not build: "+err.Error(), "")
 	}
-	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true, false)
 	if err != nil {
 		return err
 	}
@@ -733,7 +787,7 @@ func ConsolidationWorkflow(ctx workflow.Context, in Input) error {
 		workflow.GetLogger(ctx).Warn("could not build the consolidation; it will be planned again", "consolidation", id, "error", err.Error())
 		return call(ctx, opts(ctx), nil, a.FailConsolidation, id, "could not build: "+err.Error())
 	}
-	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true, false)
 	if err != nil {
 		return err
 	}
@@ -780,7 +834,7 @@ func RebalanceWorkflow(ctx workflow.Context, in Input) error {
 		workflow.GetLogger(ctx).Warn("could not build the rebalance; it will be planned again", "rebalance", id, "error", err.Error())
 		return call(ctx, opts(ctx), nil, a.FailRebalance, id, "could not build: "+err.Error(), "")
 	}
-	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true)
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true, false)
 	if err != nil {
 		return err
 	}
@@ -857,4 +911,111 @@ func RefillWorkflow(ctx workflow.Context, in Input) error {
 		}
 	}
 	return workflow.NewContinueAsNewError(ctx, RefillWorkflow, in)
+}
+
+// ---- batch (Bitcoin) ----
+
+// BatchWorkflow is one batch of withdrawals. Its workflow ID is the batch ID. The planner sealed it from the head of a shard's queue; here it is built
+// for the longest prefix the shard's coins can fund (waiting, like a single withdrawal, while they cannot), signed by the zone (which checks every
+// payment against its own approval), broadcast, bumped as a whole, and booked once, member by member, when it confirms. A refusal of the zone, or an
+// operator's cancel, ends it in a discard (nothing was signed: coins released) or in a cancel of the whole batch (the same coins back to the shard); the
+// members return to the queue in both.
+func BatchWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
+	id, t := in.ID, in.T
+	var st BatchState
+	if err := call(ctx, opts(ctx), &st, a.LoadBatch, id); err != nil {
+		return err
+	}
+	final := func(s BatchState) bool {
+		return s.Status == custody.BatchConfirmed || s.Status == custody.BatchCancelled || s.Status == custody.BatchDiscarded || s.Parked
+	}
+	if final(st) {
+		return nil
+	}
+	o := OwnerArg{Kind: custody.OwnerKindBatch, ID: id, Part: st.Part}
+	ow := custody.Owner{Kind: custody.OwnerKindBatch, ID: id, PartitionID: st.Part}
+	discard := func(reason string, refused bool) (bool, error) {
+		var ok bool
+		err := call(ctx, opts(ctx), &ok, a.DiscardBatch, id, reason, refused)
+		return ok, err
+	}
+
+	if st.Status == custody.BatchSealed {
+		deadline := workflow.Now(ctx).Add(t.HotWait)
+		for {
+			var left int
+			if err := call(ctx, opts(ctx), &left, a.PrepareBatch, id); err != nil {
+				return err
+			}
+			if left == 0 {
+				return nil // nobody left to pay: the batch was discarded
+			}
+			if left < 0 {
+				break // not sealed any more (a crash after the build): go on from what it is
+			}
+			var job string
+			err := call(ctx, buildOpts(ctx), &job, a.BuildBatchJob, id)
+			if err == nil {
+				break
+			}
+			if isType(err, errMemberRemoved) {
+				continue // a withdrawal that cannot be paid was parked and taken out: look at the batch again without it
+			}
+			if isType(err, errNoOutputs) {
+				if !workflow.Now(ctx).Before(deadline) {
+					_, derr := discard("not enough available outputs in time: "+err.Error(), false)
+					return derr
+				}
+				if err := workflow.Sleep(ctx, t.HotPoll); err != nil {
+					return err
+				}
+				continue
+			}
+			// Nothing was allocated (the build rolled back): the members go back to the queue.
+			workflow.GetLogger(ctx).Error("ALERT: could not build the batch transaction; its withdrawals return to the queue", "batch", id, "error", err.Error())
+			_, derr := discard("could not build the transaction: "+err.Error(), false)
+			return derr
+		}
+		// A member's cancel may have discarded the batch while it waited for coins.
+		if err := call(ctx, opts(ctx), &st, a.LoadBatch, id); err != nil {
+			return err
+		}
+		if final(st) {
+			return nil
+		}
+	}
+
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true, true)
+	if err != nil {
+		return err
+	}
+	if r.Kind == txRefused {
+		// Nothing signed (or only some inputs): with no signature, discard in one step; otherwise the coins must be freed by a cancel first.
+		ok, err := discard("gateway refused: "+r.Reason, true)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		if r, err = cancelNonce(ctx, t, o); err != nil {
+			return err
+		}
+	} else if r.Kind == txCancelRequested {
+		if r, err = cancelNonce(ctx, t, o); err != nil {
+			return err
+		}
+	}
+	switch r.Kind {
+	case txMined, txReverted:
+		return call(ctx, opts(ctx), nil, a.SettleBatch, id, r.Hash)
+	case txCancelled:
+		if r.Hash != "" {
+			return call(ctx, opts(ctx), nil, a.SettleBatchCancel, id, r.Hash)
+		}
+		_, err := discard("cancelled", false)
+		return err
+	}
+	return fmt.Errorf("unexpected outcome %q", r.Kind)
 }

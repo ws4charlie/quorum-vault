@@ -199,6 +199,29 @@ func (t *GuardTx) CountSince(ctx context.Context, kind string, since time.Time) 
 	return n, err
 }
 
+// CancelOutputs lists the outputs ("<txid>:0") of every cancel transaction the zone signed for a batch: the cancel took all of the batch's claims
+// (the strict cancel rule makes it spend exactly the batch's inputs, to one output), and each of its attempts, replacements included, has a txid.
+// Whichever of them confirms, the batch can never confirm.
+func (t *GuardTx) CancelOutputs(ctx context.Context, batchID string) ([]string, error) {
+	rows, err := t.tx.Query(ctx, `SELECT DISTINCT d.tx_identity FROM signed_intents b
+		JOIN exclusive_claims c ON c.chain=$1 AND c.claim = ANY(b.claims) AND c.kind='cancel'
+		JOIN signed_digests d ON d.intent_id = c.intent_id AND d.tx_identity IS NOT NULL
+		WHERE b.intent_id=$2 AND b.kind='batch'`, t.chain, batchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id+":0")
+	}
+	return out, rows.Err()
+}
+
 // Release is everything recorded when a digest is reserved, before the signer
 // runs. Signature stays nil until Guard.Finish stores it.
 type Release struct {
@@ -229,6 +252,9 @@ type MemberRelease struct {
 	ID     string
 	Hash   []byte
 	Amount *big.Int
+	// Resend: the withdrawal was signed in an earlier batch whose cancel the zone signed, and this batch spends an output of that cancel. Its row
+	// moves to this batch; it is not counted again towards the rate and the daily cap.
+	Resend bool
 }
 
 // pinOf is the pin of claim c (empty when the release has none).
@@ -263,6 +289,12 @@ func (t *GuardTx) Record(ctx context.Context, r Release) error {
 			return fmt.Errorf("record intent: %w", err)
 		}
 		for _, m := range r.Members {
+			if m.Resend {
+				if _, err := t.tx.Exec(ctx, `UPDATE signed_intents SET batch_id=$2 WHERE intent_id=$1 AND kind='withdrawal' AND intent_hash=$3`, m.ID, r.IntentID, m.Hash); err != nil {
+					return fmt.Errorf("move batch member %s: %w", m.ID, err)
+				}
+				continue
+			}
 			if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at, batch_id)
 				VALUES ($1,$2,'withdrawal',$3,$4,$5::numeric,$6,'{}',$7,$8,$9)`,
 				m.ID, m.Hash, t.chain, r.Asset, m.Amount.String(), r.Sender, r.PartitionID, r.At, r.IntentID); err != nil {
