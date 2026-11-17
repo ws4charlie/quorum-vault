@@ -27,6 +27,7 @@ func TestOIDCWithRealKeycloak(t *testing.T) {
 	if w.Code != 201 {
 		t.Fatalf("%d %v", w.Code, w.Raw)
 	}
+	s.approv["ops"] = s.approv["bob"] // a valid signature under another name: the refusal must come from the role, not the signature
 	if code, _ := s.approve("alice", w.ID); code != 403 {
 		t.Fatalf("the requester approving: %d", code)
 	}
