@@ -9,7 +9,10 @@ package gateway
 import (
 	"bytes"
 	"cmp"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +20,7 @@ import (
 	"math/big"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -24,6 +28,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
+	"github.com/ws4charlie/quorum-vault/internal/webauthn"
 )
 
 // File is the on-disk signing-zone config (JSON). See config.example.json.
@@ -85,6 +90,15 @@ type ApproverFile struct {
 	// Identity is the person this key belongs to, in the same space as an intent's requested_by (the identity provider's "sub"). Default: the
 	// approver's name. Keys with one identity are one person: they count once, and none may approve a withdrawal that person requested.
 	Identity string `json:"identity,omitempty"`
+	// Scheme is how this key signs: "ed25519" (default; PublicKey is 64 hex chars) or "webauthn". A person may have one key of each scheme, with
+	// the same Identity: they count as one approver.
+	Scheme string `json:"scheme,omitempty"`
+	// WebAuthn keys: PublicKey is hex (ES256: the 65-byte uncompressed P-256 point; EdDSA: the 32-byte Ed25519 key); Alg is "ES256" or "EdDSA";
+	// CredentialID is base64url; RPID and Origins (exact, e.g. "https://approve.example.com") are what the assertion must name.
+	Alg          string   `json:"alg,omitempty"`
+	CredentialID string   `json:"credential_id,omitempty"`
+	RPID         string   `json:"rp_id,omitempty"`
+	Origins      []string `json:"origins,omitempty"`
 }
 
 // ChainFile is one chain's verifier config and withdrawal policy.
@@ -240,6 +254,8 @@ type Approver struct {
 	Key      ed25519.PublicKey
 	Enabled  bool
 	Identity string // the person (see ApproverFile.Identity); never empty
+	// WebAuthn is set for a webauthn key (Key is then empty); an ed25519 key has Key and no WebAuthn.
+	WebAuthn *webauthn.Key
 }
 
 // ChainConfig is one chain's trust root.
@@ -387,15 +403,31 @@ func (f File) build() (*Config, error) {
 		if name == "" {
 			return nil, errors.New("gateway: config: empty approver name")
 		}
-		raw, err := hex.DecodeString(a.PublicKey)
-		if err != nil || len(raw) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("gateway: config: approver %q: public_key must be %d hex bytes", name, ed25519.PublicKeySize)
+		ap := Approver{Enabled: a.Enabled, Identity: cmp.Or(a.Identity, name)}
+		var raw []byte
+		switch a.Scheme {
+		case "", "ed25519":
+			var err error
+			raw, err = hex.DecodeString(a.PublicKey)
+			if err != nil || len(raw) != ed25519.PublicKeySize {
+				return nil, fmt.Errorf("gateway: config: approver %q: public_key must be %d hex bytes", name, ed25519.PublicKeySize)
+			}
+			ap.Key = ed25519.PublicKey(raw)
+		case "webauthn":
+			wk, err := a.webauthnKey()
+			if err != nil {
+				return nil, fmt.Errorf("gateway: config: approver %q: %w", name, err)
+			}
+			ap.WebAuthn = wk
+			raw = append([]byte("webauthn:"), wk.CredentialID...)
+		default:
+			return nil, fmt.Errorf("gateway: config: approver %q: scheme %q is neither ed25519 nor webauthn", name, a.Scheme)
 		}
 		if other, dup := keys[string(raw)]; dup {
-			return nil, fmt.Errorf("gateway: config: approvers %q and %q share one public key", other, name)
+			return nil, fmt.Errorf("gateway: config: approvers %q and %q share one public key or credential", other, name)
 		}
 		keys[string(raw)] = name
-		c.Approvers[name] = Approver{Key: ed25519.PublicKey(raw), Enabled: a.Enabled, Identity: cmp.Or(a.Identity, name)}
+		c.Approvers[name] = ap
 		if a.Enabled {
 			enabled++
 		}
@@ -682,4 +714,41 @@ func checkDepositSigner(p string, sf SignerFile) error {
 		}
 	}
 	return nil
+}
+
+// webauthnKey reads the key of a webauthn approver: the algorithm, the public key, the credential and where it may be used.
+func (a ApproverFile) webauthnKey() (*webauthn.Key, error) {
+	raw, err := hex.DecodeString(a.PublicKey)
+	if err != nil {
+		return nil, errors.New("public_key must be hex")
+	}
+	cred, err := base64.RawURLEncoding.DecodeString(a.CredentialID)
+	if err != nil || len(cred) == 0 {
+		return nil, errors.New("credential_id must be non-empty base64url")
+	}
+	if a.RPID == "" || len(a.Origins) == 0 {
+		return nil, errors.New("a webauthn approver needs rp_id and origins")
+	}
+	for _, o := range a.Origins {
+		if !strings.HasPrefix(o, "https://") && !strings.HasPrefix(o, "http://localhost") {
+			return nil, fmt.Errorf("origin %q must be https (or http://localhost for tests)", o)
+		}
+	}
+	k := &webauthn.Key{Alg: a.Alg, CredentialID: cred, RPID: a.RPID, Origins: a.Origins}
+	switch a.Alg {
+	case webauthn.ES256:
+		x, y := elliptic.Unmarshal(elliptic.P256(), raw)
+		if x == nil {
+			return nil, errors.New("an ES256 public_key is the 65-byte uncompressed P-256 point, hex")
+		}
+		k.ES256 = &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
+	case webauthn.EdDSA:
+		if len(raw) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("an EdDSA public_key is %d hex bytes", ed25519.PublicKeySize)
+		}
+		k.Ed25519 = ed25519.PublicKey(raw)
+	default:
+		return nil, fmt.Errorf("alg %q is neither ES256 nor EdDSA", a.Alg)
+	}
+	return k, nil
 }

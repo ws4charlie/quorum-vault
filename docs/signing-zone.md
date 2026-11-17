@@ -15,6 +15,11 @@ The core writes a job: what the approvers agreed to, in plain words (who gets ho
 3. The destination is one the zone's own rules allow.
 4. The same job was never signed with different content.
 
+## Approving with a security key or a passkey
+An approver may sign with an Ed25519 key or with a security key or passkey (WebAuthn). The zone checks the passkey's answer itself: it was made for this exact job, on the approval page's own address, by a key the zone's config lists, with the person present and verified. It does not trust a login service for any of this, and no network call is made. A person may have one key of each kind; they still count as one approver. Enrolling one is in the [runbook](runbooks/webauthn-approver.md). The same answer cannot be used for another job, and sending it twice counts once.
+
+The zone does not track the key's usage counter: many keys always send zero, and an answer is already tied to one job and its expiry, so a refusal on the counter would only lock out good keys.
+
 ## Who asked
 Every withdrawal, alone or inside a batch, carries the identity of the person who requested it, and approvers sign it with the rest. The zone refuses a job with no requester, and a job any of whose counted approvers is that person. Two keys that belong to one person count as one approver.
 
