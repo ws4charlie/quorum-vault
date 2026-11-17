@@ -167,7 +167,7 @@ func (e *btcEnv) refuse(r wire.Request, code string) {
 }
 
 func wd(id, to string) signjob.Intent {
-	return signjob.Intent{Kind: "withdrawal", ID: id, To: to, Amount: "100000"}
+	return signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: id, To: to, Amount: "100000"}
 }
 
 // A correct two-input transaction passes party B's own checks.

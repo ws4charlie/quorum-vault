@@ -27,7 +27,7 @@ func TestGuardUpgradeKeepsOldRowsWorking(t *testing.T) {
 	if _, err := old.Exec(ctx, storeV1SQL); err != nil {
 		t.Fatal(err)
 	}
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-old", Asset: "ETH", To: addrUser.Hex(), Amount: "500", Chain: testChain,
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-old", Asset: "ETH", To: addrUser.Hex(), Amount: "500", Chain: testChain,
 		PartitionID: testPartition, NotAfter: h.clock().Add(time.Hour).Unix()}
 	spec := txSpec{nonce: 7, to: addrUser, value: big.NewInt(500), gas: 21000}
 	signedJob := h.job("old1", in, spec, "auto")
@@ -69,7 +69,7 @@ func TestGuardUpgradeKeepsOldRowsWorking(t *testing.T) {
 	}
 
 	// 1. The old claim holds: another intent at nonce 7 is refused.
-	other := signjob.Intent{Kind: "withdrawal", ID: "w-other", Asset: "ETH", To: addrUser.Hex(), Amount: "100"}
+	other := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-other", Asset: "ETH", To: addrUser.Hex(), Amount: "100"}
 	h.mustReject(h.job("up1", other, h.ethTx(addrUser, 100, 7), "auto"), ReasonNonceTaken)
 	// 2. The old intent cannot move to another nonce.
 	h.mustReject(h.job("up2", in, h.ethTx(addrUser, 500, 8), "auto"), ReasonNonceChanged)

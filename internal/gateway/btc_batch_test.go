@@ -36,7 +36,7 @@ type bm struct {
 }
 
 func (b *btcH) bmember(m bm) signjob.BatchMember {
-	in := signjob.Intent{Kind: "withdrawal", ID: m.id, PartitionID: btcPartition, Chain: btcChain, Asset: "BTC", To: m.to, Amount: fmt.Sprint(m.amount),
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: m.id, PartitionID: btcPartition, Chain: btcChain, Asset: "BTC", To: m.to, Amount: fmt.Sprint(m.amount),
 		NotAfter: b.clock().Add(cmpDur(m.notAfter, time.Hour)).Unix()}
 	if m.noExpiry {
 		in.NotAfter = 0
@@ -259,7 +259,7 @@ func TestBTCBatchApprovalsArePerMember(t *testing.T) {
 		bt.Members[1].Approvals = bt.Members[0].Approvals // member 1's intent is not the one member 0's approver signed
 	}, mk("d"))
 	try("an approval of the batch itself", ReasonApprovals, func(_ *signjob.Batch, j *signjob.Job) {
-		j.Approvals = b.approvals(signjob.Intent{Kind: "withdrawal", ID: "x"}, "alice")
+		j.Approvals = b.approvals(signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "x"}, "alice")
 	}, mk("e"))
 	try("a large member with one approval", ReasonTier, nil, []bm{{id: "t1", to: b.other, amount: 450_000}})
 	try("a member above the per-transaction cap", ReasonPerTxCap, nil, []bm{{id: "p1", to: b.other, amount: 600_000, approvers: []string{"alice", "bob"}}})

@@ -8,6 +8,7 @@ package gateway
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -81,6 +82,9 @@ type MPCSignerFile struct {
 type ApproverFile struct {
 	PublicKey string `json:"public_key"` // 64 hex chars
 	Enabled   bool   `json:"enabled"`
+	// Identity is the person this key belongs to, in the same space as an intent's requested_by (the identity provider's "sub"). Default: the
+	// approver's name. Keys with one identity are one person: they count once, and none may approve a withdrawal that person requested.
+	Identity string `json:"identity,omitempty"`
 }
 
 // ChainFile is one chain's verifier config and withdrawal policy.
@@ -233,8 +237,9 @@ type Config struct {
 
 // Approver is a configured approver key.
 type Approver struct {
-	Key     ed25519.PublicKey
-	Enabled bool
+	Key      ed25519.PublicKey
+	Enabled  bool
+	Identity string // the person (see ApproverFile.Identity); never empty
 }
 
 // ChainConfig is one chain's trust root.
@@ -390,7 +395,7 @@ func (f File) build() (*Config, error) {
 			return nil, fmt.Errorf("gateway: config: approvers %q and %q share one public key", other, name)
 		}
 		keys[string(raw)] = name
-		c.Approvers[name] = Approver{Key: ed25519.PublicKey(raw), Enabled: a.Enabled}
+		c.Approvers[name] = Approver{Key: ed25519.PublicKey(raw), Enabled: a.Enabled, Identity: cmp.Or(a.Identity, name)}
 		if a.Enabled {
 			enabled++
 		}

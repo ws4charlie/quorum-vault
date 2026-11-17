@@ -36,14 +36,14 @@ func TestWithdrawalDestinationAllowlist(t *testing.T) {
 
 	// The same address in another case is the same address (a checksum mix-up in the intent is refused earlier, by the verifier,
 	// so the case is varied in the intent as all-lowercase, which the verifier accepts).
-	lower := signjob.Intent{Kind: "withdrawal", ID: "w-low", Asset: "ETH", To: strings.ToLower(addrUser.Hex()), Amount: "100"}
+	lower := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-low", Asset: "ETH", To: strings.ToLower(addrUser.Hex()), Amount: "100"}
 	h.mustSign(h.job("d3", lower, h.ethTx(addrUser, 100, 2), "alice"))
-	upper := signjob.Intent{Kind: "withdrawal", ID: "w-up", Asset: "ETH", To: "0x" + strings.ToUpper(addrUser.Hex()[2:]), Amount: "100"}
+	upper := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-up", Asset: "ETH", To: "0x" + strings.ToUpper(addrUser.Hex()[2:]), Amount: "100"}
 	h.mustSign(h.job("d4", upper, h.ethTx(addrUser, 100, 3), "alice"))
 
 	// An ERC-20 transfer is checked on the recipient in the calldata, not on the token contract.
 	tin := func(id string, to common.Address) signjob.Intent {
-		return signjob.Intent{Kind: "withdrawal", ID: id, Asset: "USDT", To: to.Hex(), Amount: "1000"}
+		return signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: id, Asset: "USDT", To: to.Hex(), Amount: "1000"}
 	}
 	h.mustSign(h.job("d5", tin("w-t1", addrUser), h.tokenTx(addrUser, 1000, 4), "alice"))
 	h.mustReject(h.job("d6", tin("w-t2", addrEvil), h.tokenTx(addrEvil, 1000, 5), "alice"), ReasonDestination)
@@ -102,7 +102,7 @@ func TestWithdrawalHourLimit(t *testing.T) {
 	}
 	// The hour passes: the limit recovers.
 	h.advance(61 * time.Minute)
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-r4", Asset: "ETH", To: addrUser.Hex(), Amount: "10"}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-r4", Asset: "ETH", To: addrUser.Hex(), Amount: "10"}
 	h.mustSign(h.job("r4", in, h.ethTx(addrUser, 10, 2), "alice"))
 }
 

@@ -116,7 +116,7 @@ func TestTwoInputTransactionsSignOnMPCAndValidate(t *testing.T) {
 		{"withdrawal", btc.Payload{Version: 2,
 			Inputs:  []btc.PayloadInput{{TxID: mkTxid(1), Value: 150_000, Path: []uint32{1, 0}, Sequence: btc.SequenceRBF}, {TxID: mkTxid(2), Value: 150_000, Path: []uint32{1, 0}, Sequence: btc.SequenceRBF}},
 			Outputs: []btc.PayloadOutput{{Address: dest, Value: 100_000}, {Address: hot0, Value: 180_000}}},
-			signjob.Intent{Kind: "withdrawal", ID: "w-btc", PartitionID: part, Chain: chainName, Asset: "BTC", To: dest, Amount: "100000", NotAfter: time.Now().Add(time.Hour).Unix()}},
+			signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-btc", PartitionID: part, Chain: chainName, Asset: "BTC", To: dest, Amount: "100000", NotAfter: time.Now().Add(time.Hour).Unix()}},
 		{"sweep", btc.Payload{Version: 2,
 			Inputs:  []btc.PayloadInput{{TxID: mkTxid(3), Value: 60_000, Path: []uint32{0, 7}, Sequence: btc.SequenceRBF}, {TxID: mkTxid(4), Vout: 1, Value: 40_000, Path: []uint32{0, 7}, Sequence: btc.SequenceRBF}},
 			Outputs: []btc.PayloadOutput{{Address: hot0, Value: 99_000}}},

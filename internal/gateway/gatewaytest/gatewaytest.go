@@ -194,7 +194,7 @@ func (h *Harness) Approvals(in signjob.Intent, actors ...string) []signjob.Appro
 
 // Withdrawal is a withdrawal job of ETH to `to`.
 func (h *Harness) Withdrawal(id string, to common.Address, amount int64, nonce uint64, approvers ...string) signjob.Job {
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-" + id, Asset: "ETH", To: to.Hex(), Amount: fmt.Sprint(amount)}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-" + id, Asset: "ETH", To: to.Hex(), Amount: fmt.Sprint(amount)}
 	return h.Job(id, in, ETH(to, amount, nonce), approvers...)
 }
 

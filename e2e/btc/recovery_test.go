@@ -405,7 +405,7 @@ func TestRecoveryOutsideSpendOfAReservedOutputParks(t *testing.T) {
 // outsideSpend signs a withdrawal of one output through a gateway of its own (own guard database, the same signing zone config and MPC keys, so the same
 // party B cosigner) and sends it to the node. It stands for a key that signed outside this system.
 func (s *system) outsideSpend(txid string, vout uint32, value uint64, to string) {
-	in := signjob.Intent{Kind: "withdrawal", ID: "outside-1", PartitionID: s.part, Chain: s.chain, Asset: "BTC", To: to, Amount: fmt.Sprint(value - 20_000), NotAfter: time.Now().Add(time.Hour).Unix()}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "outside-1", PartitionID: s.part, Chain: s.chain, Asset: "BTC", To: to, Amount: fmt.Sprint(value - 20_000), NotAfter: time.Now().Add(time.Hour).Unix()}
 	s.outsideSign(txid, vout, value, to, []uint32{1, 0}, in, true)
 }
 

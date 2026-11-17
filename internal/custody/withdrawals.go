@@ -125,7 +125,7 @@ func (s *Service) OpenWithdrawals(ctx context.Context) ([]Withdrawal, error) {
 // only on the row, so the API, the worker and the gateway all compute the same hash.
 func (s *Service) IntentOf(w Withdrawal) signjob.Intent {
 	return signjob.Intent{Kind: "withdrawal", ID: w.ID, PartitionID: w.PartitionID, Chain: w.Chain, Asset: w.Asset,
-		To: w.To, Amount: w.Amount.String(), NotAfter: w.NotAfter}
+		To: w.To, Amount: w.Amount.String(), NotAfter: w.NotAfter, RequestedBy: w.RequestedBy}
 }
 
 // NormalizeAddress validates an EVM destination: 0x-prefixed, 20 bytes, a valid
