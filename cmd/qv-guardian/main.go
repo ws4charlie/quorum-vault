@@ -26,6 +26,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+
+	"github.com/ws4charlie/quorum-vault/internal/auth"
 )
 
 func main() {
@@ -50,7 +52,7 @@ func run(args []string, out io.Writer) error {
 	factoryS := fs.String("factory", "", "forwarder factory address")
 	keyFile := fs.String("key-file", "", "guardian key file (hex)")
 	core := fs.String("core", "", "qv-core URL, to book the gas against the fee account")
-	actor := fs.String("actor", "ops", "X-Actor for -core")
+	actor := fs.String("actor", "", "X-Actor for -core: only a core started with the dev header accepts it; otherwise a service token comes from QV_CORE_TOKEN or the client-credentials variables QV_OIDC_*")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -139,7 +141,15 @@ func freeze(ctx context.Context, rpcURL string, factory common.Address, key *ecd
 	}
 	body, _ := json.Marshal(map[string]string{"tx": tx.Hash().Hex()})
 	req, _ := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(core, "/")+"/v2/guardian/freezes", bytes.NewReader(body))
-	req.Header.Set("X-Actor", actor)
+	if actor != "" {
+		req.Header.Set("X-Actor", actor)
+	} else {
+		tok, err := auth.ServiceToken(ctx)
+		if err != nil {
+			return fmt.Errorf("frozen, but booking the gas failed: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

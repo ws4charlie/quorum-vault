@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
@@ -111,9 +112,36 @@ func retryable(err error) bool {
 type actorKey struct{}
 
 // WithActor names who caused what happens under ctx; the audit events written under it carry that name. The /v2 API sets it
-// from the X-Actor header. Work nobody asked for (the planners, the workflows) has no actor and is recorded as "system".
+// from the verified token's sub. Work nobody asked for (the planners, the workflows) has no actor and is recorded as "system".
 func WithActor(ctx context.Context, actor string) context.Context {
 	return context.WithValue(ctx, actorKey{}, actor)
+}
+
+// Identity is what the token proved about the caller. Every audit event written under a request carries it, so the trail says
+// which login (issuer, subject, strength, time, token) caused each change.
+type Identity struct {
+	Issuer   string `json:"iss"`
+	Sub      string `json:"sub"`
+	ACR      string `json:"acr,omitempty"`
+	AuthTime int64  `json:"auth_time,omitempty"`
+	TokenID  string `json:"jti,omitempty"`
+	Session  string `json:"sid,omitempty"`
+}
+
+// IdentityOf extracts the audit identity of a verified principal.
+func IdentityOf(p *auth.Principal) Identity {
+	id := Identity{Issuer: p.Issuer, Sub: p.Sub, ACR: p.ACR, TokenID: p.TokenID, Session: p.Session}
+	if !p.AuthTime.IsZero() {
+		id.AuthTime = p.AuthTime.Unix()
+	}
+	return id
+}
+
+type identityKey struct{}
+
+// WithIdentity attaches the caller's identity to ctx.
+func WithIdentity(ctx context.Context, id Identity) context.Context {
+	return context.WithValue(ctx, identityKey{}, id)
 }
 
 func actorOf(ctx context.Context) string {
@@ -144,6 +172,9 @@ func emit(ctx context.Context, tx pgx.Tx, topic, key, typ string, fields map[str
 	for k, v := range fields {
 		p[k] = v
 	}
+	if id, ok := ctx.Value(identityKey{}).(Identity); ok && topic == outbox.TopicAudit {
+		p["identity"] = id
+	}
 	if err := outbox.Write(ctx, tx, topic, key, p); err != nil {
 		return err
 	}
@@ -168,6 +199,9 @@ func auditPayload(ctx context.Context, typ, subject string, fields map[string]an
 	p := map[string]any{"type": typ, "id": subject}
 	for k, v := range fields {
 		p[k] = v
+	}
+	if id, ok := ctx.Value(identityKey{}).(Identity); ok {
+		p["identity"] = id
 	}
 	if a, _ := p["actor"].(string); a == "" {
 		if by, _ := p["by"].(string); by != "" {
