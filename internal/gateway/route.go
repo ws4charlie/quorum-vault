@@ -190,7 +190,7 @@ func verifyRoute(cfg *Config, c RouteChange) ([]string, error) {
 	var out []string
 	for _, s := range c.Signatures {
 		ap, ok := cfg.Approvers[s.Actor]
-		if !ok || !ap.Enabled || seen[s.Actor] {
+		if !ok || !ap.Enabled || ap.WebAuthn != nil || seen[s.Actor] { // route changes are signed with Ed25519 keys only
 			continue
 		}
 		sig, err := hex.DecodeString(s.Signature)

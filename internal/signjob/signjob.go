@@ -18,14 +18,26 @@ const (
 	StatusFailed   = "failed"
 )
 
-// Approval is one approver's Ed25519 signature over Intent.Hash().
+// Approval is one approver's signature over Intent.Hash().
 //
 // It deliberately carries no public key: approver public keys and signing
 // policy come only from signing-zone configuration, never from the business
 // database, which an attacker may be able to write.
+//
+// An approver's key is either Ed25519 (Signature) or WebAuthn (WebAuthn, an assertion whose challenge is the intent hash); the zone's config says
+// which, and an approval carries exactly the one that fits.
 type Approval struct {
-	Actor     string `json:"actor"`
-	Signature []byte `json:"signature"`
+	Actor     string             `json:"actor"`
+	Signature []byte             `json:"signature,omitempty"`
+	WebAuthn  *WebAuthnAssertion `json:"webauthn,omitempty"`
+}
+
+// WebAuthnAssertion is a WebAuthn assertion over Intent.Hash(): the credential, the authenticator data, the client data JSON and the signature.
+type WebAuthnAssertion struct {
+	CredentialID      []byte `json:"credential_id"`
+	AuthenticatorData []byte `json:"authenticator_data"`
+	ClientDataJSON    []byte `json:"client_data_json"`
+	Signature         []byte `json:"signature"`
 }
 
 // Job is a row of sign_jobs. ID is the idempotency key.

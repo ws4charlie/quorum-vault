@@ -17,6 +17,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
+	"github.com/ws4charlie/quorum-vault/internal/webauthn"
 )
 
 // Mode says who is deciding.
@@ -389,12 +390,24 @@ func (d *Decider) validApprovers(hash []byte, approvals []signjob.Approval) []st
 		if !ok || !ap.Enabled || seen[ap.Identity] {
 			continue
 		}
-		if len(a.Signature) == ed25519.SignatureSize && ed25519.Verify(ap.Key, hash, a.Signature) {
+		if d.approvalHolds(ap, hash, a) {
 			seen[ap.Identity] = true
 			out = append(out, a.Actor)
 		}
 	}
 	return out
+}
+
+// approvalHolds reports whether a is a valid approval over hash by the configured key ap. An approval carries exactly the proof its key's scheme
+// asks for: an Ed25519 signature, or a WebAuthn assertion whose challenge is the intent hash. The other field present makes it invalid.
+func (d *Decider) approvalHolds(ap Approver, hash []byte, a signjob.Approval) bool {
+	if ap.WebAuthn != nil {
+		if a.WebAuthn == nil || len(a.Signature) != 0 {
+			return false
+		}
+		return webauthn.Verify(ap.WebAuthn, hash, (*webauthn.Assertion)(a.WebAuthn)) == nil
+	}
+	return a.WebAuthn == nil && len(a.Signature) == ed25519.SignatureSize && ed25519.Verify(ap.Key, hash, a.Signature)
 }
 
 func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i signjob.Intent, codec ChainCodec,
