@@ -61,6 +61,8 @@ func (s *system) setupWithdrawals(o opts) {
 	if o.fallbackRate != 0 {
 		s.cf.Chain.BTC.FallbackFeeRate = o.fallbackRate
 	}
+	s.cf.Withdrawal.MaxReplacements = o.maxReplacements
+	s.cf.Withdrawal.CPFPAfter = o.cpfpAfter
 	if o.consolidateAbove > 0 {
 		s.setConsolidation(o.consolidateAbove, o.consolidateMaxRate)
 	}

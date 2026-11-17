@@ -27,6 +27,7 @@ e2e-evm-recovery|pai|212|3|make test-e2e-evm-recovery
 e2e-btc-consolidate|pbi|201|3|make test-e2e-btc-consolidate
 e2e-btc-batching|pbi|140|3|make test-e2e-btc-batching
 e2e-btc-batching-recovery|pbi|155|3|make test-e2e-btc-batching-recovery
+e2e-btc-cpfp|pbi|220|3|make test-e2e-btc-cpfp
 e2e-btc-cold|pbi|197|3|make test-e2e-btc-cold
 e2e-btc-refill|pbi|190|3|make test-e2e-btc-refill
 e2e-btc-withdrawals|pbi|153|3|make test-e2e-btc-withdrawals
