@@ -54,7 +54,7 @@ start)
       --infra) profiles+=(--profile infra); services+=(temporal-db temporal redpanda) ;;
       --bitcoind) profiles+=(--profile btc); services+=(bitcoind) ;;
       --solana) profiles+=(--profile solana); services+=(solana) ;;
-      --keycloak) profiles+=(--profile identity); services+=(keycloak) ;;
+      --keycloak) scripts/keycloak-env.sh; profiles+=(--profile identity); services+=(keycloak) ;;
       *) echo "unknown flag $a" >&2; exit 2 ;;
     esac
   done

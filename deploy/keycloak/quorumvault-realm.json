@@ -1911,7 +1911,7 @@
       "protocol": "openid-connect",
       "publicClient": false,
       "redirectUris": [],
-      "secret": "qv-test-only-guardian-secret",
+      "secret": "${QV_KEYCLOAK_GUARDIAN_SECRET}",
       "serviceAccountsEnabled": true,
       "standardFlowEnabled": false,
       "surrogateAuthRequired": false,
@@ -2764,7 +2764,7 @@
         {
           "temporary": false,
           "type": "password",
-          "value": "qv-test-only-alice"
+          "value": "${QV_TEST_PASSWORD_ALICE}"
         }
       ],
       "disableableCredentialTypes": [],
@@ -2789,7 +2789,7 @@
         {
           "temporary": false,
           "type": "password",
-          "value": "qv-test-only-bob"
+          "value": "${QV_TEST_PASSWORD_BOB}"
         }
       ],
       "disableableCredentialTypes": [],
@@ -2814,7 +2814,7 @@
         {
           "temporary": false,
           "type": "password",
-          "value": "qv-test-only-carol"
+          "value": "${QV_TEST_PASSWORD_CAROL}"
         }
       ],
       "disableableCredentialTypes": [],
@@ -2839,7 +2839,7 @@
         {
           "temporary": false,
           "type": "password",
-          "value": "qv-test-only-ops"
+          "value": "${QV_TEST_PASSWORD_OPS}"
         }
       ],
       "disableableCredentialTypes": [],

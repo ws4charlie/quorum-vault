@@ -99,9 +99,9 @@ func ServiceBearer(client string) string {
 	if issuer != nil {
 		return "Bearer " + issuer.Token(authtest.Spec{Sub: "service-account-" + client, Client: client, Service: true, Roles: []string{"operator"}})
 	}
-	secret := os.Getenv("QV_E2E_SERVICE_SECRET")
+	secret := os.Getenv("QV_KEYCLOAK_GUARDIAN_SECRET") // written to .env by scripts/keycloak-env.sh
 	if secret == "" {
-		secret = "qv-test-only-guardian-secret"
+		panic("idp: QV_KEYCLOAK_GUARDIAN_SECRET is unset: run scripts/keycloak-env.sh")
 	}
 	t, err := post(kc+"/realms/"+realm+"/protocol/openid-connect/token", url.Values{"grant_type": {"client_credentials"}, "client_id": {client}, "client_secret": {secret}})
 	if err != nil {
@@ -140,7 +140,7 @@ func passwordGrant(user string) (string, error) {
 		return "", fmt.Errorf("no login form (HTTP %d)", resp.StatusCode)
 	}
 	action := strings.ReplaceAll(string(m[1]), "&amp;", "&")
-	resp, err = hc.PostForm(action, url.Values{"username": {user}, "password": {"qv-test-only-" + user}, "credentialId": {""}})
+	resp, err = hc.PostForm(action, url.Values{"username": {user}, "password": {testPassword(user)}, "credentialId": {""}})
 	if err != nil {
 		return "", err
 	}
@@ -150,6 +150,15 @@ func passwordGrant(user string) (string, error) {
 		return "", fmt.Errorf("login did not redirect with a code (HTTP %d)", resp.StatusCode)
 	}
 	return post(base+"token", url.Values{"grant_type": {"authorization_code"}, "client_id": {"qv-e2e"}, "code": {loc.Query().Get("code")}, "redirect_uri": {redirect}})
+}
+
+// testPassword is the test user's password, written to .env by scripts/keycloak-env.sh. The repo holds none.
+func testPassword(user string) string {
+	v := os.Getenv("QV_TEST_PASSWORD_" + strings.ToUpper(user))
+	if v == "" {
+		panic("idp: QV_TEST_PASSWORD_" + strings.ToUpper(user) + " is unset: run scripts/keycloak-env.sh")
+	}
+	return v
 }
 
 func post(u string, form url.Values) (string, error) {

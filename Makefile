@@ -131,8 +131,10 @@ test-e2e-evm-flows:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' ./e2e/custody/...
 # Real identity provider: a two-approver withdrawal with tokens from the dev Keycloak (docker compose profile identity; `make keycloak-up` first).
 test-e2e-evm-identity:
+	./scripts/keycloak-env.sh
 	$(E2E_EVM_ENV) QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-http://127.0.0.1:8180} go test -count=1 -p 1 -timeout 25m -v -run 'TestOIDCWithRealKeycloak' ./e2e/custody/...
 keycloak-up:
+	./scripts/keycloak-env.sh
 	docker compose --profile identity up -d --wait keycloak
 keycloak-down:
 	docker compose --profile identity down keycloak

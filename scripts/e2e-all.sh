@@ -239,6 +239,7 @@ if [ "$NEED_INFRA" = 1 ]; then
   ( dc "$PROJ-shared" --profile infra up -d --wait temporal-db temporal redpanda >"$OUT/shared-up.log" 2>&1 ) & pids="$pids $!"; names="$names shared"
 fi
 if [ "$NEED_KC" = 1 ]; then
+  ./scripts/keycloak-env.sh >/dev/null
   ( dc "$PROJ-shared" --profile identity up -d --wait keycloak >"$OUT/keycloak-up.log" 2>&1 ) & pids="$pids $!"; names="$names keycloak"
 fi
 i=1; while [ "$i" -le "$LANES" ]; do
