@@ -11,6 +11,8 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **All parties run on one machine, run by one team.** The cryptographic separation is real. The operational separation is not.
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
 - **`X-Actor` is not authentication.** It only names the caller. The zone now refuses an approval by the requester, but the requester is whatever the core says: anyone who can call the core can claim another name, so the check is only as good as the core's identity. A login service is planned.
+- **What you see is what you sign is not solved.** An approver's key signs a hash; a security key has no screen. If the page that shows the withdrawal is compromised, it can show one payee and ask the key to sign another job. The zone can only check that the signature is for the job it was given. A separate approval page that builds what it shows from the job itself is planned.
+- **WebAuthn is only tested with software authenticators.** No real key, no attestation and no real user verification has been tried; the test authenticators set those flags themselves, as SoftHSM stands in for a real HSM.
 - **No load test.** Numbers were measured on a laptop, not on target hardware. See [measurements](measurements).
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **Bitcoin has one hot shard per pool**, and so no rebalance.
