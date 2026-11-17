@@ -39,6 +39,7 @@ Click a box to open its page.
 | [MPC signing](docs/mpc.md) | Splits each key across machines so no one machine can sign |
 | [Hot and cold](docs/tiers.md) | Keeps a little online, the rest offline, and moves money between them |
 | [EVM](docs/evm.md) · [Bitcoin](docs/bitcoin.md) · [Solana](docs/solana.md) | What is special about each chain |
+| [Identity](docs/identity.md) | Who may call the API, and how a login is proved |
 | [Audit trail](docs/audit.md) | A record of every decision that can't be quietly changed |
 | [Testing](docs/testing.md) | How it is tested, including crashes and attacks |
 | [Limits](docs/limits.md) | What it can't do yet |

@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
 # name|services|weight (seconds in a CI run, for balancing)|QV_E2E_TIMEOUT_SCALE (CI's value)|command
-# services: p postgres, a anvil, b bitcoind, s solana-test-validator, i Temporal and Redpanda. Ordered by weight, heaviest first.
+# services: p postgres, a anvil, b bitcoind, s solana-test-validator, i Temporal and Redpanda, k Keycloak (one, shared like Temporal). Ordered by weight, heaviest first.
 GROUP_TABLE="
 e2e-evm-flows|pai|351|3|make test-e2e-evm-flows
 e2e-btc-recovery|pbi|345|3|make test-e2e-btc-recovery
@@ -43,6 +43,7 @@ e2e-sol-cold|psi|300|3|make test-e2e-sol-cold
 e2e-sol-cold-crash|psi|150|3|make test-e2e-sol-cold-crash
 e2e-sol-cold-moves-crash|psi|150|3|make test-e2e-sol-cold-moves-crash
 e2e-sol-nonces|psi|90|3|make test-e2e-sol-nonces
+e2e-evm-identity|paik|100|3|make test-e2e-evm-identity
 test|p|90|1|go vet ./... && QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -short -count=1 -p 1 ./...
 mpc-signing|pa|74|1|make test-mpc
 "
@@ -137,11 +138,13 @@ for g in $sorted_groups; do
   case "$svc" in *b*) case "${lane_svc[$best]}" in *b*) ;; *) lane_svc[$best]="${lane_svc[$best]}b" ;; esac ;; esac
   case "$svc" in *s*) case "${lane_svc[$best]}" in *s*) ;; *) lane_svc[$best]="${lane_svc[$best]}s" ;; esac ;; esac
   case "$svc" in *i*) NEED_INFRA=1 ;; esac
+  case "$svc" in *k*) NEED_KC=1 ;; esac
 done
 NEED_INFRA="${NEED_INFRA:-0}"
+NEED_KC="${NEED_KC:-0}"
 
 # ports: shared Temporal and Redpanda, then ten per lane (Postgres, anvil, bitcoind, solana)
-T_PORT=$((BASE + 1)); K_PORT=$((BASE + 2))
+T_PORT=$((BASE + 1)); K_PORT=$((BASE + 2)); KC_PORT=$((BASE + 3))
 pg_port() { echo $((BASE + 10 * $1)); }
 anvil_port() { echo $((BASE + 10 * $1 + 1)); }
 btc_port() { echo $((BASE + 10 * $1 + 2)); }
@@ -151,6 +154,7 @@ port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 check_ports() {
   local busy="" p i
   [ "$NEED_INFRA" = 1 ] && for p in $T_PORT $K_PORT; do port_busy "$p" && busy="$busy $p"; done
+  [ "$NEED_KC" = 1 ] && { port_busy "$KC_PORT" && busy="$busy $KC_PORT"; }
   i=1; while [ "$i" -le "$LANES" ]; do
     for p in $(pg_port $i) $(anvil_port $i) $(btc_port $i) $(sol_port $i); do port_busy "$p" && busy="$busy $p"; done
     i=$((i + 1))
@@ -162,7 +166,7 @@ check_ports() {
 dc() { # dc <project> <args...>: docker compose with the ports of that project in the environment
   local project=$1; shift
   case "$project" in
-    "$PROJ-shared") COMPOSE_PROJECT_NAME="$project" QV_TEMPORAL_PORT=$T_PORT QV_KAFKA_PORT=$K_PORT docker compose "$@" ;;
+    "$PROJ-shared") COMPOSE_PROJECT_NAME="$project" QV_TEMPORAL_PORT=$T_PORT QV_KAFKA_PORT=$K_PORT QV_KEYCLOAK_PORT=$KC_PORT docker compose "$@" ;;
     *) local n=${project##*-l}
        COMPOSE_PROJECT_NAME="$project" QV_PG_PORT=$(pg_port "$n") QV_ANVIL_PORT=$(anvil_port "$n") QV_BTC_PORT=$(btc_port "$n") QV_SOL_PORT=$(sol_port "$n") docker compose "$@" ;;
   esac
@@ -170,7 +174,7 @@ dc() { # dc <project> <args...>: docker compose with the ports of that project i
 
 down_all() {
   local i=1 pids="" p
-  ( dc "$PROJ-shared" --profile infra down -v --remove-orphans >/dev/null 2>&1 ) & pids="$pids $!"
+  ( dc "$PROJ-shared" --profile infra --profile identity down -v --remove-orphans >/dev/null 2>&1 ) & pids="$pids $!"
   while [ "$i" -le "$LANES" ]; do
     ( dc "$PROJ-l$i" --profile btc --profile solana down -v --remove-orphans >/dev/null 2>&1 ) & pids="$pids $!"
     i=$((i + 1))
@@ -235,6 +239,10 @@ pids=""; names=""
 if [ "$NEED_INFRA" = 1 ]; then
   ( dc "$PROJ-shared" --profile infra up -d --wait temporal-db temporal redpanda >"$OUT/shared-up.log" 2>&1 ) & pids="$pids $!"; names="$names shared"
 fi
+if [ "$NEED_KC" = 1 ]; then
+  ./scripts/keycloak-env.sh >/dev/null
+  ( dc "$PROJ-shared" --profile identity up -d --wait keycloak >"$OUT/keycloak-up.log" 2>&1 ) & pids="$pids $!"; names="$names keycloak"
+fi
 i=1; while [ "$i" -le "$LANES" ]; do
   start_lane $i & pids="$pids $!"; names="$names lane$i"
   i=$((i + 1))
@@ -263,6 +271,7 @@ run_group() { # run_group <lane> <group>
     export QV_TEMPORAL_ADDR="127.0.0.1:$T_PORT" QV_KAFKA_BROKERS="127.0.0.1:$K_PORT"
     export SOFTHSM2_CONF="$OUT/lane$n/softhsm/softhsm2.conf"
     export COMPOSE_PROJECT_NAME="$PROJ-l$n" QV_PG_PORT=$(pg_port "$n") QV_ANVIL_PORT=$(anvil_port "$n") QV_BTC_PORT=$(btc_port "$n") QV_SOL_PORT=$(sol_port "$n")
+    case "$(field "$g" 2)" in *k*) export QV_E2E_KEYCLOAK_URL="http://127.0.0.1:$KC_PORT" ;; esac
     [ "$scale" -gt 1 ] && export QV_E2E_TIMEOUT_SCALE="${QV_E2E_TIMEOUT_SCALE:-$scale}"
     exec bash -c "$cmd"
   ) >"$OUT/$g.log" 2>&1 </dev/null

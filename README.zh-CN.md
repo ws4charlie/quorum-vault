@@ -39,6 +39,7 @@
 | [MPC 签名](docs/zh/mpc.md) | 把每把密钥拆到多台机器上，没有哪台能单独签名 |
 | [冷热钱包](docs/zh/tiers.md) | 少量放在线上，其余离线保管，并在两者之间调拨 |
 | [EVM](docs/zh/evm.md) · [Bitcoin](docs/zh/bitcoin.md) · [Solana](docs/zh/solana.md) | 每条链各自的特殊之处 |
+| [身份](docs/zh/identity.md) | 谁能调用 API，登录怎么证明 |
 | [审计记录](docs/zh/audit.md) | 记下每个决定，事后没法悄悄改 |
 | [测试](docs/zh/testing.md) | 怎么测，包括崩溃和攻击 |
 | [局限](docs/zh/limits.md) | 目前还做不到的事 |

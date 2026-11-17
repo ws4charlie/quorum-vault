@@ -106,6 +106,39 @@ services:
       timeout: 5s
       retries: 40
 
+  # Development identity provider: Keycloak, with the dev realm in deploy/keycloak (test users only; see docs/identity.md). Production uses the
+  # customer's own OpenID Connect provider (Okta, Entra, ...); nothing outside this service is specific to Keycloak.
+  #   docker compose --profile identity up -d --wait keycloak     (or: make keycloak-up)
+  keycloak:
+    profiles: ["identity"]
+    image: quay.io/keycloak/keycloak:26.4.7@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007
+    # No default passwords: `make keycloak-up` (scripts/keycloak-env.sh) writes random ones to .env, and Keycloak fills the realm's ${...} placeholders from them.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - '[ -n "$$KC_BOOTSTRAP_ADMIN_PASSWORD" ] || { echo "QV_KEYCLOAK_ADMIN_PASSWORD is unset: run make keycloak-up (scripts/keycloak-env.sh)"; exit 1; }; exec /opt/keycloak/bin/kc.sh start-dev --import-realm'
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${QV_KEYCLOAK_ADMIN_PASSWORD:-}
+      QV_TEST_PASSWORD_ALICE: ${QV_TEST_PASSWORD_ALICE:-}
+      QV_TEST_PASSWORD_BOB: ${QV_TEST_PASSWORD_BOB:-}
+      QV_TEST_PASSWORD_CAROL: ${QV_TEST_PASSWORD_CAROL:-}
+      QV_TEST_PASSWORD_OPS: ${QV_TEST_PASSWORD_OPS:-}
+      QV_KEYCLOAK_GUARDIAN_SECRET: ${QV_KEYCLOAK_GUARDIAN_SECRET:-}
+      KC_HOSTNAME: http://127.0.0.1:${QV_KEYCLOAK_PORT:-8180}
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./deploy/keycloak/quorumvault-realm.json:/opt/keycloak/data/import/quorumvault-realm.json:ro
+    ports:
+      - "127.0.0.1:${QV_KEYCLOAK_PORT:-8180}:8080"
+    healthcheck:
+      # The image has no curl: open the management port and ask for readiness.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
   temporal-ui:
     profiles: ["infra"]
     image: temporalio/ui:2.56.0

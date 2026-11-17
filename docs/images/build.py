@@ -52,6 +52,12 @@ ZH = {
     "Settle": "结算", "books match": "账链一致",
     "Hot above its high mark": "热钱包高于上限", "excess goes to cold on its own": "多出的部分自动转冷",
     "Hot below its low mark": "热钱包低于下限", "people refill it from cold": "由人从冷钱包补充",
+    # identity
+    "Person": "人", "logs in with a passkey": "用通行密钥登录",
+    "Identity provider": "身份提供方", "signs a token": "签发令牌",
+    "checks role, login age": "核对角色和登录时间",
+    "Audit": "审计", "who, how, when": "谁、怎么登录、何时",
+    "Signing zone": "签名区", "still checks approver keys itself": "仍自己核对审批人密钥",
     # signing zone
     "Business side": "业务区", "queues a job": "排队一个任务",
     "Gateway": "网关", "checks the job": "核对任务",
@@ -336,6 +342,15 @@ def solana():
     d.write()
 
 
+def identity():
+    d = D("identity", 1140, 262)
+    row(d, [("Person", "logs in with a passkey", "blue"), ("Identity provider", "signs a token", "amber"),
+            ("Core API", "checks role, login age", "green"), ("Audit", "who, how, when", "gray")],
+        y=20, h=100, gap=44, size=23)
+    d.box(30, 160, 1080, 76, "Signing zone", "still checks approver keys itself", "purple")
+    d.write()
+
+
 def audit():
     d = D("audit", 1140, 330)
     gx = [30, 410, 790]
@@ -366,7 +381,7 @@ def testing():
 
 
 def build_all():
-    for f in (flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, solana, audit, testing):
+    for f in (flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, solana, identity, audit, testing):
         f()
 
 

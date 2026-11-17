@@ -17,6 +17,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/base58"
 
+	"github.com/ws4charlie/quorum-vault/e2e/idp"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
@@ -69,9 +70,10 @@ func (s *wdSys) callH(method, path string, hdr map[string]string, body any) (int
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	for k, v := range hdr {
-		req.Header.Set(k, v)
+	if _, ok := hdr["X-Actor"]; !ok {
+		req.Header.Set("Authorization", idp.Bearer("ops")) // reads and operator calls name nobody: the operator
 	}
+	idp.SetHeaders(req.Header, hdr)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		s.t.Fatalf("%s %s: %v", method, path, err)

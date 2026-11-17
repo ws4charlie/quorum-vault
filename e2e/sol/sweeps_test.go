@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ws4charlie/quorum-vault/e2e/idp"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
@@ -32,7 +33,9 @@ func (s *wdSys) watchReconcile() (stop func() []string) {
 				return
 			case <-time.After(400 * time.Millisecond):
 			}
-			resp, err := http.Get(s.apiURL + "/v2/reconcile")
+			rq, _ := http.NewRequest("GET", s.apiURL+"/v2/reconcile", nil)
+			rq.Header.Set("Authorization", idp.Bearer("ops"))
+			resp, err := http.DefaultClient.Do(rq)
 			if err != nil {
 				continue
 			}

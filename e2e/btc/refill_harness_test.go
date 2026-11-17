@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ws4charlie/quorum-vault/e2e/idp"
 	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
@@ -99,7 +100,7 @@ func (s *system) rawCall(method, path string, body []byte) (int, []byte) {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	req.Header.Set("X-Actor", "ops")
+	req.Header.Set("Authorization", idp.Bearer("ops"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		s.t.Fatal(err)
