@@ -339,6 +339,21 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		if pr.Sum != amount.Uint64() {
 			return reject("consolidation amount %s is not the sum of the inputs, %d", i.Amount, pr.Sum)
 		}
+	case KindCPFP:
+		// A child that pulls a stuck send in: coins of this partition's own shard (the guard checks that one of them is the change of a send it signed,
+		// and the package fee), back to the same shard in one output. No payment, nothing for anyone else.
+		if err := ownInputs("cpfp"); err != nil {
+			return err
+		}
+		if len(p.Outputs) != 1 {
+			return reject("a cpfp child has one output, not %d", len(p.Outputs))
+		}
+		if to.Canonical != own.addr || pr.outs[0].Canonical != own.addr {
+			return reject("a cpfp child pays the partition's own shard %s; the intent says %s and the output is %s", own.addr, to.Canonical, pr.outs[0].Canonical)
+		}
+		if amount.Sign() != 0 {
+			return reject("a cpfp intent has amount 0, not %s", i.Amount)
+		}
 	case "cancel":
 		// Every input as it was claimed (the guard checks that), back to the partition's own shard. Nothing else.
 		if len(p.Outputs) != 1 {
@@ -391,6 +406,66 @@ func (v *Verifier) CheckFirstSend(u chain.UnsignedTx, i signjob.Intent) error {
 	return nil
 }
 
+// KindCPFP is the intent kind of a child that pulls in a stuck send of the same hot shard.
+const KindCPFP = "cpfp"
+
+// Parent is what the zone records about a send it signed that has a change output to the partition's own shard: the facts a CPFP child is judged
+// against. They come from the zone's own parse of the payload it signed, never from the core's word later.
+type Parent struct {
+	VSize       uint64
+	Fee         uint64
+	ChangeVout  uint32
+	ChangeValue uint64
+}
+
+// ParentRecord is a Parent as the guard remembers it: with the partition and the intent it was signed for.
+type ParentRecord struct {
+	Parent
+	PartitionID string
+	IntentID    string
+}
+
+// CheckCPFP is the zone's rule for a child, on top of Verify: exactly one of its inputs spends a recorded send (parents, by txid), that input is
+// exactly the send's change (its vout and its value), the send was signed for the child's own partition, and the two together stay within the zone's
+// caps: the child's fee is at most CPFPRoom, which the zone computes from its own record of the send. Any other input is a coin of the shard; it
+// cannot be the change of a second recorded send (a child has one parent, and the chain of unconfirmed ancestors stays short).
+func (v *Verifier) CheckCPFP(u chain.UnsignedTx, i signjob.Intent, parents map[string]ParentRecord) error {
+	if i.Kind != KindCPFP {
+		return reject("intent kind %q is not a cpfp child", i.Kind)
+	}
+	pr, err := v.Parse(u)
+	if err != nil {
+		return err
+	}
+	var parent *ParentRecord
+	for n, in := range pr.Payload.Inputs {
+		rec, ok := parents[in.TxID]
+		if !ok {
+			continue
+		}
+		if parent != nil {
+			return reject("input %d also spends a signed transaction: a child has one parent", n)
+		}
+		if in.Vout != rec.ChangeVout || in.Value != rec.ChangeValue {
+			return reject("input %d spends output %d (%d sats) of %s, which is not its change (output %d, %d sats)", n, in.Vout, in.Value, in.TxID, rec.ChangeVout, rec.ChangeValue)
+		}
+		r := rec
+		parent = &r
+	}
+	if parent == nil {
+		return reject("no input spends the change of a transaction this zone signed: a cpfp child pulls in one of its own sends")
+	}
+	if parent.PartitionID != i.PartitionID {
+		return reject("the parent was signed for partition %q, the child is for %q", parent.PartitionID, i.PartitionID)
+	}
+	vc := uint64(EstimateVSize(pr.Built.Tx))
+	if room := CPFPRoom(v.cfg.MaxTxFeeSats, v.cfg.MaxFeeRate, parent.Fee, parent.VSize, vc); pr.Fee > room {
+		return reject("the child pays %d sats; with the parent's %d over %d vbytes the package (%d vbytes) may pay at most %d more under the fee caps (%d sats, %d sat/vB)",
+			pr.Fee, parent.Fee, parent.VSize, parent.VSize+vc, room, v.cfg.MaxTxFeeSats, v.cfg.MaxFeeRate)
+	}
+	return nil
+}
+
 // Info is what the gateway's guard reads from a verified job.
 type Info struct {
 	Sender      string
@@ -400,6 +475,8 @@ type Info struct {
 	Identity    string
 	SignerKey   []byte
 	Fee         uint64
+	// Parent is set when the last output goes to the shard of the job's own partition after at least one payment: the change a CPFP child may spend.
+	Parent *Parent
 }
 
 // Decode reads the guard's view of a job that Verify accepted: what the transaction consumes (outpoints, pinned to their values), its
@@ -414,6 +491,11 @@ func (v *Verifier) Decode(u chain.UnsignedTx) (Info, error) {
 	for _, in := range pr.Payload.Inputs {
 		info.Claims = append(info.Claims, in.TxID+":"+strconv.FormatUint(uint64(in.Vout), 10))
 		info.Pins = append(info.Pins, strconv.FormatUint(in.Value, 10))
+	}
+	if n := len(pr.Payload.Outputs); n >= 2 {
+		if own, ok := v.shard[u.KeyRef.PartitionID]; ok && pr.outs[n-1].Canonical == own.addr {
+			info.Parent = &Parent{VSize: uint64(EstimateVSize(pr.Built.Tx)), Fee: pr.Fee, ChangeVout: uint32(n - 1), ChangeValue: pr.Payload.Outputs[n-1].Value}
+		}
 	}
 	return info, nil
 }

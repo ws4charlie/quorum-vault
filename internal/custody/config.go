@@ -143,6 +143,9 @@ type WithdrawalFile struct {
 	StuckAfter      string `json:"stuck_after"`      // replace a broadcast tx that has not mined after this, default 2m
 	HotWait         string `json:"hot_wait"`         // give up waiting for hot liquidity after this, default 30m
 	MaxReplacements int    `json:"max_replacements"` // default 5
+	// CPFPAfter turns on CPFP for Bitcoin: a send that cannot be raised any more (its replacements are used up, or its next fee is over the caps) and has
+	// stayed unconfirmed this long after that gets a child that spends its change and pays for both. Empty or "0": off (the default).
+	CPFPAfter string `json:"cpfp_after"`
 	// ActivityTimeout, when set, shortens how long the workflow engine waits before it notices an activity died with its worker
 	// (production: 20 s to run, 30 s for a build). For tests that kill the worker; leave it empty in production.
 	ActivityTimeout string `json:"activity_timeout"`
@@ -197,6 +200,7 @@ type Config struct {
 	ApprovalTimeout time.Duration
 	SignTimeout     time.Duration
 	StuckAfter      time.Duration
+	CPFPAfter       time.Duration // 0: no CPFP
 	HotWait         time.Duration
 	MaxReplacements int
 	Tiers           map[string][]Tier
@@ -603,6 +607,11 @@ func (f File) Build() (*Config, error) {
 	}
 	if w.ActivityTimeout != "" {
 		if c.ActivityTimeout, err = dur("activity_timeout", w.ActivityTimeout, 0); err != nil {
+			return nil, err
+		}
+	}
+	if w.CPFPAfter != "" && w.CPFPAfter != "0" {
+		if c.CPFPAfter, err = dur("cpfp_after", w.CPFPAfter, 0); err != nil {
 			return nil, err
 		}
 	}

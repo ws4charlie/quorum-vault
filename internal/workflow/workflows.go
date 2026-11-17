@@ -24,6 +24,7 @@ type Timings struct {
 	ApprovalPoll     time.Duration // re-read approvals this often even without a signal
 	SignTimeout      time.Duration // the gateway's sign_timeout: wait this long before retrying a failed job
 	StuckAfter       time.Duration
+	CPFPAfter        time.Duration // Bitcoin: how long a send that cannot be raised any more waits before a CPFP child pulls it in; 0: never
 	HotWait          time.Duration
 	HotPoll          time.Duration
 	MaxReplacements  int
@@ -40,7 +41,7 @@ type Timings struct {
 
 // DefaultTimings derives timings from the business config.
 func DefaultTimings(c *custody.Config) Timings {
-	return Timings{ApprovalTimeout: c.ApprovalTimeout, ApprovalPoll: 15 * time.Second, SignTimeout: c.SignTimeout, StuckAfter: c.StuckAfter,
+	return Timings{ApprovalTimeout: c.ApprovalTimeout, ApprovalPoll: 15 * time.Second, SignTimeout: c.SignTimeout, StuckAfter: c.StuckAfter, CPFPAfter: c.CPFPAfter,
 		HotWait: c.HotWait, HotPoll: 10 * time.Second, MaxReplacements: c.MaxReplacements, ScanInterval: c.ScanInterval, PlanInterval: c.PlanInterval, ColdInterval: c.ColdPlanInterval, RefillPoll: c.RefillPoll, RefillStuckAfter: c.RefillStuckAfter, ActivityTimeout: c.ActivityTimeout}
 }
 
@@ -338,6 +339,37 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 		slice = 2 * time.Second // tests: look at the transaction (and at "stuck") more often
 	}
 	refused0 := -1 // replacements the node had refused as too cheap when this run began to look
+	// CPFP (Bitcoin, off unless cpfp_after is set): when the owner's own send cannot be raised any more it is pulled in by a child that spends its
+	// change. Only the owner's own track has a child (a cancel does not). exhaustedAt is when RBF first had nothing more to give.
+	cpfpOn := t.CPFPAfter > 0 && track == custody.OwnerTrack(custody.Owner{Kind: o.Kind, ID: o.ID}) && workflow.GetVersion(ctx, "btc-cpfp", workflow.DefaultVersion, 1) >= 1
+	var exhaustedAt time.Time
+	cpfpN := 0
+	cpfpStep := func() error {
+		cpfpN++
+		var cj string
+		if err := call(ctx, buildOpts(ctx), &cj, a.EnqueueCPFP, o, cpfpN); err != nil {
+			cpfpN--
+			alert("a CPFP child could not be built: " + err.Error())
+			stuckAt = workflow.Now(ctx).Add(t.StuckAfter)
+			return nil
+		}
+		if cj == "" { // the chain has no CPFP
+			cpfpN--
+			stuckAt = workflow.Now(ctx).Add(t.StuckAfter)
+			return nil
+		}
+		rr, err := waitJob(ctx, cj)
+		if err != nil {
+			return err
+		}
+		if rr.Status == custody.JobDone {
+			if err := call(ctx, opts(ctx), nil, a.BroadcastCPFP, o, cj); err != nil {
+				return err
+			}
+		} // refused or failed: the send may still mine; try again at the next deadline
+		stuckAt = workflow.Now(ctx).Add(t.StuckAfter)
+		return nil
+	}
 	for {
 		var n NonceResult
 		if err := call(ctx, longOpts(ctx, slice), &n, a.WaitNonce, o, slice); err != nil {
@@ -382,16 +414,47 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 		}
 		// A replacement the node refused as too cheap was never in the mempool: it does not use up a replacement. The next one pays more, up to the caps.
 		used := replacements - (n.FeeRefusals - refused0)
-		if !workflow.Now(ctx).Before(stuckAt) && used >= t.MaxReplacements {
-			alert("replacements exhausted")
+		stuck := !workflow.Now(ctx).Before(stuckAt)
+		if cpfpOn && stuck && n.Child {
+			// A child already pulls the send in: raise the child's fee. The send is never replaced under it.
+			if err := cpfpStep(); err != nil {
+				return txResult{}, err
+			}
+			continue
 		}
-		if !workflow.Now(ctx).Before(stuckAt) && used < t.MaxReplacements {
+		if stuck && used >= t.MaxReplacements {
+			alert("replacements exhausted")
+			if cpfpOn {
+				if exhaustedAt.IsZero() {
+					exhaustedAt = workflow.Now(ctx)
+				}
+				if !workflow.Now(ctx).Before(exhaustedAt.Add(t.CPFPAfter)) {
+					if err := cpfpStep(); err != nil {
+						return txResult{}, err
+					}
+					continue
+				}
+			}
+		}
+		if stuck && used < t.MaxReplacements {
 			replacements++
 			var rj string
 			if err := call(ctx, buildOpts(ctx), &rj, a.EnqueueReplacement, o, string(track), replacements); err != nil {
 				// Typically the fee cap: the bumped fee is above what the gateway allows.
 				replacements--
 				alert("replacement could not be built: " + err.Error())
+				if cpfpOn {
+					// RBF has nothing more to give. After CPFPAfter a child takes over.
+					if exhaustedAt.IsZero() {
+						exhaustedAt = workflow.Now(ctx)
+					}
+					if !workflow.Now(ctx).Before(exhaustedAt.Add(t.CPFPAfter)) {
+						if err := cpfpStep(); err != nil {
+							return txResult{}, err
+						}
+						continue
+					}
+				}
 				stuckAt = workflow.Now(ctx).Add(t.StuckAfter)
 				continue
 			}

@@ -1061,6 +1061,44 @@ jobs:
       - name: make test-e2e-btc-batching-recovery
         run: ci/run-in-image.sh make test-e2e-btc-batching-recovery
 
+  # Bitcoin cell, CPFP: a stuck send pulled in by a child that spends its change (a withdrawal and a batch), a cancel after a child, a crash between the child's signature and its broadcast, every hostile child refused.
+  e2e-btc-cpfp:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+          anvil: "false"
+          bitcoind: "true"
+      - name: make test-e2e-btc-cpfp
+        run: ci/run-in-image.sh make test-e2e-btc-cpfp
+
   # Bitcoin cell, refills from cold: the cold key in the qv-cold SoftHSM token, qv-cold as its own process, only files crossing.
   e2e-btc-refill:
     runs-on: ubuntu-24.04

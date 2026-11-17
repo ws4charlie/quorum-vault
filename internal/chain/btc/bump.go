@@ -118,6 +118,13 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
+	// Once a CPFP child was sent, the transaction is pulled in by it and not replaced: a replacement would orphan the child (a cancel, which also
+	// evicts it, stays possible). The caller raises the child's fee instead (BuildCPFP).
+	if has, err := a.hasBroadcastChild(ctx, tx, ownerKind, ownerID, built.TxID); err != nil {
+		return chain.UnsignedTx{}, err
+	} else if has {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: a CPFP child spends the change of %s; replacing it would orphan the child (raise the child's fee, or cancel)", chain.ErrCannotBump, built.TxID)
+	}
 	vs := uint64(EstimateVSize(built.Tx))
 	fee, err := a.escalate(ctx, tx, ownerKind, ownerID, oldFee, vs, a.feeCap(vs), func(fee uint64) error { return a.checkFee(fee, vs) })
 	if err != nil {
@@ -181,6 +188,14 @@ func (a *Adapter) buildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(fee),0) FROM btc_attempts WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3`, a.cfg.Chain, ownerKind, ownerID).Scan(&top); err != nil {
 		return chain.UnsignedTx{}, err
 	}
+	// A cancel replaces the send and so evicts its CPFP child: BIP125 asks it to pay at least what both paid, plus its own relay cost.
+	var pair int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT fee FROM btc_attempts s WHERE s.chain=$1 AND s.owner_kind=$2 AND s.owner_id=$3 AND s.kind='send' AND s.broadcast_at IS NOT NULL ORDER BY s.created_at DESC, s.txid LIMIT 1), 0)
+		+ COALESCE((SELECT max(c.fee) FROM btc_attempts c WHERE c.chain=$1 AND c.owner_kind=$2 AND c.owner_id=$3 AND c.kind='cpfp' AND c.broadcast_at IS NOT NULL), 0)`,
+		a.cfg.Chain, ownerKind, ownerID).Scan(&pair); err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	top = max(top, pair)
 	var part string
 	if err := tx.QueryRow(ctx, `SELECT partition_id FROM btc_utxos WHERE chain=$1 AND txid=$2 AND vout=$3`, a.cfg.Chain, p.Inputs[0].TxID, p.Inputs[0].Vout).Scan(&part); err != nil {
 		return chain.UnsignedTx{}, fmt.Errorf("btc: partition of the attempt's inputs: %w", err)

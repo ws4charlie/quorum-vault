@@ -48,6 +48,7 @@ const (
 	ReasonCancelClaims    = "replay_cancel_claims"     // 5 a cancel on a chain that requires it names inputs that are not exactly the claims of one signed intent of its partition
 	ReasonIdentity        = "replay_identity_reused"   // 5 the transaction identity was signed under another payload (Bitcoin: same txid, other values)
 	ReasonMemberReused    = "replay_withdrawal_reused" // 5 a withdrawal id the zone signed appears again outside a replacement of its own batch
+	ReasonCPFP            = "policy_cpfp"              // 4 a cpfp child that does not spend the change of a send this zone signed, or whose package is over the fee caps
 	ReasonSignerRefused   = "signer_refused"           // 6 the signer's other party (cb-mpc party B) refused; nothing was signed
 )
 

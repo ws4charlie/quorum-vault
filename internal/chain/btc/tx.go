@@ -86,8 +86,11 @@ func (a *Adapter) Broadcast(ctx context.Context, s chain.SignedTx) (string, erro
 		return "", err
 	}
 	// What the node refuses about a cancel is kept apart from what it refuses about a send (cancelKind).
-	if attemptKind == "cancel" {
+	switch attemptKind {
+	case "cancel":
 		ownerKind = cancelKind(ownerKind)
+	case "cpfp": // likewise a child's: what the node refuses about it says nothing about the send
+		ownerKind = cpfpKind(ownerKind)
 	}
 	h, serr := a.send(ctx, txid, s.Raw)
 	if serr == nil {
@@ -201,14 +204,29 @@ func (a *Adapter) Status(ctx context.Context, txid string) (chain.TxStatus, erro
 	return chain.TxPending, nil
 }
 
-// TxFee is what the attempt pays, from the payload it was built from (inputs minus outputs).
+// TxFee is what the attempt pays, from the payload it was built from (inputs minus outputs). For a send whose CPFP child confirmed it is what the pair
+// paid: the child's fee is a cost of the send's owner, like a bump (a child that did not confirm paid nothing).
 func (a *Adapter) TxFee(ctx context.Context, txid string) (*big.Int, error) {
 	var fee int64
-	err := a.pool.QueryRow(ctx, `SELECT fee FROM btc_attempts WHERE chain=$1 AND txid=$2`, a.cfg.Chain, txid).Scan(&fee)
+	var kind string
+	err := a.pool.QueryRow(ctx, `SELECT fee, kind FROM btc_attempts WHERE chain=$1 AND txid=$2`, a.cfg.Chain, txid).Scan(&fee, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("btc: no attempt %s", txid)
 	}
-	return big.NewInt(fee), err
+	if err != nil {
+		return nil, err
+	}
+	total := big.NewInt(fee)
+	if kind == "send" {
+		c, err := a.confirmedChild(ctx, a.pool, txid)
+		if err != nil {
+			return nil, err
+		}
+		if c != nil {
+			total.Add(total, new(big.Int).SetUint64(c.fee))
+		}
+	}
+	return total, nil
 }
 
 // TxBlock is the height of the block that holds a mined transaction.
@@ -253,6 +271,7 @@ func (a *Adapter) Outcome(ctx context.Context, ownerKind, ownerID string) (chain
 		raw        []byte
 		sent       *time.Time
 		conf       int64
+		parent     string // a CPFP child: the transaction it pulls in
 	}
 	var atts []att
 	for rows.Next() {
@@ -260,6 +279,14 @@ func (a *Adapter) Outcome(ctx context.Context, ownerKind, ownerID string) (chain
 		if err := rows.Scan(&t.txid, &t.kind, &t.payload, &t.raw, &t.sent); err != nil {
 			rows.Close()
 			return chain.Outcome{}, err
+		}
+		if t.kind == "cpfp" {
+			cp, err := DecodePayload(t.payload)
+			if err != nil || len(cp.Inputs) == 0 {
+				rows.Close()
+				return chain.Outcome{}, fmt.Errorf("btc: CPFP attempt %s has no input: %v", t.txid, err)
+			}
+			t.parent = cp.Inputs[0].TxID
 		}
 		atts = append(atts, t)
 	}
@@ -293,19 +320,48 @@ func (a *Adapter) Outcome(ctx context.Context, ownerKind, ownerID string) (chain
 		if c >= 1 {
 			inBlock = true
 		}
-		if c >= int64(a.cfg.SpendConfirmations) {
-			kind := chain.AttemptSend
-			if atts[i].kind == "cancel" {
-				kind = chain.AttemptCancel
+	}
+	depth := int64(a.cfg.SpendConfirmations)
+	// A send that has a CPFP child is decided only when the child is too: the child spends the send's change, so the books must settle both at once (the
+	// child's fee is booked with the send's, and its output replaces the change). The child is in the mempool, or in the block of its parent, or about to be.
+	childConfirmed := func(parent string) (has, confirmed bool) {
+		for _, t := range atts {
+			if t.kind == "cpfp" && t.parent == parent {
+				has = true
+				confirmed = confirmed || t.conf >= depth
 			}
-			return chain.Outcome{State: chain.OutcomeConfirmed, Hash: atts[i].txid, Kind: kind, Attempts: len(atts)}, nil
 		}
+		return
+	}
+	waitingForChild := false
+	for _, t := range atts {
+		if t.conf < depth || t.kind == "cpfp" {
+			continue
+		}
+		kind := chain.AttemptSend
+		if t.kind == "cancel" {
+			kind = chain.AttemptCancel
+		} else if has, ok := childConfirmed(t.txid); has && !ok {
+			waitingForChild = true
+			continue
+		}
+		return chain.Outcome{State: chain.OutcomeConfirmed, Hash: t.txid, Kind: kind, Attempts: len(atts)}, nil
 	}
 	if len(atts) == 0 {
 		return out, nil
 	}
-	latest := atts[len(atts)-1]
-	if !inBlock {
+	var latest att // the newest attempt that is not a child: the owner's own transaction or its cancel
+	for _, t := range atts {
+		if t.kind != "cpfp" {
+			latest = t
+		}
+	}
+	for _, t := range atts {
+		if t.kind == "cpfp" && t.parent == latest.txid {
+			out.Child = true
+		}
+	}
+	if !inBlock && !waitingForChild {
 		p, err := DecodePayload(latest.payload)
 		if err != nil {
 			return chain.Outcome{}, err
@@ -356,6 +412,24 @@ func (a *Adapter) Outcome(ctx context.Context, ownerKind, ownerID string) (chain
 			// A refusal leaves it as it was; the next older attempt is offered.
 		}
 	}
+	// A CPFP child the node forgot while the transaction it spends is known (or in a block) is sent again, newest first, at most every resendEvery.
+	known := map[string]bool{}
+	for _, t := range atts {
+		known[t.txid] = t.conf >= 0
+	}
+	for i := len(atts) - 1; i >= 0; i-- {
+		t := atts[i]
+		if t.kind != "cpfp" || t.conf >= 0 || !known[t.parent] || len(t.raw) == 0 || (t.sent != nil && time.Since(*t.sent) < resendEvery) {
+			continue
+		}
+		_, serr := a.send(ctx, t.txid, t.raw)
+		if _, err := a.pool.Exec(ctx, `UPDATE btc_attempts SET last_sent_at = now() WHERE chain=$1 AND txid=$2`, a.cfg.Chain, t.txid); err != nil {
+			return chain.Outcome{}, err
+		}
+		if serr == nil {
+			break
+		}
+	}
 	return out, nil
 }
 
@@ -404,7 +478,20 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 			return err
 		}
 	}
+	// A CPFP child that confirmed spent the change of this send: the change never becomes a coin, the child's output does (it is the child that is the
+	// hot coin once confirmed). The child's fee was booked with this send's (TxFee).
+	child, err := a.confirmedChild(ctx, tx, txid)
+	if err != nil {
+		return err
+	}
+	skip := -1
+	if child != nil {
+		skip = int(child.p.Inputs[0].Vout)
+	}
 	for n, o := range p.Outputs {
+		if n == skip {
+			continue
+		}
 		sh, ok := a.byAddr[o.Address]
 		if !ok {
 			if _, isCold := a.cold[o.Address]; isCold { // an output on the cold address (a move to cold, a refill's change) is a cold output
@@ -418,6 +505,21 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 		if _, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
 			a.cfg.Chain, txid, n, int64(o.Value), sh.partition, PathString(sh.path)); err != nil {
 			return err
+		}
+	}
+	if child != nil {
+		if _, err := tx.Exec(ctx, `UPDATE btc_attempts SET settled_at = COALESCE(settled_at, now()) WHERE chain=$1 AND txid=$2`, a.cfg.Chain, child.txid); err != nil {
+			return err
+		}
+		for n, o := range child.p.Outputs {
+			sh, ok := a.byAddr[o.Address]
+			if !ok {
+				return fmt.Errorf("btc: CPFP child %s pays %s, which is not a hot address of this cell", child.txid, o.Address)
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+				a.cfg.Chain, child.txid, n, int64(o.Value), sh.partition, PathString(sh.path)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
