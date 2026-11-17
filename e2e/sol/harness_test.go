@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 
+	"github.com/ws4charlie/quorum-vault/e2e/idp"
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"github.com/ws4charlie/quorum-vault/e2e/phasetime"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
@@ -44,6 +45,10 @@ var (
 
 func TestMain(m *testing.M) {
 	mpcstack.ReaperMain() // in the reaper process: waits for this binary to die, kills the children, never returns
+	if err := idp.Init(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	stopReaper := func() {}
 	if os.Getenv("QV_REQUIRE_SOL") == "1" {
 		dir, err := os.MkdirTemp("", "qv-e2e-sol-bin-")
@@ -385,7 +390,7 @@ func (s *system) call(method, path string, body any) (int, map[string]any) {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	req.Header.Set("X-Actor", "ops")
+	req.Header.Set("Authorization", idp.Bearer("ops"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		s.t.Fatalf("%s %s: %v", method, path, err)

@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/ws4charlie/quorum-vault/e2e/idp"
 	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 )
@@ -182,8 +183,10 @@ func TestGuardianFreezeAndCeremonyUnfreeze(t *testing.T) {
 	strangerKey := filepath.Join(s.dir, "stranger.key")
 	os.WriteFile(strangerKey, []byte(common.Bytes2Hex(crypto.FromECDSA(s.deployer))), 0o600)
 	guardian := func(key string) (string, error) {
-		out, err := exec.Command(filepath.Join(binDir, "qv-guardian"), "freeze", "-rpc", s.rpcURL, "-factory", s.factory.Hex(), "-key-file", key,
-			"-core", s.apiURL, "-actor", "ops").CombinedOutput()
+		cmd := exec.Command(filepath.Join(binDir, "qv-guardian"), "freeze", "-rpc", s.rpcURL, "-factory", s.factory.Hex(), "-key-file", key,
+			"-core", s.apiURL)
+		cmd.Env = append(os.Environ(), "QV_CORE_TOKEN="+strings.TrimPrefix(idp.ServiceBearer("qv-guardian"), "Bearer "))
+		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
 	if out, err := guardian(strangerKey); err == nil || !strings.Contains(out, "would not be allowed to freeze") {

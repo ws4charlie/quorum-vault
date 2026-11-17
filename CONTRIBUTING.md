@@ -29,6 +29,10 @@ make dev-env && make setup && make mpc-build
 
 Each group writes a log under `data/e2e-all/`. Pull requests run the light groups; the heavy crash and failure groups run nightly or from the Actions tab. `QV_CRASH_BOUNDARIES` picks crash points, and `make test-e2e-evm TEST=<name>` runs a single test. The `mpc-party` module has its own tests (`cd mpc-party && go test ./...`).
 
+## Logging in to the core API
+
+The core API wants a bearer token. For development, start Keycloak with `make keycloak-up` (the realm in `deploy/keycloak` has the test users alice, bob, carol and ops, password `qv-test-only-<name>`), then start `qv-core` with `QV_ENV=dev QV_OIDC_ISSUER=http://127.0.0.1:8180/realms/quorumvault QV_OIDC_AUDIENCE=qv-core`. A token for a script comes from `curl -s -d grant_type=client_credentials -d client_id=qv-guardian -d client_secret=qv-test-only-guardian-secret http://127.0.0.1:8180/realms/quorumvault/protocol/openid-connect/token`. People log in with the `qv-cli` client (authorization code with PKCE, then a passkey). Without Keycloak, `QV_ENV=dev QV_DEV_ACTOR_HEADER=1` brings back the old `X-Actor` header; a production start refuses it. See [docs/identity.md](docs/identity.md).
+
 ## Configuration
 
 All optional; see [.env.example](.env.example). `DATABASE_URL`, `SOFTHSM2_CONF`, `QV_HSM_PIN`, `QV_PKCS11_LIB` and `QV_CUSTODY_SIGNER` (`hsm` or `mpc`) are the ones you meet first.

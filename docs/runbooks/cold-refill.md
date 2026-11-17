@@ -31,7 +31,7 @@ come back only through an offline ceremony that several people complete. Nothing
 | # | Who | Step |
 |---|---|---|
 | 1 | Requester | `GET /v2/refills` finds the request (`requested`); the `ALERT` in the worker log names it. |
-| 2 | Requester | `POST /v2/refills/{id}/export` (header `X-Actor`) returns the request file. Nonce and fees are read from the node now; the fee cap is generous. Save it to removable media. |
+| 2 | Requester | `POST /v2/refills/{id}/export` (with an operator token) returns the request file. Nonce and fees are read from the node now; the fee cap is generous. Save it to removable media. |
 | 3 | Requester | Carry the media to the offline machine. Files only: no QR code, no cable. |
 | 4 | Each operator | `qv-cold inspect -config cfg.json -request request.json` and **read it**: the **destination** is one of your hot addresses, the **asset and amount** are what the alert said, the **chain** is right, the **fee** is plausible. If any of it is wrong: **stop** (see "On a mismatch"). |
 | 5 | Each approving operator | `qv-cold approve -operator NAME -key operator.key -request request.json -out NAME.approval.json`. The tool prints what you are approving first. |
@@ -55,7 +55,7 @@ in `record_dir` survives restarts; a re-export with only higher fees is the same
 - **Import says "re-exported, or this is another request"**: a newer export exists. Run the ceremony for the newest request file.
 - **The cold nonce moved** (someone spent from the cold address): export again. The new revision has the new nonce; the old signed file cannot be imported.
 - **A signed file was imported and broadcast, but does not confirm**: you get one `ALERT`. The system **never** retries with a new nonce. Look at the transaction on the node. If the transaction is still in the pool, wait or raise its fee with a *replacement of the same content* (the offline tool allows a higher-fee signature of the same payment at the same nonce); if the nonce was used by another transaction, the refill is parked and needs an operator.
-- **The refill is parked** (`failure_reason` starts with `parked:`): its nonce was used by another transaction. Nothing was lost, and nothing else will move through that cold address until an operator closes it: `POST /v2/refills/{id}/close` with `X-Actor` and a reason (only a parked request that was never broadcast can be closed; the planner then opens a fresh one).
+- **The refill is parked** (`failure_reason` starts with `parked:`): its nonce was used by another transaction. Nothing was lost, and nothing else will move through that cold address until an operator closes it: `POST /v2/refills/{id}/close` with an operator token (a fresh login) and a reason (only a parked request that was never broadcast can be closed; the planner then opens a fresh one).
 
 ## Drill
 
