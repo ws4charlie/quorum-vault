@@ -148,7 +148,7 @@ func TestCosignerDecisions(t *testing.T) {
 	})
 	t.Run("fee above the cap", func(t *testing.T) {
 		e := newEnv(t)
-		in := signjob.Intent{Kind: "withdrawal", ID: "w-fee", Asset: "ETH", To: gatewaytest.AddrUser.Hex(), Amount: "500"}
+		in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-fee", Asset: "ETH", To: gatewaytest.AddrUser.Hex(), Amount: "500"}
 		spec := gatewaytest.ETH(gatewaytest.AddrUser, 500, 0)
 		spec.Gas, spec.FeeCap, spec.Tip = 21000, big.NewInt(1e12), big.NewInt(1e12) // 21000 * 1e12 = 2.1e16 > 3e14
 		e.refuse(e.req(e.h.Job("fee", in, spec, "alice")), gateway.ReasonTx)
@@ -165,7 +165,7 @@ func TestCosignerDecisions(t *testing.T) {
 	})
 	t.Run("expired or open-ended approval", func(t *testing.T) {
 		e := newEnv(t)
-		in := signjob.Intent{Kind: "withdrawal", ID: "w-old", Asset: "ETH", To: gatewaytest.AddrUser.Hex(), Amount: "500", NotAfter: time.Now().Add(-time.Minute).Unix()}
+		in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-old", Asset: "ETH", To: gatewaytest.AddrUser.Hex(), Amount: "500", NotAfter: time.Now().Add(-time.Minute).Unix()}
 		e.refuse(e.req(e.h.Job("old", in, gatewaytest.ETH(gatewaytest.AddrUser, 500, 0), "alice")), gateway.ReasonExpired)
 	})
 	t.Run("the key to sign with is not the sender's", func(t *testing.T) {
@@ -394,4 +394,14 @@ func TestCosignerRefusesUnlistedDestinationAndHourLimit(t *testing.T) {
 	e.refuse(e.req(e.h.Withdrawal("rg1", gatewaytest.AddrEvil, 100, 0, "alice")), gateway.ReasonDestination)
 	e.allow(e.h.Withdrawal("rg2", gatewaytest.AddrUser, 100, 0, "alice"))
 	e.refuse(e.req(e.h.Withdrawal("rg3", gatewaytest.AddrUser, 100, 1, "alice")), gateway.ReasonWithdrawRate)
+}
+
+// The cosigner next to party B runs the same decider: it refuses a withdrawal its requester approved, and one with no requester.
+func TestCosignerRefusesRequesterAsApprover(t *testing.T) {
+	e := newEnv(t)
+	own := signjob.Intent{Kind: "withdrawal", RequestedBy: "alice", ID: "w-own", Asset: "ETH", To: gatewaytest.AddrUser.Hex(), Amount: "500"}
+	e.refuse(e.req(e.h.Job("own", own, gatewaytest.ETH(gatewaytest.AddrUser, 500, 0), "alice")), gateway.ReasonRequester)
+	none := signjob.Intent{Kind: "withdrawal", ID: "w-none", Asset: "ETH", To: gatewaytest.AddrUser.Hex(), Amount: "500"}
+	e.refuse(e.req(e.h.Job("none", none, gatewaytest.ETH(gatewaytest.AddrUser, 500, 1), "alice")), gateway.ReasonRequester)
+	e.allow(e.h.Withdrawal("ok", gatewaytest.AddrUser, 500, 2, "alice"))
 }

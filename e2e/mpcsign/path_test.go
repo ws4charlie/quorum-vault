@@ -57,7 +57,7 @@ func TestEndToEndWithdrawalMinesOnAnvil(t *testing.T) {
 	}
 
 	spec := gatewaytest.TxSpec{Nonce: nonce, To: gatewaytest.AddrUser, Value: big.NewInt(500), Gas: 21000, Tip: tip, FeeCap: feeCap}
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-e2e", Asset: "ETH", To: gatewaytest.AddrUser.Hex(), Amount: "500"}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-e2e", Asset: "ETH", To: gatewaytest.AddrUser.Hex(), Amount: "500"}
 	job := s.h.Job("job-e2e", in, spec, "alice")
 	s.enqueue(job)
 	got := s.waitJob(job.ID, 60*time.Second)

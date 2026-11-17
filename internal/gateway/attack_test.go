@@ -71,7 +71,7 @@ func TestAttackDestinationChangedAfterApproval(t *testing.T) {
 
 func TestAttackPayloadChanged(t *testing.T) {
 	h := newHarness(t)
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-pc", Asset: "ETH", To: addrUser.Hex(), Amount: "100"}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-pc", Asset: "ETH", To: addrUser.Hex(), Amount: "100"}
 	for name, spec := range map[string]txSpec{
 		"destination": h.ethTx(addrEvil, 100, 0),
 		"amount":      h.ethTx(addrUser, 900, 0),
@@ -81,7 +81,7 @@ func TestAttackPayloadChanged(t *testing.T) {
 		h.mustReject(h.job("pc-"+name, in, spec, "auto"), ReasonTx)
 	}
 	// Token withdrawal turned into a native transfer, and a different token contract.
-	tin := signjob.Intent{Kind: "withdrawal", ID: "w-pc2", Asset: "USDT", To: addrUser.Hex(), Amount: "100"}
+	tin := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-pc2", Asset: "USDT", To: addrUser.Hex(), Amount: "100"}
 	h.mustReject(h.job("pc-native", tin, h.ethTx(addrUser, 100, 0), "auto"), ReasonTx)
 	bad := h.tokenTx(addrUser, 100, 0)
 	bad.to = addrEvil
@@ -99,7 +99,7 @@ func TestAttackUnconfiguredOrDisabledApprover(t *testing.T) {
 	if _, err := h.biz.Exec(ctx, `INSERT INTO approver_keys VALUES ('mallory', $1)`, []byte(pub)); err != nil {
 		t.Fatal(err)
 	}
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-ua", Asset: "ETH", To: addrEvil.Hex(), Amount: "100"}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-ua", Asset: "ETH", To: addrEvil.Hex(), Amount: "100"}
 	hash := in.Hash()
 	j := h.job("ua1", in, h.ethTx(addrEvil, 100, 0))
 	j.Approvals = []signjob.Approval{{Actor: "mallory", Signature: ed25519.Sign(priv, hash[:])}}
@@ -117,7 +117,7 @@ func TestAttackUnconfiguredOrDisabledApprover(t *testing.T) {
 
 func TestAttackRepeatedApproverReachesQuorum(t *testing.T) {
 	h := newHarness(t)
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-rq", Asset: "ETH", To: addrUser.Hex(), Amount: "2000"} // needs 2
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-rq", Asset: "ETH", To: addrUser.Hex(), Amount: "2000"} // needs 2
 	h.mustReject(h.job("rq1", in, h.ethTx(addrUser, 2000, 0), "alice", "alice", "alice"), ReasonTier)
 	h.mustReject(h.job("rq2", in, h.ethTx(addrUser, 2000, 0), "alice", "dave"), ReasonTier)
 	// Two distinct approvers pass.
@@ -156,13 +156,13 @@ func TestAttackIntentIDReuseWithDifferentBody(t *testing.T) {
 	h := newHarness(t)
 	h.mustSign(h.withdrawal("ir1", addrUser, 500, 0, "auto"))
 	// Same intent ID, different amount, validly approved by the compromised auto key.
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-ir1", Asset: "ETH", To: addrUser.Hex(), Amount: "600"}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-ir1", Asset: "ETH", To: addrUser.Hex(), Amount: "600"}
 	h.mustReject(h.job("ir2", in, h.ethTx(addrUser, 600, 1), "auto"), ReasonIntentChanged)
 }
 
 func TestAttackHugeFee(t *testing.T) {
 	h := newHarness(t)
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-fee", Asset: "ETH", To: addrUser.Hex(), Amount: "100"}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-fee", Asset: "ETH", To: addrUser.Hex(), Amount: "100"}
 	spec := h.ethTx(addrUser, 100, 0)
 	spec.feeCap, spec.tip = big.NewInt(1000e9), big.NewInt(1000e9) // 21000 gas x 1000 gwei > cap
 	h.mustReject(h.job("fee1", in, spec, "auto"), ReasonTx)

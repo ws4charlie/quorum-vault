@@ -25,6 +25,7 @@ const (
 	ReasonExpired         = "intent_expired"           // 4 first-time withdrawal with not_after zero, past, or too far ahead
 	ReasonTx              = "tx_mismatch"              // 2 TxVerifier refused the transaction
 	ReasonApprovals       = "approval_invalid"         // 3 no valid approval from a configured, enabled approver
+	ReasonRequester       = "requester_invalid"        // 3 a withdrawal without a requester, a requester on a kind that has none, or an approver who is the requester
 	ReasonPolicyAsset     = "policy_unknown_asset"     // 4 no policy for the chain or asset
 	ReasonPerTxCap        = "policy_per_tx_cap"        // 4
 	ReasonDailyCap        = "policy_daily_cap"         // 4

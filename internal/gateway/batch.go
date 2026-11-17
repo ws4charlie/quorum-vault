@@ -86,8 +86,17 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 	arec.intent = &intentFacts{ID: b.ID, Kind: signjob.KindBatch, Asset: b.Asset, Amount: total.String(), Sender: info.Sender, Claims: info.Claims, IntentHash: hash[:]}
 	members := make([]MemberRelease, len(b.Members))
 	for i, m := range b.Members {
+		if m.Intent.Kind != "withdrawal" {
+			return nil, reject(ReasonIntent, "batch member %s is a %q intent: members are withdrawals", m.Intent.ID, m.Intent.Kind)
+		}
+		if err := checkRequesterField(m.Intent); err != nil {
+			return nil, err
+		}
 		mh := m.Intent.Hash()
 		approvers := d.validApprovers(mh[:], m.Approvals)
+		if err := d.checkRequester(m.Intent, approvers); err != nil {
+			return nil, err
+		}
 		arec.members = append(arec.members, memberFacts{ID: m.Intent.ID, To: pays[i].Destination, Amount: pays[i].Amount.String(), Approvers: approvers})
 		switch {
 		case len(approvers) == 0:

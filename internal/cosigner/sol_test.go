@@ -89,7 +89,7 @@ func (e *solEnv) msg(ixs ...st.Ix) []byte { return st.Compile(e.hot.Pub, e.bh, i
 func (e *solEnv) adv(i int) st.Ix { return st.AdvanceNonce(sol.NonceAddress(e.hot.Pub, i), e.hot.Pub) }
 
 func (e *solEnv) wdSOL(id string, amount uint64) (signjob.Intent, []byte) {
-	return signjob.Intent{Kind: "withdrawal", ID: id, Asset: "SOL", PartitionID: solPart, To: sol.Address(e.dest), Amount: fmt.Sprint(amount), NotAfter: e.notAfter},
+	return signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: id, Asset: "SOL", PartitionID: solPart, To: sol.Address(e.dest), Amount: fmt.Sprint(amount), NotAfter: e.notAfter},
 		e.msg(e.adv(0), st.SetLimit(10_000), st.SetPrice(1000), st.Transfer(e.hot.Pub, e.dest, amount))
 }
 
@@ -178,7 +178,7 @@ func TestCosignerSOLRefusesEveryAttack(t *testing.T) {
 	sweepIn := signjob.Intent{Kind: "sweep", ID: "si1", Asset: "SOL", PartitionID: solPart, From: sol.Address(e.depKey), To: e.hot.Address(), Amount: "3000000"}
 	sweepMsg := e.msg(e.adv(1), st.SetLimit(10_000), st.Transfer(e.depKey, e.hot.Pub, 3_000_000))
 	sweepEvil := e.msg(e.adv(1), st.SetLimit(10_000), st.Transfer(e.depKey, e.oth, 3_000_000))
-	tokIn := signjob.Intent{Kind: "withdrawal", ID: "ti1", Asset: "TKN", PartitionID: solTok, To: sol.Address(e.dest), Amount: "777", NotAfter: e.notAfter}
+	tokIn := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "ti1", Asset: "TKN", PartitionID: solTok, To: sol.Address(e.dest), Amount: "777", NotAfter: e.notAfter}
 	tokBad := e.msg(e.adv(0), st.SetLimit(50_000), st.CheckedTransfer(st.ATAOf(e.hot.Pub, e.mint), e.mint, st.ATAOf(e.oth, e.mint), e.hot.Pub, 777, 6))
 	tokDec := e.msg(e.adv(0), st.SetLimit(50_000), st.CheckedTransfer(st.ATAOf(e.hot.Pub, e.mint), e.mint, st.ATAOf(e.dest, e.mint), e.hot.Pub, 777, 9))
 	short := e.request("a-short", in, msg, sol.PathHot, nil, e.hot.Pub[:31], true)

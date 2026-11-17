@@ -78,7 +78,7 @@ func TestSignedTransactionsMineOnAnvil(t *testing.T) {
 	}
 
 	spec := txSpec{nonce: nonce, to: addrUser, value: big.NewInt(500), gas: 21000, tip: tip, feeCap: feeCap}
-	in := signjob.Intent{Kind: "withdrawal", ID: "w-anvil", Asset: "ETH", To: addrUser.Hex(), Amount: "500"}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-anvil", Asset: "ETH", To: addrUser.Hex(), Amount: "500"}
 	mine(h.job("anvil-w", in, spec, "alice"), spec)
 
 	cspec := txSpec{nonce: nonce + 1, to: h.hot, value: new(big.Int), gas: 21000, tip: tip, feeCap: feeCap}

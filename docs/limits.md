@@ -10,7 +10,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **M-of-N is simulated.** The cold signer checks operator signatures in software; a hardware HSM would enforce it itself.
 - **All parties run on one machine, run by one team.** The cryptographic separation is real. The operational separation is not.
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
-- **`X-Actor` is not authentication.** It only names the caller for dual control. There is no real identity and no UI.
+- **`X-Actor` is not authentication.** It only names the caller. The zone now refuses an approval by the requester, but the requester is whatever the core says: anyone who can call the core can claim another name, so the check is only as good as the core's identity. A login service is planned.
 - **No load test.** Numbers were measured on a laptop, not on target hardware. See [measurements](measurements).
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **Bitcoin has one hot shard per pool**, and so no rebalance.

@@ -141,7 +141,7 @@ func rogueDecisions(t *testing.T, to string) {
 		r.refused(t, o, pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonTx)
 	})
 	t.Run("fee above the cap", func(t *testing.T) {
-		in := signjob.Intent{Kind: "withdrawal", ID: "w-fee", Asset: "ETH", To: user.Hex(), Amount: "500"}
+		in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-fee", Asset: "ETH", To: user.Hex(), Amount: "500"}
 		spec := gatewaytest.ETH(user, 500, 13)
 		spec.FeeCap, spec.Tip = bigInt(1e12), bigInt(1e12)
 		r.refused(t, r.signOpen(s.h.Job("rogue-fee", in, spec, "alice"), s.pub33), pb.ErrorKind_ERROR_KIND_REFUSED, gateway.ReasonTx)

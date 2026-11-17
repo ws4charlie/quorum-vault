@@ -430,6 +430,7 @@ func (s *stack) intent(kind, id, asset, part, from, to string, amount uint64) si
 	in := signjob.Intent{Kind: kind, ID: id, PartitionID: part, Chain: chainName, Asset: asset, From: from, To: to, Amount: fmt.Sprint(amount)}
 	if kind == "withdrawal" {
 		in.NotAfter = time.Now().Add(time.Hour).Unix()
+		in.RequestedBy = "req" // a person who is not one of the approvers
 	}
 	return in
 }

@@ -64,16 +64,21 @@ type Intent struct {
 	// gateway refuses to start signing a withdrawal whose NotAfter is zero, past,
 	// or too far ahead, so an old approval cannot be replayed.
 	NotAfter int64
+	// RequestedBy is the stable identity of the person who asked for the withdrawal (the identity provider's "sub"; until a verified identity
+	// exists, the core's actor name). It is part of what approvers sign, so the signing zone can refuse an approval by the requester itself.
+	// Required on a withdrawal and on a batch member; empty on every other kind (see docs/signing-zone.md).
+	RequestedBy string
 }
 
-const intentDomain = "qv-intent-v1\n"
+// intentDomain is the version of the signed statement. v2 added RequestedBy; a v1 approval does not verify under v2, so it never counts.
+const intentDomain = "qv-intent-v2\n"
 
 // Canonical returns the domain prefix followed by every field, in struct
-// order, each (NotAfter as a decimal string) prefixed by its 4-byte big-endian length so that field
+// order, each (NotAfter as a decimal string; RequestedBy last) prefixed by its 4-byte big-endian length so that field
 // boundaries are unambiguous.
 func (i Intent) Canonical() []byte {
 	b := []byte(intentDomain)
-	for _, f := range []string{i.Kind, i.ID, i.PartitionID, i.Chain, i.Asset, i.From, i.To, i.Amount, strconv.FormatInt(i.NotAfter, 10)} {
+	for _, f := range []string{i.Kind, i.ID, i.PartitionID, i.Chain, i.Asset, i.From, i.To, i.Amount, strconv.FormatInt(i.NotAfter, 10), i.RequestedBy} {
 		b = binary.BigEndian.AppendUint32(b, uint32(len(f)))
 		b = append(b, f...)
 	}

@@ -259,7 +259,7 @@ func (s *solH) wd(id string, amount uint64) (signjob.Intent, []byte) {
 
 // wdAt is a withdrawal message on pool account nonceIdx with a compute unit price.
 func (s *solH) wdAt(id string, amount, price uint64, nonceIdx int) (signjob.Intent, []byte) {
-	in := signjob.Intent{Kind: "withdrawal", ID: id, Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(s.dest), Amount: fmt.Sprint(amount)}
+	in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: id, Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(s.dest), Amount: fmt.Sprint(amount)}
 	return in, s.compile(s.hot.k.Pub, s.adv(nonceIdx), s.limit(10_000), s.price(price), s.transfer(s.hot.k.Pub, s.dest, amount))
 }
 
@@ -351,7 +351,7 @@ func TestSOLRefusals(t *testing.T) {
 	pricey := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.price(100_001), s.transfer(s.hot.k.Pub, s.dest, 5_000_000))
 	s.mustRefuse(s.job("a5", in, pricey, solPartSOL, sol.PathHot, nil, "alice"), ReasonTx)
 	// over the per-transaction cap of the policy
-	big := signjob.Intent{Kind: "withdrawal", ID: "wbig", Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(s.dest), Amount: "10000000001"}
+	big := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "wbig", Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(s.dest), Amount: "10000000001"}
 	bigMsg := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.transfer(s.hot.k.Pub, s.dest, 10_000_000_001))
 	s.mustRefuse(s.job("a6", big, bigMsg, solPartSOL, sol.PathHot, nil, "alice", "bob"), ReasonPerTxCap)
 	// a v0 message
@@ -428,7 +428,7 @@ func TestSOLVersionsOfAWithdrawalShareOneNonce(t *testing.T) {
 	nop := s.compile(s.hot.k.Pub, s.adv(0), s.limit(10_000), s.transfer(s.hot.k.Pub, s.dest, 5_000_000))
 	s.mustRefuse(s.job("noprice", in, nop, solPartSOL, sol.PathHot, nil, "alice"), ReasonFeeNotHigher)
 	// another intent cannot take the nonce that w1 holds
-	other := signjob.Intent{Kind: "withdrawal", ID: "w2", Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(s.dest), Amount: "5000000"}
+	other := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w2", Asset: "SOL", PartitionID: solPartSOL, To: sol.Address(s.dest), Amount: "5000000"}
 	_, otherMsg := s.wdAt("w2", 5_000_000, 7000, 0)
 	s.mustRefuse(s.job("w2", other, otherMsg, solPartSOL, sol.PathHot, nil, "alice"), ReasonNonceTaken)
 	s.mustRefuse(s.job("w2b", other, msg, solPartSOL, sol.PathHot, nil, "alice"), ReasonIntentChanged)
