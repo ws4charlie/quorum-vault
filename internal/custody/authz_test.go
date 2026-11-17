@@ -165,3 +165,37 @@ func (s *Service) transferForTest(ctx context.Context, cust string, amt int64) e
 		return s.transfer(ctx, tx, "pre-"+cust, depAcct(testChain, "ETH"), custAcct(cust, testChain, "ETH"), big.NewInt(amt), nil)
 	})
 }
+
+// The requester in the signed intent is the verified token's sub, never a name the caller supplies.
+func TestIntentRequesterIsTheVerifiedSub(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newSvc(t)
+	is, h := apiWith(t, s, false)
+	if _, _, err := s.CreateCustomer(ctx, "ops", "c1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.transferForTest(ctx, "c1", 1000); err != nil {
+		t.Fatal(err)
+	}
+	hdr := tok(is, authtest.Spec{Sub: "sub-of-ini", Roles: []string{"requester"}, Claims: map[string]any{"preferred_username": "Display Name", "name": "Someone Else"}})
+	hdr["Idempotency-Key"] = "k-sub"
+	hdr["X-Actor"] = "mallory" // ignored: a bearer token wins and the header is not accepted without the dev flag
+	w := do(h, "POST", "/v2/withdrawals", hdr, map[string]any{"customer": "c1", "asset": "ETH", "to": "0x52908400098527886E0F7030069857D2E4169EE7", "amount": "300"})
+	if w.Code != 201 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	var wd Withdrawal
+	if err := json.Unmarshal(w.Body.Bytes(), &wd); err != nil {
+		t.Fatal(err)
+	}
+	if wd.RequestedBy != "sub-of-ini" {
+		t.Fatalf("requested_by %q", wd.RequestedBy)
+	}
+	if got := s.IntentOf(wd).RequestedBy; got != "sub-of-ini" {
+		t.Fatalf("intent requester %q", got)
+	}
+	r := do(h, "GET", "/v2/withdrawals/"+wd.ID+"/intent", tok(is, authtest.Spec{Sub: "ops", Roles: []string{"operator"}}), nil)
+	if r.Code != 200 || !strings.Contains(r.Body.String(), `"sub-of-ini"`) {
+		t.Fatalf("intent response: %d %s", r.Code, r.Body)
+	}
+}
