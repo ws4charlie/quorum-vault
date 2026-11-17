@@ -200,7 +200,8 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 		}
 
 		rel := Release{IntentID: b.ID, IntentHash: hash[:], Kind: signjob.KindBatch, Asset: b.Asset, Amount: total, Sender: info.Sender, PartitionID: b.PartitionID,
-			Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: guardKey, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now, Members: members}
+			Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: guardKey, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now, Members: members,
+			Parent: info.Parent}
 		return d.admit(ctx, gt, codec, job, intent, rec, &rel, info, key, v, arec, now)
 	})
 	if err != nil {

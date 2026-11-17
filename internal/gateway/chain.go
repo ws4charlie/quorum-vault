@@ -39,6 +39,26 @@ type TxInfo struct {
 	// Fees are the fee components of the transaction (EVM: fee cap, tip; Bitcoin: the absolute fee). A replacement
 	// of a signed transaction must satisfy FeesRaised against them.
 	Fees []*big.Int
+	// Parent is set when the transaction has a change output to its own shard that a child could spend (Bitcoin). The guard records it, when the
+	// intent is a kind that keeps a change (a withdrawal, a hot-to-cold move, a batch), so that a CPFP child can be judged against what the zone itself
+	// signed. Nil: nothing to record.
+	Parent *ParentFacts
+}
+
+// ParentFacts is what the guard remembers about a signed transaction's change: its size and fee, and which output is the change and what it holds.
+type ParentFacts struct {
+	VSize       uint64
+	Fee         uint64
+	ChangeVout  uint32
+	ChangeValue uint64
+}
+
+// ParentRecord is a ParentFacts as read back from the guard, with the partition and intent the transaction was signed for. TxID is the transaction.
+type ParentRecord struct {
+	ParentFacts
+	TxID        string
+	PartitionID string
+	IntentID    string
 }
 
 // ChainCodec is the per-chain part of the gateway: offline verification, the
@@ -117,6 +137,13 @@ func NewCodec(cc *ChainConfig) (ChainCodec, error) {
 // and be all of that intent's claims). EVM does not have it: a cancel may free a reserved nonce that nothing was ever signed at.
 type StrictCancelCodec interface {
 	StrictCancel() bool
+}
+
+// CPFPCodec is implemented by codecs of chains where a child can pull a stuck transaction in (Bitcoin). CheckCPFP judges a child against the guard's own
+// records of the transactions it signed (parents, by the transaction identity of each input): the child must spend exactly the change of one of them
+// and stay within the zone's package caps. The guard has no chain to ask; what it signed is the whole truth about the parent.
+type CPFPCodec interface {
+	CheckCPFP(u chain.UnsignedTx, i signjob.Intent, parents map[string]ParentRecord) error
 }
 
 // KeyPathCodec is implemented by codecs whose jobs name the key to sign with by a derivation path in KeyRef (Bitcoin). The gateway asks a

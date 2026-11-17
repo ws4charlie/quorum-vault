@@ -99,6 +99,9 @@ type Outcome struct {
 	// FeeRefusals counts the replacements the node refused for a fee that was too low (Bitcoin). They were never in the mempool, so they do not count
 	// against the limit on replacements; the next fee is raised above the highest of them.
 	FeeRefusals int
+	// Child says a CPFP child of the owner's newest send was broadcast and is not decided (Bitcoin). The send is then pulled in by the child, not replaced:
+	// the workflow raises the child's fee instead of the send's. Absent (false) in histories recorded before.
+	Child bool
 	// Refusal is the node's last refusal of an attempt for a reason a higher fee does not cure (Bitcoin), or "". The fee is not raised for it: an
 	// operator looks.
 	Refusal string

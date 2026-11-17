@@ -20,6 +20,7 @@ type BTCCodec struct{ *btc.Verifier }
 var (
 	_ ChainCodec = (*BTCCodec)(nil)
 	_ BatchCodec = (*BTCCodec)(nil)
+	_ CPFPCodec  = (*BTCCodec)(nil)
 )
 
 // NewBTCCodec builds the codec from the signing-zone chain config.
@@ -38,8 +39,21 @@ func (c *BTCCodec) Decode(u chain.UnsignedTx) (TxInfo, error) {
 	if err != nil {
 		return TxInfo{}, fmt.Errorf("gateway: decode btc payload: %w", err)
 	}
-	return TxInfo{Sender: i.Sender, Destination: i.Destination, Claims: i.Claims, Pins: i.Pins, Identity: i.Identity, SignerKey: i.SignerKey,
-		Fees: []*big.Int{new(big.Int).SetUint64(i.Fee)}}, nil
+	info := TxInfo{Sender: i.Sender, Destination: i.Destination, Claims: i.Claims, Pins: i.Pins, Identity: i.Identity, SignerKey: i.SignerKey,
+		Fees: []*big.Int{new(big.Int).SetUint64(i.Fee)}}
+	if i.Parent != nil {
+		info.Parent = &ParentFacts{VSize: i.Parent.VSize, Fee: i.Parent.Fee, ChangeVout: i.Parent.ChangeVout, ChangeValue: i.Parent.ChangeValue}
+	}
+	return info, nil
+}
+
+// CheckCPFP implements CPFPCodec.
+func (c *BTCCodec) CheckCPFP(u chain.UnsignedTx, i signjob.Intent, parents map[string]ParentRecord) error {
+	m := make(map[string]btc.ParentRecord, len(parents))
+	for id, p := range parents {
+		m[id] = btc.ParentRecord{Parent: btc.Parent{VSize: p.VSize, Fee: p.Fee, ChangeVout: p.ChangeVout, ChangeValue: p.ChangeValue}, PartitionID: p.PartitionID, IntentID: p.IntentID}
+	}
+	return c.Verifier.CheckCPFP(u, i, m)
 }
 
 // VerifyBatch implements BatchCodec.
