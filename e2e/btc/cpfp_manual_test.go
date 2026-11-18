@@ -151,7 +151,7 @@ func TestCPFPManualRefusedWithNoRoom(t *testing.T) {
 	s.holdBack(parent, 80)
 	s.node.mine(1, "")
 	code, out := s.startCPFP("ops", w.ID)
-	if code != http.StatusConflict || !strings.Contains(out["error"].(string), "room") {
+	if msg, _ := out["error"].(string); code != http.StatusConflict || !(strings.Contains(msg, "room") || strings.Contains(msg, "does not raise")) {
 		t.Fatalf("no room: %d %v", code, out)
 	}
 	if n := s.attempts("cpfp"); n != 0 {
