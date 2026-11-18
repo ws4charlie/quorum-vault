@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 )
@@ -256,5 +258,51 @@ func TestVerifierRefusesAnotherFeeCapSequence(t *testing.T) {
 	v.view.live.Store(&feeCapsLive{FeeCaps: fcRaised, Seq: 1}) // the zone is on change 1, the core built under 0
 	if _, err := v.Parse(u); err == nil || !strings.Contains(err.Error(), FeeCapsSeqNote) {
 		t.Fatalf("a payload built under another sequence: %v", err)
+	}
+}
+
+// A withdrawal built under change 0 that the zone refused for being on change 1 is undone (outputs free again, attempt forgotten) and built again
+// under change 1, with the same outputs and the new sequence number. A broadcast attempt cannot be undone.
+func TestUndoUnsentAndRebuildUnderTheNewChange(t *testing.T) {
+	k, now := newFCKeys(), time.Now()
+	e := newWEnvWith(t, func(c *Config) { c.FeeCaps = &FeeCapsConfig{Approvers: k.ap, MinApprovers: 2} })
+	ctx := context.Background()
+	e.fund(1_000_000)
+	u0, err := e.build("w1", 40_000, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyFeeCaps(ctx, e.a.pool, k.rules(nil), fcStatic, k.sign("btc-t", fcRaised, 1, now, "alice", "bob"), now, "core"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.commit(func(tx pgx.Tx) error { return e.a.UndoUnsent(ctx, tx, "withdrawal", "w1") }); err != nil {
+		t.Fatal(err)
+	}
+	if e.count("reserved") != 0 || e.count("available") != 1 {
+		t.Fatalf("after the undo: %d reserved, %d available", e.count("reserved"), e.count("available"))
+	}
+	u1, err := e.build("w1", 40_000, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p0, p1 := e.payload(u0), e.payload(u1)
+	if p0.FeeCapsSeq != 0 || p1.FeeCapsSeq != 1 || len(p1.Inputs) != len(p0.Inputs) || p1.Inputs[0].TxID != p0.Inputs[0].TxID {
+		t.Fatalf("rebuilt payloads: seq %d then %d", p0.FeeCapsSeq, p1.FeeCapsSeq)
+	}
+	var n int
+	e.a.pool.QueryRow(ctx, `SELECT count(*) FROM btc_attempts WHERE chain='btc-t' AND owner_id='w1'`).Scan(&n)
+	if n != 1 {
+		t.Fatalf("%d attempts of w1 after the rebuild", n)
+	}
+	// Once the transaction is handed to the node it cannot be undone.
+	st, err := e.a.Assemble(u1, e.sign(u1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.a.Broadcast(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.commit(func(tx pgx.Tx) error { return e.a.UndoUnsent(ctx, tx, "withdrawal", "w1") }); err == nil {
+		t.Fatal("a broadcast attempt was undone")
 	}
 }

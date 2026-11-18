@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -242,6 +243,9 @@ func apply(ctx context.Context, cfg *gateway.Config, stores []store, c btc.FeeCa
 		return fmt.Errorf("change refused: %w", err)
 	}
 	static := cfg.FeeCapsStatic(c.Chain)
+	// The core goes first: a send already queued for the zone was built under the old change and the zone, still on it, signs it; only sends built
+	// after the core's change wait for the zone's, and the window ends when the last database has it.
+	sort.SliceStable(stores, func(i, j int) bool { return stores[i].core && !stores[j].core })
 	var failed []string
 	for _, s := range stores {
 		var err error

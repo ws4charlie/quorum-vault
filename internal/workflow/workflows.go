@@ -629,6 +629,26 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 	if err != nil {
 		return err
 	}
+	// Refused only because the core and the zone are on different fee-cap changes (Bitcoin): nothing was signed, so the withdrawal waits and is built
+	// again under the caps in force now, until they agree. Never voided for this.
+	for r.Kind == txRefused && custody.IsFeeCapsRefusal(r.Reason) {
+		if err := workflow.Sleep(ctx, t.HotPoll); err != nil {
+			return err
+		}
+		var rebuilt bool
+		if err := call(ctx, opts(ctx), &rebuilt, a.RebuildWithdrawalJob, id); err != nil {
+			if isType(err, errNoOutputs) {
+				continue // the outputs free up or arrive; the refused job is still the one on record
+			}
+			break
+		}
+		if !rebuilt {
+			break
+		}
+		if r, err = driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true, false); err != nil {
+			return err
+		}
+	}
 	if r.Kind == txRefused {
 		// The nonce was allocated and may hold a signature the gateway reserved.
 		// Cancel it; only when a transaction at that nonce has confirmed may the hold go.
@@ -1055,7 +1075,8 @@ func BatchWorkflow(ctx workflow.Context, in Input) error {
 	}
 	if r.Kind == txRefused {
 		// Nothing signed (or only some inputs): with no signature, discard in one step; otherwise the coins must be freed by a cancel first.
-		ok, err := discard("gateway refused: "+r.Reason, true)
+		// Another fee-cap change in the zone is nobody's fault: the members return to the queue without a refusal counted against them.
+		ok, err := discard("gateway refused: "+r.Reason, !custody.IsFeeCapsRefusal(r.Reason))
 		if err != nil {
 			return err
 		}
