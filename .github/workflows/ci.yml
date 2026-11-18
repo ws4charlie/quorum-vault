@@ -327,7 +327,7 @@ jobs:
       QV_ANVIL_RPC: http://127.0.0.1:18545
       # A shared runner is slower than a laptop: every condition wait in the custody tests gets three times as long.
       QV_E2E_TIMEOUT_SCALE: "3"
-      QV_E2E_KEYCLOAK_URL: http://127.0.0.1:8180
+      QV_E2E_KEYCLOAK_URL: https://127.0.0.1:8180
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env

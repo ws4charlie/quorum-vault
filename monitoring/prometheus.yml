@@ -25,7 +25,14 @@ scrape_configs:
   - job_name: qv-anchor-archiver
     static_configs:
       - targets: ["host.docker.internal:9103"]
-  # qv-core (-metrics-listen, loopback only): its certificate expiry. The other services publish the same qv_tls_cert_* series as they move to TLS.
+  # Certificate expiry (qv_tls_cert_*), from every service that has a metrics port (-metrics-listen, loopback only); the gateway writes it into the textfile
+  # directory next to its MPC metrics. qv-core:
   - job_name: qv-core
     static_configs:
       - targets: ["host.docker.internal:9101"]
+  - job_name: qv-relay
+    static_configs:
+      - targets: ["host.docker.internal:9102"]
+  - job_name: qv-cosigner
+    static_configs:
+      - targets: ["host.docker.internal:9104"]

@@ -71,8 +71,11 @@ func run(log *slog.Logger) error {
 		return err // retention below the hard minimum: refused at start
 	}
 	if *metricsListen != "" {
+		if err := pki.RequireLoopback(*metricsListen); err != nil {
+			return fmt.Errorf("-metrics-listen: %w", err)
+		}
 		mux := http.NewServeMux()
-		mux.Handle("/metrics", pruner.MetricsHandler())
+		mux.Handle("/metrics", pki.WithMetrics(pruner.MetricsHandler(), tsrc))
 		srv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

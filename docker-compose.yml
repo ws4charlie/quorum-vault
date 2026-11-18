@@ -164,14 +164,14 @@ services:
       USE_INTERNAL_FRONTEND: "true"
       TEMPORAL_SERVICES: frontend,internal-frontend,history,matching,worker
       TEMPORAL_TLS_REFRESH_INTERVAL: 1m
+      # the gate (a TCP proxy) calls the frontend without negotiating HTTP/2 itself; the frontend must not insist on ALPN from it
+      GRPC_ENFORCE_ALPN_ENABLED: "false"
       TEMPORAL_TLS_EXPIRATION_CHECKS_WARNING_WINDOW: 4h
     configs:
       - source: temporal-dynamicconfig
         target: /etc/temporal/dynamicconfig.yaml
     volumes:
       - ${QV_PKI_DIR:-./data/pki}/business/temporal:/pki:ro
-    ports:
-      - "127.0.0.1:${QV_TEMPORAL_PORT:-7233}:7233"
     healthcheck:
       # the server image ships no temporal CLI, so check the frontend port
       test: ["CMD-SHELL", "nc -z $$(hostname -i) 7233"]
@@ -198,19 +198,46 @@ services:
       QV_TEST_PASSWORD_CAROL: ${QV_TEST_PASSWORD_CAROL:-}
       QV_TEST_PASSWORD_OPS: ${QV_TEST_PASSWORD_OPS:-}
       QV_KEYCLOAK_GUARDIAN_SECRET: ${QV_KEYCLOAK_GUARDIAN_SECRET:-}
-      KC_HOSTNAME: http://127.0.0.1:${QV_KEYCLOAK_PORT:-8180}
-      KC_HTTP_ENABLED: "true"
+      # https only, with a certificate of the business authority (name keycloak, 127.0.0.1): the core refuses an http issuer in production, and the
+      # tests now run against the https one. The management port (health) stays plain http, inside the container.
+      KC_HOSTNAME: https://127.0.0.1:${QV_KEYCLOAK_PORT:-8180}
+      KC_HTTP_ENABLED: "false"
+      KC_HTTPS_CERTIFICATE_FILE: /pki/tls.crt
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /pki/tls.key
+      KC_HTTP_MANAGEMENT_SCHEME: http
       KC_HEALTH_ENABLED: "true"
     volumes:
       - ./deploy/keycloak/quorumvault-realm.json:/opt/keycloak/data/import/quorumvault-realm.json:ro
+      - ${QV_PKI_DIR:-./data/pki}/business/keycloak:/pki:ro
     ports:
-      - "127.0.0.1:${QV_KEYCLOAK_PORT:-8180}:8080"
+      - "127.0.0.1:${QV_KEYCLOAK_PORT:-8180}:8443"
     healthcheck:
       # The image has no curl: open the management port and ask for readiness.
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
       interval: 5s
       timeout: 5s
       retries: 40
+
+  # The only way to the frontend from outside the compose network: TLS, a client certificate of the business authority, AND a list of the names that
+  # may call (deploy/temporal-gate/nginx.conf). The frontend itself checks only the authority.
+  temporal-gate:
+    profiles: ["infra"]
+    image: nginx:1.27-alpine
+    depends_on:
+      temporal:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/cfg/start.sh"]
+    ports:
+      - "127.0.0.1:${QV_TEMPORAL_PORT:-7233}:7233"
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/temporal:/pki:ro
+      - ./deploy/temporal-gate/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/temporal-gate/start.sh:/cfg/start.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 7233"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
 
   temporal-ui:
     profiles: ["infra"]
@@ -334,12 +361,15 @@ services:
         # empty keys would start a store anyone can write to; compose cannot require them for this profile only, so the container does
         : "$${ROOT_AK:?set QV_ARCHIVE_ROOT_ACCESS_KEY}" "$${ROOT_SK:?set QV_ARCHIVE_ROOT_SECRET_KEY}" "$${ARC_AK:?set QV_ARCHIVE_ACCESS_KEY}" "$${ARC_SK:?set QV_ARCHIVE_SECRET_KEY}"
         printf '{"identities":[{"name":"root","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]},{"name":"archiver","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Read","Write","List","Admin"]}]}' "$$ROOT_AK" "$$ROOT_SK" "$$ARC_AK" "$$ARC_SK" > /tmp/s3.json
-        exec /entrypoint.sh server -dir=/data -s3 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=256 -ip.bind=0.0.0.0
+        # TLS only, and a client certificate of the business authority (SeaweedFS checks the authority, not the name; the access keys identify the caller)
+        exec /entrypoint.sh server -dir=/data -s3 -s3.config=/tmp/s3.json -s3.port=0 -s3.port.https=8333 -s3.cert.file=/pki/tls.crt -s3.key.file=/pki/tls.key -s3.cacert.file=/pki/ca.crt -s3.tlsVerifyClientCert -master.volumeSizeLimitMB=256 -ip.bind=0.0.0.0
     ports:
       - "127.0.0.1:${QV_ARCHIVE_PORT:-18333}:8333"
     volumes:
       - archive-data:/data
+      - ${QV_PKI_DIR:-./data/pki}/business/seaweedfs:/pki:ro
     healthcheck:
+      # the port answers TLS only: a plain request gets a 400, which is "up"
       test: ["CMD-SHELL", "wget -q -O /dev/null --spider http://127.0.0.1:8333/ ; [ $$? -ne 4 ]"]
       interval: 2s
       timeout: 3s

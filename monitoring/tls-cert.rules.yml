@@ -3,7 +3,7 @@
 # themselves, so a leaf near its end means the renewal (the operator's PKI, or `scripts/pki.sh renew` in development) has stopped.
 # Runbook: docs/runbooks/certificates.md. A service whose certificate has expired will not start, and one that expires while running is refused by its peers.
 #
-# Inputs: the services' loopback metrics ports (qv-core -metrics-listen today; the others as they move to TLS) and, for the gateway, its textfile.
+# Inputs: the services' loopback metrics ports (qv-core, qv-relay, qv-anchor-archiver, qv-cosigner: -metrics-listen) and, for the gateway, its textfile.
 groups:
   - name: qv-tls-cert
     rules:

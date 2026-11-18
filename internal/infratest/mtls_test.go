@@ -128,7 +128,7 @@ func TestTemporalRefusesWhatItShould(t *testing.T) {
 		if tc == nil {
 			opts.ConnectionOptions = client.ConnectionOptions{}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer cancel()
 		ns, err := client.NewNamespaceClient(opts)
 		if err != nil {
@@ -138,9 +138,22 @@ func TestTemporalRefusesWhatItShould(t *testing.T) {
 		_, err = ns.Describe(ctx, "default")
 		return err
 	}
-	t.Run("the right client works", func(t *testing.T) {
-		if err := list(pkitest.ClientTLS(pki.ZoneBusiness, "worker", "temporal", "temporal")); err != nil && !strings.Contains(err.Error(), "not found") {
-			t.Fatalf("the worker's certificate was refused: %v", err)
+	// the names that may call are listed in the gate in front of the frontend (deploy/temporal-gate/nginx.conf)
+	t.Run("the names on the list work", func(t *testing.T) {
+		for _, who := range []string{"worker", "core", "admin"} {
+			if err := list(pkitest.ClientTLS(pki.ZoneBusiness, who, "temporal", "temporal")); err != nil && !strings.Contains(err.Error(), "not found") {
+				t.Errorf("%s was refused: %v", who, err)
+			}
+		}
+	})
+	t.Run("the right authority, a name that is not on the list", func(t *testing.T) {
+		for _, who := range []string{"relay", "archiver", "guardian", "gateway-link", "cosigner-link"} {
+			err := list(pkitest.ClientTLS(pki.ZoneBusiness, who, "temporal", "temporal"))
+			if err == nil || strings.Contains(err.Error(), "not found") {
+				t.Errorf("%s (a business certificate not on the list) was served: %v", who, err)
+				continue
+			}
+			t.Logf("refused, as it must be: %s: %.140v", who, err)
 		}
 	})
 	t.Run("a client without a certificate", func(t *testing.T) {

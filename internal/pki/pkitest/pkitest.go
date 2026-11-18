@@ -171,6 +171,17 @@ var (
 	adminSrc  *pki.Source
 )
 
+// Source is a Source over the files of (zone, service) in the shared PKI directory.
+func Source(t testing.TB, zone, service string) *pki.Source {
+	t.Helper()
+	c, k, a := Files(zone, service)
+	s, err := pki.NewSource(pki.SourceConfig{Name: service, Zone: zone, CertFile: c, KeyFile: k, CAFile: a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 // ClientTLS is the client TLS config of any business- or signing-zone identity, trusting that zone's authority, for serverName ("" means the host
 // dialled) and, when given, the server names allowed (business-zone service names).
 func ClientTLS(zone, service, serverName string, serverAllow ...string) *tls.Config {

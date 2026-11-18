@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,6 +22,7 @@ import (
 	"github.com/aws/smithy-go"
 
 	"github.com/ws4charlie/quorum-vault/internal/audit"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
 
 // Archive is the write-once copy of the published heads. Everything above it (the archiver, verify) only needs these three calls, so
@@ -41,6 +44,10 @@ type ArchiveConfig struct {
 	AccessKey string
 	SecretKey string
 	PathStyle bool // path-style addressing, for stores on a host:port (everything but AWS)
+	// TLS is the identity for a store at an https endpoint: our client certificate, and the store's checked against the business authority and
+	// the name business/seaweedfs. Needed for every https endpoint except AWS (empty Endpoint). An http endpoint is refused unless the development
+	// switch (pki.PlaintextAllowed) is on.
+	TLS *pki.Source
 }
 
 // S3Archive is an Archive on an S3 bucket with Object Lock.
@@ -57,7 +64,23 @@ func NewS3Archive(c ArchiveConfig) (*S3Archive, error) {
 	if c.Region == "" {
 		c.Region = "us-east-1"
 	}
+	var hc s3.HTTPClient
+	if c.Endpoint != "" {
+		u, err := url.Parse(c.Endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("archive: endpoint: %w", err)
+		}
+		switch {
+		case u.Scheme == "https" && c.TLS != nil:
+			hc = &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{TLSClientConfig: c.TLS.ClientConfig(u.Hostname(), pki.Allow{pki.ID(pki.ZoneBusiness, "seaweedfs")}), MaxIdleConnsPerHost: 8}}
+		case u.Scheme == "https":
+			return nil, errors.New("archive: an https endpoint needs the TLS identity (-archive-tls-cert, -archive-tls-key, -archive-tls-ca)")
+		case !pki.PlaintextAllowed():
+			return nil, errors.New("archive: the endpoint must be https (plain http is for a development machine only: QV_ALLOW_PLAINTEXT=1 with QV_ENV=dev)")
+		}
+	}
 	cl := s3.New(s3.Options{
+		HTTPClient:   hc,
 		Region:       c.Region,
 		Credentials:  credentials.NewStaticCredentialsProvider(c.AccessKey, c.SecretKey, ""),
 		BaseEndpoint: nonEmpty(c.Endpoint),
