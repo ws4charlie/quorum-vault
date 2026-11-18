@@ -17,6 +17,9 @@ inputs:
   solana:
     description: "'true' starts solana-test-validator on 18899, built from ci/solana (the Solana jobs)"
     default: "false"
+  keycloak:
+    description: "'true' starts the dev Keycloak on 8180 with the realm in deploy/keycloak (the identity job)"
+    default: "false"
 runs:
   using: composite
   steps:
@@ -34,12 +37,14 @@ runs:
         ANVIL: ${{ inputs.anvil }}
         BITCOIND: ${{ inputs.bitcoind }}
         SOLANA: ${{ inputs.solana }}
+        KEYCLOAK: ${{ inputs.keycloak }}
       run: |
         flags=()
         [ "$ANVIL" = true ] && flags+=(--anvil)
         [ "$INFRA" = true ] && flags+=(--infra)
         [ "$BITCOIND" = true ] && flags+=(--bitcoind)
         [ "$SOLANA" = true ] && flags+=(--solana)
+        [ "$KEYCLOAK" = true ] && flags+=(--keycloak)
         ci/infra.sh start "${flags[@]}"
     - name: Pull the CI image
       shell: bash

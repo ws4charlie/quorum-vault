@@ -6,6 +6,7 @@
 #     --infra     Temporal and Redpanda (docker compose profile infra)
 #     --bitcoind  bitcoind in regtest on 127.0.0.1:18443 (docker compose profile btc)
 #     --solana    solana-test-validator on 127.0.0.1:18899 (docker compose profile solana; the image is built from ci/solana)
+#     --keycloak  the dev Keycloak on 127.0.0.1:8180 (docker compose profile identity; the realm in deploy/keycloak)
 # Run from the checkout, on the host (compose reads docker-compose.yml). State is in $QV_INFRA_DIR (default $RUNNER_TEMP/qv-infra).
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -53,6 +54,7 @@ start)
       --infra) profiles+=(--profile infra); services+=(temporal-db temporal redpanda) ;;
       --bitcoind) profiles+=(--profile btc); services+=(bitcoind) ;;
       --solana) profiles+=(--profile solana); services+=(solana) ;;
+      --keycloak) scripts/keycloak-env.sh; profiles+=(--profile identity); services+=(keycloak) ;;
       *) echo "unknown flag $a" >&2; exit 2 ;;
     esac
   done
@@ -76,13 +78,13 @@ wait)
   done
   if [ "$failed" != 0 ]; then
     docker ps -a || true
-    docker compose --profile infra --profile btc --profile solana logs --tail 80 || true
+    docker compose --profile infra --profile btc --profile solana --profile identity logs --tail 80 || true
     exit 1
   fi
   echo "services are ready"
   ;;
 *)
-  echo "usage: $0 start [--anvil] [--infra] [--bitcoind] [--solana] | wait" >&2
+  echo "usage: $0 start [--anvil] [--infra] [--bitcoind] [--solana] [--keycloak] | wait" >&2
   exit 2
   ;;
 esac

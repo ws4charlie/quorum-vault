@@ -8,7 +8,7 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-.PHONY: monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery test-e2e-btc-cpfp setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet
+.PHONY: monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp
 
 setup: softhsm db-up chain-up
 
@@ -129,6 +129,15 @@ E2E_EVM_TX_FAILURES := TestRevertedWithdrawalVoidsAndRecordsFee|TestDroppedTrans
 E2E_EVM_RECOVERY := TestGatewayAndRelayRestart|TestMPCRefreshDuringLiveWithdrawals|TestMPCOnePartyDownWithdrawalsContinue|TestMPCRestartOfAWhileCIsDown|TestMPCRoutePreferredPairIsSignedAuditedAndHotSwitchable|TestMPCRouteFollowsHealthWithHysteresis|TestCrashAtEveryBoundary|TestReconcileCleanAtEveryStageOfASweep|TestReconcileCleanAtEveryStageOfAColdMove
 test-e2e-evm-flows:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' ./e2e/custody/...
+# Real identity provider: a two-approver withdrawal with tokens from the dev Keycloak (docker compose profile identity; `make keycloak-up` first).
+test-e2e-evm-identity:
+	./scripts/keycloak-env.sh
+	$(E2E_EVM_ENV) QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-http://127.0.0.1:8180} go test -count=1 -p 1 -timeout 25m -v -run 'TestOIDCWithRealKeycloak' ./e2e/custody/...
+keycloak-up:
+	./scripts/keycloak-env.sh
+	docker compose --profile identity up -d --wait keycloak
+keycloak-down:
+	docker compose --profile identity down keycloak
 test-e2e-evm-tx-failures:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_TX_FAILURES)' ./e2e/custody/...
 # recovery keeps one crash boundary on pull requests: the worker dies right after the broadcast.

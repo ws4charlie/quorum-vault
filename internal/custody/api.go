@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ws4charlie/quorum-vault/internal/audit"
+	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 )
@@ -27,58 +28,53 @@ type Orchestrator interface {
 	SignalWithdrawal(ctx context.Context, id string) error
 }
 
-// API is the /v2 HTTP handler. There is no real authentication: the X-Actor
-// header names the caller, as in the demo.
+// API is the /v2 HTTP handler. Every route sits behind authn: a verified bearer token names the caller (its sub is the actor), and
+// routeRules says which roles a route needs and whether it needs a fresh login.
 type API struct {
-	svc  *Service
-	orch Orchestrator
-	log  *slog.Logger
+	svc   *Service
+	orch  Orchestrator
+	log   *slog.Logger
+	authn *auth.Authenticator
 }
 
-// NewAPI returns the handler. orch may be nil (tests).
-func NewAPI(svc *Service, orch Orchestrator, log *slog.Logger) *API {
+// NewAPI returns the handler. orch may be nil (tests). A nil authn answers 401 to everything.
+func NewAPI(svc *Service, orch Orchestrator, log *slog.Logger, authn *auth.Authenticator) *API {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &API{svc: svc, orch: orch, log: log}
+	return &API{svc: svc, orch: orch, log: log, authn: authn}
 }
 
 // Handler returns the routed handler.
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v2/customers", a.createCustomer)
-	mux.HandleFunc("POST /v2/customers/{id}/deposit-addresses", a.depositAddress)
-	mux.HandleFunc("GET /v2/customers/{id}/balances", a.balances)
-	mux.HandleFunc("POST /v2/withdrawals", a.requestWithdrawal)
-	mux.HandleFunc("GET /v2/withdrawals/{id}", a.getWithdrawal)
-	mux.HandleFunc("POST /v2/withdrawals/{id}/approvals", a.approve)
-	mux.HandleFunc("POST /v2/withdrawals/{id}/rejections", a.reject)
-	mux.HandleFunc("GET /v2/withdrawals/{id}/intent", a.intent)
-	mux.HandleFunc("GET /v2/batches/{id}", a.getBatch)
-	mux.HandleFunc("POST /v2/batches/{id}/cancel", a.cancelBatch)
-	mux.HandleFunc("GET /v2/reconcile", a.reconcile)
-	mux.HandleFunc("GET /v2/refills", a.listRefills)
-	mux.HandleFunc("GET /v2/refills/{id}", a.getRefill)
-	mux.HandleFunc("POST /v2/refills/{id}/export", a.exportRefill)
-	mux.HandleFunc("POST /v2/refills/{id}/import", a.importRefill)
-	mux.HandleFunc("POST /v2/cold/fundings", a.fundCold)
-	mux.HandleFunc("POST /v2/cold/spends", a.spendCold)
-	mux.HandleFunc("POST /v2/cold/actions", a.requestAction)
-	mux.HandleFunc("POST /v2/refills/{id}/close", a.closeRefill)
-	mux.HandleFunc("POST /v2/cold-setup/export", a.exportColdSetup)
-	mux.HandleFunc("POST /v2/cold-setup/submit", a.submitColdSetup)
-	mux.HandleFunc("POST /v2/cold-nonces/retire", a.retireColdNonce)
-	mux.HandleFunc("POST /v2/cold-close/export", a.exportColdClose)
-	mux.HandleFunc("POST /v2/cold-close/submit", a.submitColdSetup)
-	mux.HandleFunc("POST /v2/guardian/freezes", a.guardianFreeze)
-	mux.HandleFunc("GET /v2/audit/verify", a.auditVerify)
-	// Whoever the X-Actor header names is the actor of everything the request causes, in the audit trail.
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if actor := r.Header.Get("X-Actor"); ValidID(actor) {
-			r = r.WithContext(WithActor(r.Context(), actor))
-		}
-		mux.ServeHTTP(w, r)
-	})
+	a.handle(mux, "POST /v2/customers", a.createCustomer)
+	a.handle(mux, "POST /v2/customers/{id}/deposit-addresses", a.depositAddress)
+	a.handle(mux, "GET /v2/customers/{id}/balances", a.balances)
+	a.handle(mux, "POST /v2/withdrawals", a.requestWithdrawal)
+	a.handle(mux, "GET /v2/withdrawals/{id}", a.getWithdrawal)
+	a.handle(mux, "POST /v2/withdrawals/{id}/approvals", a.approve)
+	a.handle(mux, "POST /v2/withdrawals/{id}/rejections", a.reject)
+	a.handle(mux, "GET /v2/withdrawals/{id}/intent", a.intent)
+	a.handle(mux, "GET /v2/batches/{id}", a.getBatch)
+	a.handle(mux, "POST /v2/batches/{id}/cancel", a.cancelBatch)
+	a.handle(mux, "GET /v2/reconcile", a.reconcile)
+	a.handle(mux, "GET /v2/refills", a.listRefills)
+	a.handle(mux, "GET /v2/refills/{id}", a.getRefill)
+	a.handle(mux, "POST /v2/refills/{id}/export", a.exportRefill)
+	a.handle(mux, "POST /v2/refills/{id}/import", a.importRefill)
+	a.handle(mux, "POST /v2/cold/fundings", a.fundCold)
+	a.handle(mux, "POST /v2/cold/spends", a.spendCold)
+	a.handle(mux, "POST /v2/cold/actions", a.requestAction)
+	a.handle(mux, "POST /v2/refills/{id}/close", a.closeRefill)
+	a.handle(mux, "POST /v2/cold-setup/export", a.exportColdSetup)
+	a.handle(mux, "POST /v2/cold-setup/submit", a.submitColdSetup)
+	a.handle(mux, "POST /v2/cold-nonces/retire", a.retireColdNonce)
+	a.handle(mux, "POST /v2/cold-close/export", a.exportColdClose)
+	a.handle(mux, "POST /v2/cold-close/submit", a.submitColdSetup)
+	a.handle(mux, "POST /v2/guardian/freezes", a.guardianFreeze)
+	a.handle(mux, "GET /v2/audit/verify", a.auditVerify)
+	return mux
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -109,12 +105,12 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 }
 
 func (a *API) actor(w http.ResponseWriter, r *http.Request) (string, bool) {
-	actor := r.Header.Get("X-Actor")
-	if !ValidID(actor) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "X-Actor header is required"})
-		return "", false
+	// handle has already verified the caller; the actor is the token's sub.
+	if p, ok := auth.FromContext(r.Context()); ok {
+		return p.Sub, true
 	}
-	return actor, true
+	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+	return "", false
 }
 
 func decode(r *http.Request, v any) error {
@@ -256,7 +252,7 @@ func (a *API) approve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Actor != actor {
-		a.fail(w, fmt.Errorf("%w: body actor %q differs from X-Actor %q", ErrInvalid, body.Actor, actor))
+		a.fail(w, fmt.Errorf("%w: body actor %q differs from the token subject %q", ErrInvalid, body.Actor, actor))
 		return
 	}
 	sig, err := hex.DecodeString(body.Signature)

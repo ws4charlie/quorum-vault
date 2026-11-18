@@ -339,6 +339,45 @@ jobs:
       - name: make test-e2e-evm-flows
         run: ci/run-in-image.sh make test-e2e-evm-flows
 
+  e2e-evm-identity:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quorumvault
+          POSTGRES_USER: qv
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U qv -d quorumvault"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+      # A shared runner is slower than a laptop: every condition wait in the custody tests gets three times as long.
+      QV_E2E_TIMEOUT_SCALE: "3"
+      QV_E2E_KEYCLOAK_URL: http://127.0.0.1:8180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          infra: "true"
+          keycloak: "true"
+      - name: make test-e2e-evm-identity
+        run: ci/run-in-image.sh make test-e2e-evm-identity
+
   e2e-evm-tx-failures:
     runs-on: ubuntu-24.04
     needs: image
