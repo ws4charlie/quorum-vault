@@ -21,7 +21,7 @@ Each send leaves enough in its change to be raised up to the fee cap, so a stuck
 A replacement or cancel the node refuses for a low fee is followed by one that pays more than every earlier attempt, even after a restart. Both stop at the fee caps with one alert; nothing is voided because of a cap ([runbook](runbooks/btc-stuck.md)).
 
 ## A child can pull a stuck send in
-A child spends the stuck send's change back to the same hot wallet and pays enough for the pair to be worth mining. It is off by default, starts after the replacements are used up,.
+A child spends the stuck send's change back to the same hot wallet and pays enough for the pair to be worth mining. It is off by default, starts only after the replacements are used up, and works for single withdrawals and whole batches.
 
 - **Within the caps.** The pair together may not pay more than one transaction of their size may, so a send already at the rate ceiling gets no child.
 - **No approval needed,** because it can only keep money where it is. The zone signs only a child with no payment that spends a signed send's change back to that wallet.
