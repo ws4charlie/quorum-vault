@@ -223,3 +223,70 @@ func TestReconcileSOLRebalanceBookedWhileReading(t *testing.T) {
 		}
 	})
 }
+
+// A move to cold becomes final on the chain while Reconcile is reading, after the finalized-transaction set was read. The cold address's balance must
+// be read before that set (and the read repeated if they disagree); read after it, the chain had the tokens and the set did not: "cold_balance TKN:
+// books 0 chain 4000000000" for a move that was only landing.
+func TestReconcileSOLColdMoveFinalWhileReading(t *testing.T) {
+	const move = 4_000_000_000
+	run := func(t *testing.T, breakIt bool) Report {
+		f := &solRaceChain{balance: map[string]*big.Int{}, fee: new(big.Int)}
+		hot, cold := sol.Address([32]byte{1}), sol.Address([32]byte{2})
+		sf := solFile()
+		sf.Chain.SOL.HotShards, sf.Chain.SOL.NoncePool, sf.Chain.SOL.NonceRentLamports = []string{hot}, 1, 1_447_680
+		sf.Chain.SOL.ComputeUnitLimit, sf.Chain.SOL.ComputeUnitPrice, sf.Chain.SOL.MaxMicroLamports, sf.Chain.SOL.FeeBumpPercent = 100_000, 1000, 10_000, 25
+		sf.Cold.Addresses = map[string]string{"omnibus": cold}
+		cfg, err := sf.Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := New(dbtest.New(t), cfg, f, solRaceReader{f})
+		ctx := context.Background()
+		if err := s.Bootstrap(ctx); err != nil {
+			t.Fatal(err)
+		}
+		hp := cfg.PartitionKey("TKN", 0).String()
+		if err := s.FundHotAsset(ctx, "seed", 0, "TKN", big.NewInt(10_000_000_000)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO cold_moves (id, chain, asset, partition_id, to_address, amount, status)
+			VALUES ('cm-race',$1,'TKN',$2,$3,$4,'signing')`, cfg.Chain, hp, cold, big.NewInt(move).String()); err != nil {
+			t.Fatal(err)
+		}
+		f.balance = map[string]*big.Int{hot + "|TKN": big.NewInt(10_000_000_000)}
+		calls := 0
+		if breakIt { // the move is final from the start and one token is missing on the cold address
+			f.balance[cold+"|TKN"] = big.NewInt(move - 1)
+			f.balance[hot+"|TKN"] = big.NewInt(10_000_000_000 - move)
+			calls = 100
+		}
+		f.outcome = func(kind, id string) (chain.Outcome, func()) {
+			calls++
+			if calls != 2 { // the first read of the set, and any later one: the move is not final
+				if calls > 2 {
+					return chain.Outcome{State: chain.OutcomeConfirmed, Hash: "cm-tx", Kind: chain.AttemptSend}, nil
+				}
+				return chain.Outcome{State: chain.OutcomeOpen}, nil
+			}
+			return chain.Outcome{State: chain.OutcomeOpen}, func() { // it becomes final right after the second read of the set
+				f.balance[cold+"|TKN"] = big.NewInt(move)
+				f.balance[hot+"|TKN"] = big.NewInt(10_000_000_000 - move)
+			}
+		}
+		rep, err := s.Reconcile(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rep
+	}
+	t.Run("final during the read", func(t *testing.T) {
+		if rep := run(t, false); !rep.Clean || rep.SkippedChainChecks != 0 {
+			t.Fatalf("clean %v skipped %d: %+v", rep.Clean, rep.SkippedChainChecks, rep.Failures())
+		}
+	})
+	t.Run("a real difference is still reported", func(t *testing.T) {
+		if rep := run(t, true); rep.Clean {
+			t.Fatalf("a missing token on the cold address was not reported")
+		}
+	})
+}
