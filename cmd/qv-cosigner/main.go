@@ -20,6 +20,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/cosigner"
 	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
+	"github.com/ws4charlie/quorum-vault/internal/kafkatls"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
 	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
@@ -44,6 +45,8 @@ func run(log *slog.Logger) error {
 	auditSource := flag.String("audit-source", "cosigner", "name this chain's heads are published under on qv.audit.heads (several deployments sharing one topic need distinct names)")
 	anchorEvery := flag.Duration("anchor-interval", time.Minute, "publish the audit chain head at least this often, and at once when it changes")
 	tlsFor := pki.Flags(flag.CommandLine, "")
+	// the audit heads go to the business Kafka: the explicit link, with a certificate the business authority issued (business/cosigner-link)
+	linkFor := pki.Flags(flag.CommandLine, "link-")
 	flag.Parse()
 	if *configPath == "" || *guardDSN == "" || *socket == "" {
 		return fmt.Errorf("-config, -guard-dsn and -socket are required")
@@ -66,6 +69,13 @@ func run(log *slog.Logger) error {
 	if tsrc != nil {
 		go tsrc.Run(ctx.Done())
 	}
+	lsrc, err := linkFor("qv-cosigner-link", pki.ZoneBusiness, log)
+	if err != nil {
+		return err
+	}
+	if lsrc != nil {
+		go lsrc.Run(ctx.Done())
+	}
 	pool, err := db.NewPool(ctx, *guardDSN, tsrc, pki.Allow{pki.ID(pki.ZoneSigning, "signing-db")})
 	if err != nil {
 		return fmt.Errorf("open replay guard: %w", err)
@@ -79,7 +89,11 @@ func run(log *slog.Logger) error {
 		log.Error("ALERT no -brokers: this zone's audit chain heads are not published, so a truncated or rewritten chain cannot be detected from outside the database")
 	}
 	if *brokers != "" {
-		pub, err := outbox.NewKafkaPublisher(strings.Split(*brokers, ","))
+		kopts, err := kafkatls.Options(lsrc)
+		if err != nil {
+			return err
+		}
+		pub, err := outbox.NewKafkaPublisher(strings.Split(*brokers, ","), kopts...)
 		if err != nil {
 			return err
 		}

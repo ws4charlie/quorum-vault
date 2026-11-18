@@ -17,6 +17,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/auditchain"
 	"github.com/ws4charlie/quorum-vault/internal/db"
+	"github.com/ws4charlie/quorum-vault/internal/kafkatls"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
 	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
@@ -80,7 +81,11 @@ func run(log *slog.Logger) error {
 		}()
 		defer srv.Close()
 	}
-	pub, err := outbox.NewKafkaPublisher(strings.Split(*brokers, ","))
+	kopts, err := kafkatls.Options(tsrc)
+	if err != nil {
+		return err
+	}
+	pub, err := outbox.NewKafkaPublisher(strings.Split(*brokers, ","), kopts...)
 	if err != nil {
 		return err
 	}

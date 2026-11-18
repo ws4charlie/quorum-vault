@@ -17,6 +17,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/audit"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
 // auditTypes returns the event types in a chain, in order.
@@ -99,7 +100,7 @@ func (s *system) requireGatewayAudit(want ...string) {
 // binaries: the anchors of this system's core chain and gateway chain must all agree with their databases.
 func (s *system) requireAnchors() {
 	s.t.Helper()
-	cl, err := kgo.NewClient(kgo.SeedBrokers(kafkaBrokers()), kgo.ConsumeTopics(outbox.TopicAuditHeads),
+	cl, err := kgo.NewClient(kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")), kgo.SeedBrokers(kafkaBrokers()), kgo.ConsumeTopics(outbox.TopicAuditHeads),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
 	if err != nil {
 		s.t.Fatal(err)

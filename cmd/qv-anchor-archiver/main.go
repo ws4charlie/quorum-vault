@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/auditchain"
+	"github.com/ws4charlie/quorum-vault/internal/kafkatls"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
 
 func main() {
@@ -33,6 +35,7 @@ func run(log *slog.Logger) error {
 	retention := fs.Duration("retention", 7*365*24*time.Hour, "the bucket's default retention in COMPLIANCE mode must be at least this, else the archiver refuses to run (default 7 years)")
 	metricsListen := fs.String("metrics-listen", "", "serve Prometheus metrics on this address, e.g. 127.0.0.1:9103; off when empty")
 	archive := auditchain.ArchiveFlags(fs)
+	tlsFor := pki.Flags(fs, "")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -51,7 +54,18 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	a := auditchain.NewArchiver(arch, auditchain.ArchiverOptions{Brokers: strings.Split(*brokers, ","), Group: *group, Retention: *retention, Logger: log})
+	tsrc, err := tlsFor("qv-anchor-archiver", pki.ZoneBusiness, log)
+	if err != nil {
+		return err
+	}
+	if tsrc != nil {
+		go tsrc.Run(ctx.Done())
+	}
+	kopts, err := kafkatls.Options(tsrc)
+	if err != nil {
+		return err
+	}
+	a := auditchain.NewArchiver(arch, auditchain.ArchiverOptions{Brokers: strings.Split(*brokers, ","), Group: *group, Retention: *retention, Logger: log, KafkaOpts: kopts})
 	// refuse a weak bucket before anything is consumed
 	if err := a.CheckBucket(ctx); err != nil {
 		return err

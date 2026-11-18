@@ -9,6 +9,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
 // checkKafka consumes the four topics from the start and requires that every
@@ -32,7 +33,7 @@ func (s *system) checkKafka(timeout time.Duration) {
 	}
 	rows.Close()
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers(kafkaBrokers()),
+	cl, err := kgo.NewClient(kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")), kgo.SeedBrokers(kafkaBrokers()),
 		kgo.ConsumeTopics(outbox.TopicDeposits, outbox.TopicWithdrawals, outbox.TopicSweeps, outbox.TopicAudit),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
 	if err != nil {

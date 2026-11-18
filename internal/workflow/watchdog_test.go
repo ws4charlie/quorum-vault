@@ -3,6 +3,7 @@ package workflow
 import (
 	"bytes"
 	"context"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"log/slog"
 	"os"
 	"strings"
@@ -117,10 +118,10 @@ func TestWatchdogReplacesARealStalledLoop(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	if err := RegisterNamespace(ctx, "127.0.0.1:7233", "default"); err != nil {
+	if err := RegisterNamespace(ctx, temporalAddrForTest(), "default", client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}); err != nil {
 		t.Fatal(err)
 	}
-	c, err := client.DialContext(ctx, client.Options{HostPort: "127.0.0.1:7233", Namespace: "default"})
+	c, err := client.DialContext(ctx, client.Options{HostPort: temporalAddrForTest(), Namespace: "default", ConnectionOptions: client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,4 +166,12 @@ func TestWatchdogReplacesARealStalledLoop(t *testing.T) {
 	if old.WorkflowExecutionInfo.Status.String() != "Terminated" {
 		t.Fatalf("old run is %s, want Terminated", old.WorkflowExecutionInfo.Status)
 	}
+}
+
+// temporalAddrForTest is the Temporal of `make infra-up`; QV_TEMPORAL_ADDR moves it (scripts/e2e-all.sh).
+func temporalAddrForTest() string {
+	if v := os.Getenv("QV_TEMPORAL_ADDR"); v != "" {
+		return v
+	}
+	return "127.0.0.1:7233"
 }
