@@ -21,6 +21,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
@@ -74,7 +75,7 @@ func (s *wdSys) callH(method, path string, hdr map[string]string, body any) (int
 		req.Header.Set("Authorization", idp.Bearer("ops")) // reads and operator calls name nobody: the operator
 	}
 	idp.SetHeaders(req.Header, hdr)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := pkitest.PeopleClient().Do(req)
 	if err != nil {
 		s.t.Fatalf("%s %s: %v", method, path, err)
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
 
@@ -239,7 +240,7 @@ func TestWrongNetworkRefusesToStart(t *testing.T) {
 	cf.Chain.SOL = &sc
 	s.cfgPath = s.cfgPath + ".mainnet"
 	s.writeConfig(cf)
-	p := s.spawn("qv-core", "-config", s.cfgPath, "-dsn", s.bizDSN, "-addr", fmt.Sprintf("127.0.0.1:%d", freePort(t)), "-task-queue", s.queue)
+	p := s.spawn("qv-core", append([]string{"-config", s.cfgPath, "-dsn", s.bizDSN, "-addr", fmt.Sprintf("127.0.0.1:%d", freePort(t)), "-task-queue", s.queue}, pkitest.CoreArgs()...)...)
 	select {
 	case <-p.done:
 	case <-time.After(30 * time.Second):

@@ -33,6 +33,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
@@ -367,10 +368,10 @@ func (s *system) restartWorker() {
 
 func (s *system) startCore() {
 	addr := fmt.Sprintf("127.0.0.1:%d", freePort(s.t))
-	s.core = s.spawn("qv-core", "-config", s.cfgPath, "-dsn", s.bizDSN, "-addr", addr, "-task-queue", s.queue)
-	s.apiURL = "http://" + addr
+	s.core = s.spawn("qv-core", append([]string{"-config", s.cfgPath, "-dsn", s.bizDSN, "-addr", addr, "-task-queue", s.queue}, pkitest.CoreArgs()...)...)
+	s.apiURL = "https://" + addr
 	s.waitFor(30*time.Second, "qv-core listening", func() bool {
-		resp, err := http.Get(s.apiURL + "/v2/reconcile")
+		resp, err := pkitest.PeopleClient().Get(s.apiURL + "/v2/reconcile")
 		if err != nil {
 			return false
 		}
@@ -391,7 +392,7 @@ func (s *system) call(method, path string, body any) (int, map[string]any) {
 		s.t.Fatal(err)
 	}
 	req.Header.Set("Authorization", idp.Bearer("ops"))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := pkitest.PeopleClient().Do(req)
 	if err != nil {
 		s.t.Fatalf("%s %s: %v", method, path, err)
 	}

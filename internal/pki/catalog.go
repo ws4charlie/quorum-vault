@@ -1,0 +1,91 @@
+package pki
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// Entry is one identity the development setup issues. Production asks its own PKI for the same names (docs/runbooks/certificates.md).
+type Entry struct {
+	Zone    string // the zone whose authority issues it
+	Service string // the name in the URI SAN
+	CN      string // subject common name; empty means Service. Postgres client certificates map it to a role
+	DNS     []string
+	IPs     []string
+	Usage   Usage
+}
+
+var localNames = []string{"localhost"}
+var localIPs = []string{"127.0.0.1", "::1"}
+
+// Catalog is every service identity. Server entries carry the DNS names and IPs a client may dial (compose service names and localhost).
+//
+// The entries whose name ends in -link are certificates of the BUSINESS authority for signing-zone programs that must reach a business
+// service (the gateway reads the job queue in the business database; the gateway and the cosigner publish audit heads to the business
+// Kafka). They are the explicit links between the zones: the business side admits the visitor by a name it issued, and trusts no signing-zone authority.
+var Catalog = []Entry{
+	// business zone
+	{Zone: ZoneBusiness, Service: "core", DNS: append([]string{"qv-core"}, localNames...), IPs: localIPs, Usage: Server | Client},
+	{Zone: ZoneBusiness, Service: "worker", Usage: Client},
+	{Zone: ZoneBusiness, Service: "relay", Usage: Client},
+	{Zone: ZoneBusiness, Service: "archiver", Usage: Client},
+	{Zone: ZoneBusiness, Service: "guardian", Usage: Client},
+	{Zone: ZoneBusiness, Service: "postgres", DNS: append([]string{"postgres"}, localNames...), IPs: localIPs, Usage: Server},
+	{Zone: ZoneBusiness, Service: "temporal-db", DNS: append([]string{"temporal-db"}, localNames...), IPs: localIPs, Usage: Server},
+	{Zone: ZoneBusiness, Service: "kafka", DNS: append([]string{"redpanda"}, localNames...), IPs: localIPs, Usage: Server},
+	{Zone: ZoneBusiness, Service: "temporal", DNS: append([]string{"temporal"}, localNames...), IPs: localIPs, Usage: Server | Client},
+	{Zone: ZoneBusiness, Service: "keycloak", DNS: append([]string{"keycloak"}, localNames...), IPs: localIPs, Usage: Server},
+	{Zone: ZoneBusiness, Service: "seaweedfs", DNS: append([]string{"seaweedfs"}, localNames...), IPs: localIPs, Usage: Server},
+	{Zone: ZoneBusiness, Service: "gateway-link", Usage: Client},
+	{Zone: ZoneBusiness, Service: "cosigner-link", Usage: Client},
+	// signing zone
+	{Zone: ZoneSigning, Service: "gateway", Usage: Client},
+	{Zone: ZoneSigning, Service: "cosigner", Usage: Client},
+	{Zone: ZoneSigning, Service: "gateway-guard-db", DNS: append([]string{"gateway-guard-db"}, localNames...), IPs: localIPs, Usage: Server},
+	{Zone: ZoneSigning, Service: "cosigner-guard-db", DNS: append([]string{"cosigner-guard-db"}, localNames...), IPs: localIPs, Usage: Server},
+}
+
+// Dir is where the certificate files of an entry live under a PKI root: <root>/<zone>/<service>/{tls.crt,tls.key,ca.crt}.
+func Dir(root, zone, service string) string { return filepath.Join(root, zone, service) }
+
+// Init makes the two zone authorities under root, each valid for caTTL. An authority that already exists is left alone.
+func Init(root string, caTTL time.Duration, now time.Time) error {
+	for _, z := range []string{ZoneBusiness, ZoneSigning} {
+		if _, err := os.Stat(filepath.Join(root, z, "ca.key")); err == nil {
+			continue
+		}
+		ca, err := NewCA(z, caTTL, now)
+		if err != nil {
+			return err
+		}
+		if err := ca.Save(root); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// IssueAll issues (or re-issues: that is rotation) every catalog certificate, valid for ttl, into root. Files are replaced atomically.
+func IssueAll(root string, ttl time.Duration, now time.Time) error {
+	cas := map[string]*CA{}
+	for _, z := range []string{ZoneBusiness, ZoneSigning} {
+		ca, err := LoadCA(root, z)
+		if err != nil {
+			return err
+		}
+		cas[z] = ca
+	}
+	for _, e := range Catalog {
+		ca := cas[e.Zone]
+		l, err := ca.Issue(IssueRequest{Service: e.Service, CN: e.CN, DNS: e.DNS, IPs: e.IPs, Usage: e.Usage, TTL: ttl, Now: now})
+		if err != nil {
+			return fmt.Errorf("%s/%s: %w", e.Zone, e.Service, err)
+		}
+		if err := WriteLeaf(Dir(root, e.Zone, e.Service), l, ca); err != nil {
+			return err
+		}
+	}
+	return nil
+}

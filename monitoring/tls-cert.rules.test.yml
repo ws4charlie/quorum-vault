@@ -1,0 +1,55 @@
+rule_files:
+  - tls-cert.rules.yml
+evaluation_interval: 1m
+tests:
+  # a certificate that is renewed in time never alerts; one whose renewal stopped alerts before it runs out
+  - interval: 1m
+    input_series:
+      - series: 'qv_tls_cert_seconds_to_expiry{name="core",zone="business",kind="leaf"}'
+        values: '20000-60x400'            # 5.5 h left, then 60 s less every minute: below 4 h after 92 minutes
+      - series: 'qv_tls_cert_seconds_to_expiry{name="worker",zone="business",kind="leaf"}'
+        values: '20000+0x400'             # renewed: stays at 5.5 h
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: QVTLSCertExpiringSoon
+        exp_alerts: []
+      - eval_time: 100m
+        alertname: QVTLSCertExpiringSoon
+        exp_alerts:
+          - exp_labels: {severity: page, name: core, zone: business}
+            exp_annotations:
+              summary: "The TLS certificate of core (business zone) expires in 3h 53m 20s"
+              description: "The service reloads renewed files without a restart; renew them now. Runbook: docs/runbooks/certificates.md"
+  - interval: 1m
+    input_series:
+      - series: 'qv_tls_cert_seconds_to_expiry{name="gateway",zone="signing",kind="leaf"}'
+        values: '120 60 0 -60 -120 -180'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: QVTLSCertExpired
+        exp_alerts:
+          - exp_labels: {severity: page, name: gateway, zone: signing}
+            exp_annotations:
+              summary: "The TLS certificate of gateway (signing zone) has expired"
+              description: "Its peers refuse it. Renew the files; the service reloads them. Runbook: docs/runbooks/certificates.md"
+  - interval: 1m
+    input_series:
+      - series: 'qv_tls_cert_seconds_to_expiry{name="core",zone="business",kind="ca"}'
+        values: '2000000+0x30'            # 23 days
+      - series: 'qv_tls_cert_reload_failures_total{name="core",zone="business"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: QVTLSCAExpiringSoon
+        exp_alerts:
+          - exp_labels: {severity: ticket, name: core, zone: business}
+            exp_annotations:
+              summary: "The business zone CA that core trusts expires in 23d 3h 33m 20s"
+              description: "Roll the authority: add the new CA to every trust bundle before issuing from it. Runbook: docs/runbooks/certificates.md"
+      - eval_time: 20m
+        alertname: QVTLSCertReloadFailing
+        exp_alerts:
+          - exp_labels: {severity: page, name: core, zone: business}
+            exp_annotations:
+              summary: "core cannot load its renewed TLS files"
+              description: "It keeps the old certificate until that expires. Check its log for the reload error (a half-written pair, a certificate of the wrong zone or authority, an expired replacement)."

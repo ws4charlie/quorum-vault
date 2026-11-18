@@ -17,6 +17,8 @@ import (
 	"github.com/ws4charlie/quorum-vault/e2e/idp"
 	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
 // Factory administration: the cold key is the forwarder factory's admin. Changing the sweep destination, freezing and unfreezing,
@@ -182,9 +184,10 @@ func TestGuardianFreezeAndCeremonyUnfreeze(t *testing.T) {
 	}
 	strangerKey := filepath.Join(s.dir, "stranger.key")
 	os.WriteFile(strangerKey, []byte(common.Bytes2Hex(crypto.FromECDSA(s.deployer))), 0o600)
+	gcert, gkey, gca := pkitest.Files(pki.ZoneBusiness, "guardian")
 	guardian := func(key string) (string, error) {
 		cmd := exec.Command(filepath.Join(binDir, "qv-guardian"), "freeze", "-rpc", s.rpcURL, "-factory", s.factory.Hex(), "-key-file", key,
-			"-core", s.apiURL)
+			"-core", s.apiURL, "-tls-cert", gcert, "-tls-key", gkey, "-tls-ca", gca)
 		cmd.Env = append(os.Environ(), "QV_CORE_TOKEN="+strings.TrimPrefix(idp.ServiceBearer("qv-guardian"), "Bearer "))
 		out, err := cmd.CombinedOutput()
 		return string(out), err
