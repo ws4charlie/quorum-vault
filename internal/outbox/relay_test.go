@@ -14,9 +14,16 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
-const kafkaAddr = "127.0.0.1:19092"
+// the broker of `make infra-up`; QV_KAFKA_BROKERS moves it
+var kafkaAddr = func() string {
+	if v := os.Getenv("QV_KAFKA_BROKERS"); v != "" {
+		return v
+	}
+	return "127.0.0.1:19092"
+}()
 
 // fakePub records events; failAt (1-based publish count) makes that publish fail once.
 type fakePub struct {
@@ -220,7 +227,7 @@ func requireInfra(t *testing.T) {
 
 func consumeAll(t *testing.T, topic string, want int, timeout time.Duration) []*kgo.Record {
 	t.Helper()
-	cl, err := kgo.NewClient(kgo.SeedBrokers(kafkaAddr), kgo.ConsumeTopics(topic),
+	cl, err := kgo.NewClient(kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")), kgo.SeedBrokers(kafkaAddr), kgo.ConsumeTopics(topic),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
 	if err != nil {
 		t.Fatal(err)
@@ -261,7 +268,7 @@ func TestRelayKafkaOrderAndEventIDs(t *testing.T) {
 		keys[i] = fmt.Sprint("key", i%3)
 	}
 	writeEvents(t, pool, topic, keys...)
-	pub, err := NewKafkaPublisher([]string{kafkaAddr})
+	pub, err := NewKafkaPublisher([]string{kafkaAddr}, kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +313,7 @@ func TestRelayKafkaCrashRedeliversSameID(t *testing.T) {
 	pool := dbtest.New(t)
 	topic := uniqueTopic("qv.relay.crash")
 	writeEvents(t, pool, topic, "k1", "k2", "k3")
-	pub, err := NewKafkaPublisher([]string{kafkaAddr})
+	pub, err := NewKafkaPublisher([]string{kafkaAddr}, kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +366,7 @@ func TestRelayKafkaDownThenUp(t *testing.T) {
 		t.Fatal("rows lost or marked while Kafka was down")
 	}
 
-	up, err := NewKafkaPublisher([]string{kafkaAddr})
+	up, err := NewKafkaPublisher([]string{kafkaAddr}, kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")))
 	if err != nil {
 		t.Fatal(err)
 	}

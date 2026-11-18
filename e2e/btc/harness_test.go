@@ -651,10 +651,10 @@ func newSystem(t *testing.T, o opts) *system {
 	}
 	rctx, cancel := context.WithTimeout(s.ctx, 60*time.Second)
 	defer cancel()
-	if err := workflow.RegisterNamespace(rctx, addr, "default"); err != nil {
+	if err := workflow.RegisterNamespace(rctx, addr, "default", client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}); err != nil {
 		t.Fatal(err)
 	}
-	tc, err := client.DialContext(s.ctx, client.Options{HostPort: addr, Namespace: "default"})
+	tc, err := client.DialContext(s.ctx, client.Options{HostPort: addr, Namespace: "default", ConnectionOptions: client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}})
 	if err != nil {
 		t.Fatal(err)
 	}

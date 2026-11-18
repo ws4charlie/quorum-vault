@@ -17,6 +17,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/ws4charlie/quorum-vault/internal/custody"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
 // refusalOnNoCancelChain runs a withdrawal whose job the gateway refused, on a chain without cancel whose NothingToFree answer
@@ -119,11 +120,14 @@ func TestTwoChainsOnOneTemporalDoNotCross(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	const addr = "127.0.0.1:7233"
-	if err := RegisterNamespace(ctx, addr, "default"); err != nil {
+	addr := os.Getenv("QV_TEMPORAL_ADDR") // scripts/e2e-all.sh moves it
+	if addr == "" {
+		addr = "127.0.0.1:7233"
+	}
+	if err := RegisterNamespace(ctx, addr, "default", client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}); err != nil {
 		t.Fatal(err)
 	}
-	c, err := client.DialContext(ctx, client.Options{HostPort: addr, Namespace: "default"})
+	c, err := client.DialContext(ctx, client.Options{HostPort: addr, Namespace: "default", ConnectionOptions: client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}})
 	if err != nil {
 		t.Fatal(err)
 	}

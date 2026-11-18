@@ -23,6 +23,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/audit"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/domain"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
 // ---- logic without any service (these run under -short) ----
@@ -397,7 +398,7 @@ func kafkaBrokersForTest(t *testing.T) []string {
 func newTopic(t *testing.T, brokers []string) string {
 	t.Helper()
 	topic := "qv.audit.heads.test." + randHex(t, 4)
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	cl, err := kgo.NewClient(kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")), kgo.SeedBrokers(brokers...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +411,7 @@ func newTopic(t *testing.T, brokers []string) string {
 
 func produce(t *testing.T, brokers []string, topic string, values ...[]byte) {
 	t.Helper()
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.RequiredAcks(kgo.AllISRAcks()))
+	cl, err := kgo.NewClient(kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")), kgo.SeedBrokers(brokers...), kgo.RequiredAcks(kgo.AllISRAcks()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +426,7 @@ func produce(t *testing.T, brokers []string, topic string, values ...[]byte) {
 // startArchiver runs an archiver until stop is called; processed reports heads it has handled (stored or already there).
 func startArchiver(t *testing.T, arch Archive, brokers []string, topic, group string) (a *Archiver, stop func()) {
 	t.Helper()
-	a = NewArchiver(arch, ArchiverOptions{Brokers: brokers, Topic: topic, Group: group, Retention: 24 * time.Hour, Retry: 100 * time.Millisecond})
+	a = NewArchiver(arch, ArchiverOptions{KafkaOpts: []kgo.Opt{kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka"))}, Brokers: brokers, Topic: topic, Group: group, Retention: 24 * time.Hour, Retry: 100 * time.Millisecond})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- a.Run(ctx) }()
@@ -567,7 +568,7 @@ func TestVerifyWorksFromTheArchiveAfterTheTopicIsDeleted(t *testing.T) {
 	waitLong(t, func() bool { return a.stored.Load() == 2 })
 	stop()
 
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	cl, err := kgo.NewClient(kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")), kgo.SeedBrokers(brokers...))
 	if err != nil {
 		t.Fatal(err)
 	}

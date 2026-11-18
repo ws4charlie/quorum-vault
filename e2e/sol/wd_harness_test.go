@@ -30,6 +30,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
 
@@ -348,10 +349,10 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	}
 	rctx, rcancel := context.WithTimeout(s.ctx, 60*time.Second)
 	defer rcancel()
-	if err := workflow.RegisterNamespace(rctx, addr, "default"); err != nil {
+	if err := workflow.RegisterNamespace(rctx, addr, "default", client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}); err != nil {
 		t.Fatal(err)
 	}
-	if s.tc, err = client.DialContext(s.ctx, client.Options{HostPort: addr, Namespace: "default"}); err != nil {
+	if s.tc, err = client.DialContext(s.ctx, client.Options{HostPort: addr, Namespace: "default", ConnectionOptions: client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.tc.Close)

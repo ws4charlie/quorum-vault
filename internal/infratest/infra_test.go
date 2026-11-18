@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"os"
 	"testing"
 	"time"
@@ -17,10 +18,18 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
-const (
-	temporalAddr = "127.0.0.1:7233"
-	kafkaAddr    = "127.0.0.1:19092"
+// The services of `make infra-up`; scripts/e2e-all.sh moves them (QV_TEMPORAL_ADDR, QV_KAFKA_BROKERS).
+var (
+	temporalAddr = envOr("QV_TEMPORAL_ADDR", "127.0.0.1:7233")
+	kafkaAddr    = envOr("QV_KAFKA_BROKERS", "127.0.0.1:19092")
 )
+
+func envOr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
 
 func requireInfra(t *testing.T) {
 	t.Helper()
@@ -40,7 +49,7 @@ func TestTemporalWorkflow(t *testing.T) {
 	defer cancel()
 
 	const namespace = "default"
-	ns, err := client.NewNamespaceClient(client.Options{HostPort: temporalAddr})
+	ns, err := client.NewNamespaceClient(client.Options{HostPort: temporalAddr, ConnectionOptions: client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}})
 	if err != nil {
 		t.Fatalf("namespace client: %v", err)
 	}
@@ -55,7 +64,7 @@ func TestTemporalWorkflow(t *testing.T) {
 		t.Fatalf("register namespace: %v", err)
 	}
 
-	c, err := client.DialContext(ctx, client.Options{HostPort: temporalAddr, Namespace: namespace})
+	c, err := client.DialContext(ctx, client.Options{HostPort: temporalAddr, Namespace: namespace, ConnectionOptions: client.ConnectionOptions{TLS: pkitest.AdminTLS("temporal", "temporal")}})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -98,6 +107,7 @@ func TestRedpandaRoundTrip(t *testing.T) {
 
 	topic := fmt.Sprintf("qv.smoke.%d", time.Now().UnixNano())
 	cl, err := kgo.NewClient(
+		kgo.DialTLSConfig(pkitest.AdminTLS("", "kafka")),
 		kgo.SeedBrokers(kafkaAddr),
 		kgo.AllowAutoTopicCreation(),
 		kgo.ConsumeTopics(topic),

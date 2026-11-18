@@ -73,14 +73,19 @@ services:
   temporal-db:
     profiles: ["infra"]
     image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/cfg/entrypoint.sh"]
     environment:
       POSTGRES_DB: temporal
       POSTGRES_USER: temporal
-      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_HOST_AUTH_METHOD: trust # only for initdb; the hba file requires TLS and a certificate
     volumes:
       - temporal-pgdata:/var/lib/postgresql/data
+      - ${QV_PKI_DIR:-./data/pki}/business/temporal-db:/pki:ro
+      - ./deploy/postgres/entrypoint.sh:/cfg/entrypoint.sh:ro
+      - ./deploy/postgres/temporal.pg_hba.conf:/cfg/pg_hba.conf:ro
+      - ./deploy/postgres/temporal.pg_ident.conf:/cfg/pg_ident.conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U temporal -d temporal"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -97,10 +102,19 @@ services:
       SQL_HOST: temporal-db
       SQL_PORT: "5432"
       SQL_USER: temporal
+      # TLS, with the Temporal service's own certificate as the client certificate (name temporal -> role temporal)
+      SQL_TLS: "true"
+      SQL_TLS_CERT_FILE: /pki/tls.crt
+      SQL_TLS_KEY_FILE: /tmp/sql.key # a copy: the Postgres driver insists on a key file that only its user can read
+      SQL_TLS_CA_FILE: /pki/ca.crt
+      SQL_TLS_SERVER_NAME: temporal-db
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/temporal:/pki:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
+        cp /pki/tls.key /tmp/sql.key && chmod 600 /tmp/sql.key
         temporal-sql-tool --db temporal create-database || true
         temporal-sql-tool --db temporal setup-schema -v 0.0
         temporal-sql-tool --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
@@ -111,6 +125,7 @@ services:
   temporal:
     profiles: ["infra"]
     image: temporalio/server:1.32.1
+    entrypoint: ["/bin/sh", "-c", "cp /pki/tls.key /tmp/sql.key && chmod 600 /tmp/sql.key && exec /etc/temporal/entrypoint.sh"]
     depends_on:
       temporal-schema:
         condition: service_completed_successfully
@@ -125,9 +140,36 @@ services:
       BIND_ON_IP: 0.0.0.0
       TEMPORAL_BROADCAST_ADDRESS: 127.0.0.1
       DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig.yaml
+      # its database: TLS, temporal-db's certificate checked, our certificate as the client certificate
+      SQL_TLS_ENABLED: "true"
+      SQL_CA: /pki/ca.crt
+      SQL_CERT: /pki/tls.crt
+      SQL_CERT_KEY: /tmp/sql.key # a copy made at start (the entrypoint below): the Postgres driver insists on a key file that only its user can read
+      SQL_HOST_VERIFICATION: "true"
+      SQL_HOST_NAME: temporal-db
+      # the frontend: TLS, and a client certificate of the business authority from every caller (workers, the core, tests); the files are
+      # re-read every minute, so a renewed certificate needs no restart
+      TEMPORAL_TLS_FRONTEND_CERT: /pki/tls.crt
+      TEMPORAL_TLS_FRONTEND_KEY: /pki/tls.key
+      TEMPORAL_TLS_CLIENT1_CA_CERT: /pki/ca.crt
+      TEMPORAL_TLS_CLIENT2_CA_CERT: /pki/ca.crt
+      TEMPORAL_TLS_REQUIRE_CLIENT_AUTH: "true"
+      TEMPORAL_TLS_SERVER_CA_CERT: /pki/ca.crt
+      TEMPORAL_TLS_FRONTEND_SERVER_NAME: temporal
+      # the cluster's own traffic (history, matching, the system worker through the internal frontend) is TLS with the same certificate; with the
+      # frontend demanding client certificates, the system worker needs the internal frontend
+      TEMPORAL_TLS_SERVER_CERT: /pki/tls.crt
+      TEMPORAL_TLS_SERVER_KEY: /pki/tls.key
+      TEMPORAL_TLS_INTERNODE_SERVER_NAME: temporal
+      USE_INTERNAL_FRONTEND: "true"
+      TEMPORAL_SERVICES: frontend,internal-frontend,history,matching,worker
+      TEMPORAL_TLS_REFRESH_INTERVAL: 1m
+      TEMPORAL_TLS_EXPIRATION_CHECKS_WARNING_WINDOW: 4h
     configs:
       - source: temporal-dynamicconfig
         target: /etc/temporal/dynamicconfig.yaml
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/temporal:/pki:ro
     ports:
       - "127.0.0.1:${QV_TEMPORAL_PORT:-7233}:7233"
     healthcheck:
@@ -178,25 +220,52 @@ services:
         condition: service_healthy
     environment:
       TEMPORAL_ADDRESS: temporal:7233
+      # the UI is a client of the frontend like any other: it shows the admin certificate
+      TEMPORAL_TLS_CA: /pki/ca.crt
+      TEMPORAL_TLS_CERT: /pki/tls.crt
+      TEMPORAL_TLS_KEY: /pki/tls.key
+      TEMPORAL_TLS_ENABLE_HOST_VERIFICATION: "true"
+      TEMPORAL_TLS_SERVER_NAME: temporal
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/admin:/pki:ro
     ports:
       - "127.0.0.1:${QV_TEMPORAL_UI_PORT:-8233}:8080"
 
-  # Single-node Kafka-API broker for the outbox relay. Kafka API on 19092.
+  # Single-node Kafka-API broker for the outbox relay. Kafka API on 19092. TLS with a client certificate from the business authority only; the
+  # principal is the certificate's common name (the service name), and ACLs (deploy/redpanda/acl.sh) say what each name may do. `admin` is the
+  # superuser (operators, tests). Redpanda re-reads its certificate files by itself.
   redpanda:
     profiles: ["infra"]
     image: redpandadata/redpanda:v26.2.4
+    # start.sh starts the broker and makes the ACLs (deploy/redpanda/acl.sh) as soon as it is up; the health check waits for them
+    entrypoint: ["/bin/bash", "/cfg/start.sh"]
     command:
       - redpanda
       - start
       - --mode=dev-container
       - --smp=1
       - --memory=512M
-      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:${QV_KAFKA_PORT:-19092}
       - --advertise-kafka-addr=internal://redpanda:9092,external://127.0.0.1:${QV_KAFKA_PORT:-19092}
+      - --set
+      # (no spaces in these values: the image's entrypoint splits its arguments at spaces; JSON is YAML)
+      - 'redpanda.kafka_api_tls=[{"name":"internal","enabled":true,"require_client_auth":true,"cert_file":"/tmp/tls/tls.crt","key_file":"/tmp/tls/tls.key","truststore_file":"/tmp/tls/ca.crt"},{"name":"external","enabled":true,"require_client_auth":true,"cert_file":"/tmp/tls/tls.crt","key_file":"/tmp/tls/tls.key","truststore_file":"/tmp/tls/ca.crt"}]'
+      - --set
+      - 'redpanda.kafka_api=[{"name":"internal","address":"0.0.0.0","port":9092,"authentication_method":"mtls_identity"},{"name":"external","address":"0.0.0.0","port":${QV_KAFKA_PORT:-19092},"authentication_method":"mtls_identity"}]'
+      - --set
+      - redpanda.kafka_enable_authorization=true
+      - --set
+      - "redpanda.superusers=[admin]"
+      - --set
+      - 'redpanda.kafka_mtls_principal_mapping_rules=["RULE:^.*CN=([^,]+).*$$/$$1/"]'
     ports:
       - "127.0.0.1:${QV_KAFKA_PORT:-19092}:${QV_KAFKA_PORT:-19092}"
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/kafka:/pki:ro
+      - ${QV_PKI_DIR:-./data/pki}/business/admin:/admin:ro
+      - ./deploy/redpanda/start.sh:/cfg/start.sh:ro
+      - ./deploy/redpanda/acl.sh:/cfg/acl.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' && test -f /tmp/acl-ready"]
       interval: 3s
       timeout: 5s
       retries: 40

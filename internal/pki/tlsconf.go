@@ -118,7 +118,11 @@ func (s *Source) ClientConfig(serverName string, serverAllow Allow) *tls.Config 
 				inter.AddCert(c)
 			}
 			leaf := cs.PeerCertificates[0]
-			if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, Intermediates: inter, DNSName: serverName, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+			name := serverName
+			if name == "" {
+				name = cs.ServerName // the client library set it to the host it dialled (a Kafka client dials several brokers)
+			}
+			if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, Intermediates: inter, DNSName: name, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
 				return fmt.Errorf("server certificate (issued by authority key %x) is not accepted by the %s bundle of %s (authority keys %s): %w", leaf.AuthorityKeyId, s.cfg.Zone, s.cfg.Name, s.caKeyIDs(), err)
 			}
 			if len(serverAllow) > 0 {

@@ -20,6 +20,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
+	"github.com/ws4charlie/quorum-vault/internal/kafkatls"
 	"github.com/ws4charlie/quorum-vault/internal/mpcsigner"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
 	"github.com/ws4charlie/quorum-vault/internal/pki"
@@ -159,7 +160,11 @@ func run(log *slog.Logger) error {
 		log.Error("ALERT no -brokers: this zone's audit chain heads are not published, so a truncated or rewritten chain cannot be detected from outside the database")
 	}
 	if *brokers != "" {
-		pub, err := outbox.NewKafkaPublisher(strings.Split(*brokers, ","))
+		kopts, err := kafkatls.Options(lsrc) // the business-issued link certificate: the audit heads go to the business Kafka
+		if err != nil {
+			return err
+		}
+		pub, err := outbox.NewKafkaPublisher(strings.Split(*brokers, ","), kopts...)
 		if err != nil {
 			return err
 		}

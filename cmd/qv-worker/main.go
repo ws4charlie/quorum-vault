@@ -94,10 +94,14 @@ func run(log *slog.Logger) error {
 	if err := svc.Bootstrap(ctx); err != nil {
 		return err
 	}
-	if err := workflow.RegisterNamespace(ctx, *temporalAddr, *namespace); err != nil {
+	tconn, err := workflow.ConnectionOptions(*temporalAddr, tsrc)
+	if err != nil {
 		return err
 	}
-	tc, err := client.DialContext(ctx, client.Options{HostPort: *temporalAddr, Namespace: *namespace, Logger: sdklog.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})))})
+	if err := workflow.RegisterNamespace(ctx, *temporalAddr, *namespace, tconn); err != nil {
+		return err
+	}
+	tc, err := client.DialContext(ctx, client.Options{HostPort: *temporalAddr, Namespace: *namespace, ConnectionOptions: tconn, Logger: sdklog.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})))})
 	if err != nil {
 		return fmt.Errorf("dial temporal: %w", err)
 	}

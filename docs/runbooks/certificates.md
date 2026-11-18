@@ -45,6 +45,25 @@ Every database connection is TLS with a client certificate; there is no password
 - **Server certificates** are copied into the container by `deploy/postgres/entrypoint.sh`, which copies them again when they change and reloads Postgres. In production use your own mechanism (`pg_ctl reload` after replacing the files).
 - **Tests** read `DATABASE_URL` (business) and `QV_SIGNING_DB_URL` (signing zone), each naming the admin certificate files. `make` passes both; for `go test` by hand see `.env.example`.
 
+## Kafka
+
+Redpanda takes TLS with a client certificate from the business authority only, on every listener. The principal is the certificate's common name (the service name), mapped by `kafka_mtls_principal_mapping_rules`, and ACLs say what each name may do (`deploy/redpanda/acl.sh`, applied when the broker starts):
+
+| Name | May |
+|---|---|
+| `relay` | publish and create the `qv.` topics |
+| `gateway-link`, `cosigner-link` | publish to `qv.audit.heads` only |
+| `archiver` | read `qv.audit.heads` in its consumer group |
+| `admin` | everything (superuser: operators, tests) |
+
+A name without a rule connects and can do nothing. The signing zone's programs publish their audit heads through the business-issued link certificates (the second explicit link between the zones); flags `-link-tls-*` on the gateway and the cosigner. Redpanda reads a copy of its certificate files that `deploy/redpanda/start.sh` refreshes, so a renewed server certificate needs no restart. In production use your own mechanism and the same ACLs.
+
+## Temporal
+
+The frontend takes TLS and requires a client certificate signed by the business authority; the files are re-read every minute (`TEMPORAL_TLS_REFRESH_INTERVAL`). The cluster's own traffic uses the same certificate, with the internal frontend for the system worker, and Temporal's database (`temporal-db`) is a TLS-only Postgres like the others (the certificate named `temporal` maps to role `temporal`). Clients present their own certificate and check the frontend's name (`business/temporal`).
+
+Temporal can check the authority but not the NAME of a client certificate (its authorizer works on tokens, not certificates): any business-zone certificate may call the frontend. Closing that gap would take an authorizer plugin or a name-checking proxy in front of it.
+
 ## Checking and alerts
 
 - Each service exports `qv_tls_cert_seconds_to_expiry{name,zone,kind="leaf"|"ca"}` and `qv_tls_cert_reload_failures_total` (qv-core: `-metrics-listen`, loopback only). Rules: `monitoring/tls-cert.rules.yml`.
