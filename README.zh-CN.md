@@ -14,7 +14,7 @@
 ## 架构
 
 <p align="center">
-<img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"><img src="docs/images/zh/arch-api.png" width="48%" alt="核心 API"><br/>
+<img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"><a href="docs/zh/identity.md"><img src="docs/images/zh/arch-identity.png" width="24%" alt="身份"></a><img src="docs/images/zh/arch-api.png" width="24%" alt="核心 API"><br/>
 <img src="docs/images/zh/arch-down.png" width="72%" alt=""><br/>
 <a href="docs/zh/workflows.md"><img src="docs/images/zh/arch-workflows.png" width="24%" alt="工作流"></a><a href="docs/zh/ledger.md"><img src="docs/images/zh/arch-ledger.png" width="24%" alt="账本"></a><a href="docs/zh/audit.md"><img src="docs/images/zh/arch-audit.png" width="24%" alt="审计记录"></a><br/>
 <img src="docs/images/zh/arch-merge.png" width="72%" alt=""><br/>
