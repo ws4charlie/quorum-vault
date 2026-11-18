@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
@@ -99,11 +100,17 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 		if err != nil {
 			return err
 		}
-		after, err := s.solStamp(ctx)
+		coldBooks, err := s.solColdRead(ctx)
 		if err != nil {
 			return err
 		}
+		// What the finalized transactions have already done is read after every balance and every book above, and BEFORE the closing stamp: a
+		// booking made after the stamp would otherwise be in the books' side (read earlier) and in this set too, and be counted twice.
 		landedAfter, err := s.solLanded(ctx)
+		if err != nil {
+			return err
+		}
+		after, err := s.solStamp(ctx)
 		if err != nil {
 			return err
 		}
@@ -135,9 +142,7 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 			rep.add(Check{Name: "hot_balance", Asset: hc.asset, Subject: hc.partition, Ledger: want.String(), Chain: hc.balance.String(), OK: want.Cmp(hc.balance) == 0,
 				Detail: fmt.Sprintf("hot shard %s at finalized commitment; %d finalized withdrawal(s) not settled yet are accounted for", hc.address, landedAfter.n)})
 		}
-		if err := s.solColdChecks(ctx, rep, landedAfter); err != nil {
-			return err
-		}
+		s.solColdChecks(rep, coldBooks, landedAfter)
 		s.ledgerInvariants(ctx, rep)
 		// Nothing is moved to cold on this family yet, and a withdrawal posts its hold and moves it on in one transaction, so those clearing
 		// accounts must be empty. The sweep account holds what sweeps broadcast and not settled yet are taking, as a negative amount.
@@ -642,13 +647,24 @@ func (s *Service) solLandedColdOps(ctx context.Context, res *solLandedSet) ([]st
 	return key, nil
 }
 
-// solColdChecks compares each pool's cold address with the books: minus the cold accounts of the partitions that use it, per asset.
-func (s *Service) solColdChecks(ctx context.Context, rep *Report, landed solLandedSet) error {
+// solColdCell is what one pool's cold address holds in one asset: the books' side and the chain's, read inside the comparison's window.
+type solColdCell struct {
+	pool, addr, asset string
+	books, chain      *big.Int
+}
+
+// solColdRead reads, for each pool's cold address and asset, minus the cold accounts of the partitions that use it, and the address's finalized
+// balance. It belongs inside the window of reconcileSOL, like the hot reads: the books are read there, not when the checks are made.
+func (s *Service) solColdRead(ctx context.Context) ([]solColdCell, error) {
 	c := s.Cfg
-	if len(c.SOL.ColdAddresses) == 0 {
-		return nil
+	var out []solColdCell
+	pools := make([]string, 0, len(c.SOL.ColdAddresses))
+	for pool := range c.SOL.ColdAddresses {
+		pools = append(pools, pool)
 	}
-	for pool, addr := range c.SOL.ColdAddresses {
+	sort.Strings(pools)
+	for _, pool := range pools {
+		addr := c.SOL.ColdAddresses[pool]
 		for _, sym := range c.AssetList {
 			want := new(big.Int)
 			for i := 0; i < c.shardCount(); i++ {
@@ -658,20 +674,28 @@ func (s *Service) solColdChecks(ctx context.Context, rep *Report, landed solLand
 				}
 				posted, err := s.posted(ctx, coldAcct(p.String()))
 				if err != nil {
-					return err
+					return nil, err
 				}
 				want.Sub(want, posted)
 			}
-			if in := landed.coldIn[[2]string{addr, sym}]; in != nil {
-				want.Add(want, in)
-			}
 			got, err := s.Reader.Balance(ctx, addr, sym, 0)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			rep.add(Check{Name: "cold_balance", Asset: sym, Subject: addr, Ledger: want.String(), Chain: got.String(), OK: want.Cmp(got) == 0,
-				Detail: fmt.Sprintf("cold address of pool %s at finalized commitment", pool)})
+			out = append(out, solColdCell{pool: pool, addr: addr, asset: sym, books: want, chain: got})
 		}
 	}
-	return nil
+	return out, nil
+}
+
+// solColdChecks compares each pool's cold address with the books (read by solColdRead), with the finalized transactions the books have not caught up with.
+func (s *Service) solColdChecks(rep *Report, cells []solColdCell, landed solLandedSet) {
+	for _, cell := range cells {
+		want := new(big.Int).Set(cell.books)
+		if in := landed.coldIn[[2]string{cell.addr, cell.asset}]; in != nil {
+			want.Add(want, in)
+		}
+		rep.add(Check{Name: "cold_balance", Asset: cell.asset, Subject: cell.addr, Ledger: want.String(), Chain: cell.chain.String(), OK: want.Cmp(cell.chain) == 0,
+			Detail: fmt.Sprintf("cold address of pool %s at finalized commitment", cell.pool)})
+	}
 }
