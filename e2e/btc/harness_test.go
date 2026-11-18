@@ -495,7 +495,7 @@ func (s *system) spawnEnv(name string, env []string, args ...string) *proc {
 		s.t.Fatal(err)
 	}
 	cmd := exec.Command(filepath.Join(binDir, name), args...)
-	cmd.Env = append(append(os.Environ(), "SOFTHSM2_CONF="+hsm.SoftHSMConf()), env...)
+	cmd.Env = append(append(append(os.Environ(), "SOFTHSM2_CONF="+hsm.SoftHSMConf()), pkitest.EnvFor(name)...), env...)
 	cmd.Stdout, cmd.Stderr = lf, lf
 	mpcstack.Guard(cmd)
 	if err := cmd.Start(); err != nil {
@@ -595,8 +595,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.node = newNode(t)
 	tm.Phase("chain")
 	s.pool = dbtest.New(t)
-	cc := s.pool.Config().ConnConfig
-	s.bizDSN = fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", cc.User, cc.Host, cc.Port, cc.Database)
+	s.bizDSN = dbtest.DSN(s.pool)
 	tm.Phase("db")
 	s.mpc.WaitReady(60 * time.Second)
 	tm.Phase("mpc-wait")

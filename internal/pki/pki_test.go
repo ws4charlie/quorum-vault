@@ -135,7 +135,7 @@ func TestClientChecksTheServer(t *testing.T) {
 		t.Fatal("a host name mismatch was accepted")
 	}
 	// a server of the signing zone (its certificate has the localhost name too): the business client does not trust that authority
-	sign := source(t, root, ZoneSigning, "gateway-guard-db")
+	sign := source(t, root, ZoneSigning, "signing-db")
 	other := startServer(t, sign.ServerConfig(OptionalClient, nil))
 	if _, err := get(t, other, worker.ClientConfig("localhost", nil)); err == nil {
 		t.Fatal("a signing-zone server certificate was accepted by a business client")

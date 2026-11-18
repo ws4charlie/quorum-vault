@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,7 +19,6 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/eth"
@@ -100,27 +98,11 @@ type harness struct {
 
 func newGuardDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("DATABASE_URL")
-	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, url)
+	cfg, err := pgxpool.ParseConfig(dbtest.CreateGuardDB(t, "qv_guard_")) // the signing zone's Postgres
 	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	defer admin.Close(ctx)
-	name := "qv_guard_" + hex.EncodeToString(uuid.NewSHA1(uuid.NameSpaceOID, []byte(t.Name()+time.Now().String())).NodeID())
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		c, err := pgx.Connect(context.Background(), url)
-		if err == nil {
-			c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-			c.Close(context.Background())
-		}
-	})
-	cfg, _ := pgxpool.ParseConfig(url)
-	cfg.ConnConfig.Database = name
-	p, err := pgxpool.NewWithConfig(ctx, cfg)
+	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

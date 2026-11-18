@@ -17,6 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/db"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
 // New creates database qv_test_<random> on the DATABASE_URL server, migrates
@@ -88,4 +90,83 @@ func redact(url string) string {
 		return "<DATABASE_URL>"
 	}
 	return cfg.Host + "/" + cfg.Database
+}
+
+// DSN is a DSN of the pool's database, made from DATABASE_URL so that the TLS settings (sslmode, certificate files) carry over. Build a DSN
+// for a spawned program from it, never with a format string.
+func DSN(pool *pgxpool.Pool) string {
+	return db.Rewrite(os.Getenv("DATABASE_URL"), "", pool.Config().ConnConfig.Database)
+}
+
+// SigningURL is the admin DSN of the signing zone's Postgres (QV_SIGNING_DB_URL): the server that holds the replay-guard databases, with its own
+// certificate authority. Without it the test is skipped, or fails under QV_REQUIRE_DB=1.
+func SigningURL(t testing.TB) string {
+	t.Helper()
+	u := os.Getenv("QV_SIGNING_DB_URL")
+	if u == "" {
+		unavailable(t, "QV_SIGNING_DB_URL is not set (the signing zone's Postgres; `make db-up`)")
+	}
+	return u
+}
+
+// CreateGuardDB creates a database for a replay guard on the signing zone's Postgres and returns its DSN. Cleanup drops it. The guard databases
+// of the gateway and of the cosigner are made by two calls: they must never be the same database.
+func CreateGuardDB(t testing.TB, prefix string) string {
+	t.Helper()
+	admin := SigningURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c, err := pgx.Connect(ctx, admin)
+	if err != nil {
+		t.Fatalf("dbtest: connect to the signing zone's Postgres: %v", err)
+	}
+	defer c.Close(ctx)
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatal(err)
+	}
+	name := prefix + hex.EncodeToString(b[:])
+	if _, err := c.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatalf("dbtest: create %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if c, err := pgx.Connect(ctx, admin); err == nil {
+			c.Exec(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+			c.Close(ctx)
+		}
+	})
+	return db.Rewrite(admin, "", name)
+}
+
+// GatewayLogin lets role qv_gateway log in for the test (the migration creates it NOLOGIN) and takes it away at cleanup. The role is
+// cluster-global, so tests that use it run one after another, as the e2e packages do.
+func GatewayLogin(t testing.TB) {
+	t.Helper()
+	url := os.Getenv("DATABASE_URL")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close(ctx)
+	if _, err := c.Exec(ctx, `ALTER ROLE qv_gateway LOGIN`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if c, err := pgx.Connect(ctx, url); err == nil {
+			c.Exec(ctx, `ALTER ROLE qv_gateway NOLOGIN`)
+			c.Close(ctx)
+		}
+	})
+}
+
+// GatewayJobsDSN is the DSN the gateway reads the job queue with: the restricted role qv_gateway, and the certificate the BUSINESS authority
+// issued to the gateway for this one link (name business/gateway-link), which the business Postgres maps to that role and to no other.
+func GatewayJobsDSN(bizDSN string) string {
+	return pkitest.WithCert(db.Rewrite(bizDSN, "qv_gateway", ""), pki.ZoneBusiness, "gateway-link", pki.ZoneBusiness)
 }

@@ -42,6 +42,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/gateway/gatewaytest"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
@@ -166,7 +167,7 @@ type proc struct {
 func startProc(t testing.TB, name, bin string, env []string, args ...string) *proc {
 	t.Helper()
 	p := &proc{name: name, cmd: exec.Command(bin, args...), out: &syncBuf{}, done: make(chan struct{})}
-	p.cmd.Env = append(os.Environ(), env...)
+	p.cmd.Env = append(append(os.Environ(), pkitest.EnvFor(filepath.Base(bin))...), env...)
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
 	mpcstack.Guard(p.cmd)
 	if err := p.cmd.Start(); err != nil {
@@ -488,7 +489,7 @@ func (s *stack) gatewayConfig() string {
 }
 
 func (s *stack) startGateway(id string) *proc {
-	return startProc(s.t, "gateway-"+id, binGateway, nil, "-config", s.gatewayConfig(), "-jobs-dsn", s.bizDSN, "-guard-dsn", s.gwGuardDSN,
+	return startProc(s.t, "gateway-"+id, binGateway, nil, "-config", s.gatewayConfig(), "-jobs-dsn", dbtest.GatewayJobsDSN(s.bizDSN), "-guard-dsn", s.gwGuardDSN,
 		"-worker-id", id, "-interval", "100ms", "-lease", "3s")
 }
 

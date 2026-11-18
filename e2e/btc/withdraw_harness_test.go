@@ -11,7 +11,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +19,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
+	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/gateway/gatewaytest"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
@@ -215,7 +215,7 @@ func (s *system) startGateway() {
 			c.Close(context.Background())
 		}
 	})
-	jobs := strings.Replace(s.bizDSN, "//qv@", "//qv_gateway@", 1)
+	jobs := dbtest.GatewayJobsDSN(s.bizDSN)
 	s.gateway = s.spawn("qv-gateway", "-config", s.gwPath, "-jobs-dsn", jobs, "-guard-dsn", s.gwGuard, "-interval", "200ms", "-lease", s.lease, "-worker-id", "gw-"+uuid.NewString()[:6])
 	p := s.gateway
 	s.waitFor(30*time.Second, "gateway started", func() bool { return fileContains(p.log, "gateway") })

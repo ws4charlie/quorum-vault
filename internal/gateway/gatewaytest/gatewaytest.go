@@ -10,19 +10,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	neturl "net/url"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/eth"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
+	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
@@ -211,42 +209,19 @@ func (h *Harness) Rebalance(id string, intentTo, txTo common.Address, amount int
 	return h.Job(id, in, ETH(txTo, amount, nonce), approvers...)
 }
 
-// NewGuardDB creates an empty database on the DATABASE_URL server (dropped at cleanup) and returns a pool. Each call is a
+// NewGuardDB creates an empty database on the signing zone's Postgres (QV_SIGNING_DB_URL) (dropped at cleanup) and returns a pool. Each call is a
 // different database: use one for the gateway's guard and another for the cosigner's.
 func NewGuardDB(t testing.TB) (*pgxpool.Pool, string) {
 	t.Helper()
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		if os.Getenv("QV_REQUIRE_DB") == "1" {
-			t.Fatal("DATABASE_URL is not set")
-		}
-		t.Skip("DATABASE_URL is not set")
-	}
-	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, url)
+	dsn := dbtest.CreateGuardDB(t, "qv_guard_") // on the signing zone's Postgres, with its own certificate authority
+	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	defer admin.Close(ctx)
-	name := "qv_guard_" + hex.EncodeToString(uuid.NewSHA1(uuid.NameSpaceOID, []byte(t.Name()+time.Now().String())).NodeID())
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		c, err := pgx.Connect(context.Background(), url)
-		if err == nil {
-			c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-			c.Close(context.Background())
-		}
-	})
-	cfg, _ := pgxpool.ParseConfig(url)
-	cfg.ConnConfig.Database = name
-	p, err := pgxpool.NewWithConfig(ctx, cfg)
+	p, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(p.Close)
-	u, _ := neturl.Parse(url)
-	u.Path = "/" + name
-	return p, u.String()
+	return p, dsn
 }

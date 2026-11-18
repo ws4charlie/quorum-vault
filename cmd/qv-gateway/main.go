@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/ws4charlie/quorum-vault/internal/auditchain"
+	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/internal/mpcsigner"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 )
 
@@ -49,6 +49,11 @@ func run(log *slog.Logger) error {
 	auditSource := flag.String("audit-source", "gateway", "name this chain's heads are published under on qv.audit.heads (several deployments sharing one topic need distinct names)")
 	anchorEvery := flag.Duration("anchor-interval", time.Minute, "publish the audit chain head at least this often, and at once when it changes")
 	metricsFile := flag.String("mpc-metrics-file", os.Getenv("QV_MPC_METRICS_FILE"), "write the MPC route and party health metrics here in the Prometheus text format, for a node-exporter textfile collector (the gateway opens no port; env QV_MPC_METRICS_FILE)")
+	tlsFor := pki.Flags(flag.CommandLine, "")
+	// The explicit link between the zones: the job queue is in the business database, so the gateway reaches it with a certificate the BUSINESS
+	// authority issued to it (name business/gateway-link) and trusts only the business authority for that link. The signing zone's own
+	// authority is never trusted by the business database.
+	linkFor := pki.Flags(flag.CommandLine, "link-")
 	flag.Parse()
 
 	if *configPath == "" || *jobsDSN == "" || *guardDSN == "" {
@@ -64,12 +69,25 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	jobs, err := pgxpool.New(ctx, *jobsDSN)
+	tsrc, err := tlsFor("qv-gateway", pki.ZoneSigning, log)
+	if err != nil {
+		return err
+	}
+	lsrc, err := linkFor("qv-gateway-link", pki.ZoneBusiness, log)
+	if err != nil {
+		return err
+	}
+	for _, s := range []*pki.Source{tsrc, lsrc} {
+		if s != nil {
+			go s.Run(ctx.Done())
+		}
+	}
+	jobs, err := db.NewPool(ctx, *jobsDSN, lsrc, pki.Allow{pki.ID(pki.ZoneBusiness, "postgres")})
 	if err != nil {
 		return fmt.Errorf("open job queue: %w", err)
 	}
 	defer jobs.Close()
-	gp, err := pgxpool.New(ctx, *guardDSN)
+	gp, err := db.NewPool(ctx, *guardDSN, tsrc, pki.Allow{pki.ID(pki.ZoneSigning, "signing-db")})
 	if err != nil {
 		return fmt.Errorf("open replay guard: %w", err)
 	}

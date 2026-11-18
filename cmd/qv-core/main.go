@@ -109,7 +109,7 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Open(ctx, *dsn)
+	pool, err := db.OpenTLS(ctx, *dsn, tsrc, pki.Allow{pki.ID(pki.ZoneBusiness, "postgres")})
 	if err != nil {
 		return err
 	}

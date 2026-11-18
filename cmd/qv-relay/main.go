@@ -15,10 +15,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/ws4charlie/quorum-vault/internal/auditchain"
+	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
 
 func main() {
@@ -43,6 +43,7 @@ func run(log *slog.Logger) error {
 	pruneEvery := flag.Duration("prune-interval", time.Hour, "how often to delete old published outbox rows")
 	pruneBatch := flag.Int("prune-batch", 1000, "rows per delete statement when pruning")
 	metricsListen := flag.String("metrics-listen", "", "serve Prometheus metrics (outbox pruning) on this address, e.g. 127.0.0.1:9102; off when empty")
+	tlsFor := pki.Flags(flag.CommandLine, "")
 	flag.Parse()
 	if *dsn == "" || *brokers == "" {
 		return fmt.Errorf("-dsn and -brokers are required")
@@ -52,7 +53,14 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	pool, err := pgxpool.New(ctx, *dsn)
+	tsrc, err := tlsFor("qv-relay", pki.ZoneBusiness, log)
+	if err != nil {
+		return err
+	}
+	if tsrc != nil {
+		go tsrc.Run(ctx.Done())
+	}
+	pool, err := db.NewPool(ctx, *dsn, tsrc, pki.Allow{pki.ID(pki.ZoneBusiness, "postgres")})
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
