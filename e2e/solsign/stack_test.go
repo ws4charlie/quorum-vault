@@ -394,6 +394,7 @@ func newStack(t *testing.T, o optsT) *stack {
 	u, _ := url.Parse(os.Getenv("DATABASE_URL"))
 	u.Path = "/" + dbname
 	s.bizDSN = u.String()
+	dbtest.GatewayLogin(t) // the gateway reads the job queue as the restricted role qv_gateway
 	_, s.gwGuard = gatewaytest.NewGuardDB(t)
 	_, guardB := gatewaytest.NewGuardDB(t)
 	_, guardC := gatewaytest.NewGuardDB(t)

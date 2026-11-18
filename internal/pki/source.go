@@ -63,6 +63,8 @@ func NewSource(cfg SourceConfig) (*Source, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	l := s.Leaf()
+	cfg.Log.Info("TLS identity loaded", "name", cfg.Name, "zone", cfg.Zone, "certificate", cfg.CertFile, "ca", cfg.CAFile, "spiffe", l.URIs[0].String(), "serial", l.SerialNumber.String(), "not_after", l.NotAfter.UTC().Format(time.RFC3339))
 	return s, nil
 }
 
@@ -185,6 +187,17 @@ func (s *Source) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) 
 func (s *Source) GetClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 	c, _ := s.current()
 	return c, nil
+}
+
+// caKeyIDs lists the subject key ids of the CA bundle in use, for error messages.
+func (s *Source) caKeyIDs() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := ""
+	for _, c := range s.ca {
+		out += fmt.Sprintf("%x ", c.SubjectKeyId)
+	}
+	return out
 }
 
 // SecondsToExpiry is the time left on the certificate in use, negative once it expired.

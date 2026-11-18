@@ -188,6 +188,7 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	tm.Phase("chain")
 	s.pool = dbtest.New(t)
 	s.bizDSN = dbtest.DSN(s.pool)
+	dbtest.GatewayLogin(s.t) // the gateway reads the job queue as the restricted role qv_gateway
 	s.guard = s.newGuardDB()
 	tm.Phase("db")
 

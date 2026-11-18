@@ -119,7 +119,7 @@ func (s *Source) ClientConfig(serverName string, serverAllow Allow) *tls.Config 
 			}
 			leaf := cs.PeerCertificates[0]
 			if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, Intermediates: inter, DNSName: serverName, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
-				return fmt.Errorf("server certificate: %w", err)
+				return fmt.Errorf("server certificate (issued by authority key %x) is not accepted by the %s bundle of %s (authority keys %s): %w", leaf.AuthorityKeyId, s.cfg.Zone, s.cfg.Name, s.caKeyIDs(), err)
 			}
 			if len(serverAllow) > 0 {
 				if _, err := CheckPeer(leaf, s.cfg.Zone, serverAllow); err != nil {

@@ -7,6 +7,7 @@ services:
   # The business database. Certificate common names map to roles in deploy/postgres/business.pg_ident.conf.
   postgres:
     image: postgres:16-alpine
+    # (the health checks use TCP: while the image initialises a new volume its temporary server answers on the socket only, which is not "ready")
     entrypoint: ["/bin/sh", "/cfg/entrypoint.sh"]
     environment:
       POSTGRES_DB: quorumvault
@@ -21,7 +22,7 @@ services:
       - ./deploy/postgres/business.pg_hba.conf:/cfg/pg_hba.conf:ro
       - ./deploy/postgres/business.pg_ident.conf:/cfg/pg_ident.conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U qv -d quorumvault"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U qv -d quorumvault"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -44,7 +45,7 @@ services:
       - ./deploy/postgres/signing.pg_hba.conf:/cfg/pg_hba.conf:ro
       - ./deploy/postgres/signing.pg_ident.conf:/cfg/pg_ident.conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U qv -d qv_signing"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U qv -d qv_signing"]
       interval: 2s
       timeout: 3s
       retries: 30

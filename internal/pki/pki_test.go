@@ -2,6 +2,7 @@ package pki
 
 import (
 	"crypto/tls"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -335,5 +336,20 @@ func TestPlaintextNeedsTheDevSwitchAndADevEnvironment(t *testing.T) {
 	t.Setenv("QV_ALLOW_PLAINTEXT", "")
 	if PlaintextAllowed() {
 		t.Fatal("dev without the switch allowed plain text")
+	}
+}
+
+// The environment variable of a flag with a prefix: -link-tls-cert reads QV_LINK_TLS_CERT.
+func TestFlagsEnvNames(t *testing.T) {
+	t.Setenv("QV_LINK_TLS_CERT", "c")
+	t.Setenv("QV_TLS_CERT", "main")
+	fs := flag.NewFlagSet("x", flag.ContinueOnError)
+	Flags(fs, "")
+	Flags(fs, "link-")
+	if got := fs.Lookup("link-tls-cert").DefValue; got != "c" {
+		t.Fatalf("-link-tls-cert default %q, want the value of QV_LINK_TLS_CERT", got)
+	}
+	if got := fs.Lookup("tls-cert").DefValue; got != "main" {
+		t.Fatalf("-tls-cert default %q", got)
 	}
 }

@@ -171,3 +171,18 @@ func TestPoolFollowsRotatedCertificate(t *testing.T) {
 		t.Error("a server with another name was accepted")
 	}
 }
+
+// A signing-zone service reaches the signing zone's Postgres through its own Source (the cosigner and the gateway do this), as the business ones do.
+func TestSigningServiceUsesItsSourceForTheGuardDatabase(t *testing.T) {
+	admin := dbtest.SigningURL(t)
+	_, _, ca := pkitest.Files(pki.ZoneSigning, "admin")
+	dsn := db.WithClientCert(admin, "", "", ca)
+	for _, who := range []string{"gateway", "cosigner"} {
+		src, _ := pkitest.CopyIdentity(t, pki.ZoneSigning, who)
+		p, err := db.OpenTLS(context.Background(), dsn, src, pki.Allow{pki.ID(pki.ZoneSigning, "signing-db")})
+		if err != nil {
+			t.Fatalf("%s: %v", who, err)
+		}
+		p.Close()
+	}
+}

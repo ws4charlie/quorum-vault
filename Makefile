@@ -6,12 +6,13 @@ endif
 
 export CGO_ENABLED := 1
 # Both Postgres servers want TLS and a client certificate (docs/runbooks/certificates.md): the DSNs name the files `make pki` writes.
-PKI ?= $(or $(QV_PKI_DIR),$(CURDIR)/data/pki)
-export QV_PKI_DIR := $(PKI)
-DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=$(PKI)/business/admin/ca.crt&sslcert=$(PKI)/business/admin/tls.crt&sslkey=$(PKI)/business/admin/tls.key
+# (one variable, QV_PKI_DIR: the environment wins, so a nested make or scripts/e2e-all.sh keeps the directory of its own run)
+QV_PKI_DIR ?= $(CURDIR)/data/pki
+export QV_PKI_DIR
+DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/business/admin/ca.crt&sslcert=$(QV_PKI_DIR)/business/admin/tls.crt&sslkey=$(QV_PKI_DIR)/business/admin/tls.key
 export DATABASE_URL
 # the signing zone's Postgres (the replay-guard databases) is another server with another authority
-QV_SIGNING_DB_URL ?= postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=$(PKI)/signing/admin/ca.crt&sslcert=$(PKI)/signing/admin/tls.crt&sslkey=$(PKI)/signing/admin/tls.key
+QV_SIGNING_DB_URL ?= postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/signing/admin/ca.crt&sslcert=$(QV_PKI_DIR)/signing/admin/tls.crt&sslkey=$(QV_PKI_DIR)/signing/admin/tls.key
 export QV_SIGNING_DB_URL
 
 .PHONY: pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp
