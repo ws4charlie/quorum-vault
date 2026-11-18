@@ -146,3 +146,9 @@ func (o Orch) RejectWithdrawal(ctx context.Context, id, reason string) error {
 	_, err := o.C.SignalWithStartWorkflow(ctx, id, SignalReject, reason, o.opts(id), WithdrawalWorkflow, Input{ID: id, T: o.T})
 	return err
 }
+
+// CPFPNow tells the workflow that drives a Bitcoin send (its workflow ID is the owner's ID: the withdrawal's, or its batch's) to sign and broadcast the
+// CPFP child whose first job the API has just enqueued. It does not start a workflow: a send that is broadcast and unconfirmed has one running.
+func (o Orch) CPFPNow(ctx context.Context, ownerID string) error {
+	return o.C.SignalWorkflow(ctx, ownerID, "", SignalCPFPNow, nil)
+}

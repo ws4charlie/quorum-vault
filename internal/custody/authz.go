@@ -33,6 +33,7 @@ var routeRules = map[string]auth.Rule{
 	"POST /v2/withdrawals/{id}/approvals":       {Roles: approvers, StepUp: true, HumanOnly: true},
 	"POST /v2/withdrawals/{id}/rejections":      {Roles: rejecters},
 	"GET /v2/withdrawals/{id}/intent":           {Roles: readers},
+	"POST /v2/withdrawals/{id}/cpfp":            {Roles: operators, StepUp: true, HumanOnly: true},
 	"GET /v2/batches/{id}":                      {Roles: readers},
 	"POST /v2/batches/{id}/cancel":              {Roles: operators},
 	"GET /v2/reconcile":                         {Roles: operators},

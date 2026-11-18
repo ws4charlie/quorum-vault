@@ -15,6 +15,13 @@ A transaction that waits is never voided because of a cap.
 ## Turn CPFP on
 In the core's config, `withdrawal.cpfp_after` is how long a send that cannot be raised any more waits before its child is built (for example `30m`). Empty or `0` turns it off. The signing zone needs no setting: it signs a child under the caps it already has. Restart the workers to apply it; a send already in flight keeps the setting it started with.
 
+## Start the child now
+Use this when a send is stuck and waiting for `cpfp_after` costs more than it should, or when `cpfp_after` is off. An operator, freshly logged in as a person (not a service), calls `POST /v2/withdrawals/{id}/cpfp`; for a withdrawal in a batch the whole batch is pulled in. The child is built at once and the call answers 202 with its job.
+
+- **Same checks as the automatic child.** The send must be broadcast and unconfirmed, and a child must raise the pair's fee rate within the caps. Otherwise the answer is 409 with the reason; nothing is built.
+- **Safe to repeat.** A second call returns the child that exists and builds no other. Once a child exists its fee is raised as for an automatic one.
+- **Audited** in the core like every write, with the operator's identity.
+
 ## See the child
 The child is an attempt of the same withdrawal or batch with kind `cpfp` in `btc_attempts`; its input is the send's change. The withdrawal's transaction hash stays the send's. When both confirm, the withdrawal's fee is the two fees together.
 
