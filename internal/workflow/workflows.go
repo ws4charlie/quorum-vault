@@ -16,6 +16,9 @@ import (
 const (
 	SignalApproval = "approval" // an approval was added to the row; re-read it
 	SignalReject   = "reject"   // a human rejected; payload is the reason
+	// SignalCPFPNow is sent to the workflow that drives a Bitcoin send (a withdrawal's, or its batch's: the workflow ID is the owner's ID) when an operator
+	// asks for the CPFP child now. The API has already built and enqueued the child's first job; the signal makes the stuck-send step sign and broadcast it.
+	SignalCPFPNow = "cpfp-now"
 )
 
 // Timings the workflows use that are not business configuration.
@@ -341,7 +344,15 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 	refused0 := -1 // replacements the node had refused as too cheap when this run began to look
 	// CPFP (Bitcoin, off unless cpfp_after is set): when the owner's own send cannot be raised any more it is pulled in by a child that spends its
 	// change. Only the owner's own track has a child (a cancel does not). exhaustedAt is when RBF first had nothing more to give.
-	cpfpOn := t.CPFPAfter > 0 && track == custody.OwnerTrack(custody.Owner{Kind: o.Kind, ID: o.ID}) && workflow.GetVersion(ctx, "btc-cpfp", workflow.DefaultVersion, 1) >= 1
+	cpfpCan := track == custody.OwnerTrack(custody.Owner{Kind: o.Kind, ID: o.ID}) && workflow.GetVersion(ctx, "btc-cpfp", workflow.DefaultVersion, 1) >= 1
+	cpfpOn := t.CPFPAfter > 0 && cpfpCan
+	// Manual CPFP (an operator's call, which works with cpfp_after off): the child is also raised when it exists, whatever cpfp_after says.
+	manual := cpfpCan && workflow.GetVersion(ctx, "btc-cpfp-manual", workflow.DefaultVersion, 1) >= 1
+	var cpfpNow workflow.ReceiveChannel
+	if manual {
+		cpfpNow = workflow.GetSignalChannel(ctx, SignalCPFPNow)
+	}
+	wantChild := false
 	var exhaustedAt time.Time
 	cpfpN := 0
 	cpfpStep := func() error {
@@ -415,7 +426,22 @@ func driveTx(ctx workflow.Context, t Timings, o OwnerArg, track custody.Track, f
 		// A replacement the node refused as too cheap was never in the mempool: it does not use up a replacement. The next one pays more, up to the caps.
 		used := replacements - (n.FeeRefusals - refused0)
 		stuck := !workflow.Now(ctx).Before(stuckAt)
-		if cpfpOn && stuck && n.Child {
+		if manual {
+			var sig string
+			for cpfpNow.ReceiveAsync(&sig) {
+				wantChild = true
+			}
+			if wantChild && cpfpN == 0 && !n.Child {
+				// An operator asked for the child now. The API built its first job; sign and broadcast it. A repeat while a child exists does nothing.
+				wantChild = false
+				if err := cpfpStep(); err != nil {
+					return txResult{}, err
+				}
+				continue
+			}
+			wantChild = false
+		}
+		if (cpfpOn || manual) && stuck && n.Child {
 			// A child already pulls the send in: raise the child's fee. The send is never replaced under it.
 			if err := cpfpStep(); err != nil {
 				return txResult{}, err

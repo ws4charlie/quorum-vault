@@ -56,6 +56,7 @@ func (a *API) Handler() http.Handler {
 	a.handle(mux, "POST /v2/withdrawals/{id}/approvals", a.approve)
 	a.handle(mux, "POST /v2/withdrawals/{id}/rejections", a.reject)
 	a.handle(mux, "GET /v2/withdrawals/{id}/intent", a.intent)
+	a.handle(mux, "POST /v2/withdrawals/{id}/cpfp", a.startCPFP)
 	a.handle(mux, "GET /v2/batches/{id}", a.getBatch)
 	a.handle(mux, "POST /v2/batches/{id}/cancel", a.cancelBatch)
 	a.handle(mux, "GET /v2/reconcile", a.reconcile)

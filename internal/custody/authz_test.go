@@ -100,6 +100,17 @@ func TestRefusalsNeedNoDatabase(t *testing.T) {
 	if w.Code != 401 || !strings.Contains(w.Header().Get("WWW-Authenticate"), "insufficient_user_authentication") {
 		t.Fatalf("stale login: %d %q", w.Code, w.Header().Get("WWW-Authenticate"))
 	}
+	// The CPFP trigger: an operator, freshly logged in, a human. Not a requester, not a stale login, not a service.
+	cp := "/v2/withdrawals/w1/cpfp"
+	if w := do(h, "POST", cp, tok(is, authtest.Spec{Sub: "bob", Roles: []string{"requester"}}), nil); w.Code != 403 {
+		t.Fatalf("CPFP, missing role: %d", w.Code)
+	}
+	if w := do(h, "POST", cp, tok(is, authtest.Spec{Sub: "bob", Roles: []string{"operator"}, AuthAge: time.Hour}), nil); w.Code != 401 || !strings.Contains(w.Header().Get("WWW-Authenticate"), "insufficient_user_authentication") {
+		t.Fatalf("CPFP, stale login: %d %q", w.Code, w.Header().Get("WWW-Authenticate"))
+	}
+	if w := do(h, "POST", cp, tok(is, authtest.Spec{Sub: "svc", Client: "qv-svc", Service: true, Roles: []string{"operator"}}), nil); w.Code != 403 {
+		t.Fatalf("CPFP, a service: %d", w.Code)
+	}
 	if w := do(h, "POST", "/v2/cold/actions", tok(is, authtest.Spec{Sub: "svc", Client: "qv-svc", Service: true, Roles: []string{"admin"}}), map[string]any{}); w.Code != 403 {
 		t.Fatalf("a service on an admin route: %d", w.Code)
 	}
