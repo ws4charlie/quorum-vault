@@ -226,16 +226,19 @@ def architecture():
         d.box(left, 2, w - left - right, h - 4, title, sub, c, size=26, sub_size=21)
         return d
 
-    d = tile("operators", 380, H, "Operators", "approve and ask", "gray", right=99)
-    d.arrow(281, H / 2, 380, H / 2)
+    tile("operators", 380, H, "Operators", "approve and ask", "gray").write()
+
+    d = D("arch-a", 380, 58)  # operators to identity
+    d.arrow(190, 2, 190, 56)
     d.write()
-    d = tile("identity", 380, H, "Identity", "login, roles", "purple", right=99)
-    d.arrow(281, H / 2, 380, H / 2)
+    tile("identity", 380, H, "Identity", "login, roles", "purple").write()
+    d = D("arch-b", 380, 58)  # identity to the API
+    d.arrow(190, 2, 190, 56)
     d.write()
     tile("api", 380, H, "Core API", "queues jobs only", "blue").write()
 
-    d = D("arch-down", 1140, 58)  # from the API (right tile) to three boxes
-    d.line(950, 2, 950, 28)
+    d = D("arch-down", 1140, 58)  # from the API (centre) to three boxes
+    d.line(570, 2, 570, 28)
     d.line(cols[0], 28, cols[2], 28)
     for x in cols:
         d.arrow(x, 28, x, 56)
@@ -245,19 +248,20 @@ def architecture():
     tile("ledger", 380, H, "Ledger", "double entry, Reconcile", "amber").write()
     tile("audit", 380, H, "Audit trail", "hash chains", "purple").write()
 
-    d = D("arch-merge", 1140, 58)
-    d.arrow(cols[0], 2, cols[0], 56, "queues sign jobs", lx=cols[0] + 14, ly=36, anchor="start")
+    d = D("arch-merge", 1140, 58)  # from the row above into hot and cold
+    d.arrow(cols[1], 2, cols[1], 56)
     d.write()
 
-    d = tile("zone", 760, H, "Signing zone", "checks every job before any key signs", "green", right=99)
-    d.arrow(760, H / 2, 661, H / 2, both=False)
+    tile("tiers", 380, H, "Hot and cold", "bands, refills", "blue").write()
+
+    d = D("arch-merge2", 1140, 58)
+    d.arrow(cols[1], 2, cols[1], 56, "queues sign jobs", lx=cols[1] + 14, ly=36, anchor="start")
     d.write()
-    d = tile("tiers", 380, H, "Hot and cold", "bands, refills", "blue")
-    d.arrow(19, H / 2, 0, H / 2)
-    d.write()
+
+    tile("zone", 760, H, "Signing zone", "checks every job before any key signs", "green").write()
 
     d = D("arch-down2", 1140, 58)
-    d.arrow(380, 2, 380, 56, "asks the parties to sign", lx=394, ly=36, anchor="start")
+    d.arrow(cols[1], 2, cols[1], 56, "asks the parties to sign", lx=cols[1] + 14, ly=36, anchor="start")
     d.write()
 
     tile("mpc", 1140, H, "MPC parties A, B, C", "key shares, each sealed in its own HSM token", "green", right=19).write()
