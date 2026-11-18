@@ -493,7 +493,7 @@ type unsentUndoer interface {
 // RebuildWithdrawalJob rebuilds a withdrawal whose first send the zone refused only because the core and the zone were on different fee-cap
 // changes: nothing was signed or broadcast, so it forgets the unsent build and its refused jobs and builds again under the caps in force now, in one
 // transaction, with the same job id. It returns false, changing nothing, for anything else (another refusal, a broadcast transaction, a chain that
-// cannot undo a build). When the build cannot be made now (too few outputs, an expired approval) the transaction rolls back and the error says why.
+// cannot undo a build, or a job of the withdrawal that may hold a signature). When the build cannot be made now (too few outputs, an expired approval) the transaction rolls back and the error says why.
 func (s *Service) RebuildWithdrawalJob(ctx context.Context, id string) (bool, error) {
 	jobID := OwnerTrack(Owner{Kind: "withdrawal", ID: id}).FirstJob()
 	rebuilt := false
@@ -509,6 +509,10 @@ func (s *Service) RebuildWithdrawalJob(ctx context.Context, id string) (bool, er
 		}
 		if w.Status != WdSigning || w.JobID != jobID || w.TxHash != "" {
 			return nil
+		}
+		// Locks the owner's jobs. A job that is signing, done or failed may have a signature: that is the cancel path's, not ours.
+		if _, may, err := jobStates(ctx, tx, Owner{Kind: "withdrawal", ID: id}); err != nil || may {
+			return err
 		}
 		jobs, err := jobGroup(ctx, tx, jobID)
 		if err != nil {

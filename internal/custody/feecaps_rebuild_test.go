@@ -89,7 +89,21 @@ func TestRebuildWithdrawalJobAfterFeeCapsRefusal(t *testing.T) {
 	if bal.Held.Cmp(big.NewInt(300)) != 0 {
 		t.Fatalf("held %s", bal.Held)
 	}
+	// A signature may exist (another input of the transaction was signed before the zone changed): not ours to rebuild, the cancel path decides.
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO sign_jobs (id, partition_id, key_ref, chain, intent, digest, payload, status) SELECT $2, partition_id, key_ref, chain, intent, '\x04', payload, 'done' FROM sign_jobs WHERE id=$1`, jobID, jobID+".1"); err != nil {
+		t.Fatal(err)
+	}
+	reject("tx_mismatch: " + btc.FeeCapsSeqNote)
+	if ok, err := s.RebuildWithdrawalJob(ctx, w.ID); err != nil || ok || rc.builds != 2 {
+		t.Fatalf("a job that may hold a signature: %v %v (builds %d)", ok, err, rc.builds)
+	}
+	if _, err := s.Pool.Exec(ctx, `DELETE FROM sign_jobs WHERE id=$1`, jobID+".1"); err != nil {
+		t.Fatal(err)
+	}
 	// A pending job is not rebuilt again.
+	if _, err := s.Pool.Exec(ctx, `UPDATE sign_jobs SET status='pending', reject_reason=NULL WHERE id=$1`, jobID); err != nil {
+		t.Fatal(err)
+	}
 	if ok, err := s.RebuildWithdrawalJob(ctx, w.ID); err != nil || ok || rc.builds != 2 {
 		t.Fatalf("a pending job: %v %v", ok, err)
 	}
