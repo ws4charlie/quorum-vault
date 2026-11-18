@@ -19,6 +19,8 @@ import (
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
+
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
 
 // Role is what a route asks for. The set is small on purpose: each role is a separate duty that the dual-control rule keeps apart.
@@ -141,6 +143,8 @@ type Authenticator struct {
 	env Environment
 	dev bool // accept X-Actor
 
+	svcCert *serviceCert // when set, a service (client-credentials) caller must also present an allow-listed client certificate
+
 	mu        sync.Mutex
 	keys      *jose.JSONWebKeySet
 	fetchedAt time.Time
@@ -237,6 +241,17 @@ func New(cfg Config, env Environment, devActorHeader bool) (*Authenticator, erro
 	return a, nil
 }
 
+type serviceCert struct {
+	zone  string
+	allow pki.Allow
+}
+
+// RequireServiceCert makes every service caller (a client-credentials token) present a TLS client certificate of the zone whose name is on
+// allow. People keep coming with a bearer token alone. A stolen service token is then useless without the certificate's key.
+func (a *Authenticator) RequireServiceCert(zone string, allow pki.Allow) {
+	a.svcCert = &serviceCert{zone: zone, allow: allow}
+}
+
 // DevHeader reports whether X-Actor is accepted.
 func (a *Authenticator) DevHeader() bool { return a != nil && a.dev }
 
@@ -265,6 +280,14 @@ func (a *Authenticator) Authenticate(r *http.Request) (*Principal, *Failure) {
 	p, err := a.Verify(r.Context(), strings.TrimSpace(tok))
 	if err != nil {
 		return nil, &Failure{Status: http.StatusUnauthorized, Message: "invalid token: " + err.Error(), Challenge: `Bearer realm="qv-core", error="invalid_token"`}
+	}
+	if p.Service && a.svcCert != nil {
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			return nil, &Failure{Status: http.StatusForbidden, Message: "a service must present its TLS client certificate"}
+		}
+		if _, err := pki.CheckPeer(r.TLS.PeerCertificates[0], a.svcCert.zone, a.svcCert.allow); err != nil {
+			return nil, &Failure{Status: http.StatusForbidden, Message: "service certificate refused: " + err.Error()}
+		}
 	}
 	return p, nil
 }

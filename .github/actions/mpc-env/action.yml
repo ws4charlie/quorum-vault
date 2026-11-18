@@ -65,6 +65,12 @@ runs:
       run: |
         ./scripts/dev-env.sh
         ci/run-in-image.sh ./scripts/setup-softhsm.sh
+    # One private CA per trust zone and a short-lived certificate for every service, made fresh for this job (nothing is committed).
+    - name: Make the TLS certificates (scripts/pki.sh)
+      shell: bash
+      run: |
+        ci/run-in-image.sh ./scripts/pki.sh
+        echo "QV_PKI_DIR=$GITHUB_WORKSPACE/data/pki" >> "$GITHUB_ENV"
     - name: Wait for the services
       shell: bash
       run: ci/infra.sh wait

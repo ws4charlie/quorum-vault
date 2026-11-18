@@ -28,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/ws4charlie/quorum-vault/internal/auth"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
 
 func main() {
@@ -53,6 +54,7 @@ func run(args []string, out io.Writer) error {
 	keyFile := fs.String("key-file", "", "guardian key file (hex)")
 	core := fs.String("core", "", "qv-core URL, to book the gas against the fee account")
 	actor := fs.String("actor", "", "X-Actor for -core: only a core started with the dev header accepts it; otherwise a service token comes from QV_CORE_TOKEN or the client-credentials variables QV_OIDC_*")
+	tlsFor := pki.Flags(fs, "")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -67,10 +69,23 @@ func run(args []string, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("guardian key: %w", err)
 	}
-	return freeze(context.Background(), *rpcURL, common.HexToAddress(*factoryS), key, *core, *actor, out)
+	// The core is called over TLS with this service's business-zone certificate (the core refuses a service token without one).
+	hc := http.DefaultClient
+	if *core != "" {
+		src, err := tlsFor("qv-guardian", pki.ZoneBusiness, nil)
+		if err != nil {
+			return err
+		}
+		if src != nil {
+			if hc, err = src.HTTPClient(*core, pki.Allow{pki.ID(pki.ZoneBusiness, "core")}, 30*time.Second); err != nil {
+				return err
+			}
+		}
+	}
+	return freeze(context.Background(), *rpcURL, common.HexToAddress(*factoryS), key, *core, *actor, out, hc)
 }
 
-func freeze(ctx context.Context, rpcURL string, factory common.Address, key *ecdsa.PrivateKey, core, actor string, out io.Writer) error {
+func freeze(ctx context.Context, rpcURL string, factory common.Address, key *ecdsa.PrivateKey, core, actor string, out io.Writer, hc *http.Client) error {
 	ec, err := ethclient.DialContext(ctx, rpcURL)
 	if err != nil {
 		return err
@@ -151,7 +166,7 @@ func freeze(ctx context.Context, rpcURL string, factory common.Address, key *ecd
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("frozen, but booking the gas failed: %w", err)
 	}

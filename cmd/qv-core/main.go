@@ -24,6 +24,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chainfactory"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
 
@@ -53,6 +54,9 @@ func run(log *slog.Logger) error {
 	maxSession := flag.Duration("oidc-max-session", 12*time.Hour, "overall session limit counted from auth_time (NIST AAL3: 12h)")
 	testJWKS := flag.String("oidc-test-jwks", os.Getenv("QV_OIDC_TEST_JWKS"), "JWKS file of the TEST issuer; refused unless QV_ENV is dev or test (env QV_OIDC_TEST_JWKS)")
 	devActor := flag.Bool("dev-actor-header", os.Getenv("QV_DEV_ACTOR_HEADER") == "1", "accept X-Actor with nothing verified; refused unless QV_ENV is dev or test (env QV_DEV_ACTOR_HEADER=1)")
+	tlsFor := pki.Flags(flag.CommandLine, "")
+	serviceAllow := flag.String("service-allow", envOr("QV_CORE_SERVICE_ALLOW", "business/guardian,business/worker"), "names (zone/service) of the services that may call with a client-credentials token; each must also present a business-zone client certificate with that name (env QV_CORE_SERVICE_ALLOW)")
+	metricsListen := flag.String("metrics-listen", os.Getenv("QV_CORE_METRICS_LISTEN"), "serve Prometheus metrics (certificate expiry) in plain http on a loopback address, e.g. 127.0.0.1:9101; off when empty (env QV_CORE_METRICS_LISTEN)")
 	flag.Parse()
 	if *cfgPath == "" || *dsn == "" {
 		return errors.New("-config and -dsn (or DATABASE_URL) are required")
@@ -80,6 +84,20 @@ func run(log *slog.Logger) error {
 	authn, err := auth.New(acfg, auth.EnvironmentFromEnv(), *devActor)
 	if err != nil {
 		return err
+	}
+	// TLS is required: only an explicit dev switch (QV_ALLOW_PLAINTEXT=1 with QV_ENV=dev) runs without it, and production refuses that.
+	tsrc, err := tlsFor("qv-core", pki.ZoneBusiness, log)
+	if err != nil {
+		return err
+	}
+	if tsrc != nil {
+		allow, err := pki.ParseAllow(*serviceAllow)
+		if err != nil {
+			return fmt.Errorf("-service-allow: %w", err)
+		}
+		authn.RequireServiceCert(pki.ZoneBusiness, allow)
+	} else {
+		log.Warn("DEV ONLY: serving plain http (QV_ALLOW_PLAINTEXT=1)")
 	}
 	cfg, err := custody.LoadConfig(*cfgPath)
 	if err != nil {
@@ -116,6 +134,29 @@ func run(log *slog.Logger) error {
 
 	api := custody.NewAPI(svc, workflow.Orch{C: tc, T: workflow.DefaultTimings(cfg), Queue: *queue}, log, authn)
 	srv := &http.Server{Addr: *addr, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	if tsrc != nil {
+		// People come with a bearer token and no certificate; a caller that does show a certificate must have a valid, allow-listed one, and a
+		// service token is accepted only with one (internal/auth). Humans and services share this one address.
+		allow, _ := pki.ParseAllow(*serviceAllow)
+		srv.TLSConfig = tsrc.ServerConfig(pki.OptionalClient, allow)
+		go tsrc.Run(ctx.Done())
+	}
+	if *metricsListen != "" {
+		if err := pki.RequireLoopback(*metricsListen); err != nil {
+			return fmt.Errorf("-metrics-listen: %w", err)
+		}
+		mux := http.NewServeMux()
+		if tsrc != nil {
+			mux.Handle("/metrics", pki.MetricsHandler(tsrc))
+		}
+		msrv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := msrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("metrics server stopped", "error", err.Error())
+			}
+		}()
+		defer msrv.Close()
+	}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -126,8 +167,14 @@ func run(log *slog.Logger) error {
 		log.Warn("DEV ONLY: X-Actor is accepted without verification")
 	}
 	log.Info("qv-core listening", "addr", *addr, "chain", cfg.Chain, "issuer", *oidcIssuer)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	var serveErr error
+	if tsrc != nil {
+		serveErr = srv.ListenAndServeTLS("", "") // certificates come from TLSConfig.GetCertificate, which follows the files
+	} else {
+		serveErr = srv.ListenAndServe()
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return serveErr
 	}
 	return nil
 }

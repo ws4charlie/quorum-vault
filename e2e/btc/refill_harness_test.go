@@ -20,6 +20,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/internal/hsm/hsmtest"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
 // coldKit is the offline side of the ceremony: a cold key in the qv-cold SoftHSM token, three operators and the offline config. qv-cold runs as a separate
@@ -101,7 +102,7 @@ func (s *system) rawCall(method, path string, body []byte) (int, []byte) {
 		s.t.Fatal(err)
 	}
 	req.Header.Set("Authorization", idp.Bearer("ops"))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := pkitest.PeopleClient().Do(req)
 	if err != nil {
 		s.t.Fatal(err)
 	}
