@@ -24,8 +24,12 @@ func ColdPlannerID(chain string) string { return "cold-planner:" + chain }
 
 // RegisterNamespace creates the Temporal namespace if it does not exist (the
 // dev server starts without one). Idempotent.
-func RegisterNamespace(ctx context.Context, addr, namespace string) error {
-	ns, err := client.NewNamespaceClient(client.Options{HostPort: addr})
+func RegisterNamespace(ctx context.Context, addr, namespace string, conn ...client.ConnectionOptions) error {
+	opts := client.Options{HostPort: addr}
+	if len(conn) > 0 {
+		opts.ConnectionOptions = conn[0]
+	}
+	ns, err := client.NewNamespaceClient(opts)
 	if err != nil {
 		return err
 	}

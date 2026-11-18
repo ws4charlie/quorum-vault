@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -81,17 +86,23 @@ func startStore(t *testing.T) *wormStore {
 	}
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
-	w := &wormStore{endpoint: fmt.Sprintf("http://127.0.0.1:%d", port)}
-	w.root = ArchiveConfig{Endpoint: w.endpoint, AccessKey: "root" + randHex(t, 6), SecretKey: randHex(t, 16), PathStyle: true}
-	w.archiver = ArchiveConfig{Endpoint: w.endpoint, AccessKey: "arc" + randHex(t, 6), SecretKey: randHex(t, 16), PathStyle: true}
+	w := &wormStore{endpoint: fmt.Sprintf("https://127.0.0.1:%d", port)}
+	id := pkitest.Source(t, pki.ZoneBusiness, "archiver") // the store takes TLS with a client certificate of the business authority
+	w.root = ArchiveConfig{Endpoint: w.endpoint, AccessKey: "root" + randHex(t, 6), SecretKey: randHex(t, 16), PathStyle: true, TLS: id}
+	w.archiver = ArchiveConfig{Endpoint: w.endpoint, AccessKey: "arc" + randHex(t, 6), SecretKey: randHex(t, 16), PathStyle: true, TLS: id}
 	// The identities are written inside the container from the environment, as docker-compose.yml does: a bind mount would name a path of
 	// this process, which is not the daemon's path when the tests run in a container (CI) next to the daemon.
 	script := `printf '{"identities":[{"name":"root","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]},` +
 		`{"name":"archiver","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Read","Write","List","Admin"]}]}' "$ROOT_AK" "$ROOT_SK" "$ARC_AK" "$ARC_SK" > /tmp/s3.json && ` +
-		`exec /entrypoint.sh server -dir=/data -s3 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=64 -ip.bind=0.0.0.0`
+		`printf '%s' "$S3_CERT" > /tmp/s3.crt && printf '%s' "$S3_KEY" > /tmp/s3.key && printf '%s' "$S3_CA" > /tmp/s3-ca.crt && ` +
+		`exec /entrypoint.sh server -dir=/data -s3 -s3.config=/tmp/s3.json -s3.port=0 -s3.port.https=8333 -s3.cert.file=/tmp/s3.crt -s3.key.file=/tmp/s3.key ` +
+		`-s3.cacert.file=/tmp/s3-ca.crt -s3.tlsVerifyClientCert -master.volumeSizeLimitMB=64 -ip.bind=0.0.0.0`
+	// the store's own certificate (business authority, name seaweedfs, IP 127.0.0.1) goes in through the environment, like the identities
+	srvCert, srvKey, srvCA := pkitest.Files(pki.ZoneBusiness, "seaweedfs")
 	name := "qv-worm-" + randHex(t, 4)
 	out, err := exec.Command("docker", "run", "-d", "--name", name, "-p", fmt.Sprintf("127.0.0.1:%d:8333", port),
 		"-e", "ROOT_AK="+w.root.AccessKey, "-e", "ROOT_SK="+w.root.SecretKey, "-e", "ARC_AK="+w.archiver.AccessKey, "-e", "ARC_SK="+w.archiver.SecretKey,
+		"-e", "S3_CERT="+readFile(t, srvCert), "-e", "S3_KEY="+readFile(t, srvKey), "-e", "S3_CA="+readFile(t, srvCA),
 		"--entrypoint", "/bin/sh", img, "-c", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker run: %v\n%s", err, out)
@@ -265,4 +276,62 @@ func TestWormRefusesDeleteAndOverwriteDuringRetention(t *testing.T) {
 func (w *wormStore) archiveClient(t *testing.T) *s3.Client {
 	t.Helper()
 	return w.archive(t).cl
+}
+
+func readFile(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// The store takes TLS with a client certificate of the business authority and nothing else; the archiver's client refuses plain http and a store the
+// business authority did not sign. (SeaweedFS can check the authority but not the NAME of a client certificate: its identity is the access key.)
+func TestStoreTakesTLSWithAClientCertificateOnly(t *testing.T) {
+	w := startStore(t)
+	root, _ := w.bucket(t, "COMPLIANCE", 400) // waits until the store takes requests
+
+	// the right client works (w.bucket just used it); no client certificate, and the signing zone's, do not
+	_, _, ca := pkitest.Files(pki.ZoneBusiness, "admin")
+	pool := x509.NewCertPool()
+	pem, _ := os.ReadFile(ca)
+	pool.AppendCertsFromPEM(pem)
+	noCert := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}}}
+	if resp, err := noCert.Get(w.endpoint + "/"); err == nil {
+		resp.Body.Close()
+		t.Fatalf("a client without a certificate was served (%d)", resp.StatusCode)
+	} else {
+		t.Logf("refused, as it must be: %.140v", err)
+	}
+	plain := &http.Client{Timeout: 10 * time.Second}
+	if resp, err := plain.Get(strings.Replace(w.endpoint, "https://", "http://", 1) + "/"); err == nil {
+		resp.Body.Close()
+		if resp.StatusCode < 400 {
+			t.Fatalf("a plain connection was served (%d)", resp.StatusCode)
+		}
+	}
+	other := root
+	other.TLS = pkitest.Source(t, pki.ZoneSigning, "gateway")
+	if a, err := NewS3Archive(other); err == nil {
+		if _, err := a.Anchors(context.Background(), ""); err == nil {
+			t.Fatal("a signing-zone certificate (and authority) was accepted")
+		} else {
+			t.Logf("refused, as it must be: %.140v", err)
+		}
+	}
+	// the archiver's own client refuses a plain endpoint, and an https one with no identity
+	t.Setenv("QV_ENV", "")
+	t.Setenv("QV_ALLOW_PLAINTEXT", "")
+	plainCfg := root
+	plainCfg.Endpoint = strings.Replace(w.endpoint, "https://", "http://", 1)
+	if _, err := NewS3Archive(plainCfg); err == nil {
+		t.Fatal("an http endpoint was accepted")
+	}
+	noID := root
+	noID.TLS = nil
+	if _, err := NewS3Archive(noID); err == nil {
+		t.Fatal("an https endpoint without an identity was accepted")
+	}
 }

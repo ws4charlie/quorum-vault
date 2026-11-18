@@ -108,7 +108,8 @@ func EnvFor(binary string) []string {
 	case "qv-anchor-archiver":
 		return Env(pki.ZoneBusiness, "archiver")
 	case "qv-cosigner":
-		return Env(pki.ZoneSigning, "cosigner")
+		c, k, a := Files(pki.ZoneBusiness, "cosigner-link")
+		return append(Env(pki.ZoneSigning, "cosigner"), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a)
 	case "qv-gateway":
 		c, k, a := Files(pki.ZoneBusiness, "gateway-link")
 		return append(Env(pki.ZoneSigning, "gateway"), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a)
@@ -163,4 +164,77 @@ func CopyIdentity(t testing.TB, zone, service string) (src *pki.Source, rotate f
 		}
 	}
 	return src, rotate
+}
+
+var (
+	adminOnce sync.Once
+	adminSrc  *pki.Source
+)
+
+// Source is a Source over the files of (zone, service) in the shared PKI directory.
+func Source(t testing.TB, zone, service string) *pki.Source {
+	t.Helper()
+	c, k, a := Files(zone, service)
+	s, err := pki.NewSource(pki.SourceConfig{Name: service, Zone: zone, CertFile: c, KeyFile: k, CAFile: a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// ClientTLS is the client TLS config of any business- or signing-zone identity, trusting that zone's authority, for serverName ("" means the host
+// dialled) and, when given, the server names allowed (business-zone service names).
+func ClientTLS(zone, service, serverName string, serverAllow ...string) *tls.Config {
+	c, k, a := Files(zone, service)
+	src, err := pki.NewSource(pki.SourceConfig{Name: service, Zone: zone, CertFile: c, KeyFile: k, CAFile: a})
+	if err != nil {
+		panic(err)
+	}
+	var allow pki.Allow
+	for _, n := range serverAllow {
+		allow = append(allow, pki.ID(pki.ZoneBusiness, n))
+	}
+	return src.ClientConfig(serverName, allow)
+}
+
+// Reissue replaces the certificate files of (zone, service) in the shared PKI directory with a new certificate (new key, new serial) from the same
+// CA, with the catalog's names. Running services that follow their files pick it up; this is the rotation under test.
+func Reissue(t testing.TB, zone, service string) {
+	t.Helper()
+	ca, err := pki.LoadCA(Root(), zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range pki.Catalog {
+		if e.Zone != zone || e.Service != service {
+			continue
+		}
+		l, err := ca.Issue(pki.IssueRequest{Service: e.Service, CN: e.CN, DNS: e.DNS, IPs: e.IPs, Usage: e.Usage, TTL: 12 * time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pki.WriteLeaf(pki.Dir(Root(), zone, service), l, ca); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatalf("pkitest: %s/%s is not in the catalog", zone, service)
+}
+
+// AdminTLS is the client TLS config of the business-zone admin identity (an operator or a test: a Kafka superuser, a Temporal client), for
+// serverName ("" means the host dialled, as a Kafka client needs). The brokers' and the frontend's names are checked as in the services.
+func AdminTLS(serverName string, serverAllow ...string) *tls.Config {
+	adminOnce.Do(func() {
+		c, k, a := Files(pki.ZoneBusiness, "admin")
+		s, err := pki.NewSource(pki.SourceConfig{Name: "admin", Zone: pki.ZoneBusiness, CertFile: c, KeyFile: k, CAFile: a})
+		if err != nil {
+			panic(err)
+		}
+		adminSrc = s
+	})
+	var allow pki.Allow
+	for _, n := range serverAllow {
+		allow = append(allow, pki.ID(pki.ZoneBusiness, n))
+	}
+	return adminSrc.ClientConfig(serverName, allow)
 }

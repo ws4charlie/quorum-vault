@@ -52,7 +52,7 @@ start)
   for a in "$@"; do
     case "$a" in
       --anvil) anvil=1 ;;
-      --infra) profiles+=(--profile infra); services+=(temporal-db temporal redpanda) ;;
+      --infra) profiles+=(--profile infra); services+=(temporal-db temporal temporal-gate redpanda) ;;
       --bitcoind) profiles+=(--profile btc); services+=(bitcoind) ;;
       --solana) profiles+=(--profile solana); services+=(solana) ;;
       --postgres) services+=(postgres signing-db) ;;

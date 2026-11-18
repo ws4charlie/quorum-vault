@@ -53,6 +53,7 @@ func run(log *slog.Logger) error {
 	stepUpAge := flag.Duration("oidc-stepup-max-age", 5*time.Minute, "how fresh auth_time must be on a step-up route")
 	maxSession := flag.Duration("oidc-max-session", 12*time.Hour, "overall session limit counted from auth_time (NIST AAL3: 12h)")
 	testJWKS := flag.String("oidc-test-jwks", os.Getenv("QV_OIDC_TEST_JWKS"), "JWKS file of the TEST issuer; refused unless QV_ENV is dev or test (env QV_OIDC_TEST_JWKS)")
+	oidcCA := flag.String("oidc-ca-file", os.Getenv("QV_OIDC_CA_FILE"), "CA bundle (PEM) that signed the identity provider's https certificate, when it is not a public one (the dev Keycloak: the business authority) (env QV_OIDC_CA_FILE)")
 	devActor := flag.Bool("dev-actor-header", os.Getenv("QV_DEV_ACTOR_HEADER") == "1", "accept X-Actor with nothing verified; refused unless QV_ENV is dev or test (env QV_DEV_ACTOR_HEADER=1)")
 	tlsFor := pki.Flags(flag.CommandLine, "")
 	serviceAllow := flag.String("service-allow", envOr("QV_CORE_SERVICE_ALLOW", "business/guardian,business/worker"), "names (zone/service) of the services that may call with a client-credentials token; each must also present a business-zone client certificate with that name (env QV_CORE_SERVICE_ALLOW)")
@@ -72,6 +73,13 @@ func run(log *slog.Logger) error {
 			}
 			acfg.RoleMap[k] = auth.Role(v)
 		}
+	}
+	if *oidcCA != "" {
+		hc, err := pki.HTTPClientWithCA(*oidcCA, 10*time.Second)
+		if err != nil {
+			return fmt.Errorf("-oidc-ca-file: %w", err)
+		}
+		acfg.HTTP = hc
 	}
 	if *testJWKS != "" {
 		b, err := os.ReadFile(*testJWKS)
@@ -126,7 +134,11 @@ func run(log *slog.Logger) error {
 	if err := svc.Bootstrap(ctx); err != nil {
 		return err
 	}
-	tc, err := client.DialContext(ctx, client.Options{HostPort: *temporalAddr, Namespace: *namespace, Logger: sdklog.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})))})
+	tconn, err := workflow.ConnectionOptions(*temporalAddr, tsrc)
+	if err != nil {
+		return err
+	}
+	tc, err := client.DialContext(ctx, client.Options{HostPort: *temporalAddr, Namespace: *namespace, ConnectionOptions: tconn, Logger: sdklog.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})))})
 	if err != nil {
 		return fmt.Errorf("dial temporal: %w", err)
 	}

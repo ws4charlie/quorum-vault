@@ -73,14 +73,19 @@ services:
   temporal-db:
     profiles: ["infra"]
     image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/cfg/entrypoint.sh"]
     environment:
       POSTGRES_DB: temporal
       POSTGRES_USER: temporal
-      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_HOST_AUTH_METHOD: trust # only for initdb; the hba file requires TLS and a certificate
     volumes:
       - temporal-pgdata:/var/lib/postgresql/data
+      - ${QV_PKI_DIR:-./data/pki}/business/temporal-db:/pki:ro
+      - ./deploy/postgres/entrypoint.sh:/cfg/entrypoint.sh:ro
+      - ./deploy/postgres/temporal.pg_hba.conf:/cfg/pg_hba.conf:ro
+      - ./deploy/postgres/temporal.pg_ident.conf:/cfg/pg_ident.conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U temporal -d temporal"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U temporal -d temporal"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -97,10 +102,19 @@ services:
       SQL_HOST: temporal-db
       SQL_PORT: "5432"
       SQL_USER: temporal
+      # TLS, with the Temporal service's own certificate as the client certificate (name temporal -> role temporal)
+      SQL_TLS: "true"
+      SQL_TLS_CERT_FILE: /pki/tls.crt
+      SQL_TLS_KEY_FILE: /tmp/sql.key # a copy: the Postgres driver insists on a key file that only its user can read
+      SQL_TLS_CA_FILE: /pki/ca.crt
+      SQL_TLS_SERVER_NAME: temporal-db
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/temporal:/pki:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
+        cp /pki/tls.key /tmp/sql.key && chmod 600 /tmp/sql.key
         temporal-sql-tool --db temporal create-database || true
         temporal-sql-tool --db temporal setup-schema -v 0.0
         temporal-sql-tool --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
@@ -111,6 +125,7 @@ services:
   temporal:
     profiles: ["infra"]
     image: temporalio/server:1.32.1
+    entrypoint: ["/bin/sh", "-c", "cp /pki/tls.key /tmp/sql.key && chmod 600 /tmp/sql.key && exec /etc/temporal/entrypoint.sh"]
     depends_on:
       temporal-schema:
         condition: service_completed_successfully
@@ -125,11 +140,38 @@ services:
       BIND_ON_IP: 0.0.0.0
       TEMPORAL_BROADCAST_ADDRESS: 127.0.0.1
       DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig.yaml
+      # its database: TLS, temporal-db's certificate checked, our certificate as the client certificate
+      SQL_TLS_ENABLED: "true"
+      SQL_CA: /pki/ca.crt
+      SQL_CERT: /pki/tls.crt
+      SQL_CERT_KEY: /tmp/sql.key # a copy made at start (the entrypoint below): the Postgres driver insists on a key file that only its user can read
+      SQL_HOST_VERIFICATION: "true"
+      SQL_HOST_NAME: temporal-db
+      # the frontend: TLS, and a client certificate of the business authority from every caller (workers, the core, tests); the files are
+      # re-read every minute, so a renewed certificate needs no restart
+      TEMPORAL_TLS_FRONTEND_CERT: /pki/tls.crt
+      TEMPORAL_TLS_FRONTEND_KEY: /pki/tls.key
+      TEMPORAL_TLS_CLIENT1_CA_CERT: /pki/ca.crt
+      TEMPORAL_TLS_CLIENT2_CA_CERT: /pki/ca.crt
+      TEMPORAL_TLS_REQUIRE_CLIENT_AUTH: "true"
+      TEMPORAL_TLS_SERVER_CA_CERT: /pki/ca.crt
+      TEMPORAL_TLS_FRONTEND_SERVER_NAME: temporal
+      # the cluster's own traffic (history, matching, the system worker through the internal frontend) is TLS with the same certificate; with the
+      # frontend demanding client certificates, the system worker needs the internal frontend
+      TEMPORAL_TLS_SERVER_CERT: /pki/tls.crt
+      TEMPORAL_TLS_SERVER_KEY: /pki/tls.key
+      TEMPORAL_TLS_INTERNODE_SERVER_NAME: temporal
+      USE_INTERNAL_FRONTEND: "true"
+      TEMPORAL_SERVICES: frontend,internal-frontend,history,matching,worker
+      TEMPORAL_TLS_REFRESH_INTERVAL: 1m
+      # the gate (a TCP proxy) calls the frontend without negotiating HTTP/2 itself; the frontend must not insist on ALPN from it
+      GRPC_ENFORCE_ALPN_ENABLED: "false"
+      TEMPORAL_TLS_EXPIRATION_CHECKS_WARNING_WINDOW: 4h
     configs:
       - source: temporal-dynamicconfig
         target: /etc/temporal/dynamicconfig.yaml
-    ports:
-      - "127.0.0.1:${QV_TEMPORAL_PORT:-7233}:7233"
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/temporal:/pki:ro
     healthcheck:
       # the server image ships no temporal CLI, so check the frontend port
       test: ["CMD-SHELL", "nc -z $$(hostname -i) 7233"]
@@ -156,19 +198,46 @@ services:
       QV_TEST_PASSWORD_CAROL: ${QV_TEST_PASSWORD_CAROL:-}
       QV_TEST_PASSWORD_OPS: ${QV_TEST_PASSWORD_OPS:-}
       QV_KEYCLOAK_GUARDIAN_SECRET: ${QV_KEYCLOAK_GUARDIAN_SECRET:-}
-      KC_HOSTNAME: http://127.0.0.1:${QV_KEYCLOAK_PORT:-8180}
-      KC_HTTP_ENABLED: "true"
+      # https only, with a certificate of the business authority (name keycloak, 127.0.0.1): the core refuses an http issuer in production, and the
+      # tests now run against the https one. The management port (health) stays plain http, inside the container.
+      KC_HOSTNAME: https://127.0.0.1:${QV_KEYCLOAK_PORT:-8180}
+      KC_HTTP_ENABLED: "false"
+      KC_HTTPS_CERTIFICATE_FILE: /pki/tls.crt
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /pki/tls.key
+      KC_HTTP_MANAGEMENT_SCHEME: http
       KC_HEALTH_ENABLED: "true"
     volumes:
       - ./deploy/keycloak/quorumvault-realm.json:/opt/keycloak/data/import/quorumvault-realm.json:ro
+      - ${QV_PKI_DIR:-./data/pki}/business/keycloak:/pki:ro
     ports:
-      - "127.0.0.1:${QV_KEYCLOAK_PORT:-8180}:8080"
+      - "127.0.0.1:${QV_KEYCLOAK_PORT:-8180}:8443"
     healthcheck:
       # The image has no curl: open the management port and ask for readiness.
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
       interval: 5s
       timeout: 5s
       retries: 40
+
+  # The only way to the frontend from outside the compose network: TLS, a client certificate of the business authority, AND a list of the names that
+  # may call (deploy/temporal-gate/nginx.conf). The frontend itself checks only the authority.
+  temporal-gate:
+    profiles: ["infra"]
+    image: nginx:1.27-alpine
+    depends_on:
+      temporal:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/cfg/start.sh"]
+    ports:
+      - "127.0.0.1:${QV_TEMPORAL_PORT:-7233}:7233"
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/temporal:/pki:ro
+      - ./deploy/temporal-gate/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/temporal-gate/start.sh:/cfg/start.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 7233"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
 
   temporal-ui:
     profiles: ["infra"]
@@ -178,25 +247,52 @@ services:
         condition: service_healthy
     environment:
       TEMPORAL_ADDRESS: temporal:7233
+      # the UI is a client of the frontend like any other: it shows the admin certificate
+      TEMPORAL_TLS_CA: /pki/ca.crt
+      TEMPORAL_TLS_CERT: /pki/tls.crt
+      TEMPORAL_TLS_KEY: /pki/tls.key
+      TEMPORAL_TLS_ENABLE_HOST_VERIFICATION: "true"
+      TEMPORAL_TLS_SERVER_NAME: temporal
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/admin:/pki:ro
     ports:
       - "127.0.0.1:${QV_TEMPORAL_UI_PORT:-8233}:8080"
 
-  # Single-node Kafka-API broker for the outbox relay. Kafka API on 19092.
+  # Single-node Kafka-API broker for the outbox relay. Kafka API on 19092. TLS with a client certificate from the business authority only; the
+  # principal is the certificate's common name (the service name), and ACLs (deploy/redpanda/acl.sh) say what each name may do. `admin` is the
+  # superuser (operators, tests). Redpanda re-reads its certificate files by itself.
   redpanda:
     profiles: ["infra"]
     image: redpandadata/redpanda:v26.2.4
+    # start.sh starts the broker and makes the ACLs (deploy/redpanda/acl.sh) as soon as it is up; the health check waits for them
+    entrypoint: ["/bin/bash", "/cfg/start.sh"]
     command:
       - redpanda
       - start
       - --mode=dev-container
       - --smp=1
       - --memory=512M
-      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:${QV_KAFKA_PORT:-19092}
       - --advertise-kafka-addr=internal://redpanda:9092,external://127.0.0.1:${QV_KAFKA_PORT:-19092}
+      - --set
+      # (no spaces in these values: the image's entrypoint splits its arguments at spaces; JSON is YAML)
+      - 'redpanda.kafka_api_tls=[{"name":"internal","enabled":true,"require_client_auth":true,"cert_file":"/tmp/tls/tls.crt","key_file":"/tmp/tls/tls.key","truststore_file":"/tmp/tls/ca.crt"},{"name":"external","enabled":true,"require_client_auth":true,"cert_file":"/tmp/tls/tls.crt","key_file":"/tmp/tls/tls.key","truststore_file":"/tmp/tls/ca.crt"}]'
+      - --set
+      - 'redpanda.kafka_api=[{"name":"internal","address":"0.0.0.0","port":9092,"authentication_method":"mtls_identity"},{"name":"external","address":"0.0.0.0","port":${QV_KAFKA_PORT:-19092},"authentication_method":"mtls_identity"}]'
+      - --set
+      - redpanda.kafka_enable_authorization=true
+      - --set
+      - "redpanda.superusers=[admin]"
+      - --set
+      - 'redpanda.kafka_mtls_principal_mapping_rules=["RULE:^.*CN=([^,]+).*$$/$$1/"]'
     ports:
       - "127.0.0.1:${QV_KAFKA_PORT:-19092}:${QV_KAFKA_PORT:-19092}"
+    volumes:
+      - ${QV_PKI_DIR:-./data/pki}/business/kafka:/pki:ro
+      - ${QV_PKI_DIR:-./data/pki}/business/admin:/admin:ro
+      - ./deploy/redpanda/start.sh:/cfg/start.sh:ro
+      - ./deploy/redpanda/acl.sh:/cfg/acl.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' && test -f /tmp/acl-ready"]
       interval: 3s
       timeout: 5s
       retries: 40
@@ -265,12 +361,15 @@ services:
         # empty keys would start a store anyone can write to; compose cannot require them for this profile only, so the container does
         : "$${ROOT_AK:?set QV_ARCHIVE_ROOT_ACCESS_KEY}" "$${ROOT_SK:?set QV_ARCHIVE_ROOT_SECRET_KEY}" "$${ARC_AK:?set QV_ARCHIVE_ACCESS_KEY}" "$${ARC_SK:?set QV_ARCHIVE_SECRET_KEY}"
         printf '{"identities":[{"name":"root","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]},{"name":"archiver","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Read","Write","List","Admin"]}]}' "$$ROOT_AK" "$$ROOT_SK" "$$ARC_AK" "$$ARC_SK" > /tmp/s3.json
-        exec /entrypoint.sh server -dir=/data -s3 -s3.config=/tmp/s3.json -master.volumeSizeLimitMB=256 -ip.bind=0.0.0.0
+        # TLS only, and a client certificate of the business authority (SeaweedFS checks the authority, not the name; the access keys identify the caller)
+        exec /entrypoint.sh server -dir=/data -s3 -s3.config=/tmp/s3.json -s3.port=0 -s3.port.https=8333 -s3.cert.file=/pki/tls.crt -s3.key.file=/pki/tls.key -s3.cacert.file=/pki/ca.crt -s3.tlsVerifyClientCert -master.volumeSizeLimitMB=256 -ip.bind=0.0.0.0
     ports:
       - "127.0.0.1:${QV_ARCHIVE_PORT:-18333}:8333"
     volumes:
       - archive-data:/data
+      - ${QV_PKI_DIR:-./data/pki}/business/seaweedfs:/pki:ro
     healthcheck:
+      # the port answers TLS only: a plain request gets a 400, which is "up"
       test: ["CMD-SHELL", "wget -q -O /dev/null --spider http://127.0.0.1:8333/ ; [ $$? -ne 4 ]"]
       interval: 2s
       timeout: 3s

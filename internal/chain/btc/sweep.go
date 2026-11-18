@@ -59,7 +59,7 @@ func (a *Adapter) urgent(amount uint64) bool {
 func (a *Adapter) sweepRate(ctx context.Context, amount uint64) (rate uint64, wait string) {
 	raw := a.rawFeeRate(ctx)
 	switch {
-	case raw > a.cfg.MaxFeeRate:
+	case raw > a.caps().MaxFeeRate:
 		return 0, waitAboveCap
 	case raw > a.cfg.SweepMaxFeeRate && !a.urgent(amount):
 		return 0, waitAboveCeiling
@@ -106,6 +106,9 @@ func (a *Adapter) RecordDeposit(ctx context.Context, tx pgx.Tx, d chain.Observed
 // leaving out every output that costs at least its value to spend at the current rate (it would only lose money). The rest of an address waits for
 // the next round. An address with nothing left to take is not listed.
 func (a *Adapter) SweepCandidates(ctx context.Context) ([]chain.SweepCandidate, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return nil, err
+	}
 	rate := a.feeRate(ctx)
 	rows, err := a.pool.Query(ctx, `SELECT address, value FROM btc_utxos WHERE chain=$1 AND deposit AND status='available' ORDER BY address, created_at, txid, vout`, a.cfg.Chain)
 	if err != nil {
@@ -154,6 +157,9 @@ func (a *Adapter) SweepCandidates(ctx context.Context) ([]chain.SweepCandidate, 
 // EstimateSweepFee is the fee of the sweep that would take the amount from the address: the current rate times the size of that many inputs and one
 // output. The number of inputs is that of the outputs SweepCandidates would take.
 func (a *Adapter) EstimateSweepFee(ctx context.Context, s chain.SweepIntent) (*big.Int, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return nil, err
+	}
 	rate := a.feeRate(ctx)
 	rows, err := a.pool.Query(ctx, `SELECT value FROM btc_utxos WHERE chain=$1 AND deposit AND address=$2 AND status='available' ORDER BY created_at, txid, vout`, a.cfg.Chain, s.From)
 	if err != nil {
@@ -190,6 +196,9 @@ func (a *Adapter) EstimateSweepFee(ctx context.Context, s chain.SweepIntent) (*b
 // inputs). The one output pays the sink shard the sum minus the fee. If the outputs do not add up to the amount (the set changed since the plan), it
 // returns chain.ErrNotEnoughOutputs and reserves nothing: the sweep ends and the planner plans it again.
 func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent) (chain.UnsignedTx, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return chain.UnsignedTx{}, err
+	}
 	sh, err := a.shardOf(s.ToPartition)
 	if err != nil {
 		return chain.UnsignedTx{}, err
@@ -202,7 +211,7 @@ func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent
 	if wait != "" {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: %s", chain.ErrSweepFeePolicy, wait)
 	}
-	rate = min(rate, a.cfg.MaxFeeRate)
+	rate = min(rate, a.caps().MaxFeeRate)
 	var picked []utxo
 	var paths []string
 	var sum uint64
@@ -234,8 +243,8 @@ func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent
 		return chain.UnsignedTx{}, fmt.Errorf("%w: the oldest outputs add up to %d, not %d", chain.ErrNotEnoughOutputs, sum, want)
 	}
 	fee := vsize(len(picked), sh.script) * rate
-	if fee > a.cfg.MaxTxFeeSats {
-		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats against the cap %d", ErrFeeTooHigh, fee, a.cfg.MaxTxFeeSats)
+	if fee > a.caps().MaxTxFeeSats {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats against the cap %d", ErrFeeTooHigh, fee, a.caps().MaxTxFeeSats)
 	}
 	if sum < fee+DustLimit(KindP2WPKH) {
 		return chain.UnsignedTx{}, fmt.Errorf("btc: %d sats cannot pay a %d sat fee and leave an output", sum, fee)

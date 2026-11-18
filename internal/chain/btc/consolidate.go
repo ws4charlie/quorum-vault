@@ -65,6 +65,9 @@ func (a *Adapter) smallestWorthSpending(ctx context.Context, partitionID string,
 // more than consolidate_above outputs that are worth spending at the current rate (dust does not count), the rate is at or below consolidate_max_fee_rate, at least two outputs are worth spending and what
 // they leave after the fee is above dust. The largest outputs stay free for withdrawals.
 func (a *Adapter) PlanConsolidation(ctx context.Context, partitionID string) (chain.Consolidation, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return chain.Consolidation{}, err
+	}
 	none := chain.Consolidation{Amount: new(big.Int)}
 	if a.cfg.ConsolidateAbove <= 0 {
 		return none, nil
@@ -109,6 +112,9 @@ func (a *Adapter) PlanConsolidation(ctx context.Context, partitionID string) (ch
 // inputs), and pays the sum less the fee to the shard's own address in one output. If they do not add up (the set changed since the plan, or a withdrawal
 // took one) it returns chain.ErrNotEnoughOutputs and reserves nothing: the consolidation ends and the planner plans it again.
 func (a *Adapter) BuildConsolidation(ctx context.Context, tx pgx.Tx, c chain.ConsolidateIntent) (chain.UnsignedTx, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return chain.UnsignedTx{}, err
+	}
 	if a.cfg.ConsolidateAbove <= 0 {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: consolidate_above is 0", ErrConsolidateWait)
 	}
@@ -155,8 +161,8 @@ func (a *Adapter) BuildConsolidation(ctx context.Context, tx pgx.Tx, c chain.Con
 		return chain.UnsignedTx{}, fmt.Errorf("btc: a consolidation spends at least two outputs, not %d", len(picked))
 	}
 	fee := vsize(len(picked), sh.script) * rate
-	if fee > a.cfg.MaxTxFeeSats {
-		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats against the cap %d", ErrFeeTooHigh, fee, a.cfg.MaxTxFeeSats)
+	if fee > a.caps().MaxTxFeeSats {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats against the cap %d", ErrFeeTooHigh, fee, a.caps().MaxTxFeeSats)
 	}
 	if sum < fee+DustLimit(KindP2WPKH)+1 {
 		return chain.UnsignedTx{}, fmt.Errorf("btc: %d sats cannot pay a %d sat fee and leave an output above dust", sum, fee)

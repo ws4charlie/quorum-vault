@@ -178,6 +178,21 @@ type BTCFile struct {
 	// many payments (checked at start-up), and the value must lie between per_tx_cap and daily_cap of the BTC policy. The core cannot raise either.
 	MaxBatchOutputs   int    `json:"max_batch_outputs,omitempty"`
 	MaxBatchValueSats uint64 `json:"max_batch_value_sats,omitempty"`
+	// FeeCapsChange lets the zone's approvers change max_tx_fee_sats and max_fee_rate with signatures, within the bounds written here (see
+	// docs/runbooks/btc-fee-caps.md). The caps above are the caps until the first change. Absent: no change is accepted.
+	FeeCapsChange *FeeCapsChangeFile `json:"fee_caps_change,omitempty"`
+}
+
+// FeeCapsChangeFile is the fee_caps_change section of a btc chain: the static ceiling and floor no signature can lift, and the signature rules.
+type FeeCapsChangeFile struct {
+	MinFeeRate   uint64 `json:"min_fee_rate"`
+	MaxFeeRate   uint64 `json:"max_fee_rate"`
+	MinTxFeeSats uint64 `json:"min_tx_fee_sats"`
+	MaxTxFeeSats uint64 `json:"max_tx_fee_sats"`
+	// MinApprovers: distinct approvers (by identity) a change needs (default 1). MaxChangeAge: how far from now the signing time of a change may be
+	// when it is applied (default "10m").
+	MinApprovers int    `json:"min_approvers,omitempty"`
+	MaxChangeAge string `json:"max_change_age,omitempty"`
 }
 
 // HotShardFile is one pinned hot shard.
@@ -203,6 +218,30 @@ func (cf ChainFile) buildBTC(name string, enabledApprovers int) (*ChainConfig, e
 		MaxBatchOutputs: b.MaxBatchOutputs, MaxBatchValue: b.MaxBatchValueSats}
 	for p, h := range b.HotShards {
 		sc.HotShards[p] = btc.HotShard{Address: h.Address, Path: h.Path}
+	}
+	if fc := b.FeeCapsChange; fc != nil {
+		pol := &btc.FeeCapsPolicy{MinApprovers: fc.MinApprovers, MaxAge: 10 * time.Minute,
+			Bounds: btc.FeeCapsBounds{MinFeeRate: fc.MinFeeRate, MaxFeeRate: fc.MaxFeeRate, MinTxFeeSats: fc.MinTxFeeSats, MaxTxFeeSats: fc.MaxTxFeeSats}}
+		if pol.MinApprovers == 0 {
+			pol.MinApprovers = 1
+		}
+		if fc.MaxChangeAge != "" {
+			d, err := time.ParseDuration(fc.MaxChangeAge)
+			if err != nil || d <= 0 {
+				return nil, fmt.Errorf("gateway: config: chain %q: fee_caps_change.max_change_age %q is not a positive duration", name, fc.MaxChangeAge)
+			}
+			pol.MaxAge = d
+		}
+		if err := pol.Bounds.Validate(); err != nil {
+			return nil, fmt.Errorf("gateway: config: chain %q: fee_caps_change: %w", name, err)
+		}
+		if err := pol.Bounds.Check(btc.FeeCaps{MaxTxFeeSats: b.MaxTxFeeSats, MaxFeeRate: b.MaxFeeRate}); err != nil {
+			return nil, fmt.Errorf("gateway: config: chain %q: the configured caps must lie within fee_caps_change: %w", name, err)
+		}
+		if pol.MinApprovers < 1 || pol.MinApprovers > enabledApprovers {
+			return nil, fmt.Errorf("gateway: config: chain %q: fee_caps_change.min_approvers %d: between 1 and the %d enabled approvers", name, pol.MinApprovers, enabledApprovers)
+		}
+		sc.FeeCaps = pol
 	}
 	v, err := btc.NewVerifier(sc)
 	if err != nil {

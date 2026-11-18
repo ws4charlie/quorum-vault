@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/auth/authtest"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
 const (
@@ -36,7 +38,8 @@ const (
 
 var (
 	issuer *authtest.Issuer
-	kc     string // Keycloak base URL; empty in test-issuer mode
+	kc     string               // Keycloak base URL; empty in test-issuer mode
+	httpc  = http.DefaultClient // trusts the business authority once Keycloak is used (https)
 
 	mu     sync.Mutex
 	cached = map[string]cachedTok{}
@@ -55,6 +58,13 @@ func Init() error {
 	if u := strings.TrimRight(os.Getenv("QV_E2E_KEYCLOAK_URL"), "/"); u != "" {
 		kc = u
 		os.Setenv("QV_OIDC_ISSUER", u+"/realms/"+realm)
+		_, _, ca := pkitest.Files(pki.ZoneBusiness, "keycloak")
+		os.Setenv("QV_OIDC_CA_FILE", ca) // the spawned qv-core trusts the business authority for the https issuer
+		hc, err := pki.HTTPClientWithCA(ca, 20*time.Second)
+		if err != nil {
+			return err
+		}
+		httpc = hc
 		os.Unsetenv("QV_OIDC_TEST_JWKS")
 		return nil
 	}
@@ -126,7 +136,7 @@ func SetHeaders(h http.Header, hdr map[string]string) {
 // username, passkey) is the flow qv-cli uses and is not exercised here: it needs a browser.
 func passwordGrant(user string) (string, error) {
 	jar, _ := cookiejar.New(nil)
-	hc := &http.Client{Timeout: 20 * time.Second, Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	hc := &http.Client{Timeout: 20 * time.Second, Jar: jar, Transport: httpc.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	redirect := "http://127.0.0.1/cb"
 	base := kc + "/realms/" + realm + "/protocol/openid-connect/"
 	resp, err := hc.Get(base + "auth?" + url.Values{"client_id": {"qv-e2e"}, "response_type": {"code"}, "scope": {"openid"}, "redirect_uri": {redirect}, "state": {"s"}}.Encode())
@@ -162,7 +172,7 @@ func testPassword(user string) string {
 }
 
 func post(u string, form url.Values) (string, error) {
-	resp, err := (&http.Client{Timeout: 20 * time.Second}).PostForm(u, form)
+	resp, err := httpc.PostForm(u, form)
 	if err != nil {
 		return "", err
 	}

@@ -28,6 +28,7 @@ type ArchiverOptions struct {
 	Retention time.Duration // the bucket's default COMPLIANCE retention must be at least this; checked at start
 	Retry     time.Duration // wait after a failed store before the same head is tried again, default 2s
 	Logger    *slog.Logger
+	KafkaOpts []kgo.Opt // transport: the TLS settings (internal/kafkatls)
 }
 
 // Archiver copies every head published on qv.audit.heads into an Archive, one object per head. It runs outside the signing zones: it holds
@@ -113,8 +114,8 @@ func (a *Archiver) Run(ctx context.Context) error {
 	if err := a.CheckBucket(ctx); err != nil {
 		return err
 	}
-	cl, err := kgo.NewClient(kgo.SeedBrokers(a.opt.Brokers...), kgo.ConsumerGroup(a.opt.Group), kgo.ConsumeTopics(a.opt.Topic),
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()), kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll())
+	cl, err := kgo.NewClient(append([]kgo.Opt{kgo.SeedBrokers(a.opt.Brokers...), kgo.ConsumerGroup(a.opt.Group), kgo.ConsumeTopics(a.opt.Topic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()), kgo.DisableAutoCommit(), kgo.BlockRebalanceOnPoll()}, a.opt.KafkaOpts...)...)
 	if err != nil {
 		return fmt.Errorf("archiver: kafka client: %w", err)
 	}
