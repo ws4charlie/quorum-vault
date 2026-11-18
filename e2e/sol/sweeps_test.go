@@ -12,6 +12,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/e2e/idp"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -35,7 +36,7 @@ func (s *wdSys) watchReconcile() (stop func() []string) {
 			}
 			rq, _ := http.NewRequest("GET", s.apiURL+"/v2/reconcile", nil)
 			rq.Header.Set("Authorization", idp.Bearer("ops"))
-			resp, err := http.DefaultClient.Do(rq)
+			resp, err := pkitest.PeopleClient().Do(rq)
 			if err != nil {
 				continue
 			}

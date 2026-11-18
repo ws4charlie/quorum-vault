@@ -10,6 +10,7 @@ rule_files:
   - mpc-routing.rules.yml
   - mpc-blame.rules.yml
   - audit-archive.rules.yml
+  - tls-cert.rules.yml
 
 scrape_configs:
   # every party's metrics port: qv_mpc_party_session_failures_total. Local development: start the parties with metrics_listen on these ports.
@@ -24,3 +25,7 @@ scrape_configs:
   - job_name: qv-anchor-archiver
     static_configs:
       - targets: ["host.docker.internal:9103"]
+  # qv-core (-metrics-listen, loopback only): its certificate expiry. The other services publish the same qv_tls_cert_* series as they move to TLS.
+  - job_name: qv-core
+    static_configs:
+      - targets: ["host.docker.internal:9101"]

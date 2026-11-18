@@ -211,6 +211,8 @@ docker info >/dev/null 2>&1 || die "docker is not running"
 qv_load_pins --so || die "no SoftHSM PINs"
 [ -d mpc-party/.deps ] || die "cb-mpc is not built: run make mpc-build first"
 mkdir -p "$OUT"
+# Fresh certificate authorities (one per trust zone) and short-lived certificates for this run; every group's processes use them.
+QV_PKI_DIR="$OUT/pki" ./scripts/pki.sh >"$OUT/pki.log" 2>&1 || die "making the TLS certificates failed (see $OUT/pki.log)"
 check_ports
 started=1
 say "e2e-all: $ngroups groups on $LANES lanes; logs and results in $OUT"
@@ -268,6 +270,7 @@ run_group() { # run_group <lane> <group>
   (
     export DATABASE_URL="postgres://qv@localhost:$(pg_port "$n")/quorumvault?sslmode=disable"
     export QV_ANVIL_RPC="http://127.0.0.1:$(anvil_port "$n")" QV_BTC_RPC="http://127.0.0.1:$(btc_port "$n")" QV_SOL_RPC="http://127.0.0.1:$(sol_port "$n")"
+    export QV_PKI_DIR="$OUT/pki"
     export QV_TEMPORAL_ADDR="127.0.0.1:$T_PORT" QV_KAFKA_BROKERS="127.0.0.1:$K_PORT"
     export SOFTHSM2_CONF="$OUT/lane$n/softhsm/softhsm2.conf"
     export COMPOSE_PROJECT_NAME="$PROJ-l$n" QV_PG_PORT=$(pg_port "$n") QV_ANVIL_PORT=$(anvil_port "$n") QV_BTC_PORT=$(btc_port "$n") QV_SOL_PORT=$(sol_port "$n")
