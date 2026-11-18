@@ -44,23 +44,13 @@ jobs:
       contents: read
       packages: read
     timeout-minutes: 45
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: quorumvault
-          POSTGRES_USER: qv
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U qv -d quorumvault"
-          --health-interval 2s --health-timeout 3s --health-retries 30
     env:
       CGO_ENABLED: "1"
       CC: clang-20
       CXX: clang++-20
-      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=disable
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
       QV_REQUIRE_DB: "1"
       QV_REQUIRE_HSM: "1"
       QV_ANVIL_RPC: http://127.0.0.1:18545
@@ -70,6 +60,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          postgres: "true"
           infra: "true"
       - name: make test-mpc
         run: ci/run-in-image.sh make test-mpc

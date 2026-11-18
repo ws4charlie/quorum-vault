@@ -42,6 +42,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/gateway/gatewaytest"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
@@ -166,7 +167,7 @@ type proc struct {
 func startProc(t testing.TB, name, bin string, env []string, args ...string) *proc {
 	t.Helper()
 	p := &proc{name: name, cmd: exec.Command(bin, args...), out: &syncBuf{}, done: make(chan struct{})}
-	p.cmd.Env = append(os.Environ(), env...)
+	p.cmd.Env = append(append(os.Environ(), pkitest.EnvFor(filepath.Base(bin))...), env...)
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
 	mpcstack.Guard(p.cmd)
 	if err := p.cmd.Start(); err != nil {
@@ -223,6 +224,7 @@ func freeAddr(t testing.TB) string {
 type stack struct {
 	t        *testing.T
 	dir      string
+	gateways []*proc // every gateway started, for their log when a job does not finish
 	certA    cert
 	certB    cert
 	certC    cert
@@ -406,6 +408,7 @@ func (s *stack) provision(t *testing.T, noCosigner bool) {
 	u, _ := url.Parse(os.Getenv("DATABASE_URL"))
 	u.Path = "/" + dbname
 	s.bizDSN = u.String()
+	dbtest.GatewayLogin(t) // the gateway reads the job queue as the restricted role qv_gateway
 	_, s.gwGuardDSN = gatewaytest.NewGuardDB(t)
 	_, s.csGuardDSN = gatewaytest.NewGuardDB(t)
 	_, s.csGuardDSNC = gatewaytest.NewGuardDB(t) // party C's cosigner has its own replay guard
@@ -488,8 +491,10 @@ func (s *stack) gatewayConfig() string {
 }
 
 func (s *stack) startGateway(id string) *proc {
-	return startProc(s.t, "gateway-"+id, binGateway, nil, "-config", s.gatewayConfig(), "-jobs-dsn", s.bizDSN, "-guard-dsn", s.gwGuardDSN,
+	p := startProc(s.t, "gateway-"+id, binGateway, nil, "-config", s.gatewayConfig(), "-jobs-dsn", dbtest.GatewayJobsDSN(s.bizDSN), "-guard-dsn", s.gwGuardDSN,
 		"-worker-id", id, "-interval", "100ms", "-lease", "3s")
+	s.gateways = append(s.gateways, p)
+	return p
 }
 
 func (s *stack) enqueue(j signjob.Job) {
@@ -518,7 +523,11 @@ func (s *stack) waitJob(id string, d time.Duration) signjob.Job {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	s.t.Fatalf("job %s did not finish", id)
+	var logs string
+	for _, g := range s.gateways {
+		logs += "\n" + g.name + ": " + tail(g.out.String(), 1500)
+	}
+	s.t.Fatalf("job %s did not finish%s", id, logs)
 	return signjob.Job{}
 }
 

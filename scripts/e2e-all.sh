@@ -143,12 +143,13 @@ done
 NEED_INFRA="${NEED_INFRA:-0}"
 NEED_KC="${NEED_KC:-0}"
 
-# ports: shared Temporal and Redpanda, then ten per lane (Postgres, anvil, bitcoind, solana)
+# ports: shared Temporal and Redpanda, then ten per lane (Postgres, anvil, bitcoind, solana, signing-zone Postgres)
 T_PORT=$((BASE + 1)); K_PORT=$((BASE + 2)); KC_PORT=$((BASE + 3))
 pg_port() { echo $((BASE + 10 * $1)); }
 anvil_port() { echo $((BASE + 10 * $1 + 1)); }
 btc_port() { echo $((BASE + 10 * $1 + 2)); }
 sol_port() { echo $((BASE + 10 * $1 + 3)); }
+sdb_port() { echo $((BASE + 10 * $1 + 4)); }
 
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 check_ports() {
@@ -156,7 +157,7 @@ check_ports() {
   [ "$NEED_INFRA" = 1 ] && for p in $T_PORT $K_PORT; do port_busy "$p" && busy="$busy $p"; done
   [ "$NEED_KC" = 1 ] && { port_busy "$KC_PORT" && busy="$busy $KC_PORT"; }
   i=1; while [ "$i" -le "$LANES" ]; do
-    for p in $(pg_port $i) $(anvil_port $i) $(btc_port $i) $(sol_port $i); do port_busy "$p" && busy="$busy $p"; done
+    for p in $(pg_port $i) $(anvil_port $i) $(btc_port $i) $(sol_port $i) $(sdb_port $i); do port_busy "$p" && busy="$busy $p"; done
     i=$((i + 1))
   done
   [ -z "$busy" ] || die "ports in use:$busy (another make test-e2e-all running? set QV_E2E_PORT_BASE to move the range)"
@@ -168,7 +169,7 @@ dc() { # dc <project> <args...>: docker compose with the ports of that project i
   case "$project" in
     "$PROJ-shared") COMPOSE_PROJECT_NAME="$project" QV_TEMPORAL_PORT=$T_PORT QV_KAFKA_PORT=$K_PORT QV_KEYCLOAK_PORT=$KC_PORT docker compose "$@" ;;
     *) local n=${project##*-l}
-       COMPOSE_PROJECT_NAME="$project" QV_PG_PORT=$(pg_port "$n") QV_ANVIL_PORT=$(anvil_port "$n") QV_BTC_PORT=$(btc_port "$n") QV_SOL_PORT=$(sol_port "$n") docker compose "$@" ;;
+       COMPOSE_PROJECT_NAME="$project" QV_PG_PORT=$(pg_port "$n") QV_SIGNING_DB_PORT=$(sdb_port "$n") QV_ANVIL_PORT=$(anvil_port "$n") QV_BTC_PORT=$(btc_port "$n") QV_SOL_PORT=$(sol_port "$n") docker compose "$@" ;;
   esac
 }
 
@@ -211,8 +212,9 @@ docker info >/dev/null 2>&1 || die "docker is not running"
 qv_load_pins --so || die "no SoftHSM PINs"
 [ -d mpc-party/.deps ] || die "cb-mpc is not built: run make mpc-build first"
 mkdir -p "$OUT"
-# Fresh certificate authorities (one per trust zone) and short-lived certificates for this run; every group's processes use them.
-QV_PKI_DIR="$OUT/pki" ./scripts/pki.sh >"$OUT/pki.log" 2>&1 || die "making the TLS certificates failed (see $OUT/pki.log)"
+# Fresh certificate authorities (one per trust zone) and short-lived certificates for this run; every group's processes and the Postgres servers use them.
+export QV_PKI_DIR="$OUT/pki"
+./scripts/pki.sh >"$OUT/pki.log" 2>&1 || die "making the TLS certificates failed (see $OUT/pki.log)"
 check_ports
 started=1
 say "e2e-all: $ngroups groups on $LANES lanes; logs and results in $OUT"
@@ -229,7 +231,7 @@ i=1; while [ "$i" -le "$LANES" ]; do
   i=$((i + 1))
 done
 start_lane() { # start_lane <n>: Postgres, the chains it needs, and the lane's SoftHSM tokens
-  local n=$1 svcs="postgres" prof=()
+  local n=$1 svcs="postgres signing-db" prof=()
   case "${lane_svc[$n]}" in *a*) svcs="$svcs anvil" ;; esac
   case "${lane_svc[$n]}" in *b*) svcs="$svcs bitcoind"; prof=(--profile btc) ;; esac
   case "${lane_svc[$n]}" in *s*) svcs="$svcs solana"; prof+=(--profile solana) ;; esac
@@ -268,7 +270,8 @@ run_group() { # run_group <lane> <group>
   t1=$SECONDS
   say "  start  $g (lane $n)"
   (
-    export DATABASE_URL="postgres://qv@localhost:$(pg_port "$n")/quorumvault?sslmode=disable"
+    export DATABASE_URL="postgres://qv@localhost:$(pg_port "$n")/quorumvault?sslmode=verify-full&sslrootcert=$OUT/pki/business/admin/ca.crt&sslcert=$OUT/pki/business/admin/tls.crt&sslkey=$OUT/pki/business/admin/tls.key"
+    export QV_SIGNING_DB_URL="postgres://qv@localhost:$(sdb_port "$n")/qv_signing?sslmode=verify-full&sslrootcert=$OUT/pki/signing/admin/ca.crt&sslcert=$OUT/pki/signing/admin/tls.crt&sslkey=$OUT/pki/signing/admin/tls.key"
     export QV_ANVIL_RPC="http://127.0.0.1:$(anvil_port "$n")" QV_BTC_RPC="http://127.0.0.1:$(btc_port "$n")" QV_SOL_RPC="http://127.0.0.1:$(sol_port "$n")"
     export QV_PKI_DIR="$OUT/pki"
     export QV_TEMPORAL_ADDR="127.0.0.1:$T_PORT" QV_KAFKA_BROKERS="127.0.0.1:$K_PORT"

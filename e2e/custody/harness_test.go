@@ -403,8 +403,7 @@ func newSystem(t *testing.T, o opts) *system {
 	}
 	// Databases: the business database, and the gateway's own replay guard.
 	s.pool = dbtest.New(t)
-	cc := s.pool.Config().ConnConfig
-	s.bizDSN = fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", cc.User, cc.Host, cc.Port, cc.Database)
+	s.bizDSN = dbtest.DSN(s.pool)
 	s.guardDSN = s.newGuardDB()
 	s.gatewayLogin()
 
@@ -751,26 +750,7 @@ func writeJSON(t *testing.T, path string, v any) {
 }
 
 func (s *system) newGuardDB() string {
-	t := s.t
-	url := os.Getenv("DATABASE_URL")
-	admin, err := pgx.Connect(s.ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(s.ctx)
-	name := "qv_guard_" + strings.ReplaceAll(uuid.NewString()[:12], "-", "")
-	if _, err := admin.Exec(s.ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		c, err := pgx.Connect(context.Background(), url)
-		if err == nil {
-			c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-			c.Close(context.Background())
-		}
-	})
-	cfg, _ := pgx.ParseConfig(url)
-	return fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Host, cfg.Port, name)
+	return dbtest.CreateGuardDB(s.t, "qv_guard_") // on the signing zone's Postgres
 }
 
 // gatewayLogin lets the gateway connect as role qv_gateway (SELECT and UPDATE on
@@ -795,7 +775,7 @@ func (s *system) gatewayLogin() {
 }
 
 func (s *system) gatewayJobsDSN() string {
-	return strings.Replace(s.bizDSN, "//qv@", "//qv_gateway@", 1)
+	return dbtest.GatewayJobsDSN(s.bizDSN)
 }
 
 func (s *system) setDestination(dest common.Address) {
@@ -823,7 +803,7 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 		s.t.Fatal(err)
 	}
 	cmd := exec.Command(filepath.Join(binDir, name), args...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(append(os.Environ(), pkitest.EnvFor(name)...), env...)
 	cmd.Env = append(cmd.Env, "SOFTHSM2_CONF="+hsm.SoftHSMConf())
 	cmd.Stdout, cmd.Stderr = lf, lf
 	mpcstack.Guard(cmd)

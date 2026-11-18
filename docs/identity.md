@@ -31,7 +31,9 @@ The signing zone does not trust the identity provider: approvals are still signa
 
 Services do not trust a network address. Each trust zone, the business side and the signing zone, has its own private certificate authority, and a certificate from one is not accepted by the other. Every service holds a certificate that lasts hours to days, with a name of the form `spiffe://quorumvault/<zone>/<service>`, and swaps in the renewed files by itself while it runs. A server does not stop at "my authority signed it": each endpoint keeps its own list of names that may call it. A service whose certificate has expired refuses to start, and an alert fires before that happens. The few links that cross the zones are explicit: the business authority issues a named visitor certificate, and the signing zone's authority is never trusted on a business endpoint.
 
-The core API follows this first. People log in at the identity provider and need no certificate; a service that calls with its own token must also show a certificate whose name is on the list, so a stolen token alone is no use. The runbook for renewing certificates is [certificates](runbooks/certificates.md).
+The core API and every database connection use it. The business database trusts only the business authority, and the replay-guard databases sit on a separate server that trusts only the signing authority. A database maps the name in a certificate to one role, so a name it has not listed is refused. The gateway reads the job queue through the one explicit link, with a certificate that the business authority issued for it.
+
+On the core API, people log in at the identity provider and need no certificate; a service that calls with its own token must also show a certificate whose name is on the list, so a stolen token alone is no use. The runbook for renewing certificates is [certificates](runbooks/certificates.md).
 
 ## What the audit trail records
 

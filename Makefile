@@ -5,12 +5,19 @@ export
 endif
 
 export CGO_ENABLED := 1
-DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
+# Both Postgres servers want TLS and a client certificate (docs/runbooks/certificates.md): the DSNs name the files `make pki` writes.
+# (one variable, QV_PKI_DIR: the environment wins, so a nested make or scripts/e2e-all.sh keeps the directory of its own run)
+QV_PKI_DIR ?= $(CURDIR)/data/pki
+export QV_PKI_DIR
+DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/business/admin/ca.crt&sslcert=$(QV_PKI_DIR)/business/admin/tls.crt&sslkey=$(QV_PKI_DIR)/business/admin/tls.key
 export DATABASE_URL
+# the signing zone's Postgres (the replay-guard databases) is another server with another authority
+QV_SIGNING_DB_URL ?= postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/signing/admin/ca.crt&sslcert=$(QV_PKI_DIR)/signing/admin/tls.crt&sslkey=$(QV_PKI_DIR)/signing/admin/tls.key
+export QV_SIGNING_DB_URL
 
 .PHONY: pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp
 
-setup: softhsm db-up chain-up pki
+setup: softhsm pki db-up chain-up
 
 # One private CA per trust zone and short-lived certificates for every service, into data/pki (gitignored). Run again to rotate; services reload.
 pki:
@@ -23,8 +30,8 @@ dev-env:
 softhsm:
 	./scripts/setup-softhsm.sh
 
-db-up:
-	docker compose up -d --wait postgres
+db-up: pki
+	docker compose up -d --wait postgres signing-db
 
 db-down:
 	docker compose down

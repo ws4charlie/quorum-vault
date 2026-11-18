@@ -2,6 +2,7 @@ package pki
 
 import (
 	"crypto/tls"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -135,7 +136,7 @@ func TestClientChecksTheServer(t *testing.T) {
 		t.Fatal("a host name mismatch was accepted")
 	}
 	// a server of the signing zone (its certificate has the localhost name too): the business client does not trust that authority
-	sign := source(t, root, ZoneSigning, "gateway-guard-db")
+	sign := source(t, root, ZoneSigning, "signing-db")
 	other := startServer(t, sign.ServerConfig(OptionalClient, nil))
 	if _, err := get(t, other, worker.ClientConfig("localhost", nil)); err == nil {
 		t.Fatal("a signing-zone server certificate was accepted by a business client")
@@ -335,5 +336,20 @@ func TestPlaintextNeedsTheDevSwitchAndADevEnvironment(t *testing.T) {
 	t.Setenv("QV_ALLOW_PLAINTEXT", "")
 	if PlaintextAllowed() {
 		t.Fatal("dev without the switch allowed plain text")
+	}
+}
+
+// The environment variable of a flag with a prefix: -link-tls-cert reads QV_LINK_TLS_CERT.
+func TestFlagsEnvNames(t *testing.T) {
+	t.Setenv("QV_LINK_TLS_CERT", "c")
+	t.Setenv("QV_TLS_CERT", "main")
+	fs := flag.NewFlagSet("x", flag.ContinueOnError)
+	Flags(fs, "")
+	Flags(fs, "link-")
+	if got := fs.Lookup("link-tls-cert").DefValue; got != "c" {
+		t.Fatalf("-link-tls-cert default %q, want the value of QV_LINK_TLS_CERT", got)
+	}
+	if got := fs.Lookup("tls-cert").DefValue; got != "main" {
+		t.Fatalf("-tls-cert default %q", got)
 	}
 }

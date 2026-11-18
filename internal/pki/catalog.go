@@ -32,6 +32,7 @@ var Catalog = []Entry{
 	{Zone: ZoneBusiness, Service: "relay", Usage: Client},
 	{Zone: ZoneBusiness, Service: "archiver", Usage: Client},
 	{Zone: ZoneBusiness, Service: "guardian", Usage: Client},
+	{Zone: ZoneBusiness, Service: "admin", Usage: Client}, // operators and tests: creates databases, migrates (Postgres role qv)
 	{Zone: ZoneBusiness, Service: "postgres", DNS: append([]string{"postgres"}, localNames...), IPs: localIPs, Usage: Server},
 	{Zone: ZoneBusiness, Service: "temporal-db", DNS: append([]string{"temporal-db"}, localNames...), IPs: localIPs, Usage: Server},
 	{Zone: ZoneBusiness, Service: "kafka", DNS: append([]string{"redpanda"}, localNames...), IPs: localIPs, Usage: Server},
@@ -43,8 +44,12 @@ var Catalog = []Entry{
 	// signing zone
 	{Zone: ZoneSigning, Service: "gateway", Usage: Client},
 	{Zone: ZoneSigning, Service: "cosigner", Usage: Client},
-	{Zone: ZoneSigning, Service: "gateway-guard-db", DNS: append([]string{"gateway-guard-db"}, localNames...), IPs: localIPs, Usage: Server},
-	{Zone: ZoneSigning, Service: "cosigner-guard-db", DNS: append([]string{"cosigner-guard-db"}, localNames...), IPs: localIPs, Usage: Server},
+	{Zone: ZoneSigning, Service: "signing-db", DNS: append([]string{"signing-db"}, localNames...), IPs: localIPs, Usage: Server}, // the Postgres of the guard databases
+	{Zone: ZoneSigning, Service: "admin", Usage: Client},
+	// the MPC parties keep their pinned certificates for now (docs/mpc.md); these are the names they take if the mesh moves to the zone CA
+	{Zone: ZoneSigning, Service: "mpc-party-a", DNS: []string{"mpc-party-a", "localhost"}, IPs: localIPs, Usage: Server | Client},
+	{Zone: ZoneSigning, Service: "mpc-party-b", DNS: []string{"mpc-party-b", "localhost"}, IPs: localIPs, Usage: Server | Client},
+	{Zone: ZoneSigning, Service: "mpc-party-c", DNS: []string{"mpc-party-c", "localhost"}, IPs: localIPs, Usage: Server | Client},
 }
 
 // Dir is where the certificate files of an entry live under a PKI root: <root>/<zone>/<service>/{tls.crt,tls.key,ca.crt}.

@@ -16,12 +16,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/ws4charlie/quorum-vault/internal/auditchain"
 	"github.com/ws4charlie/quorum-vault/internal/cosigner"
+	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
 
 func main() {
@@ -43,6 +43,7 @@ func run(log *slog.Logger) error {
 	brokers := flag.String("brokers", os.Getenv("QV_KAFKA_BROKERS"), "Kafka brokers for publishing the head of this zone's audit chain on qv.audit.heads (optional; env QV_KAFKA_BROKERS)")
 	auditSource := flag.String("audit-source", "cosigner", "name this chain's heads are published under on qv.audit.heads (several deployments sharing one topic need distinct names)")
 	anchorEvery := flag.Duration("anchor-interval", time.Minute, "publish the audit chain head at least this often, and at once when it changes")
+	tlsFor := pki.Flags(flag.CommandLine, "")
 	flag.Parse()
 	if *configPath == "" || *guardDSN == "" || *socket == "" {
 		return fmt.Errorf("-config, -guard-dsn and -socket are required")
@@ -58,7 +59,14 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	pool, err := pgxpool.New(ctx, *guardDSN)
+	tsrc, err := tlsFor("qv-cosigner", pki.ZoneSigning, log)
+	if err != nil {
+		return err
+	}
+	if tsrc != nil {
+		go tsrc.Run(ctx.Done())
+	}
+	pool, err := db.NewPool(ctx, *guardDSN, tsrc, pki.Allow{pki.ID(pki.ZoneSigning, "signing-db")})
 	if err != nil {
 		return fmt.Errorf("open replay guard: %w", err)
 	}

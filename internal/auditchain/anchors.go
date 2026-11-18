@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ws4charlie/quorum-vault/internal/db"
 
 	"github.com/ws4charlie/quorum-vault/internal/audit"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
@@ -195,7 +195,7 @@ func VerifyCommand(ctx context.Context, args []string, source, dsnEnv string, ou
 	} else if a != nil {
 		arch = a
 	}
-	pool, err := pgxpool.New(ctx, *dsn)
+	pool, err := db.NewPool(ctx, *dsn, nil, nil)
 	if err != nil {
 		return err
 	}

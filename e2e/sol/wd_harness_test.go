@@ -16,14 +16,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"go.temporal.io/sdk/client"
 
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
@@ -117,26 +115,7 @@ func (s *wdSys) hotAddrs() []string {
 }
 
 func (s *wdSys) newGuardDB() string {
-	t := s.t
-	url := os.Getenv("DATABASE_URL")
-	admin, err := pgx.Connect(s.ctx, url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(s.ctx)
-	name := "qv_guard_" + strings.ReplaceAll(uuid.NewString()[:12], "-", "")
-	if _, err := admin.Exec(s.ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		c, err := pgx.Connect(context.Background(), url)
-		if err == nil {
-			c.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-			c.Close(context.Background())
-		}
-	})
-	cfg, _ := pgx.ParseConfig(url)
-	return fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Host, cfg.Port, name)
+	return dbtest.CreateGuardDB(s.t, "qv_guard_") // on the signing zone's Postgres
 }
 
 func writeJSONFile(t *testing.T, path string, v any) {
@@ -208,8 +187,8 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	s.mint = s.c.newMint(s.funder, 6)
 	tm.Phase("chain")
 	s.pool = dbtest.New(t)
-	cc := s.pool.Config().ConnConfig
-	s.bizDSN = fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable", cc.User, cc.Host, cc.Port, cc.Database)
+	s.bizDSN = dbtest.DSN(s.pool)
+	dbtest.GatewayLogin(s.t) // the gateway reads the job queue as the restricted role qv_gateway
 	s.guard = s.newGuardDB()
 	tm.Phase("db")
 
@@ -461,7 +440,7 @@ func tail(s string) string {
 
 func (s *wdSys) startGateway() {
 	s.gateway = mpcstack.NewProc(s.t, "gateway", filepath.Join(s.dir, "gateway.log"), filepath.Join(binDir, "qv-gateway"), nil,
-		"-config", s.gwPath, "-jobs-dsn", s.bizDSN, "-guard-dsn", s.guard, "-worker-id", "gw-"+s.tag, "-interval", "100ms", "-lease", "12s")
+		"-config", s.gwPath, "-jobs-dsn", dbtest.GatewayJobsDSN(s.bizDSN), "-guard-dsn", s.guard, "-worker-id", "gw-"+s.tag, "-interval", "100ms", "-lease", "12s")
 	s.gateway.Start(s.t)
 }
 

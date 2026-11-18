@@ -41,6 +41,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 
@@ -191,7 +192,7 @@ func (p *Proc) Start(t testing.TB) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(p.bin, p.args...)
-	cmd.Env = append(os.Environ(), p.env...)
+	cmd.Env = append(append(os.Environ(), pkitest.EnvFor(filepath.Base(p.bin))...), p.env...)
 	cmd.Stdout, cmd.Stderr = f, f
 	Guard(cmd)
 	if err := cmd.Start(); err != nil {

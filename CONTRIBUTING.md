@@ -16,7 +16,7 @@ brew install softhsm           # Ubuntu: apt-get install softhsm2
 make dev-env && make setup && make mpc-build
 ```
 
-`make dev-env` writes `.env` (gitignored) with random SoftHSM PINs and never overwrites an existing one. `make setup` creates the SoftHSM tokens, Postgres on port 55432 and an anvil node.
+`make dev-env` writes `.env` (gitignored) with random SoftHSM PINs and never overwrites an existing one. `make setup` creates the SoftHSM tokens, the certificates (below), the Postgres servers (business on 55432, the signing zone's replay guards on 55433) and an anvil node.
 
 ## Tests
 
@@ -35,7 +35,7 @@ The core API wants a bearer token. For development, start Keycloak with `make ke
 
 ## Certificates
 
-Services talk over TLS with client certificates. `make setup` runs `scripts/pki.sh`, which makes one private CA per trust zone (business, signing) and a short-lived certificate for every service under `data/pki` (gitignored; nothing is committed). Run `make pki` again to rotate: running services reload the new files, no restart. `make test-e2e-all` and every CI job make fresh ones, and tests without `QV_PKI_DIR` make their own. Plain http is only for a dev machine that sets `QV_ALLOW_PLAINTEXT=1` with `QV_ENV=dev`; production refuses it. What a deployment must provide is in [docs/runbooks/certificates.md](docs/runbooks/certificates.md).
+Services and both Postgres servers talk over TLS with client certificates only (no passwords). `make setup` runs `scripts/pki.sh`, which makes one private CA per trust zone (business, signing) and a short-lived certificate for every service under `data/pki` (gitignored; nothing is committed). Run `make pki` again to rotate: running services reload the new files, no restart. `make test-e2e-all` and every CI job make fresh ones, and tests without `QV_PKI_DIR` make their own. Plain http is only for a dev machine that sets `QV_ALLOW_PLAINTEXT=1` with `QV_ENV=dev`; production refuses it. What a deployment must provide is in [docs/runbooks/certificates.md](docs/runbooks/certificates.md).
 
 ## Configuration
 

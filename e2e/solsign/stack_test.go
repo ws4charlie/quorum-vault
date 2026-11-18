@@ -394,6 +394,7 @@ func newStack(t *testing.T, o optsT) *stack {
 	u, _ := url.Parse(os.Getenv("DATABASE_URL"))
 	u.Path = "/" + dbname
 	s.bizDSN = u.String()
+	dbtest.GatewayLogin(t) // the gateway reads the job queue as the restricted role qv_gateway
 	_, s.gwGuard = gatewaytest.NewGuardDB(t)
 	_, guardB := gatewaytest.NewGuardDB(t)
 	_, guardC := gatewaytest.NewGuardDB(t)
@@ -417,7 +418,7 @@ func newStack(t *testing.T, o optsT) *stack {
 		t.Fatal(err)
 	}
 	s.metrics = filepath.Join(s.dir, "mpc-metrics.prom")
-	s.gw = mpcstack.NewProc(t, "gateway", filepath.Join(s.dir, "gateway.log"), binGW, nil, "-config", gwCfg, "-jobs-dsn", s.bizDSN, "-guard-dsn", s.gwGuard,
+	s.gw = mpcstack.NewProc(t, "gateway", filepath.Join(s.dir, "gateway.log"), binGW, nil, "-config", gwCfg, "-jobs-dsn", dbtest.GatewayJobsDSN(s.bizDSN), "-guard-dsn", s.gwGuard,
 		"-worker-id", "w1", "-interval", "100ms", "-lease", "10s", "-mpc-metrics-file", s.metrics)
 	s.gw.Start(t)
 	s.mpc.WaitSigning(90 * time.Second)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
+	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
@@ -325,7 +326,7 @@ func TestWithdrawalInconsistentFeeCapsRefuseToStartInTheCoreAndTheZone(t *testin
 	if err := os.WriteFile(badGW, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	jobs := strings.Replace(s.bizDSN, "//qv@", "//qv_gateway@", 1)
+	jobs := dbtest.GatewayJobsDSN(s.bizDSN)
 	gw := s.spawn("qv-gateway", "-config", badGW, "-jobs-dsn", jobs, "-guard-dsn", s.gwGuard, "-interval", "200ms", "-lease", s.lease, "-worker-id", "gw-bad")
 	refuses("qv-gateway with a low max_tx_fee_sats", gw, "raise max_tx_fee_sats to at least 72250")
 }

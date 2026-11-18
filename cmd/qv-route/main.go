@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ws4charlie/quorum-vault/internal/db"
 
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/mpcsigner"
@@ -98,7 +98,7 @@ func withGuard(cmd string, args []string) error {
 		return err
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, *dsn)
+	pool, err := db.NewPool(ctx, *dsn, nil, nil)
 	if err != nil {
 		return err
 	}

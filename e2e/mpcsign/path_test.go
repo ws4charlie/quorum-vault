@@ -19,6 +19,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"github.com/ws4charlie/quorum-vault/internal/chain/eth"
+	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/gateway/gatewaytest"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
@@ -209,7 +210,7 @@ func TestCosignerGuardDatabaseDownIsUnavailable(t *testing.T) {
 	drop := func(dsn string) {
 		u, _ := url.Parse(dsn)
 		name := strings.TrimPrefix(u.Path, "/")
-		admin, err := pgx.Connect(context.Background(), os.Getenv("DATABASE_URL"))
+		admin, err := pgx.Connect(context.Background(), dbtest.SigningURL(t))
 		if err != nil {
 			t.Fatal(err)
 		}

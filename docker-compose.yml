@@ -1,20 +1,51 @@
-# Host ports can be moved with QV_PG_PORT, QV_ANVIL_PORT, QV_TEMPORAL_PORT, QV_KAFKA_PORT, QV_BTC_PORT, QV_SOL_PORT and QV_PROM_PORT (scripts/e2e-all.sh runs
+# Host ports can be moved with QV_PG_PORT, QV_SIGNING_DB_PORT, QV_ANVIL_PORT, QV_TEMPORAL_PORT, QV_KAFKA_PORT, QV_BTC_PORT, QV_SOL_PORT and QV_PROM_PORT (scripts/e2e-all.sh runs
 # several isolated sets side by side); with none set they are the fixed ports below.
-# Dev-only services, reachable only from this machine. Postgres: no password
-# (trust auth).
+# Dev-only services, reachable only from this machine. The two Postgres servers take TLS connections with a client certificate only (no passwords,
+# no plain connections): `make pki` (scripts/pki.sh) writes the certificates they read from QV_PKI_DIR (default data/pki), and `make setup` runs it first.
+# Each server trusts the ONE authority of its zone: `postgres` the business authority, `signing-db` the signing authority.
 services:
+  # The business database. Certificate common names map to roles in deploy/postgres/business.pg_ident.conf.
   postgres:
     image: postgres:16-alpine
+    # (the health checks use TCP: while the image initialises a new volume its temporary server answers on the socket only, which is not "ready")
+    entrypoint: ["/bin/sh", "/cfg/entrypoint.sh"]
     environment:
       POSTGRES_DB: quorumvault
       POSTGRES_USER: qv
-      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_HOST_AUTH_METHOD: trust # only for initdb; pg_hba.conf (hostssl ... cert) is what applies
     ports:
       - "127.0.0.1:${QV_PG_PORT:-55432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ${QV_PKI_DIR:-./data/pki}/business/postgres:/pki:ro
+      - ./deploy/postgres/entrypoint.sh:/cfg/entrypoint.sh:ro
+      - ./deploy/postgres/business.pg_hba.conf:/cfg/pg_hba.conf:ro
+      - ./deploy/postgres/business.pg_ident.conf:/cfg/pg_ident.conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U qv -d quorumvault"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U qv -d quorumvault"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # The signing zone's Postgres: the gateway's and the cosigner's replay-guard databases. A different server and a different authority from the
+  # business one, so nothing the business side holds opens it.
+  signing-db:
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/cfg/entrypoint.sh"]
+    environment:
+      POSTGRES_DB: qv_signing
+      POSTGRES_USER: qv
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:${QV_SIGNING_DB_PORT:-55433}:5432"
+    volumes:
+      - signing-pgdata:/var/lib/postgresql/data
+      - ${QV_PKI_DIR:-./data/pki}/signing/signing-db:/pki:ro
+      - ./deploy/postgres/entrypoint.sh:/cfg/entrypoint.sh:ro
+      - ./deploy/postgres/signing.pg_hba.conf:/cfg/pg_hba.conf:ro
+      - ./deploy/postgres/signing.pg_ident.conf:/cfg/pg_ident.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U qv -d qv_signing"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -274,5 +305,6 @@ configs:
 
 volumes:
   pgdata:
+  signing-pgdata:
   archive-data:
   temporal-pgdata:

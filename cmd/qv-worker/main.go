@@ -27,6 +27,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chainfactory"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
 
@@ -48,6 +49,7 @@ func run(log *slog.Logger) error {
 		"file with the automated approver's Ed25519 seed (64 hex chars); optional (env QV_AUTO_APPROVER_KEY_FILE)")
 	wdStall := flag.Duration("watchdog-stall", 2*time.Minute, "a loop workflow with no new history for this long is terminated and restarted, a withdrawal or sweep workflow is only reported (ALERT); 0 turns the watchdog off")
 	wdEvery := flag.Duration("watchdog-interval", 15*time.Second, "how often the watchdog looks")
+	tlsFor := pki.Flags(flag.CommandLine, "")
 	flag.Parse()
 	if *cfgPath == "" || *dsn == "" {
 		return errors.New("-config and -dsn (or DATABASE_URL) are required")
@@ -68,7 +70,14 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Open(ctx, *dsn)
+	tsrc, err := tlsFor("qv-worker", pki.ZoneBusiness, log)
+	if err != nil {
+		return err
+	}
+	if tsrc != nil {
+		go tsrc.Run(ctx.Done())
+	}
+	pool, err := db.OpenTLS(ctx, *dsn, tsrc, pki.Allow{pki.ID(pki.ZoneBusiness, "postgres")})
 	if err != nil {
 		return err
 	}

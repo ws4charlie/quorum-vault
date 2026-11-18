@@ -17,6 +17,9 @@ inputs:
   solana:
     description: "'true' starts solana-test-validator on 18899, built from ci/solana (the Solana jobs)"
     default: "false"
+  postgres:
+    description: "'true' starts the business Postgres (55432) and the signing zone's Postgres (55433), TLS with client certificates only, from the certificates made here"
+    default: "false"
   keycloak:
     description: "'true' starts the dev Keycloak on 8180 with the realm in deploy/keycloak (the identity job)"
     default: "false"
@@ -30,22 +33,6 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || echo "no login, pulling anonymously"
-    - name: Start the services in the background
-      shell: bash
-      env:
-        INFRA: ${{ inputs.infra }}
-        ANVIL: ${{ inputs.anvil }}
-        BITCOIND: ${{ inputs.bitcoind }}
-        SOLANA: ${{ inputs.solana }}
-        KEYCLOAK: ${{ inputs.keycloak }}
-      run: |
-        flags=()
-        [ "$ANVIL" = true ] && flags+=(--anvil)
-        [ "$INFRA" = true ] && flags+=(--infra)
-        [ "$BITCOIND" = true ] && flags+=(--bitcoind)
-        [ "$SOLANA" = true ] && flags+=(--solana)
-        [ "$KEYCLOAK" = true ] && flags+=(--keycloak)
-        ci/infra.sh start "${flags[@]}"
     - name: Pull the CI image
       shell: bash
       env:
@@ -60,17 +47,36 @@ runs:
         path: ~/.cache/qv-go
         key: qv-go-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum') }}
         restore-keys: qv-go-${{ runner.os }}-${{ runner.arch }}-
-    - name: Generate the PINs (.env) and create the SoftHSM2 tokens (quorumvault, qv-party-1, qv-party-2, qv-party-3, qv-cold)
-      shell: bash
-      run: |
-        ./scripts/dev-env.sh
-        ci/run-in-image.sh ./scripts/setup-softhsm.sh
-    # One private CA per trust zone and a short-lived certificate for every service, made fresh for this job (nothing is committed).
+    # One private CA per trust zone and a short-lived certificate for every service, made fresh for this job (nothing is committed). They come before the services
+    # start: the Postgres containers read theirs from data/pki.
     - name: Make the TLS certificates (scripts/pki.sh)
       shell: bash
       run: |
         ci/run-in-image.sh ./scripts/pki.sh
         echo "QV_PKI_DIR=$GITHUB_WORKSPACE/data/pki" >> "$GITHUB_ENV"
+    - name: Start the services in the background
+      shell: bash
+      env:
+        INFRA: ${{ inputs.infra }}
+        ANVIL: ${{ inputs.anvil }}
+        BITCOIND: ${{ inputs.bitcoind }}
+        SOLANA: ${{ inputs.solana }}
+        KEYCLOAK: ${{ inputs.keycloak }}
+        POSTGRES: ${{ inputs.postgres }}
+      run: |
+        flags=()
+        [ "$ANVIL" = true ] && flags+=(--anvil)
+        [ "$INFRA" = true ] && flags+=(--infra)
+        [ "$BITCOIND" = true ] && flags+=(--bitcoind)
+        [ "$SOLANA" = true ] && flags+=(--solana)
+        [ "$KEYCLOAK" = true ] && flags+=(--keycloak)
+        [ "$POSTGRES" = true ] && flags+=(--postgres)
+        ci/infra.sh start "${flags[@]}"
+    - name: Generate the PINs (.env) and create the SoftHSM2 tokens (quorumvault, qv-party-1, qv-party-2, qv-party-3, qv-cold)
+      shell: bash
+      run: |
+        ./scripts/dev-env.sh
+        ci/run-in-image.sh ./scripts/setup-softhsm.sh
     - name: Wait for the services
       shell: bash
       run: ci/infra.sh wait

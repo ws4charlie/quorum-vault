@@ -42,7 +42,7 @@ func Flags(fs *flag.FlagSet, prefix string) func(name, zone string, log *slog.Lo
 }
 
 func upper(s string) string {
-	b := []byte(s)
+	b := []byte(strings.TrimSuffix(s, "-"))
 	for i, c := range b {
 		if c >= 'a' && c <= 'z' {
 			b[i] = c - 32
