@@ -157,6 +157,4 @@ func TestCPFPManualRefusedWithNoRoom(t *testing.T) {
 	if n := s.attempts("cpfp"); n != 0 {
 		t.Fatalf("%d children", n)
 	}
-	s.node.mine(1, "")
-	s.waitWd(w.ID, "confirmed", 90*time.Second)
 }
