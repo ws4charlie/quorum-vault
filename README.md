@@ -14,11 +14,17 @@ Two rules carry the design:
 ## Architecture
 
 <p align="center">
-<img src="docs/images/arch-operators.png" width="24%" alt="Operators and approvers"><img src="docs/images/arch-api.png" width="48%" alt="Core API"><br/>
+<img src="docs/images/arch-operators.png" width="24%" alt="Operators and approvers"><br/>
+<img src="docs/images/arch-a.png" width="24%" alt=""><br/>
+<a href="docs/identity.md"><img src="docs/images/arch-identity.png" width="24%" alt="Identity"></a><br/>
+<img src="docs/images/arch-b.png" width="24%" alt=""><br/>
+<img src="docs/images/arch-api.png" width="24%" alt="Core API"><br/>
 <img src="docs/images/arch-down.png" width="72%" alt=""><br/>
 <a href="docs/workflows.md"><img src="docs/images/arch-workflows.png" width="24%" alt="Workflows"></a><a href="docs/ledger.md"><img src="docs/images/arch-ledger.png" width="24%" alt="Ledger"></a><a href="docs/audit.md"><img src="docs/images/arch-audit.png" width="24%" alt="Audit trail"></a><br/>
 <img src="docs/images/arch-merge.png" width="72%" alt=""><br/>
-<a href="docs/signing-zone.md"><img src="docs/images/arch-zone.png" width="48%" alt="Signing zone"></a><a href="docs/tiers.md"><img src="docs/images/arch-tiers.png" width="24%" alt="Hot and cold"></a><br/>
+<a href="docs/tiers.md"><img src="docs/images/arch-tiers.png" width="24%" alt="Hot and cold"></a><br/>
+<img src="docs/images/arch-merge2.png" width="72%" alt=""><br/>
+<a href="docs/signing-zone.md"><img src="docs/images/arch-zone.png" width="48%" alt="Signing zone"></a><br/>
 <img src="docs/images/arch-down2.png" width="72%" alt=""><br/>
 <a href="docs/mpc.md"><img src="docs/images/arch-mpc.png" width="72%" alt="MPC parties"></a><br/>
 <img src="docs/images/arch-split.png" width="72%" alt=""><br/>
@@ -39,6 +45,7 @@ Click a box to open its page.
 | [MPC signing](docs/mpc.md) | Splits each key across machines so no one machine can sign |
 | [Hot and cold](docs/tiers.md) | Keeps a little online, the rest offline, and moves money between them |
 | [EVM](docs/evm.md) · [Bitcoin](docs/bitcoin.md) · [Solana](docs/solana.md) | What is special about each chain |
+| [Bitcoin sends](docs/bitcoin-sending.md) | How a Bitcoin send gets confirmed: fee room, replacement, cancel, child and batches |
 | [Identity](docs/identity.md) | Who may call the API, and how a login is proved |
 | [Audit trail](docs/audit.md) | A record of every decision that can't be quietly changed |
 | [Testing](docs/testing.md) | How it is tested, including crashes and attacks |
@@ -65,4 +72,6 @@ The first command builds the MPC library once, which takes a few minutes. The se
 | Deposits, sweeps, withdrawals, cold storage on EVM, Bitcoin and Solana | End-to-end tests on local chains, in CI |
 | Crash safety | A worker is killed at every step of every flow; each payment settles once |
 | Attacks on the signing side | A compromised gateway, party or database is refused |
+| Login and approvals | A real OpenID Connect token is required; passkey approvals are checked by the signing zone. Tested with Keycloak and software authenticators, not hardware keys |
+| Audit record | Chain heads are copied into write-once storage; tamper checks in tests |
 | Real networks, real load | **Not yet.** No testnet or mainnet use, and no load test. See [Limits](docs/limits.md) |

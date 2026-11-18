@@ -7,7 +7,7 @@ The tests try to break the system on purpose: they kill workers, attack the sign
 <p align="center"><img src="images/testing.png" width="60%" alt="Each lane has its own database, chains and HSM tokens. A lane runs groups of tests one after another, and every test ends with a Reconcile."></p>
 
 ## One command runs every CI group
-The groups CI runs are spread over several lanes that run at the same time. A lane has its own Postgres, chains and SoftHSM tokens, because the tests mine blocks, reorganise chains and restart nodes. Each group writes its own log.
+The groups CI runs are spread over several lanes that run at the same time. A lane has its own Postgres, chains and SoftHSM tokens, because the tests mine blocks, reorganise chains and restart nodes. Each group writes its own log. The alert rules are tested too, in CI.
 
 ## A crash at every step
 A worker is killed at each named step of each flow, then restarted. The payment must settle once, with no second nonce and no second send. Light crash tests run on every pull request; the heavy ones, which also kill the gateway, a party or the cosigner, cut the network and add latency, run nightly.

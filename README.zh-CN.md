@@ -14,11 +14,17 @@
 ## 架构
 
 <p align="center">
-<img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"><img src="docs/images/zh/arch-api.png" width="48%" alt="核心 API"><br/>
+<img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"><br/>
+<img src="docs/images/zh/arch-a.png" width="24%" alt=""><br/>
+<a href="docs/zh/identity.md"><img src="docs/images/zh/arch-identity.png" width="24%" alt="身份"></a><br/>
+<img src="docs/images/zh/arch-b.png" width="24%" alt=""><br/>
+<img src="docs/images/zh/arch-api.png" width="24%" alt="核心 API"><br/>
 <img src="docs/images/zh/arch-down.png" width="72%" alt=""><br/>
 <a href="docs/zh/workflows.md"><img src="docs/images/zh/arch-workflows.png" width="24%" alt="工作流"></a><a href="docs/zh/ledger.md"><img src="docs/images/zh/arch-ledger.png" width="24%" alt="账本"></a><a href="docs/zh/audit.md"><img src="docs/images/zh/arch-audit.png" width="24%" alt="审计记录"></a><br/>
 <img src="docs/images/zh/arch-merge.png" width="72%" alt=""><br/>
-<a href="docs/zh/signing-zone.md"><img src="docs/images/zh/arch-zone.png" width="48%" alt="签名区"></a><a href="docs/zh/tiers.md"><img src="docs/images/zh/arch-tiers.png" width="24%" alt="冷热钱包"></a><br/>
+<a href="docs/zh/tiers.md"><img src="docs/images/zh/arch-tiers.png" width="24%" alt="冷热钱包"></a><br/>
+<img src="docs/images/zh/arch-merge2.png" width="72%" alt=""><br/>
+<a href="docs/zh/signing-zone.md"><img src="docs/images/zh/arch-zone.png" width="48%" alt="签名区"></a><br/>
 <img src="docs/images/zh/arch-down2.png" width="72%" alt=""><br/>
 <a href="docs/zh/mpc.md"><img src="docs/images/zh/arch-mpc.png" width="72%" alt="MPC 参与方"></a><br/>
 <img src="docs/images/zh/arch-split.png" width="72%" alt=""><br/>
@@ -39,6 +45,7 @@
 | [MPC 签名](docs/zh/mpc.md) | 把每把密钥拆到多台机器上，没有哪台能单独签名 |
 | [冷热钱包](docs/zh/tiers.md) | 少量放在线上，其余离线保管，并在两者之间调拨 |
 | [EVM](docs/zh/evm.md) · [Bitcoin](docs/zh/bitcoin.md) · [Solana](docs/zh/solana.md) | 每条链各自的特殊之处 |
+| [Bitcoin 发送](docs/zh/bitcoin-sending.md) | 一笔 Bitcoin 交易怎么上链：加价余量、替换、取消、子交易和批量 |
 | [身份](docs/zh/identity.md) | 谁能调用 API，登录怎么证明 |
 | [审计记录](docs/zh/audit.md) | 记下每个决定，事后没法悄悄改 |
 | [测试](docs/zh/testing.md) | 怎么测，包括崩溃和攻击 |
@@ -65,4 +72,6 @@ make test-e2e-all
 | EVM、Bitcoin、Solana 的存款、归集、提现和冷钱包 | 本地链上的端到端测试，在 CI 里跑 |
 | 崩溃安全 | 在每个流程的每一步杀掉工作进程，每笔付款都只结算一次 |
 | 针对签名侧的攻击 | 网关、某个参与方或数据库被攻破，都会被拒绝 |
+| 登录和审批 | API 要求真实的 OpenID Connect 令牌；通行密钥审批由签名区自己核对。用 Keycloak 和软件认证器测过，没试过硬件密钥 |
+| 审计记录 | 链头复制进一次写入的存储；篡改检查在测试里验证 |
 | 真实网络、真实负载 | **还没有。** 没上过测试网或主网，也没做压测。见[局限](docs/zh/limits.md) |
