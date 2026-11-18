@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
 	"github.com/ws4charlie/quorum-vault/internal/partition"
@@ -453,26 +454,88 @@ func (s *Service) BuildWithdrawalJob(ctx context.Context, id string) (string, er
 		if w.JobID != "" {
 			return nil
 		}
-		if s.Now().Unix() >= w.NotAfter {
-			return ErrExpired
-		}
-		u, err := s.Chain.BuildWithdrawal(ctx, tx, chain.WithdrawalIntent{ID: id, PartitionID: w.PartitionID, Asset: w.Asset, To: w.To, Amount: w.Amount})
-		if err != nil {
-			return err
-		}
-		ib, err := json.Marshal(s.IntentOf(w))
-		if err != nil {
-			return err
-		}
-		if err := EnqueueUnsigned(ctx, tx, jobID, w.PartitionID, u, ib, w.Approvals); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE withdrawals SET status='signing', job_id=$2, updated_at=now() WHERE id=$1`, id, jobID); err != nil {
-			return err
-		}
-		return emit(ctx, tx, outbox.TopicWithdrawals, id, "withdrawal.signing", map[string]any{"job": jobID})
+		return s.buildWithdrawalTx(ctx, tx, w, jobID)
 	})
 	return jobID, err
+}
+
+// buildWithdrawalTx builds the transaction of w, enqueues its sign job under jobID and marks the withdrawal signing, inside tx.
+func (s *Service) buildWithdrawalTx(ctx context.Context, tx pgx.Tx, w Withdrawal, jobID string) error {
+	id := w.ID
+	if s.Now().Unix() >= w.NotAfter {
+		return ErrExpired
+	}
+	u, err := s.Chain.BuildWithdrawal(ctx, tx, chain.WithdrawalIntent{ID: id, PartitionID: w.PartitionID, Asset: w.Asset, To: w.To, Amount: w.Amount})
+	if err != nil {
+		return err
+	}
+	ib, err := json.Marshal(s.IntentOf(w))
+	if err != nil {
+		return err
+	}
+	if err := EnqueueUnsigned(ctx, tx, jobID, w.PartitionID, u, ib, w.Approvals); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE withdrawals SET status='signing', job_id=$2, updated_at=now() WHERE id=$1`, id, jobID); err != nil {
+		return err
+	}
+	return emit(ctx, tx, outbox.TopicWithdrawals, id, "withdrawal.signing", map[string]any{"job": jobID})
+}
+
+// IsFeeCapsRefusal reports whether a sign job's refusal reason is the zone's "built under another fee-cap change" (btc.FeeCapsSeqNote).
+func IsFeeCapsRefusal(reason string) bool { return strings.Contains(reason, btc.FeeCapsSeqNote) }
+
+// unsentUndoer is implemented by a chain cell that can forget a build of an owner that was never broadcast (Bitcoin).
+type unsentUndoer interface {
+	UndoUnsent(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) error
+}
+
+// RebuildWithdrawalJob rebuilds a withdrawal whose first send the zone refused only because the core and the zone were on different fee-cap
+// changes: nothing was signed or broadcast, so it forgets the unsent build and its refused jobs and builds again under the caps in force now, in one
+// transaction, with the same job id. It returns false, changing nothing, for anything else (another refusal, a broadcast transaction, a chain that
+// cannot undo a build, or a job of the withdrawal that may hold a signature). When the build cannot be made now (too few outputs, an expired approval) the transaction rolls back and the error says why.
+func (s *Service) RebuildWithdrawalJob(ctx context.Context, id string) (bool, error) {
+	jobID := OwnerTrack(Owner{Kind: "withdrawal", ID: id}).FirstJob()
+	rebuilt := false
+	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		rebuilt = false
+		un, ok := s.Chain.(unsentUndoer)
+		if !ok {
+			return nil
+		}
+		w, err := scanWd(tx.QueryRow(ctx, `SELECT `+wdCols+` FROM withdrawals WHERE id=$1 FOR UPDATE`, id))
+		if err != nil {
+			return err
+		}
+		if w.Status != WdSigning || w.JobID != jobID || w.TxHash != "" {
+			return nil
+		}
+		// Locks the owner's jobs. A job that is signing, done or failed may have a signature: that is the cancel path's, not ours.
+		if _, may, err := jobStates(ctx, tx, Owner{Kind: "withdrawal", ID: id}); err != nil || may {
+			return err
+		}
+		jobs, err := jobGroup(ctx, tx, jobID)
+		if err != nil {
+			return err
+		}
+		if st, reason, _ := groupStatus(jobs); st != signjob.StatusRejected || !IsFeeCapsRefusal(reason) {
+			return nil
+		}
+		if err := un.UndoUnsent(ctx, tx, "withdrawal", id); err != nil {
+			return err
+		}
+		for _, j := range jobs {
+			if _, err := tx.Exec(ctx, `DELETE FROM sign_jobs WHERE id=$1`, j.ID); err != nil {
+				return err
+			}
+		}
+		if err := s.buildWithdrawalTx(ctx, tx, w, jobID); err != nil {
+			return err
+		}
+		rebuilt = true
+		return nil
+	})
+	return rebuilt && err == nil, err
 }
 
 // RecordWithdrawalBroadcast stores the transaction hash and marks the withdrawal broadcast.

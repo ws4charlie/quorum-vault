@@ -30,7 +30,7 @@ func (a *Adapter) shardOf(partitionID string) (shard, error) {
 // feeRate is the fee rate for a withdrawal in satoshis per virtual byte: the node's estimate for confirmation in a couple of blocks, the
 // configured fallback when it has none, never above the configured ceiling (which is below the signing zone's) and never below the relay minimum.
 func (a *Adapter) feeRate(ctx context.Context) uint64 {
-	return min(a.rawFeeRate(ctx), a.cfg.MaxFeeRate)
+	return min(a.rawFeeRate(ctx), a.caps().MaxFeeRate)
 }
 
 // rawFeeRate is the market rate before the ceiling: the node's estimate, else the fallback, never below the relay minimum. A sweep compares it
@@ -85,7 +85,7 @@ func (a *Adapter) oldestCannotCarry(ctx context.Context, tx pgx.Tx, partitionID 
 			return true, rows.Err() // more outputs than one transaction takes, and no prefix of the oldest ones covered the payment
 		}
 		sum += uint64(v)
-		if vs := vsize(n, destScript, changeScript); sum >= ReserveNeed(amount, vs*rate, vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate) {
+		if vs := vsize(n, destScript, changeScript); sum >= ReserveNeed(amount, vs*rate, vs, a.caps().MaxTxFeeSats, a.caps().MaxFeeRate) {
 			return false, nil
 		}
 	}
@@ -101,6 +101,9 @@ func (a *Adapter) oldestCannotCarry(ctx context.Context, tx pgx.Tx, partitionID 
 // chain.ErrNotEnoughOutputs (also wrapping chain.ErrFeeReserve when the payment and today's fee alone would have been covered, with how much more
 // releases it): the withdrawal waits and nothing stays reserved.
 func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.WithdrawalIntent) (chain.UnsignedTx, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return chain.UnsignedTx{}, err
+	}
 	kind := w.OwnerKind
 	if kind == "" {
 		kind = "withdrawal"
@@ -148,7 +151,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 	var sum uint64
 	need := func(n int) (uint64, uint64) { // what n inputs must hold, and the size it was computed for
 		vs := vsize(n, destScript, sh.script)
-		return ReserveNeed(amount, feeFor(n, destScript, sh.script), vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate), vs
+		return ReserveNeed(amount, feeFor(n, destScript, sh.script), vs, a.caps().MaxTxFeeSats, a.caps().MaxFeeRate), vs
 	}
 	// short builds the error of a build that cannot go on with n inputs holding sum: the reserve when the payment and today's fee alone are covered.
 	short := func(n int, sum uint64, why string) error {
@@ -164,7 +167,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 		}
 		return fmt.Errorf("%w: %w: %s holds %d sats in %d inputs for a payment of %d plus fee %d, and the reserve to bump it up to the fee cap (%d sats for %d vbytes, plus %d dust change) needs %d in all: %s",
 			chain.ErrNotEnoughOutputs, chain.ErrFeeReserve, w.PartitionID, sum, n, amount, feeFor(n, destScript, sh.script),
-			FeeCap(a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate, vs), vs, changeDust, want, release)
+			FeeCap(a.caps().MaxTxFeeSats, a.caps().MaxFeeRate, vs), vs, changeDust, want, release)
 	}
 	for {
 		// Enough for the payment, today's fee, and the reserve in change?
@@ -204,13 +207,14 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 	fee := feeFor(len(picked), destScript, sh.script)
 	change := sum - amount - fee
 	p.Outputs = append(p.Outputs, PayloadOutput{Address: sh.address, Value: change})
-	if fee > a.cfg.MaxTxFeeSats {
-		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats against the cap %d", ErrFeeTooHigh, fee, a.cfg.MaxTxFeeSats)
+	if fee > a.caps().MaxTxFeeSats {
+		return chain.UnsignedTx{}, fmt.Errorf("%w: %d sats against the cap %d", ErrFeeTooHigh, fee, a.caps().MaxTxFeeSats)
 	}
 	built, err := BuildUnsigned(p, a.acct)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
+	p.FeeCapsSeq = a.capsSeq()
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return chain.UnsignedTx{}, err

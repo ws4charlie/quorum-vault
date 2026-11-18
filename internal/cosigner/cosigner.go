@@ -55,6 +55,9 @@ func (c *Cosigner) Decide(ctx context.Context, r wire.Request) wire.Response {
 		attrs = append(attrs, "reason", resp.Reason)
 	}
 	c.log.Info("cosigner decision", attrs...)
+	if !resp.Allow && strings.Contains(resp.Reason, btc.FeeCapsSeqNote) {
+		c.log.Error("ALERT: the cosigner refused a transaction built under other fee caps than its own; the core and the zone wait until the same signed change is applied to both (docs/runbooks/btc-fee-caps.md)", attrs...)
+	}
 	if !resp.Allow && strings.Contains(resp.Reason, btc.CapMismatchNote) {
 		c.log.Error("ALERT: the cosigner refused a first send because the core reserved less than the zone's fee caps need; the core and the zone fee caps must be equal (docs/runbooks/btc-fee-caps.md)", attrs...)
 	}

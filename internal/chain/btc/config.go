@@ -52,6 +52,9 @@ type Config struct {
 	MaxFeeRate      uint64
 	// MaxTxFeeSats is the most a transaction may pay in fee (default 150000; at least MaxFeeRate times the size of the largest transaction, see CheckFeeCaps).
 	MaxTxFeeSats uint64
+	// FeeCaps, when set, lets the zone's approvers change MaxTxFeeSats and MaxFeeRate with signatures (feecaps.go); these two then are the caps until
+	// the first change. Nil: the caps are these and nothing else.
+	FeeCaps *FeeCapsConfig
 	// SweepMaxFeeRate is the most a routine sweep pays per virtual byte (default MaxFeeRate; it must not be above it). Above it routine sweeps wait.
 	// SweepUrgentValue, in satoshis, is the amount from which a sweep goes regardless of that ceiling, up to MaxFeeRate (0: no such exception).
 	SweepMaxFeeRate uint64
@@ -252,6 +255,11 @@ func (c Config) validated() (*validatedConfig, error) {
 	// limit here (the second size argument, 1 payment today).
 	if err := CheckFeeCaps("config", c.MaxTxFeeSats, c.MaxFeeRate, c.MaxInputs, max(1, c.MaxBatchOutputs)); err != nil {
 		return nil, err
+	}
+	if c.FeeCaps != nil {
+		if _, err := c.FeeCaps.rules(c.Chain, c.MaxInputs, max(1, c.MaxBatchOutputs)); err != nil {
+			return nil, err
+		}
 	}
 	// The form of an address this config derives must belong to the network it names.
 	probe, err := v.addressAt(0)

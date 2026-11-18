@@ -34,11 +34,13 @@ func (a *Adapter) nextFee(ctx context.Context, oldFee, vs uint64) uint64 {
 }
 
 // feeCap is the most a transaction of vs virtual bytes may pay: the fee cap and the fee rate ceiling, whichever is lower.
-func (a *Adapter) feeCap(vs uint64) uint64 { return FeeCap(a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate, vs) }
+func (a *Adapter) feeCap(vs uint64) uint64 {
+	return FeeCap(a.caps().MaxTxFeeSats, a.caps().MaxFeeRate, vs)
+}
 
 func (a *Adapter) checkFee(fee, vs uint64) error {
 	if fee > a.feeCap(vs) {
-		return fmt.Errorf("%w: %d sats over %d vbytes would be above the fee cap %d sats or %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate)
+		return fmt.Errorf("%w: %d sats over %d vbytes would be above the fee cap %d sats or %d sat/vB", chain.ErrCannotBump, fee, vs, a.caps().MaxTxFeeSats, a.caps().MaxFeeRate)
 	}
 	return nil
 }
@@ -64,6 +66,7 @@ func (a *Adapter) record(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, kin
 	if err != nil {
 		return nil, nil, err
 	}
+	p.FeeCapsSeq = a.capsSeq()
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return nil, nil, err
@@ -91,6 +94,9 @@ func unsignedOf(chainName string, built *Unsigned, raw []byte, partition string,
 // BuildReplacement builds the fee bump of the owner's newest attempt: the same inputs and the same payment, less change, a higher fee (see the rule
 // above). Without a change output, or when the change would fall to dust, it returns chain.ErrCannotBump: the attempt cannot be bumped.
 func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return chain.UnsignedTx{}, err
+	}
 	// An owner whose cancel was built is on its cancel track: its replacements raise the cancel, not the send (see BuildCancel).
 	if cancelling, err := a.isCancelling(ctx, tx, ownerKind, ownerID); err != nil {
 		return chain.UnsignedTx{}, err
@@ -152,6 +158,9 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 // BuildReplacement raises the cancel, not the send, and the cancel has its own fee floor (the highest fee the node refused for a cancel), so that a
 // refused or stuck cancel escalates like a send, within the same caps.
 func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return chain.UnsignedTx{}, err
+	}
 	if ownerKind != "withdrawal" && ownerKind != "sweep" && ownerKind != "to-cold" && ownerKind != OwnerKindConsolidate && ownerKind != OwnerKindBatch {
 		return chain.UnsignedTx{}, errLater
 	}

@@ -52,6 +52,9 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 	if cc == nil || codec == nil {
 		return nil, reject(ReasonIntent, "chain %q is not configured", b.Chain)
 	}
+	if err := refreshFeeCaps(ctx, codec); err != nil {
+		return nil, err
+	}
 	bc, ok := codec.(BatchCodec)
 	if !ok {
 		return nil, reject(ReasonIntent, "chain %q does not sign batches", b.Chain)

@@ -302,6 +302,17 @@ func (a *Activities) BuildWithdrawalJob(ctx context.Context, id string) (string,
 	return job, nil
 }
 
+// RebuildWithdrawalJob is for a withdrawal whose first send the zone refused because the core and the zone were on different fee-cap changes: it
+// builds the transaction again under the caps in force now (true), or does nothing (false). One ALERT per withdrawal while it waits. A build that
+// cannot be made now (too few outputs) is reported as the usual waiting error.
+func (a *Activities) RebuildWithdrawalJob(ctx context.Context, id string) (bool, error) {
+	if _, seen := a.reserveAlerted.LoadOrStore("feecaps/"+id, true); !seen {
+		a.log().Error("ALERT: the zone refused a withdrawal built under other fee caps than its own; it waits and is rebuilt until the core and the zone are on the same signed change (docs/runbooks/btc-fee-caps.md)", "withdrawal", id)
+	}
+	ok, err := a.D.Svc.RebuildWithdrawalJob(ctx, id)
+	return ok, nonRetry(err)
+}
+
 // VoidWithdrawal releases the hold. It refuses while the nonce is live.
 func (a *Activities) VoidWithdrawal(ctx context.Context, id, reason, feeTx string) error {
 	return nonRetry(a.D.Svc.VoidWithdrawal(ctx, id, reason, feeTx))
