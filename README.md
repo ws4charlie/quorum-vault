@@ -14,11 +14,17 @@ Two rules carry the design:
 ## Architecture
 
 <p align="center">
-<img src="docs/images/arch-operators.png" width="24%" alt="Operators and approvers"><img src="docs/images/arch-api.png" width="48%" alt="Core API"><br/>
+<img src="docs/images/arch-operators.png" width="24%" alt="Operators and approvers"><br/>
+<img src="docs/images/arch-a.png" width="24%" alt=""><br/>
+<a href="docs/identity.md"><img src="docs/images/arch-identity.png" width="24%" alt="Identity"></a><br/>
+<img src="docs/images/arch-b.png" width="24%" alt=""><br/>
+<img src="docs/images/arch-api.png" width="24%" alt="Core API"><br/>
 <img src="docs/images/arch-down.png" width="72%" alt=""><br/>
 <a href="docs/workflows.md"><img src="docs/images/arch-workflows.png" width="24%" alt="Workflows"></a><a href="docs/ledger.md"><img src="docs/images/arch-ledger.png" width="24%" alt="Ledger"></a><a href="docs/audit.md"><img src="docs/images/arch-audit.png" width="24%" alt="Audit trail"></a><br/>
 <img src="docs/images/arch-merge.png" width="72%" alt=""><br/>
-<a href="docs/signing-zone.md"><img src="docs/images/arch-zone.png" width="48%" alt="Signing zone"></a><a href="docs/tiers.md"><img src="docs/images/arch-tiers.png" width="24%" alt="Hot and cold"></a><br/>
+<a href="docs/tiers.md"><img src="docs/images/arch-tiers.png" width="24%" alt="Hot and cold"></a><br/>
+<img src="docs/images/arch-merge2.png" width="72%" alt=""><br/>
+<a href="docs/signing-zone.md"><img src="docs/images/arch-zone.png" width="48%" alt="Signing zone"></a><br/>
 <img src="docs/images/arch-down2.png" width="72%" alt=""><br/>
 <a href="docs/mpc.md"><img src="docs/images/arch-mpc.png" width="72%" alt="MPC parties"></a><br/>
 <img src="docs/images/arch-split.png" width="72%" alt=""><br/>

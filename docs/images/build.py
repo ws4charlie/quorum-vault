@@ -107,6 +107,15 @@ ZH = {
     "Batched sweep": "批量归集", "several addresses, one transaction": "多个地址，一笔交易",
     "Nonce account": "nonce 账户", "withdrawal signs its value": "提现签它的值",
     "First version to land": "最先上链的版本", "uses it up; others are refused": "把它用掉，其余被拒绝",
+    # new in the sweep
+    "Identity": "身份", "login, roles": "登录、角色", "queues jobs only": "只排队任务",
+    "Deposit": "存款", "credited when confirmed": "确认够了才入账",
+    "Send": "发送", "keeps change for a higher fee": "找零里留着加价的余量",
+    "Replace": "替换", "same coins, higher fee": "同样的币、更高手续费",
+    "Child": "子交易", "pulls a stuck send in": "把卡住的交易拉上链",
+    "Cancel": "取消", "coins go back to hot": "币花回热钱包",
+    "Batch": "批量", "many withdrawals, one transaction": "多个提现，一笔交易",
+    "Write-once storage": "一次写入存储", "an archiver copies every head": "归档程序复制每个链头",
     # audit
     "Core": "核心服务", "Cosigner": "Cosigner", "entry": "记录",
     "Kafka": "Kafka", "heads published, so a cut chain stands out": "链头对外发布，截短的链一眼可见",
@@ -217,13 +226,19 @@ def architecture():
         d.box(left, 2, w - left - right, h - 4, title, sub, c, size=26, sub_size=21)
         return d
 
-    d = tile("operators", 380, H, "Operators", "approve and ask", "gray", right=99)
-    d.arrow(281, H / 2, 380, H / 2)
-    d.write()
-    tile("api", 760, H, "Core API", "queues jobs, never signs", "blue", right=99).write()
+    tile("operators", 380, H, "Operators", "approve and ask", "gray").write()
 
-    d = D("arch-down", 1140, 58)  # from the API (right tile) to three boxes
-    d.line(760, 2, 760, 28)
+    d = D("arch-a", 380, 58)  # operators to identity
+    d.arrow(190, 2, 190, 56)
+    d.write()
+    tile("identity", 380, H, "Identity", "login, roles", "purple").write()
+    d = D("arch-b", 380, 58)  # identity to the API
+    d.arrow(190, 2, 190, 56)
+    d.write()
+    tile("api", 380, H, "Core API", "queues jobs only", "blue").write()
+
+    d = D("arch-down", 1140, 58)  # from the API (centre) to three boxes
+    d.line(570, 2, 570, 28)
     d.line(cols[0], 28, cols[2], 28)
     for x in cols:
         d.arrow(x, 28, x, 56)
@@ -233,19 +248,20 @@ def architecture():
     tile("ledger", 380, H, "Ledger", "double entry, Reconcile", "amber").write()
     tile("audit", 380, H, "Audit trail", "hash chains", "purple").write()
 
-    d = D("arch-merge", 1140, 58)
-    d.arrow(cols[0], 2, cols[0], 56, "queues sign jobs", lx=cols[0] + 14, ly=36, anchor="start")
+    d = D("arch-merge", 1140, 58)  # from the row above into hot and cold
+    d.arrow(cols[1], 2, cols[1], 56)
     d.write()
 
-    d = tile("zone", 760, H, "Signing zone", "checks every job before any key signs", "green", right=99)
-    d.arrow(760, H / 2, 661, H / 2, both=False)
+    tile("tiers", 380, H, "Hot and cold", "bands, refills", "blue").write()
+
+    d = D("arch-merge2", 1140, 58)
+    d.arrow(cols[1], 2, cols[1], 56, "queues sign jobs", lx=cols[1] + 14, ly=36, anchor="start")
     d.write()
-    d = tile("tiers", 380, H, "Hot and cold", "bands, refills", "blue")
-    d.arrow(19, H / 2, 0, H / 2)
-    d.write()
+
+    tile("zone", 760, H, "Signing zone", "checks every job before any key signs", "green").write()
 
     d = D("arch-down2", 1140, 58)
-    d.arrow(380, 2, 380, 56, "asks the parties to sign", lx=394, ly=36, anchor="start")
+    d.arrow(cols[1], 2, cols[1], 56, "asks the parties to sign", lx=cols[1] + 14, ly=36, anchor="start")
     d.write()
 
     tile("mpc", 1140, H, "MPC parties A, B, C", "key shares, each sealed in its own HSM token", "green", right=19).write()
@@ -327,7 +343,16 @@ def bitcoin():
     d = D("bitcoin", 1140, 312)
     row(d, [("Public key", "derives each address", "blue"), ("Hot coins", "reserve what is needed", "amber"),
             ("Payment", "and change back to hot", "green")], y=20, h=92, gap=60, total=1080)
-    cards(d, [("Stuck transaction", "replace: same coins, higher fee", "amber"), ("Many small coins", "merge into one", "gray")],
+    cards(d, [("Deposit", "credited when confirmed", "purple"), ("Many small coins", "merge into one", "gray")],
+          y=170, h=100, gap=40)
+    d.write()
+
+
+def bitcoin_sending():
+    d = D("bitcoin-sending", 1140, 312)
+    row(d, [("Send", "keeps change for a higher fee", "amber"), ("Replace", "same coins, higher fee", "amber"),
+            ("Child", "pulls a stuck send in", "green")], y=20, h=92, gap=60, total=1080)
+    cards(d, [("Cancel", "coins go back to hot", "gray"), ("Batch", "many withdrawals, one transaction", "blue")],
           y=170, h=100, gap=40)
     d.write()
 
@@ -365,8 +390,10 @@ def audit():
     for x in gx:
         d.line(x + 160, 170, x + 160, 206)
     d.line(190, 206, 950, 206)
-    d.arrow(570, 206, 570, 232)
-    d.box(280, 232, 580, 76, "Kafka", "heads published, so a cut chain stands out", "purple")
+    d.arrow(290, 206, 290, 232)
+    d.arrow(850, 206, 850, 232)
+    d.box(30, 232, 520, 76, "Kafka", "heads published, so a cut chain stands out", "purple")
+    d.box(590, 232, 520, 76, "Write-once storage", "an archiver copies every head", "green")
     d.write()
 
 
@@ -381,7 +408,7 @@ def testing():
 
 
 def build_all():
-    for f in (flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, solana, identity, audit, testing):
+    for f in (flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, bitcoin_sending, solana, identity, audit, testing):
         f()
 
 

@@ -4,7 +4,7 @@
 
 The audit trail records every decision so it can't be quietly changed later. Each line carries a fingerprint of the line above, like a numbered ledger with each page stamped from the last: tear one out and the stamps stop matching.
 
-<p align="center"><img src="images/audit.png" width="60%" alt="Each trust zone keeps its own hash chain. Each chain publishes its head to Kafka, so a shortened or rewritten chain no longer matches."></p>
+<p align="center"><img src="images/audit.png" width="60%" alt="Each trust zone keeps its own hash chain. Each chain publishes its head to Kafka, and an archiver copies it into write-once storage, so a shortened or rewritten chain no longer matches."></p>
 
 ## One chain per trust zone
 The core, the gateway and the cosigner each keep their own chain in their own database, which refuses edits, deletes and truncation. The gateway and cosigner write each decision in the same transaction as the decision itself: if the record can't be written, nothing is signed. Their chains keep working while the core is down.
