@@ -58,7 +58,8 @@ deletes; the tests prove that. Set the four `QV_ARCHIVE_*` key variables to rand
 
 ```bash
 docker compose --profile archive up -d --wait seaweedfs
-# create the bucket with the root identity (any S3 client), e.g. with aws-cli against http://127.0.0.1:18333, then put-object-lock-configuration as above
+# create the bucket with the root identity (any S3 client), e.g. with aws-cli against https://127.0.0.1:18333 (--ca-bundle data/pki/business/ca.crt, and a client certificate:
+# the store takes TLS and a client certificate of the business authority only), then put-object-lock-configuration as above
 ```
 
 ## Run the archiver
@@ -67,7 +68,8 @@ It runs outside the signing zones: it holds the archive's keys and reads Kafka, 
 
 ```bash
 qv-anchor-archiver -brokers kafka:9092 -archive-bucket qv-audit-heads -archive-region eu-central-1 -retention 61320h -metrics-listen 127.0.0.1:9103
-# other stores: -archive-endpoint https://s3.example.internal (path-style addressing is then on)
+# other stores: -archive-endpoint https://s3.example.internal (path-style addressing is then on), with -archive-tls-cert, -archive-tls-key and -archive-tls-ca for the store
+# (an http endpoint is refused outside development). AWS S3 (no endpoint) needs none of them.
 ```
 
 - It refuses to start, with the reason, if the bucket has no Object Lock, no default retention, a default in GOVERNANCE mode or one shorter than `-retention`. Fix the bucket (a new bucket if the lock was off at creation), not the flag.

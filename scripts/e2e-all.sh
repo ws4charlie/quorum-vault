@@ -241,7 +241,7 @@ start_lane() { # start_lane <n>: Postgres, the chains it needs, and the lane's S
 }
 pids=""; names=""
 if [ "$NEED_INFRA" = 1 ]; then
-  ( dc "$PROJ-shared" --profile infra up -d --wait temporal-db temporal redpanda >"$OUT/shared-up.log" 2>&1 ) & pids="$pids $!"; names="$names shared"
+  ( dc "$PROJ-shared" --profile infra up -d --wait temporal-db temporal temporal-gate redpanda >"$OUT/shared-up.log" 2>&1 ) & pids="$pids $!"; names="$names shared"
 fi
 if [ "$NEED_KC" = 1 ]; then
   ./scripts/keycloak-env.sh >/dev/null
@@ -277,7 +277,7 @@ run_group() { # run_group <lane> <group>
     export QV_TEMPORAL_ADDR="127.0.0.1:$T_PORT" QV_KAFKA_BROKERS="127.0.0.1:$K_PORT"
     export SOFTHSM2_CONF="$OUT/lane$n/softhsm/softhsm2.conf"
     export COMPOSE_PROJECT_NAME="$PROJ-l$n" QV_PG_PORT=$(pg_port "$n") QV_ANVIL_PORT=$(anvil_port "$n") QV_BTC_PORT=$(btc_port "$n") QV_SOL_PORT=$(sol_port "$n")
-    case "$(field "$g" 2)" in *k*) export QV_E2E_KEYCLOAK_URL="http://127.0.0.1:$KC_PORT" ;; esac
+    case "$(field "$g" 2)" in *k*) export QV_E2E_KEYCLOAK_URL="https://127.0.0.1:$KC_PORT" ;; esac
     [ "$scale" -gt 1 ] && export QV_E2E_TIMEOUT_SCALE="${QV_E2E_TIMEOUT_SCALE:-$scale}"
     exec bash -c "$cmd"
   ) >"$OUT/$g.log" 2>&1 </dev/null

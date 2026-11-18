@@ -44,10 +44,10 @@ chain-down:
 
 # Phase 2 infra (profile "infra"): Temporal + its own Postgres + UI, and Redpanda.
 infra-up:
-	docker compose --profile infra up -d --wait temporal-db temporal temporal-ui redpanda
+	docker compose --profile infra up -d --wait temporal-db temporal temporal-gate temporal-ui redpanda
 
 infra-down:
-	docker compose --profile infra rm -sfv temporal-ui temporal temporal-schema temporal-db redpanda
+	docker compose --profile infra rm -sfv temporal-ui temporal-gate temporal temporal-schema temporal-db redpanda
 
 # Monitoring (profile "monitoring"): a read-only Prometheus over monitoring/ and node-exporter's textfile collector for the gateway's metrics file.
 monitoring-up:
@@ -143,7 +143,7 @@ test-e2e-evm-flows:
 # Real identity provider: a two-approver withdrawal with tokens from the dev Keycloak (docker compose profile identity; `make keycloak-up` first).
 test-e2e-evm-identity:
 	./scripts/keycloak-env.sh
-	$(E2E_EVM_ENV) QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-http://127.0.0.1:8180} go test -count=1 -p 1 -timeout 25m -v -run 'TestOIDCWithRealKeycloak' ./e2e/custody/...
+	$(E2E_EVM_ENV) QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-https://127.0.0.1:8180} go test -count=1 -p 1 -timeout 25m -v -run 'TestOIDCWithRealKeycloak' ./e2e/custody/...
 keycloak-up:
 	./scripts/keycloak-env.sh
 	docker compose --profile identity up -d --wait keycloak

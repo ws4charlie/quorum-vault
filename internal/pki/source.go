@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -224,7 +225,12 @@ func (s *Source) WriteMetrics(w io.Writer) {
 
 // MetricsHandler serves the metrics of several sources in the Prometheus text format.
 func MetricsHandler(srcs ...*Source) http.Handler {
-	sorted := append([]*Source(nil), srcs...)
+	var sorted []*Source
+	for _, s := range srcs {
+		if s != nil {
+			sorted = append(sorted, s)
+		}
+	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].cfg.Name < sorted[j].cfg.Name })
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -232,6 +238,33 @@ func MetricsHandler(srcs ...*Source) http.Handler {
 			s.WriteMetrics(w)
 		}
 	})
+}
+
+// WithMetrics returns a handler that serves h's output and then the certificate metrics of srcs (nil entries are skipped).
+func WithMetrics(h http.Handler, srcs ...*Source) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r)
+		for _, s := range srcs {
+			if s != nil {
+				s.WriteMetrics(w)
+			}
+		}
+	})
+}
+
+// WriteMetricsFile replaces path atomically with the certificate metrics of srcs, for a textfile collector.
+func WriteMetricsFile(path string, srcs ...*Source) error {
+	var b strings.Builder
+	for _, s := range srcs {
+		if s != nil {
+			s.WriteMetrics(&b)
+		}
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // nameOf returns the zone and service of a certificate's single spiffe URI SAN.

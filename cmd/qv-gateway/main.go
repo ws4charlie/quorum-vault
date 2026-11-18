@@ -120,6 +120,23 @@ func run(log *slog.Logger) error {
 		})
 	}
 
+	if *metricsFile != "" {
+		// the certificate metrics go to a sibling file of the same textfile directory, whether or not a route is configured
+		tlsFile := strings.TrimSuffix(*metricsFile, ".prom") + "-tls.prom"
+		go func() {
+			for {
+				if err := pki.WriteMetricsFile(tlsFile, tsrc, lsrc); err != nil {
+					log.Error("cannot write the certificate metrics file", "error", err.Error())
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(15 * time.Second):
+				}
+			}
+		}()
+	}
+
 	signers := map[string]signer.Signer{}
 	if gateway.HasHSMSigners(cfg) {
 		lib, err := hsm.LoadLib(hsm.DefaultLibPath())

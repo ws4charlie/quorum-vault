@@ -16,6 +16,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/audit"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
 
 // AnchorOptions tunes PublishHeads.
@@ -137,9 +138,18 @@ func ArchiveFlags(fs *flag.FlagSet) func() (*S3Archive, error) {
 	bucket := fs.String("archive-bucket", os.Getenv("QV_ARCHIVE_BUCKET"), "bucket that holds the archived heads (env QV_ARCHIVE_BUCKET)")
 	region := fs.String("archive-region", envOr("QV_ARCHIVE_REGION", "us-east-1"), "region (env QV_ARCHIVE_REGION)")
 	pathStyle := fs.Bool("archive-path-style", os.Getenv("QV_ARCHIVE_ENDPOINT") != "", "path-style addressing: on for a store at host:port, off for AWS")
+	// the identity for an https store: the same three flags as a service, with the prefix archive-
+	tlsFor := pki.Flags(fs, "archive-")
 	return func() (*S3Archive, error) {
 		if *bucket == "" {
 			return nil, nil
+		}
+		var tsrc *pki.Source
+		if *endpoint != "" {
+			var err error
+			if tsrc, err = tlsFor("archive-store", pki.ZoneBusiness, nil); err != nil {
+				return nil, err
+			}
 		}
 		ak, err := envOrFile("QV_ARCHIVE_ACCESS_KEY")
 		if err != nil {
@@ -149,7 +159,7 @@ func ArchiveFlags(fs *flag.FlagSet) func() (*S3Archive, error) {
 		if err != nil {
 			return nil, err
 		}
-		return NewS3Archive(ArchiveConfig{Endpoint: *endpoint, Region: *region, Bucket: *bucket, AccessKey: ak, SecretKey: sk, PathStyle: *pathStyle})
+		return NewS3Archive(ArchiveConfig{Endpoint: *endpoint, Region: *region, Bucket: *bucket, AccessKey: ak, SecretKey: sk, PathStyle: *pathStyle, TLS: tsrc})
 	}
 }
 
