@@ -27,5 +27,15 @@ Workers and scripts that call the core use their own service identity with a cli
 ## Login does not approve a payment
 The signing zone does not trust the identity provider: approvals are still signatures that it checks against keys in its own configuration ([Signing zone](signing-zone.md)). A stolen provider could queue withdrawals, but could not approve one.
 
+## How services prove who they are
+
+Services do not trust a network address. Each trust zone, the business side and the signing zone, has its own private certificate authority, and a certificate from one is not accepted by the other. Every service holds a certificate that lasts hours to days, with a name of the form `spiffe://quorumvault/<zone>/<service>`, and swaps in the renewed files by itself while it runs. A server does not stop at "my authority signed it": each endpoint keeps its own list of names that may call it. A service whose certificate has expired refuses to start, and an alert fires before that happens. The few links that cross the zones are explicit: the business authority issues a named visitor certificate, and the signing zone's authority is never trusted on a business endpoint.
+
+The core API follows this first. People log in at the identity provider and need no certificate; a service that calls with its own token must also show a certificate whose name is on the list, so a stolen token alone is no use. The runbook for renewing certificates is [certificates](runbooks/certificates.md).
+
+## What the audit trail records
+
+Every write first leaves a row naming the issuer, `sub`, authentication level, login time and token id, then the change itself carries the same identity. If that row cannot be written, nothing changes.
+
 ## Development only
 A plain header that names the actor, and a test issuer with a local key, work only in development and test; production refuses them. Tests log in without a passkey ([Limits](limits.md)).

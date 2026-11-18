@@ -8,9 +8,13 @@ export CGO_ENABLED := 1
 DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=disable
 export DATABASE_URL
 
-.PHONY: monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp
+.PHONY: pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp
 
-setup: softhsm db-up chain-up
+setup: softhsm db-up chain-up pki
+
+# One private CA per trust zone and short-lived certificates for every service, into data/pki (gitignored). Run again to rotate; services reload.
+pki:
+	./scripts/pki.sh
 
 # Writes .env with random SoftHSM PINs if there is none (never overwrites). Run it first on a fresh checkout.
 dev-env:

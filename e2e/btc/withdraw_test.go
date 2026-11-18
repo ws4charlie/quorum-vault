@@ -16,6 +16,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
+	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
 // withdrawalSystem is a system with the whole withdrawal path, a funded hot shard, and a customer with a deposit.
@@ -308,7 +309,7 @@ func TestWithdrawalInconsistentFeeCapsRefuseToStartInTheCoreAndTheZone(t *testin
 	if err := os.WriteFile(bad, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	core := s.spawn("qv-core", "-config", bad, "-dsn", s.bizDSN, "-addr", fmt.Sprintf("127.0.0.1:%d", freePort(t)), "-task-queue", s.queue)
+	core := s.spawn("qv-core", append([]string{"-config", bad, "-dsn", s.bizDSN, "-addr", fmt.Sprintf("127.0.0.1:%d", freePort(t)), "-task-queue", s.queue}, pkitest.CoreArgs()...)...)
 	refuses("qv-core with a low max_tx_fee_sats", core, "raise max_tx_fee_sats to at least 72250")
 	// The zone: the same, from the gateway's own config.
 	var gf gateway.File
