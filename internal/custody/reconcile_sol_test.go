@@ -18,6 +18,7 @@ type solRaceChain struct {
 	mu      sync.Mutex
 	reads   int // how many times the probe was asked about
 	fire    func()
+	outcome func(kind, id string) (chain.Outcome, func()) // the answer about a move, and what happens after the read
 	refill  string
 	fee     *big.Int
 	balance map[string]*big.Int
@@ -43,6 +44,16 @@ func (f *solRaceChain) Status(_ context.Context, h string) (chain.TxStatus, erro
 		}
 	}
 	return chain.TxConfirmed, nil
+}
+func (f *solRaceChain) Outcome(_ context.Context, kind, id string) (chain.Outcome, error) {
+	if f.outcome == nil {
+		return chain.Outcome{State: chain.OutcomeOpen}, nil
+	}
+	oc, after := f.outcome(kind, id)
+	if after != nil {
+		after()
+	}
+	return oc, nil
 }
 func (f *solRaceChain) TxFee(_ context.Context, h string) (*big.Int, error) {
 	if h == raceRefill {
@@ -132,6 +143,83 @@ func TestReconcileSOLColdBookedWhileReading(t *testing.T) {
 		rep := run(t, true)
 		if rep.Clean {
 			t.Fatal("a one-lamport difference on the cold address was not reported")
+		}
+	})
+}
+
+// A rebalance between two hot shards is final on the chain; the worker books its broadcast (the amount leaves the source shard, the clearing account
+// takes it) while Reconcile is reading. The books' side and the set of finalized transactions must be one view: reading the books before the booking
+// and the set after it reported "hot_balance TKN books 9000000000 chain 8000000000" and "clearing_residual TKN rebal: books 0 chain -1000000000" for a
+// move that was only in flight. A move that really lost money must still be reported.
+func TestReconcileSOLRebalanceBookedWhileReading(t *testing.T) {
+	const move = 1_000_000_000
+	run := func(t *testing.T, breakIt bool) Report {
+		f := &solRaceChain{balance: map[string]*big.Int{}, fee: new(big.Int)}
+		hot0, hot1 := sol.Address([32]byte{1}), sol.Address([32]byte{3})
+		sf := solFile()
+		sf.Chain.SOL.HotShards, sf.Chain.SOL.NoncePool, sf.Chain.SOL.NonceRentLamports = []string{hot0, hot1}, 1, 1_447_680
+		sf.Chain.SOL.ComputeUnitLimit, sf.Chain.SOL.ComputeUnitPrice, sf.Chain.SOL.MaxMicroLamports, sf.Chain.SOL.FeeBumpPercent = 100_000, 1000, 10_000, 25
+		cfg, err := sf.Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := New(dbtest.New(t), cfg, f, solRaceReader{f})
+		ctx := context.Background()
+		if err := s.Bootstrap(ctx); err != nil {
+			t.Fatal(err)
+		}
+		p0, p1 := cfg.PartitionKey("TKN", 0).String(), cfg.PartitionKey("TKN", 1).String()
+		if err := s.FundHotAsset(ctx, "seed", 0, "TKN", big.NewInt(10*move)); err != nil {
+			t.Fatal(err)
+		}
+		const id = "rb-race"
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO rebalance_moves (id, chain, asset, partition_id, to_partition_id, to_address, amount, status)
+			VALUES ($1,$2,'TKN',$3,$4,$5,$6,'signing')`, id, cfg.Chain, p0, p1, hot1, big.NewInt(move).String()); err != nil {
+			t.Fatal(err)
+		}
+		// a sweep in flight that the chain has not decided: asking about it is the moment the booking of the rebalance happens
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO sweeps (id, chain, asset, from_address, to_partition_id, amount, status)
+			VALUES ('sw-probe',$1,'TKN',$2,$3,1,'signing')`, cfg.Chain, hot1, p0); err != nil {
+			t.Fatal(err)
+		}
+		// The chain: the rebalance is final.
+		out := big.NewInt(9 * move)
+		if breakIt {
+			out.Sub(out, big.NewInt(1))
+		}
+		f.balance = map[string]*big.Int{hot0 + "|TKN": out, hot1 + "|TKN": big.NewInt(move)}
+		probes := 0
+		f.outcome = func(kind, oid string) (chain.Outcome, func()) {
+			switch kind {
+			case "sweep":
+				probes++
+				if probes == 2 { // the second read of the landed set
+					return chain.Outcome{State: chain.OutcomeOpen}, func() {
+						if err := s.RecordRebalanceBroadcast(ctx, id, "rb-tx"); err != nil {
+							t.Error(err)
+						}
+					}
+				}
+			case "rebalance":
+				return chain.Outcome{State: chain.OutcomeConfirmed, Hash: "rb-tx", Kind: chain.AttemptSend}, nil
+			}
+			return chain.Outcome{State: chain.OutcomeOpen}, nil
+		}
+		rep, err := s.Reconcile(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rep
+	}
+	t.Run("booked during the read", func(t *testing.T) {
+		rep := run(t, false)
+		if !rep.Clean || rep.SkippedChainChecks != 0 {
+			t.Fatalf("clean %v skipped %d: %+v", rep.Clean, rep.SkippedChainChecks, rep.Failures())
+		}
+	})
+	t.Run("a real difference is still reported", func(t *testing.T) {
+		if rep := run(t, true); rep.Clean {
+			t.Fatal("a missing token lamport on the source shard was not reported")
 		}
 	})
 }
