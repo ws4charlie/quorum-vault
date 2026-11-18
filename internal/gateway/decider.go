@@ -49,6 +49,7 @@ func NewDecider(cfg *Config, codecs map[string]ChainCodec, guard *Guard, mode Mo
 	if now == nil {
 		now = time.Now
 	}
+	bindFeeCaps(cfg, codecs, guard)
 	return &Decider{cfg: cfg, codecs: codecs, guard: guard, mode: mode, now: now}
 }
 
@@ -146,6 +147,10 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 	codec := d.codecs[intent.Chain]
 	if cc == nil || codec == nil {
 		return nil, reject(ReasonIntent, "chain %q is not configured", intent.Chain)
+	}
+
+	if err := refreshFeeCaps(ctx, codec); err != nil {
+		return nil, err
 	}
 
 	// 2. Transaction matches intent.

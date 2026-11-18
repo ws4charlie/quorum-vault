@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -23,6 +24,8 @@ type Adapter struct {
 	byAddr map[string]shard  // canonical address -> shard
 	cold   map[string]string // canonical cold address -> pool
 	coldBy map[string]string // pool -> canonical cold address
+
+	view *FeeCapsView // the fee caps in force: the configured ones, or the newest signed change (feecaps.go)
 
 	waitMu   sync.Mutex
 	sweepWhy string // why sweeps are waiting now ("" when they are not), to log a change once
@@ -73,6 +76,18 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 		}
 		pool := strings.TrimSuffix(k, "/native")
 		a.cold[d.Canonical], a.coldBy[pool] = pool, d.Canonical
+	}
+	static := FeeCaps{MaxTxFeeSats: v.MaxTxFeeSats, MaxFeeRate: v.MaxFeeRate}
+	if v.FeeCaps != nil {
+		rules, err := v.FeeCaps.rules(v.Chain, v.MaxInputs, max(1, v.MaxBatchOutputs))
+		if err != nil {
+			return nil, err
+		}
+		a.view = NewFeeCapsView(static, rules, pool, func(n int) {
+			slog.Error("ALERT btc fee caps: rows of the fee-cap table do not carry valid approver signatures and are ignored", "chain", v.Chain, "rows", n)
+		})
+	} else {
+		a.view = NewFeeCapsView(static, nil, nil, nil)
 	}
 	var info struct {
 		Chain string `json:"chain"`
@@ -125,3 +140,24 @@ func (a *Adapter) DeriveDepositAddress(_ context.Context, customerID string, ind
 var errLater = fmt.Errorf("btc: %w (a later P7 task)", chain.ErrNotSupported)
 
 // The Adapter is also the custody.Reader of the chain: SafeHead, TxBlock and Balance (cold.go).
+
+// caps is the fee caps in force now. Each public build or bump starts with refreshCaps, so it works under the newest signed record; a build that is
+// under way finishes under the caps it started with or a newer record, never a mixture the zone would not accept (it stamps the sequence number).
+func (a *Adapter) caps() FeeCaps {
+	if c, seq := a.view.Now(); seq > 0 {
+		return c
+	}
+	return FeeCaps{MaxTxFeeSats: a.cfg.MaxTxFeeSats, MaxFeeRate: a.cfg.MaxFeeRate} // no signed change: the configuration
+}
+
+// capsSeq is the sequence number of the change in force (0: the configuration).
+func (a *Adapter) capsSeq() int64 {
+	_, s := a.view.Now()
+	return s
+}
+
+// refreshCaps reads the newest signed record. When it cannot, the build does not start.
+func (a *Adapter) refreshCaps(ctx context.Context) error { return a.view.Refresh(ctx) }
+
+// FeeCapsNow is the caps and the sequence number the core builds under now (for metrics and tests).
+func (a *Adapter) FeeCapsNow() (FeeCaps, int64) { return a.view.Now() }

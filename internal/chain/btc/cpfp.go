@@ -86,6 +86,9 @@ func CPFPRoom(maxTxFeeSats, maxFeeRate, pf, vp, vc uint64) uint64 {
 
 // BuildCPFP builds the owner's child, or the next bump of the child it has. See the rule above. It implements chain.CPFPBuilder.
 func (a *Adapter) BuildCPFP(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return chain.UnsignedTx{}, err
+	}
 	if !cpfpOwner(ownerKind) {
 		return chain.UnsignedTx{}, chain.ErrNotSupported
 	}
@@ -106,7 +109,7 @@ func (a *Adapter) BuildCPFP(ctx context.Context, tx pgx.Tx, ownerKind, ownerID s
 	change := pp.Outputs[n-1].Value
 	vp := uint64(EstimateVSize(pb.Tx))
 	vc := vsize(1, sh.script)
-	room := CPFPRoom(a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate, pf, vp, vc)
+	room := CPFPRoom(a.caps().MaxTxFeeSats, a.caps().MaxFeeRate, pf, vp, vc)
 	if dust := DustLimit(KindP2WPKH); change > dust {
 		room = min(room, change-dust)
 	} else {

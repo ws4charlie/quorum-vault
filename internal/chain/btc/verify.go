@@ -2,12 +2,14 @@ package btc
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
 
@@ -43,6 +45,16 @@ type SigningConfig struct {
 	// fee caps must reach max_fee_rate for the largest batch (CheckFeeCaps).
 	MaxBatchOutputs int
 	MaxBatchValue   uint64
+	// FeeCaps, when set, lets the zone's approvers change the two fee caps with signatures within these bounds (feecaps.go). Nil: the caps above are
+	// the caps and no change is accepted.
+	FeeCaps *FeeCapsPolicy
+}
+
+// FeeCapsPolicy is the zone's static rules for signed fee-cap changes: how many approvers, how old a change may be, and the bounds no signature can lift.
+type FeeCapsPolicy struct {
+	MinApprovers int
+	MaxAge       time.Duration
+	Bounds       FeeCapsBounds
 }
 
 // Verifier implements chain.TxVerifier from SigningConfig alone.
@@ -52,6 +64,7 @@ type Verifier struct {
 	acct   *Account
 	shard  map[string]shardInfo // partition ID -> its own shard
 	cold   map[string]string    // pool -> canonical cold address
+	view   *FeeCapsView         // the fee caps in force (feecaps.go); the static ones until BindFeeCaps
 }
 
 type shardInfo struct {
@@ -69,7 +82,8 @@ func NewVerifier(cfg SigningConfig) (*Verifier, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := &Verifier{cfg: cfg, params: acct.Params, acct: acct, shard: map[string]shardInfo{}, cold: map[string]string{}}
+	v := &Verifier{cfg: cfg, params: acct.Params, acct: acct, shard: map[string]shardInfo{}, cold: map[string]string{},
+		view: NewFeeCapsView(FeeCaps{MaxTxFeeSats: cfg.MaxTxFeeSats, MaxFeeRate: cfg.MaxFeeRate}, nil, nil, nil)}
 	if cfg.MaxTxFeeSats == 0 || cfg.MaxFeeRate == 0 || cfg.MaxInputs <= 0 {
 		return nil, errors.New("btc: max_tx_fee_sats, max_fee_rate and max_inputs are required and must be positive")
 	}
@@ -223,11 +237,15 @@ func (v *Verifier) Parse(u chain.UnsignedTx) (*Parsed, error) {
 		return nil, reject("outputs (%d) exceed inputs (%d)", out, pr.Sum)
 	}
 	pr.Fee = pr.Sum - out
-	if pr.Fee > v.cfg.MaxTxFeeSats {
-		return nil, reject("fee %d sats exceeds the cap %d", pr.Fee, v.cfg.MaxTxFeeSats)
+	caps, seq := v.view.Now()
+	if p.FeeCapsSeq != seq {
+		return nil, reject("the transaction was built under fee-cap change %d, the zone is on %d: %s", p.FeeCapsSeq, seq, FeeCapsSeqNote)
 	}
-	if vs := uint64(EstimateVSize(built.Tx)); pr.Fee > v.cfg.MaxFeeRate*vs {
-		return nil, reject("fee %d sats over %d vbytes is above %d sat/vB", pr.Fee, vs, v.cfg.MaxFeeRate)
+	if pr.Fee > caps.MaxTxFeeSats {
+		return nil, reject("fee %d sats exceeds the cap %d", pr.Fee, caps.MaxTxFeeSats)
+	}
+	if vs := uint64(EstimateVSize(built.Tx)); pr.Fee > caps.MaxFeeRate*vs {
+		return nil, reject("fee %d sats over %d vbytes is above %d sat/vB", pr.Fee, vs, caps.MaxFeeRate)
 	}
 	return pr, nil
 }
@@ -398,10 +416,11 @@ func (v *Verifier) CheckFirstSend(u chain.UnsignedTx, i signjob.Intent) error {
 		payments += o.Value
 	}
 	vs := uint64(EstimateVSize(pr.Built.Tx))
-	if short := ReserveShortfall(pr.Sum, payments, pr.Fee, vs, v.cfg.MaxTxFeeSats, v.cfg.MaxFeeRate); short > 0 {
+	caps, _ := v.view.Now()
+	if short := ReserveShortfall(pr.Sum, payments, pr.Fee, vs, caps.MaxTxFeeSats, caps.MaxFeeRate); short > 0 {
 		change := pr.Payload.Outputs[n-1].Value
 		return reject("%s keeps %d sats of change; the zone needs at least %d for its fee cap of %d sats over %d vbytes (fee %d, dust %d): the core reserved less than the zone's caps need, %s",
-			i.Kind, change, change+short, FeeCap(v.cfg.MaxTxFeeSats, v.cfg.MaxFeeRate, vs), vs, pr.Fee, DustLimit(KindP2WPKH), CapMismatchNote)
+			i.Kind, change, change+short, FeeCap(caps.MaxTxFeeSats, caps.MaxFeeRate, vs), vs, pr.Fee, DustLimit(KindP2WPKH), CapMismatchNote)
 	}
 	return nil
 }
@@ -459,9 +478,10 @@ func (v *Verifier) CheckCPFP(u chain.UnsignedTx, i signjob.Intent, parents map[s
 		return reject("the parent was signed for partition %q, the child is for %q", parent.PartitionID, i.PartitionID)
 	}
 	vc := uint64(EstimateVSize(pr.Built.Tx))
-	if room := CPFPRoom(v.cfg.MaxTxFeeSats, v.cfg.MaxFeeRate, parent.Fee, parent.VSize, vc); pr.Fee > room {
+	caps, _ := v.view.Now()
+	if room := CPFPRoom(caps.MaxTxFeeSats, caps.MaxFeeRate, parent.Fee, parent.VSize, vc); pr.Fee > room {
 		return reject("the child pays %d sats; with the parent's %d over %d vbytes the package (%d vbytes) may pay at most %d more under the fee caps (%d sats, %d sat/vB)",
-			pr.Fee, parent.Fee, parent.VSize, parent.VSize+vc, room, v.cfg.MaxTxFeeSats, v.cfg.MaxFeeRate)
+			pr.Fee, parent.Fee, parent.VSize, parent.VSize+vc, room, caps.MaxTxFeeSats, caps.MaxFeeRate)
 	}
 	return nil
 }
@@ -515,3 +535,15 @@ func (v *Verifier) Canonical(address string) (string, error) {
 	}
 	return d.Canonical, nil
 }
+
+// BindFeeCaps lets signed changes (feecaps.go) set the zone's caps: the verifier reads the newest valid record from q at each Refresh, judged by
+// rules, and the static caps of its configuration stand until there is one. onSkip is called when rows that do not verify are ignored.
+func (v *Verifier) BindFeeCaps(rules *FeeCapsRules, q Queryer, onSkip func(skipped int)) {
+	v.view = NewFeeCapsView(FeeCaps{MaxTxFeeSats: v.cfg.MaxTxFeeSats, MaxFeeRate: v.cfg.MaxFeeRate}, rules, q, onSkip)
+}
+
+// RefreshFeeCaps reads the current record; call it before deciding on a transaction.
+func (v *Verifier) RefreshFeeCaps(ctx context.Context) error { return v.view.Refresh(ctx) }
+
+// FeeCapsNow is the caps and the sequence number the zone judges by now.
+func (v *Verifier) FeeCapsNow() (FeeCaps, int64) { return v.view.Now() }

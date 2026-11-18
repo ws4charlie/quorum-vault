@@ -22,6 +22,9 @@ import (
 // fee-bump reserve of a transaction with that many inputs and two outputs (the payment and the change): the fee cap for its size and one dust change,
 // which stay in the shard (reserve.go). An output reserved by a withdrawal is not available, so a move never takes one. Zero (or less than dust) means nothing can be moved yet.
 func (a *Adapter) MaxMove(ctx context.Context, partitionID string) (*big.Int, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return nil, err
+	}
 	sh, err := a.shardOf(partitionID)
 	if err != nil {
 		return nil, err
@@ -49,7 +52,7 @@ func (a *Adapter) MaxMove(ctx context.Context, partitionID string) (*big.Int, er
 	}
 	// The cold address may be a script as large as P2WSH (34 bytes): size the payment output for it.
 	vs := vsize(n, sh.script, make([]byte, 34))
-	keep := ReserveNeed(0, vs*a.feeRate(ctx), vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate) // the fee now or the cap, and one dust change
+	keep := ReserveNeed(0, vs*a.feeRate(ctx), vs, a.coldCaps().MaxTxFeeSats, a.coldCaps().MaxFeeRate) // the fee now or the cap, and one dust change
 	if sum <= keep {
 		return new(big.Int), nil
 	}
@@ -440,6 +443,9 @@ func (a *Adapter) ColdAvailable(ctx context.Context, coldAddress string) (*big.I
 // refuse is never exported. When the outputs one transaction can carry hold less than the need, the payment is what they hold less the fee, and the
 // refill is done in rounds. It reserves nothing.
 func (a *Adapter) BuildRefill(ctx context.Context, b chain.RefillBuild) (coldsign.BTCRequest, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return coldsign.BTCRequest{}, err
+	}
 	sh, err := a.shardOf(b.PartitionID)
 	if err != nil {
 		return coldsign.BTCRequest{}, err
@@ -507,8 +513,8 @@ func (a *Adapter) BuildRefill(ctx context.Context, b chain.RefillBuild) (coldsig
 	if change == 0 {
 		vs = vsize(len(picked), hotScript)
 	}
-	if fee > a.cfg.MaxTxFeeSats || fee > a.cfg.MaxFeeRate*vs {
-		return coldsign.BTCRequest{}, fmt.Errorf("%w: a fee of %d sats is above the core's caps (%d sats, %d sat/vB)", ErrFeeTooHigh, fee, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate)
+	if fee > a.coldCaps().MaxTxFeeSats || fee > a.coldCaps().MaxFeeRate*vs {
+		return coldsign.BTCRequest{}, fmt.Errorf("%w: a fee of %d sats is above the core's caps (%d sats, %d sat/vB)", ErrFeeTooHigh, fee, a.coldCaps().MaxTxFeeSats, a.coldCaps().MaxFeeRate)
 	}
 	r := coldsign.BTCRequest{Version: coldsign.BTCRequestVersion, ID: b.ID, Revision: b.Revision, Network: a.cfg.Network, Chain: a.cfg.Chain, Pool: k.Pool, From: cold}
 	for _, u := range picked {
@@ -641,4 +647,11 @@ func (a *Adapter) UnsentAttempt(ctx context.Context, id string) ([]byte, bool, e
 func (a *Adapter) DropUnsentAttempt(ctx context.Context, id string) error {
 	_, err := a.pool.Exec(ctx, `DELETE FROM btc_attempts WHERE chain=$1 AND owner_kind='refill' AND owner_id=$2 AND broadcast_at IS NULL`, a.cfg.Chain, id)
 	return err
+}
+
+// coldCaps are the caps of a refill, which the offline signer re-checks with caps of its own that are not signed: the lower of the configured ones and
+// the ones in force, so a signed change can lower what a refill may pay but never raise it above the configuration.
+func (a *Adapter) coldCaps() FeeCaps {
+	c := a.caps()
+	return FeeCaps{MaxTxFeeSats: min(c.MaxTxFeeSats, a.cfg.MaxTxFeeSats), MaxFeeRate: min(c.MaxFeeRate, a.cfg.MaxFeeRate)}
 }

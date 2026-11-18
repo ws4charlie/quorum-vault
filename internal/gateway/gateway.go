@@ -200,6 +200,9 @@ func (g *Gateway) Process(ctx context.Context, job signjob.Job) Decision {
 		attrs = append(attrs, "reason", d.Reason)
 	}
 	g.opt.Logger.Info("decision", attrs...)
+	if d.Outcome == OutcomeRejected && strings.Contains(d.Reason, btc.FeeCapsSeqNote) {
+		g.opt.Logger.Error("ALERT: the zone refused a transaction built under other fee caps than its own; the core and the zone wait until the same signed change is applied to both (docs/runbooks/btc-fee-caps.md)", attrs...)
+	}
 	if d.Outcome == OutcomeRejected && strings.Contains(d.Reason, btc.CapMismatchNote) {
 		g.opt.Logger.Error("ALERT: the zone refused a first send because the core reserved less than the zone's fee caps need; the core and the zone fee caps must be equal (docs/runbooks/btc-fee-caps.md)", attrs...)
 	}

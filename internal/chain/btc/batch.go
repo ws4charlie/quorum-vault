@@ -33,6 +33,9 @@ var _ chain.BatchBuilder = (*Adapter)(nil)
 // be bumped to the cap with its own inputs (reserve.go). Outputs another transaction holds locked are not taken, so the prefix is what is free now.
 // A member whose destination or amount cannot be paid at all (an invalid address, below dust) is an error naming it, not a skip.
 func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionID string, members []BatchMember) (BatchBuild, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return BatchBuild{}, err
+	}
 	if batchID == "" || len(members) == 0 {
 		return BatchBuild{}, errors.New("btc: a batch needs an id and at least one member")
 	}
@@ -132,7 +135,7 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 		for _, m := range members[:k] {
 			pay += m.Amount
 		}
-		return ReserveNeed(pay, vs*rate, vs, a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate), vs
+		return ReserveNeed(pay, vs*rate, vs, a.caps().MaxTxFeeSats, a.caps().MaxFeeRate), vs
 	}
 	// take walks a list in order and returns the shortest prefix of it that holds need(k, n), at most max_inputs long.
 	take := func(list []utxo, k int) []utxo {
@@ -202,8 +205,8 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 	outs := append(append([][]byte{}, scripts[:funded]...), sh.script)
 	vs := vsize(len(picked), outs...)
 	fee := vs * rate
-	if fee > a.cfg.MaxTxFeeSats {
-		return BatchBuild{}, fmt.Errorf("%w: %d sats against the cap %d", ErrFeeTooHigh, fee, a.cfg.MaxTxFeeSats)
+	if fee > a.caps().MaxTxFeeSats {
+		return BatchBuild{}, fmt.Errorf("%w: %d sats against the cap %d", ErrFeeTooHigh, fee, a.caps().MaxTxFeeSats)
 	}
 	change := sum - pay - fee // the selection keeps at least the fee cap's room and a dust change above the payments
 	p.Outputs = append(p.Outputs, PayloadOutput{Address: sh.address, Value: change})
@@ -211,6 +214,7 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 	if err != nil {
 		return BatchBuild{}, err
 	}
+	p.FeeCapsSeq = a.capsSeq()
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return BatchBuild{}, err
@@ -261,7 +265,7 @@ func (a *Adapter) batchShort(head BatchMember, oldest []utxo, need func(k, n int
 	}
 	want, vs := need(1, n)
 	return fmt.Errorf("%w: %w: %s holds %d sats in %d outputs for the head of the batch (%s, %d sats) and the reserve to bump it to the fee cap (%d sats for %d vbytes, plus %d dust change) needs %d in all",
-		chain.ErrNotEnoughOutputs, chain.ErrFeeReserve, partitionID, sum, n, head.ID, head.Amount, FeeCap(a.cfg.MaxTxFeeSats, a.cfg.MaxFeeRate, vs), vs, changeDust, want)
+		chain.ErrNotEnoughOutputs, chain.ErrFeeReserve, partitionID, sum, n, head.ID, head.Amount, FeeCap(a.caps().MaxTxFeeSats, a.caps().MaxFeeRate, vs), vs, changeDust, want)
 }
 
 // FeeShares splits a batch's fee between its members, in satoshis, deterministically: a member's weight is the size of its own output plus an equal

@@ -23,6 +23,9 @@ type Payload struct {
 	LockTime uint32          `json:"locktime"`
 	Inputs   []PayloadInput  `json:"inputs"`
 	Outputs  []PayloadOutput `json:"outputs"`
+	// FeeCapsSeq is the sequence number of the signed fee-cap change the core built under (0: the caps of the configuration). The zone refuses a
+	// payload whose number is not its own current one (feecaps.go). It does not change the transaction.
+	FeeCapsSeq int64 `json:"fee_caps_seq,omitempty"`
 }
 
 // PayloadInput is one input. Path is the derivation path below the account key: [branch, index], branch 0 for deposit addresses and
