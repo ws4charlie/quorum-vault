@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that pull request's older run, so superseded runs do not hold runners. Pushes to main and dev are never
+# cancelled: every commit there keeps its own full run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # The CI image (ci/qv-ci.Dockerfile): clang-20, cb-mpc, SoftHSM2 and Go, tagged by a hash of its inputs (ci/image-tag.sh). Almost always the tag
   # exists already and this job is a no-op of a few seconds; when an input changed it builds the image and pushes it, and the jobs below wait for it.
