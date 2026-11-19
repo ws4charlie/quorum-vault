@@ -39,6 +39,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
+	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
@@ -177,7 +178,7 @@ type Proc struct {
 }
 
 func NewProc(t testing.TB, name, logPath, bin string, env []string, args ...string) *Proc {
-	p := &Proc{Name: name, Log: logPath, bin: bin, args: args, env: env}
+	p := &Proc{Name: name, Log: logPath, bin: bin, args: dbtest.RoleArgs(t, bin, args), env: env}
 	t.Cleanup(func() { p.Stop() })
 	return p
 }

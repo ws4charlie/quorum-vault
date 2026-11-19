@@ -802,7 +802,7 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	cmd := exec.Command(filepath.Join(binDir, name), args...)
+	cmd := exec.Command(filepath.Join(binDir, name), dbtest.RoleArgs(s.t, name, args)...)
 	cmd.Env = append(append(os.Environ(), pkitest.EnvFor(name)...), env...)
 	cmd.Env = append(cmd.Env, "SOFTHSM2_CONF="+hsm.SoftHSMConf())
 	cmd.Stdout, cmd.Stderr = lf, lf

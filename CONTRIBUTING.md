@@ -29,6 +29,8 @@ make dev-env && make setup && make mpc-build
 
 Each group writes a log under `data/e2e-all/`. Pull requests run the light groups; the heavy crash and failure groups run nightly or from the Actions tab. `QV_CRASH_BOUNDARIES` picks crash points, and `make test-e2e-evm TEST=<name>` runs a single test. The `mpc-party` module has its own tests (`cd mpc-party && go test ./...`).
 
+`make db-up` also applies the migrations as the owner role (`make migrate` does it alone): `qv-core` and `qv-worker` only check that they are applied and refuse to start otherwise. See [docs/runbooks/database-roles.md](docs/runbooks/database-roles.md).
+
 ## Logging in to the core API
 
 The core API wants a bearer token. For development, start Keycloak with `make keycloak-up` (the realm in `deploy/keycloak` has the test users alice, bob, carol and ops; their random passwords, the admin console's and the guardian client's secret are written to `.env` as `QV_TEST_PASSWORD_<NAME>`, `QV_KEYCLOAK_ADMIN_PASSWORD` and `QV_KEYCLOAK_GUARDIAN_SECRET`; nothing is in the repo), then start `qv-core` with `QV_ENV=dev QV_OIDC_ISSUER=http://127.0.0.1:8180/realms/quorumvault QV_OIDC_AUDIENCE=qv-core`. A token for a script comes from `curl -s -d grant_type=client_credentials -d client_id=qv-guardian -d client_secret=$QV_KEYCLOAK_GUARDIAN_SECRET http://127.0.0.1:8180/realms/quorumvault/protocol/openid-connect/token`. People log in with the `qv-cli` client (authorization code with PKCE, then a passkey). Without Keycloak, `QV_ENV=dev QV_DEV_ACTOR_HEADER=1` brings back the old `X-Actor` header; a production start refuses it. See [docs/identity.md](docs/identity.md).

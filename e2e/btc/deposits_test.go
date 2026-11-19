@@ -11,6 +11,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
+	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
@@ -210,7 +211,7 @@ func TestWrongNetworkConfigRefusesToStart(t *testing.T) {
 		if bin == "qv-core" {
 			args = append(args, pkitest.CoreArgs()...) // with TLS configured, the refusal that remains is the network check
 		}
-		out, err := exec.Command(filepath.Join(binDir, bin), args...).CombinedOutput()
+		out, err := exec.Command(filepath.Join(binDir, bin), dbtest.RoleArgs(t, bin, args)...).CombinedOutput()
 		if err == nil || !strings.Contains(string(out), "another network") {
 			t.Fatalf("%s with a mainnet key on regtest: err %v, output %s", bin, err, out)
 		}
