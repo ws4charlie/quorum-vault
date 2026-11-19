@@ -160,28 +160,10 @@ func (v *NitroVerifier) Verify(evidence []byte, expect Expect, now time.Time) (*
 		return nil, fail(RuleFormat, "document is %d bytes (allowed 1..%d)", len(evidence), maxDocBytes)
 	}
 
-	// 1. COSE_Sign1 envelope. [AWS-DOC]: the document is a CBOR-encoded COSE_Sign1; NSM output carries tag 18, some tools omit it.
-	b := evidence
-	if b[0] == 0xC0|coseTagSign1 { // major type 6, value 18
-		b = b[1:]
-	}
-	if b[0] != 0x84 { // definite array of 4: nothing but the optional tag 18 may precede it
-		return nil, fail(RuleFormat, "not a COSE_Sign1 (tag 18 or untagged array of four)")
-	}
-	var s coseSign1
-	if err := strictDec.Unmarshal(b, &s); err != nil {
-		return nil, &Error{Rule: RuleFormat, Detail: "not a COSE_Sign1 array", Err: err}
-	}
-	if len(s.Unprotected) == 0 || s.Unprotected[0]>>5 != 5 { // major type 5: map
-		return nil, fail(RuleFormat, "unprotected header is not a map")
-	}
-	var prot map[int64]any
-	if err := strictDec.Unmarshal(s.Protected, &prot); err != nil {
-		return nil, &Error{Rule: RuleFormat, Detail: "protected header", Err: err}
-	}
-	// [AWS-DOC]/[NSM-API]: the signing algorithm is ECDSA w/ SHA-384 (alg -35); nothing else is accepted.
-	if alg, ok := prot[coseHeaderAlg]; !ok || fmt.Sprint(alg) != fmt.Sprint(coseAlgES384) {
-		return nil, fail(RuleAlgorithm, "protected alg is %v, want %d (ES384)", alg, coseAlgES384)
+	// 1. COSE_Sign1 envelope and algorithm.
+	s, err := parseSign1(evidence)
+	if err != nil {
+		return nil, err
 	}
 	var doc nitroDoc
 	if err := strictDec.Unmarshal(s.Payload, &doc); err != nil {
@@ -201,23 +183,13 @@ func (v *NitroVerifier) Verify(evidence []byte, expect Expect, now time.Time) (*
 		return nil, err
 	}
 
-	// 4. COSE signature ([COSE] RFC 9052 4.4, ES384) under the leaf's P-384 key.
+	// 4. COSE signature under the leaf's P-384 key.
 	pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
 	if !ok || pub.Curve != elliptic.P384() {
 		return nil, fail(RuleAlgorithm, "leaf certificate key is not ECDSA P-384")
 	}
-	if len(s.Signature) != es384SigBytes {
-		return nil, fail(RuleSignature, "signature is %d bytes, want %d", len(s.Signature), es384SigBytes)
-	}
-	tbs, err := sigStructure(s.Protected, s.Payload)
-	if err != nil {
-		return nil, &Error{Rule: RuleFormat, Detail: "sig_structure", Err: err}
-	}
-	h := sha512.Sum384(tbs)
-	r := new(big.Int).SetBytes(s.Signature[:es384SigBytes/2])
-	sv := new(big.Int).SetBytes(s.Signature[es384SigBytes/2:])
-	if !ecdsa.Verify(pub, h[:], r, sv) {
-		return nil, fail(RuleSignature, "ES384 signature does not verify")
+	if err := verifySign1(pub, s.Protected, s.Payload, s.Signature); err != nil {
+		return nil, err
 	}
 
 	// 5. Freshness (our rule: a document is a statement about now; [AWS-DOC] leaves the window to the relying party).
@@ -268,6 +240,53 @@ func (v *NitroVerifier) Verify(evidence []byte, expect Expect, now time.Time) (*
 		return nil, fail(RulePublicKey, "public_key differs from the expected one")
 	}
 	return claims, nil
+}
+
+// parseSign1 decodes the COSE_Sign1 envelope and checks the protected algorithm is ES384. [AWS-DOC]: the document is a CBOR-encoded
+// COSE_Sign1; NSM output carries tag 18, some tools omit it. Nothing but that optional tag may precede the array.
+func parseSign1(evidence []byte) (*coseSign1, error) {
+	b := evidence
+	if b[0] == 0xC0|coseTagSign1 { // major type 6, value 18
+		b = b[1:]
+	}
+	if len(b) == 0 || b[0] != 0x84 { // definite array of 4
+		return nil, fail(RuleFormat, "not a COSE_Sign1 (tag 18 or untagged array of four)")
+	}
+	var s coseSign1
+	if err := strictDec.Unmarshal(b, &s); err != nil {
+		return nil, &Error{Rule: RuleFormat, Detail: "not a COSE_Sign1 array", Err: err}
+	}
+	if len(s.Unprotected) == 0 || s.Unprotected[0]>>5 != 5 { // major type 5: map
+		return nil, fail(RuleFormat, "unprotected header is not a map")
+	}
+	var prot map[int64]any
+	if err := strictDec.Unmarshal(s.Protected, &prot); err != nil {
+		return nil, &Error{Rule: RuleFormat, Detail: "protected header", Err: err}
+	}
+	// [AWS-DOC]/[NSM-API]: the signing algorithm is ECDSA w/ SHA-384 (alg -35); nothing else is accepted.
+	if alg, ok := prot[coseHeaderAlg]; !ok || fmt.Sprint(alg) != fmt.Sprint(coseAlgES384) {
+		return nil, fail(RuleAlgorithm, "protected alg is %v, want %d (ES384)", alg, coseAlgES384)
+	}
+	return &s, nil
+}
+
+// verifySign1 checks an ES384 COSE_Sign1 signature ([COSE] RFC 9052 4.4 Sig_structure, RFC 9053 2.1) with no payload rules, so a published
+// test vector can drive it.
+func verifySign1(pub *ecdsa.PublicKey, protected, payload, sig []byte) error {
+	if len(sig) != es384SigBytes {
+		return fail(RuleSignature, "signature is %d bytes, want %d", len(sig), es384SigBytes)
+	}
+	tbs, err := sigStructure(protected, payload)
+	if err != nil {
+		return &Error{Rule: RuleFormat, Detail: "sig_structure", Err: err}
+	}
+	h := sha512.Sum384(tbs)
+	r := new(big.Int).SetBytes(sig[:es384SigBytes/2])
+	sv := new(big.Int).SetBytes(sig[es384SigBytes/2:])
+	if !ecdsa.Verify(pub, h[:], r, sv) {
+		return fail(RuleSignature, "ES384 signature does not verify")
+	}
+	return nil
 }
 
 func checkFields(d *nitroDoc) error {

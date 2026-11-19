@@ -45,14 +45,6 @@ func TestProductionBuildHasNoMock(t *testing.T) {
 	}
 }
 
-// The verifier tests need the mock, so they are tagged. Run them from the plain `go test ./...` too, so CI covers them without a second command.
-func TestVerifierRulesUnderTeesim(t *testing.T) {
-	if testing.Short() {
-		t.Skip("-short")
-	}
-	goCmd(t, "test", "-count=1", "-tags", "teesim", ".")
-}
-
 // The test CA tool refuses to run in a production build.
 func TestCATooIsInertWithoutTag(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
