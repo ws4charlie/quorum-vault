@@ -81,22 +81,24 @@ SELECT pg_temp.grant_matrix(ARRAY[
     -- ---- qv_core and qv_worker: the business application. Both build the same custody.Service, but they do different work:
     -- qv-core serves the API (customers, deposit addresses, withdrawal requests and approvals, refill ceremonies, cancels) and writes only what
     -- those do; qv-worker runs the workflow activities (scanning, nonces, attempts, signing jobs, sweeps, cold moves, rebalances) and reads
-    -- customers and deposit addresses without writing them. Core reads the worker's tables (reconciliation and balances). Neither may touch
+    -- customers and deposit addresses without writing them. Core reads the worker's tables (reconciliation and balances).
+    -- Bitcoin and Solana API paths (refill import, CPFP, nonce pool registration, cancels) write the btc_*, sol_* and sign_jobs bookkeeping the
+    -- workflow also writes, so core has the worker's rights on those tables (found by running the BTC and Solana e2e groups). Neither may touch
     -- audit_log's contents (only the relay writes it; core reads it for the verify endpoint), and the ledger journal is append-only.
     ['qv_core',   'assets',                   'SELECT, INSERT, UPDATE'],
     ['qv_worker', 'assets',                   'SELECT, INSERT, UPDATE'],
     ['qv_core',   'audit_log',                'SELECT'],
-    ['qv_core',   'btc_attempts',             'SELECT'],
+    ['qv_core',   'btc_attempts',             'SELECT, INSERT, UPDATE, DELETE'],
     ['qv_worker', 'btc_attempts',             'SELECT, INSERT, UPDATE, DELETE'],
-    ['qv_core',   'btc_batch_items',          'SELECT, UPDATE, DELETE'],
+    ['qv_core',   'btc_batch_items',          'SELECT, INSERT, UPDATE, DELETE'],
     ['qv_worker', 'btc_batch_items',          'SELECT, INSERT, UPDATE, DELETE'],
-    ['qv_core',   'btc_batches',              'SELECT, UPDATE'],
+    ['qv_core',   'btc_batches',              'SELECT, INSERT, UPDATE'],
     ['qv_worker', 'btc_batches',              'SELECT, INSERT, UPDATE'],
     ['qv_core',   'btc_fee_cap_changes',      'SELECT'],
     ['qv_worker', 'btc_fee_cap_changes',      'SELECT'],
-    ['qv_core',   'btc_refusals',             'SELECT'],
+    ['qv_core',   'btc_refusals',             'SELECT, INSERT, UPDATE, DELETE'],
     ['qv_worker', 'btc_refusals',             'SELECT, INSERT, UPDATE, DELETE'],
-    ['qv_core',   'btc_utxos',                'SELECT'],
+    ['qv_core',   'btc_utxos',                'SELECT, INSERT, UPDATE'],
     ['qv_worker', 'btc_utxos',                'SELECT, INSERT, UPDATE'],
     ['qv_core',   'chain_cursors',            'SELECT'],
     ['qv_worker', 'chain_cursors',            'SELECT, INSERT, UPDATE'],
@@ -146,17 +148,17 @@ SELECT pg_temp.grant_matrix(ARRAY[
     ['qv_worker', 'scanned_blocks',           'SELECT, INSERT, UPDATE'],
     ['qv_core',   'schema_migrations',        'SELECT'],
     ['qv_worker', 'schema_migrations',        'SELECT'],
-    ['qv_core',   'sign_jobs',                'SELECT, DELETE'],
+    ['qv_core',   'sign_jobs',                'SELECT, INSERT, UPDATE, DELETE'],
     ['qv_worker', 'sign_jobs',                'SELECT, INSERT, UPDATE, DELETE'],
     ['qv_core',   'sol_cold_nonce_retired',   'SELECT, INSERT, UPDATE'],
     ['qv_worker', 'sol_cold_nonce_retired',   'SELECT, INSERT, UPDATE'],
     ['qv_core',   'sol_cold_ops',             'SELECT, INSERT, UPDATE'],
     ['qv_worker', 'sol_cold_ops',             'SELECT, INSERT, UPDATE'],
-    ['qv_core',   'sol_nonce_accounts',       'SELECT, UPDATE'],
+    ['qv_core',   'sol_nonce_accounts',       'SELECT, INSERT, UPDATE'],
     ['qv_worker', 'sol_nonce_accounts',       'SELECT, INSERT, UPDATE'],
-    ['qv_core',   'sol_nonce_allocations',    'SELECT'],
+    ['qv_core',   'sol_nonce_allocations',    'SELECT, INSERT, UPDATE'],
     ['qv_worker', 'sol_nonce_allocations',    'SELECT, INSERT, UPDATE'],
-    ['qv_core',   'sol_tx_attempts',          'SELECT'],
+    ['qv_core',   'sol_tx_attempts',          'SELECT, INSERT'],
     ['qv_worker', 'sol_tx_attempts',          'SELECT, INSERT'],
     ['qv_core',   'sweep_items',              'SELECT'],
     ['qv_worker', 'sweep_items',              'SELECT, INSERT'],
