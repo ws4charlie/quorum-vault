@@ -5,6 +5,7 @@
 # new files up without a restart. An existing CA is kept; delete data/pki to start over.
 #   scripts/pki.sh                 CAs if missing, then all certificates (QV_PKI_LEAF_TTL, default 72h)
 #   scripts/pki.sh renew [-every]  keep issuing until stopped
+# It also makes the test CA of the simulated TEE attester (data/pki/tee).
 # Production does not use this: the operator's PKI provides the files (docs/runbooks/certificates.md).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,4 +19,13 @@ fi
 if [ "${1:-}" = renew ]; then shift; exec "$BIN" renew "$@"; fi
 "$BIN" init
 "$BIN" issue
+# Test CA of the simulated TEE attester (mock AWS Nitro documents, research/TEE.md): root and intermediate under $QV_PKI_DIR/tee. Built only with
+# -tags teesim, so no production binary contains it; production verifies against the vendor's root. QV_PKI_TEE=0 skips it.
+if [ "${QV_PKI_TEE:-1}" != 0 ]; then
+  TEE_BIN="${QV_ATTEST_CA_BIN:-$ROOT/bin/qv-attest-ca}"
+  if [ ! -x "$TEE_BIN" ] || [ -n "$(find mpc-party/internal/attest -newer "$TEE_BIN" -name '*.go' 2>/dev/null | head -1)" ]; then
+    (cd mpc-party && go build -tags teesim -o "$TEE_BIN" ./internal/attest/cmd/qv-attest-ca)
+  fi
+  "$TEE_BIN" -dir "$QV_PKI_DIR/tee"
+fi
 echo "pki: certificates in $QV_PKI_DIR (valid ${QV_PKI_LEAF_TTL:-72h})"
