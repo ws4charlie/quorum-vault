@@ -24,6 +24,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chainfactory"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db"
+	"github.com/ws4charlie/quorum-vault/internal/health"
 	"github.com/ws4charlie/quorum-vault/internal/pki"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
@@ -57,7 +58,8 @@ func run(log *slog.Logger) error {
 	devActor := flag.Bool("dev-actor-header", os.Getenv("QV_DEV_ACTOR_HEADER") == "1", "accept X-Actor with nothing verified; refused unless QV_ENV is dev or test (env QV_DEV_ACTOR_HEADER=1)")
 	tlsFor := pki.Flags(flag.CommandLine, "")
 	serviceAllow := flag.String("service-allow", envOr("QV_CORE_SERVICE_ALLOW", "business/guardian,business/worker"), "names (zone/service) of the services that may call with a client-credentials token; each must also present a business-zone client certificate with that name (env QV_CORE_SERVICE_ALLOW)")
-	metricsListen := flag.String("metrics-listen", os.Getenv("QV_CORE_METRICS_LISTEN"), "serve Prometheus metrics (certificate expiry) in plain http on a loopback address, e.g. 127.0.0.1:9101; off when empty (env QV_CORE_METRICS_LISTEN)")
+	metricsListen := flag.String("metrics-listen", os.Getenv("QV_CORE_METRICS_LISTEN"), "serve Prometheus metrics (certificate expiry) in plain http on a loopback address, e.g. 127.0.0.1:9101 (another address only with QV_METRICS_ALLOW_NON_LOOPBACK=1); off when empty (env QV_CORE_METRICS_LISTEN)")
+	healthListen := health.Flag(flag.CommandLine)
 	flag.Parse()
 	if *cfgPath == "" || *dsn == "" {
 		return errors.New("-config and -dsn (or DATABASE_URL) are required")
@@ -116,12 +118,20 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	probe := health.New(log)
+	stopHealth, err := probe.Serve(ctx, *healthListen)
+	if err != nil {
+		return err
+	}
+	defer stopHealth()
 
 	pool, err := db.OpenTLS(ctx, *dsn, tsrc, pki.Allow{pki.ID(pki.ZoneBusiness, "postgres")})
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
+	probe.Check("database", health.Ping(pool))
+	probe.Check("certificates", health.Certs(tsrc))
 	if err := db.Check(ctx, pool); err != nil {
 		return err
 	}
@@ -154,7 +164,7 @@ func run(log *slog.Logger) error {
 		go tsrc.Run(ctx.Done())
 	}
 	if *metricsListen != "" {
-		if err := pki.RequireLoopback(*metricsListen); err != nil {
+		if err := pki.CheckMetricsAddr(*metricsListen, pki.ZoneBusiness); err != nil {
 			return fmt.Errorf("-metrics-listen: %w", err)
 		}
 		mux := http.NewServeMux()
@@ -169,9 +179,13 @@ func run(log *slog.Logger) error {
 		}()
 		defer msrv.Close()
 	}
+	// On SIGTERM: stop being ready first (the probe), then stop accepting and let running requests finish, at most shutdownGrace.
+	// run returns only after Shutdown has, so a request in flight is not cut by the process exiting.
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
@@ -179,6 +193,7 @@ func run(log *slog.Logger) error {
 		log.Warn("DEV ONLY: X-Actor is accepted without verification")
 	}
 	log.Info("qv-core listening", "addr", *addr, "chain", cfg.Chain, "issuer", *oidcIssuer)
+	probe.SetReady(true)
 	var serveErr error
 	if tsrc != nil {
 		serveErr = srv.ListenAndServeTLS("", "") // certificates come from TLSConfig.GetCertificate, which follows the files
@@ -188,8 +203,12 @@ func run(log *slog.Logger) error {
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return serveErr
 	}
+	<-drained
 	return nil
 }
+
+// shutdownGrace is how long running requests may take after SIGTERM; terminationGracePeriodSeconds must be larger (deploy/images/README.md).
+const shutdownGrace = 10 * time.Second
 
 func splitList(s string) []string {
 	var out []string

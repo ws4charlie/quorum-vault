@@ -21,6 +21,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/cosigner"
 	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
+	"github.com/ws4charlie/quorum-vault/internal/health"
 	"github.com/ws4charlie/quorum-vault/internal/kafkatls"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
 	"github.com/ws4charlie/quorum-vault/internal/pki"
@@ -52,6 +53,7 @@ func run(log *slog.Logger) error {
 	tlsFor := pki.Flags(flag.CommandLine, "")
 	// the audit heads go to the business Kafka: the explicit link, with a certificate the business authority issued (business/cosigner-link)
 	linkFor := pki.Flags(flag.CommandLine, "link-")
+	healthListen := health.Flag(flag.CommandLine)
 	flag.Parse()
 	if *configPath == "" || *guardDSN == "" || *socket == "" {
 		return fmt.Errorf("-config, -guard-dsn and -socket are required")
@@ -67,6 +69,12 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	probe := health.New(log)
+	stopHealth, err := probe.Serve(ctx, *healthListen)
+	if err != nil {
+		return err
+	}
+	defer stopHealth()
 	tsrc, err := tlsFor("qv-cosigner", pki.ZoneSigning, log)
 	if err != nil {
 		return err
@@ -86,6 +94,8 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("open replay guard: %w", err)
 	}
 	defer pool.Close()
+	probe.Check("guard database", health.Ping(pool))
+	probe.Check("certificates", health.Certs(tsrc, lsrc))
 	guard, err := gateway.OpenGuard(ctx, pool)
 	if err != nil {
 		return err
@@ -105,20 +115,6 @@ func run(log *slog.Logger) error {
 		defer pub.Close()
 		// Publishing the head never holds up a decision; if Kafka is down the heads catch up when it is back.
 		go auditchain.PublishHeads(ctx, guard.Querier(), *auditSource, pub, auditchain.AnchorOptions{Interval: *anchorEvery, Logger: log})
-	}
-	if *metricsListen != "" {
-		if err := pki.RequireLoopback(*metricsListen); err != nil {
-			return fmt.Errorf("-metrics-listen: %w", err)
-		}
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", pki.MetricsHandler(tsrc, lsrc))
-		msrv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-		go func() {
-			if err := msrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Error("metrics server stopped", "error", err.Error())
-			}
-		}()
-		defer msrv.Close()
 	}
 	c, err := cosigner.New(cfg, guard, log, nil)
 	if err != nil {
@@ -146,22 +142,49 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if *metricsListen != "" {
+		if err := pki.RequireLoopback(*metricsListen); err != nil {
+			return fmt.Errorf("-metrics-listen: %w", err)
+		}
+		mux := http.NewServeMux()
+		certs := pki.MetricsHandler(tsrc, lsrc)
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+			certs.ServeHTTP(w, r)
+			cosigner.WriteSocketMetrics(w, sockTLS, time.Now()) // the party-to-cosigner channel certificate (pinned, loaded once)
+		})
+		msrv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := msrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Error("metrics server stopped", "error", err.Error())
+			}
+		}()
+		defer msrv.Close()
+	}
 	srv := &http.Server{Handler: c.Handler(), ReadHeaderTimeout: 5 * time.Second,
 		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn)} // a refused handshake (an unpinned caller) shows in the log
+	// On SIGTERM: not ready first, then stop accepting and let running decisions finish (at most shutdownGrace). Serve returns as soon as
+	// Shutdown begins, so main waits for Shutdown itself: a decision in flight is not cut by the process exiting.
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
-		sc, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		sc, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 		srv.Shutdown(sc)
 	}()
 	log.Info("qv-cosigner started", "socket", *socket, "chains", len(cfg.Chains))
+	probe.SetReady(true)
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}
+	<-drained
 	os.Remove(*socket)
 	log.Info("qv-cosigner stopped cleanly")
 	return nil
 }
+
+// shutdownGrace is how long a decision in flight may take after SIGTERM; terminationGracePeriodSeconds must be larger (deploy/images/README.md).
+const shutdownGrace = 10 * time.Second
 
 func sameDatabase(a, b string) (bool, error) {
 	key := func(dsn string) (string, error) {
