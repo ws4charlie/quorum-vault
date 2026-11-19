@@ -14,6 +14,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -56,6 +57,8 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/hsm/hsmtest"
 	"github.com/ws4charlie/quorum-vault/internal/hsmsigner"
 	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
+	"github.com/ws4charlie/quorum-vault/internal/webauthn"
+	"github.com/ws4charlie/quorum-vault/internal/webauthn/webauthntest"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
 
@@ -148,6 +151,7 @@ type opts struct {
 	frozen          bool     // factory deployed frozen and left frozen
 	gwETHPerTx      string   // gateway per-tx cap for ETH (wei), default huge
 	gwETHDest       []string // when set, the gateway lets ETH withdrawals pay only these addresses (default: any_destination)
+	webauthn        bool     // enrol "dave", a simulated WebAuthn approver (s.wa["dave"])
 	businessOneTier bool     // business config knows only the lowest tier (the gateway still has two)
 	approvalTimeout string   // default 20s
 	stuckAfter      string   // default 4s (scaled)
@@ -278,6 +282,7 @@ type system struct {
 	keyPath string
 	dir     string
 	approv  map[string]ed25519.PrivateKey
+	wa      map[string]*webauthntest.Authenticator // SIMULATED WebAuthn approvers (software authenticators)
 
 	svc *custody.Service
 	tc  client.Client
@@ -379,7 +384,7 @@ func newSystem(t *testing.T, o opts) *system {
 			t.Fatal(err)
 		}
 	}
-	s := &system{t: t, o: o, ctx: context.Background(), approv: map[string]ed25519.PrivateKey{}, dir: dir, tag: uuid.NewString()[:8], tm: tm}
+	s := &system{t: t, o: o, ctx: context.Background(), approv: map[string]ed25519.PrivateKey{}, wa: map[string]*webauthntest.Authenticator{}, dir: dir, tag: uuid.NewString()[:8], tm: tm}
 	s.rpcURL = os.Getenv("QV_ANVIL_RPC")
 	if s.rpcURL == "" {
 		s.rpcURL = "http://127.0.0.1:18545"
@@ -473,6 +478,11 @@ func newSystem(t *testing.T, o opts) *system {
 		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 		s.approv[name] = priv
 		apprFiles[name] = gateway.ApproverFile{PublicKey: hex.EncodeToString(pub), Enabled: true}
+	}
+	if o.webauthn {
+		a := webauthntest.New(t, webauthn.ES256, waRPID, waOrigin)
+		s.wa["dave"] = a
+		apprFiles["dave"] = gateway.ApproverFile{Enabled: true, Scheme: "webauthn", Alg: webauthn.ES256, PublicKey: a.PublicKeyHex(), CredentialID: a.CredentialIDString(), RPID: waRPID, Origins: []string{waOrigin}}
 	}
 	seed := s.approv["auto"].Seed()
 	s.keyPath = filepath.Join(s.dir, "auto.key")
@@ -1107,6 +1117,31 @@ func (s *system) approve(actor, id string) (int, map[string]any) {
 	sig := ed25519.Sign(s.approv[actor], h)
 	return s.call("POST", "/v2/withdrawals/"+id+"/approvals", map[string]string{"X-Actor": actor},
 		map[string]any{"actor": actor, "signature": hex.EncodeToString(sig)})
+}
+
+// SIMULATED WebAuthn relying party of the e2e approvers.
+const (
+	waRPID   = "approve.example.com"
+	waOrigin = "https://approve.example.com"
+)
+
+// approveWebAuthn is approve for a WebAuthn approver: it asserts over the hash of withdrawal hashFrom's intent (the right one when hashFrom == id) and posts
+// the assertion as the approval of withdrawal id.
+func (s *system) approveWebAuthn(actor, id, hashFrom string) (int, map[string]any) {
+	s.t.Helper()
+	code, in := s.call("GET", "/v2/withdrawals/"+hashFrom+"/intent", nil, nil)
+	if code != 200 {
+		s.t.Fatalf("intent: %d %v", code, in)
+	}
+	h, err := hex.DecodeString(in["hash"].(string))
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	as := s.wa[actor].Assert(h, webauthntest.Options{})
+	b64 := base64.RawURLEncoding.EncodeToString
+	return s.call("POST", "/v2/withdrawals/"+id+"/approvals", map[string]string{"X-Actor": actor},
+		map[string]any{"actor": actor, "webauthn": map[string]string{"credential_id": b64(as.CredentialID), "authenticator_data": b64(as.AuthenticatorData),
+			"client_data_json": b64(as.ClientDataJSON), "signature": b64(as.Signature)}})
 }
 
 func (s *system) count(query string, args ...any) int {

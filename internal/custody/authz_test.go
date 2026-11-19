@@ -3,6 +3,7 @@ package custody
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -208,5 +209,78 @@ func TestIntentRequesterIsTheVerifiedSub(t *testing.T) {
 	r := do(h, "GET", "/v2/withdrawals/"+wd.ID+"/intent", tok(is, authtest.Spec{Sub: "ops", Roles: []string{"operator"}}), nil)
 	if r.Code != 200 || !strings.Contains(r.Body.String(), `"sub-of-ini"`) {
 		t.Fatalf("intent response: %d %s", r.Code, r.Body)
+	}
+}
+
+// The approvals route takes exactly one of an Ed25519 signature or a WebAuthn assertion, in shape only: the core never judges either.
+func TestApprovalsRouteAcceptsEd25519OrWebAuthn(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newSvc(t)
+	is, h := apiWith(t, s, false)
+	if err := s.transferForTest(ctx, "c1", 1000); err != nil {
+		t.Fatal(err)
+	}
+	to := "0x52908400098527886E0F7030069857D2E4169EE7"
+	w1, _, err := s.RequestWithdrawal(WithActorForTest(ctx, "ini"), WithdrawalRequest{Actor: "ini", IdempotencyKey: "k", Customer: "c1", Asset: "ETH", To: to, Amount: big.NewInt(300)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v2/withdrawals/" + w1.ID + "/approvals"
+	b64 := func(n int) string { return base64.RawURLEncoding.EncodeToString(make([]byte, n)) }
+	cd := base64.RawURLEncoding.EncodeToString([]byte(`{"type":"webauthn.get"}`))
+	wa := func(mod func(m map[string]string)) map[string]string {
+		m := map[string]string{"credential_id": b64(16), "authenticator_data": b64(37), "client_data_json": cd, "signature": b64(70)}
+		if mod != nil {
+			mod(m)
+		}
+		return m
+	}
+	post := func(sub string, body map[string]any) int {
+		return do(h, "POST", path, tok(is, authtest.Spec{Sub: sub, Roles: []string{"approver"}}), body).Code
+	}
+	edSig := strings.Repeat("00", 64)
+	for name, c := range map[string]struct {
+		body map[string]any
+		code int
+	}{
+		"both set":              {map[string]any{"actor": "alice", "signature": edSig, "webauthn": wa(nil)}, 400},
+		"neither set":           {map[string]any{"actor": "alice"}, 400},
+		"padded base64":         {map[string]any{"actor": "alice", "webauthn": wa(func(m map[string]string) { m["signature"] = base64.URLEncoding.EncodeToString(make([]byte, 70)) })}, 400},
+		"not base64url":         {map[string]any{"actor": "alice", "webauthn": wa(func(m map[string]string) { m["credential_id"] = "+/+/" })}, 400},
+		"client data not JSON":  {map[string]any{"actor": "alice", "webauthn": wa(func(m map[string]string) { m["client_data_json"] = b64(20) })}, 400},
+		"empty credential":      {map[string]any{"actor": "alice", "webauthn": wa(func(m map[string]string) { m["credential_id"] = "" })}, 400},
+		"short authenticator":   {map[string]any{"actor": "alice", "webauthn": wa(func(m map[string]string) { m["authenticator_data"] = b64(36) })}, 400},
+		"oversized credential":  {map[string]any{"actor": "alice", "webauthn": wa(func(m map[string]string) { m["credential_id"] = b64(maxCredentialID + 1) })}, 400},
+		"oversized auth data":   {map[string]any{"actor": "alice", "webauthn": wa(func(m map[string]string) { m["authenticator_data"] = b64(maxAuthenticator + 1) })}, 400},
+		"oversized client data": {map[string]any{"actor": "alice", "webauthn": wa(func(m map[string]string) { m["client_data_json"] = b64(maxClientDataJSON + 1) })}, 400},
+		"oversized signature":   {map[string]any{"actor": "alice", "webauthn": wa(func(m map[string]string) { m["signature"] = b64(maxAssertionSig + 1) })}, 400},
+		"unknown field":         {map[string]any{"actor": "alice", "webauthn": map[string]string{"credential_id": b64(16), "extra": "x"}}, 400},
+		"body actor not sub":    {map[string]any{"actor": "bob", "webauthn": wa(nil)}, 400},
+	} {
+		if got := post("alice", c.body); got != c.code {
+			t.Errorf("%s: %d, want %d", name, got, c.code)
+		}
+	}
+	// The requester cannot approve with an assertion either.
+	if got := post("ini", map[string]any{"actor": "ini", "webauthn": wa(nil)}); got != 403 {
+		t.Errorf("self-approval with an assertion: %d", got)
+	}
+	// A well-formed assertion is stored as given (the zone judges it) and carried in the job's approval.
+	if got := post("alice", map[string]any{"actor": "alice", "webauthn": wa(nil)}); got != 200 {
+		t.Fatalf("assertion: %d", got)
+	}
+	// Ed25519 is unchanged: a second approver by signature counts too.
+	if got := post("bob", map[string]any{"actor": "bob", "signature": edSig}); got != 200 {
+		t.Fatalf("ed25519: %d", got)
+	}
+	got, err := s.GetWithdrawal(ctx, w1.ID)
+	if err != nil || len(got.Approvals) != 2 {
+		t.Fatalf("approvals %+v, %v", got.Approvals, err)
+	}
+	if a := got.Approvals[0]; a.Actor != "alice" || a.WebAuthn == nil || len(a.Signature) != 0 || len(a.WebAuthn.CredentialID) != 16 || len(a.WebAuthn.Signature) != 70 {
+		t.Fatalf("stored webauthn approval %+v", a)
+	}
+	if a := got.Approvals[1]; a.Actor != "bob" || a.WebAuthn != nil || len(a.Signature) != 64 {
+		t.Fatalf("stored ed25519 approval %+v", a)
 	}
 }
