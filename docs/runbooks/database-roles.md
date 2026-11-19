@@ -6,13 +6,14 @@ Every service connects to Postgres as a role of its own. The certificate's name 
 
 | Service | Role | What it may do |
 |---|---|---|
-| `qv-core`, `qv-worker` | `qv_core`, `qv_worker` | Read and write the custody tables the code uses (ledger accounts, holds, journal and transactions append-only; withdrawals, sweeps, nonces, deposits, jobs and so on), insert into `outbox`, read `schema_migrations`. No `audit_log`, no delete on the journal. |
+| `qv-core` | `qv_core` | The API's writes: customers, deposit addresses, withdrawals, the ledger (journal append-only), refills, `outbox` (insert, and read of `id` only), and the Bitcoin and Solana bookkeeping its endpoints touch (`btc_*`, `sol_*`, `sign_jobs`, with the worker's rights). Reads the worker's other tables and `audit_log` (verify endpoint). |
+| `qv-worker` | `qv_worker` | The workflow's writes: scanning, nonces, attempts, utxos, sweeps, cold moves, rebalances, jobs, the ledger, `outbox` insert. Reads customers and deposit addresses without writing them. No `audit_log`. |
 | `qv-relay` | `qv_relay` | Read `outbox`, change only its `published_at` and `chained_at`; append to and read `audit_log`; call `outbox_prune()`. Nothing else. |
 | `qv-anchor-archiver` | `qv_archiver` | Nothing: it reads Kafka and writes the archive store. |
 | `qv-gateway` (link) | `qv_gateway` | Read and update `sign_jobs`. |
 | admin, `qv-migrate` | `qv` | Owner. |
 
-The exact grants are the matrix in `migrations/0030_service_roles.sql`. A table added by a later migration is closed to every service role until that migration grants it.
+`keysets` (key registry): core and worker select, insert, update; nobody deletes. The exact grants are the matrix in `migrations/0030_service_roles.sql`. A table added by a later migration is closed to every service role until that migration grants it.
 
 ## Migrations
 
