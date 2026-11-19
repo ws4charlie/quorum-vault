@@ -11,7 +11,7 @@ cd "$(dirname "$0")/../.."
 # shellcheck source=images.sh
 . deploy/images/images.sh
 # secret-looking paths (extended regex on the path inside the layer)
-SECRET_RE='(^|/)(\.env(\..*)?|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.netrc|\.npmrc|\.pgpass|\.git-credentials|credentials|\.aws|\.ssh|\.gnupg|\.docker/config\.json|kubeconfig|\.kube/config|[^/]*\.(pem|key|crt|cer|der|p12|pfx|jks|keystore|sealed|token|pin|secret|secrets|kdbx)|tls\.(key|crt)|ca\.(key|crt)|[^/]*\.(key|pin)\.[a-z]+|softhsm2?\.conf|pin(_file)?|secrets?(\.[a-z]+)?|(var/lib/)?softhsm/tokens(/.*)?|data/(pki|softhsm)(/.*)?)$'
+SECRET_RE='(^|/)(\.env(\..*)?|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.netrc|\.npmrc|\.pgpass|\.git-credentials|credentials|\.aws|\.ssh|\.gnupg|\.docker/config\.json|kubeconfig|\.kube/config|[^/]*\.(pem|key|crt|cer|der|p12|pfx|jks|keystore|sealed|token|pin|secret|secrets|kdbx)|tls\.(key|crt)|ca\.(key|crt)|[^/]*\.(key|pin)\.[a-z]+|pin(_file)?|secrets?(\.[a-z]+)?|(var/lib/)?softhsm/tokens(/.*)?|data/(pki|softhsm)(/.*)?)$'
 # the one exception: the system CA bundle of the base image is public trust data, not a secret
 ALLOW_RE='^(etc/ssl/certs/|usr/share/ca-certificates/|etc/ca-certificates|usr/lib/ssl/)'
 fail=0

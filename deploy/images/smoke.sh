@@ -13,13 +13,15 @@ while IFS=: read -r name zone bins; do
   img="${QV_IMAGE_PREFIX}${name}:${QV_IMAGE_TAG}"
   for b in ${bins//,/ }; do
     set +e
-    # -h makes Go's flag package print the usage; its exit status is 0 (flag.ExitOnError) or 2 (ContinueOnError); mpc-party prints a usage too.
+    # -h makes Go's flag package print the usage (exit 0 or 2); the subcommand tools (qv-route, qv-fee-caps, qv-approvers, qv-guardian) print theirs
+    # and exit 1 for -h, so a second try without arguments counts too. What fails: a binary that does not start, a missing library, a write to the root fs.
     out="$("${RUN[@]}" --entrypoint "/usr/local/bin/$b" "$img" -h 2>&1)"; rc=$?
+    if ! { [ "$rc" -le 2 ] && printf '%s' "$out" | grep -qi 'usage'; }; then out="$("${RUN[@]}" --entrypoint "/usr/local/bin/$b" "$img" 2>&1)"; rc=$?; fi
     set -e
-    if { [ "$rc" = 0 ] || [ "$rc" = 2 ]; } && printf '%s' "$out" | grep -qi 'usage'; then
-      echo "ok   $name: $b -h"
+    if [ "$rc" -le 2 ] && printf '%s' "$out" | grep -qi 'usage'; then
+      echo "ok   $name: $b prints its usage"
     else
-      echo "FAIL $name: $b -h exited $rc"; printf '%s\n' "$out" | head -5 | sed 's/^/    /'; fail=1
+      echo "FAIL $name: $b exited $rc"; printf '%s\n' "$out" | head -5 | sed 's/^/    /'; fail=1
     fi
   done
 done < <(qv_all_images | grep -v -- '-dev:' )
@@ -34,7 +36,7 @@ done
 probe() { # probe <image> <binary> <string>
   local cid; cid="$(docker create "${QV_IMAGE_PREFIX}$1:${QV_IMAGE_TAG}")"; docker cp "$cid:/usr/local/bin/$2" - 2>/dev/null | tar -xO 2>/dev/null | grep -c -a -F -- "$3" || true; docker rm -f "$cid" >/dev/null
 }
-n="$(probe mpc-party mpc-party 'insecure-static-key-for-tests')"; [ "$n" = 0 ] && echo "ok   mpc-party has no insecure sealer" || { echo "FAIL mpc-party contains the insecure sealer"; fail=1; }
+n="$(probe mpc-party mpc-party 'sealer key file must hold 64 hex chars')"; [ "$n" = 0 ] && echo "ok   mpc-party has no insecure sealer" || { echo "FAIL mpc-party contains the insecure sealer"; fail=1; }
 n="$(probe mpc-party mpc-party 'I UNDERSTAND THIS PARTY SIGNS ANYTHING')"; [ "$n" = 0 ] && echo "ok   mpc-party has no dev-allow-all authorizer" || { echo "FAIL mpc-party contains dev-allow-all"; fail=1; }
 n="$(probe qv-worker qv-worker 'QV_FAILPOINT')"; [ "$n" = 0 ] && echo "ok   qv-worker has no failpoints" || { echo "FAIL qv-worker contains failpoints"; fail=1; }
 exit "$fail"
