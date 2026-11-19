@@ -56,6 +56,19 @@ func TestGuardRolesAreSeparated(t *testing.T) {
 		if _, err := p.Exec(ctx, `DELETE FROM approver_changes`); err == nil {
 			t.Errorf("%s: approver_changes rows were deleted", name)
 		}
+		// the keyset log (keysets.go) is a table in the same database, so the role needs no extra grant: readable, appendable, immutable
+		if err := p.QueryRow(ctx, `SELECT count(*) FROM keyset_changes`).Scan(&n); err != nil {
+			t.Fatalf("%s: read keyset_changes: %v", name, err)
+		}
+		if _, err := p.Exec(ctx, `INSERT INTO keyset_changes (seq, action, shard, generation, signed_at, signatures) VALUES (1, 'activate', 'e/c/omnibus/0', 2, 1, '[]')`); err != nil {
+			t.Fatalf("%s: append keyset_changes: %v", name, err)
+		}
+		if _, err := p.Exec(ctx, `UPDATE keyset_changes SET shard = 'x'`); err == nil {
+			t.Errorf("%s: keyset_changes was updated", name)
+		}
+		if _, err := p.Exec(ctx, `DELETE FROM keyset_changes`); err == nil {
+			t.Errorf("%s: keyset_changes rows were deleted", name)
+		}
 		p.Close()
 	}
 	// neither can open the other's guard database, nor the bootstrap database, with the right certificate or the wrong one

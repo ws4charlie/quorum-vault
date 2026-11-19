@@ -12,6 +12,11 @@ import (
 // KindBatch is the job kind of one transaction that pays several withdrawals at once (Bitcoin).
 const KindBatch = "batch"
 
+// KindDrain is the job kind that moves everything an old hot shard key holds to its successor key (EVM first). Intent.PartitionID names the shard,
+// Asset the asset, From the source address (which names the generation) and To the successor's address. The intent format and its version are
+// unchanged: only the kind is new.
+const KindDrain = "drain"
+
 // BatchMember is one withdrawal of a batch exactly as a single withdrawal job carries it: its own intent and the approvals over that intent's hash.
 // Approval stays per withdrawal; nothing is approved at the level of the batch.
 type BatchMember struct {

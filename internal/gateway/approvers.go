@@ -202,10 +202,18 @@ func (o *OperatorConfig) verify(c ApproverChange) ([]string, error) {
 	if o == nil {
 		return nil, errors.New("the zone's config has no operators section: signed approver changes are off")
 	}
-	msg := ApproverChangeMessage(c)
+	return o.verifyMsg(ApproverChangeMessage(c), c.Signatures)
+}
+
+// verifyMsg returns the distinct operators whose signature over msg is valid, and an error when there are fewer than the config needs. The approver
+// registry and the keyset registry share it.
+func (o *OperatorConfig) verifyMsg(msg []byte, sigs []OperatorSignature) ([]string, error) {
+	if o == nil {
+		return nil, errors.New("the zone's config has no operators section: signed changes are off")
+	}
 	seen := map[string]bool{}
 	var out []string
-	for _, s := range c.Signatures {
+	for _, s := range sigs {
 		key, ok := o.Keys[s.Operator]
 		if !ok || seen[s.Operator] {
 			continue

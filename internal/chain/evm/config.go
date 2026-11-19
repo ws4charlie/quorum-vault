@@ -38,6 +38,10 @@ type Config struct {
 	Factory          common.Address
 	SweepDestination common.Address
 	HotAddresses     map[string]common.Address // partition ID -> hot address
+	// HotSenders, when it has an entry for a partition, lists every address that may send transactions for it (every generation of its shard's key:
+	// the signing zone sets it per decision from its keyset view, docs/runbooks/key-replacement.md). Without an entry the partition's HotAddresses
+	// entry is the only sender. Which of these senders may do WHAT is the zone's state rule (internal/gateway/keysets.go), not the verifier's.
+	HotSenders map[string][]common.Address
 	// ColdAddresses is where hot-to-cold moves go, per pool and asset class: key "<pool>/native" or "<pool>/token". The
 	// verifier accepts a "to-cold" intent only when its destination is exactly this address. It lives in signing-zone
 	// config, so the business side cannot change it.
@@ -176,6 +180,30 @@ func (c Config) hot(partitionID string) (common.Address, error) {
 		return common.Address{}, fmt.Errorf("evm: no hot address configured for partition %q", partitionID)
 	}
 	return a, nil
+}
+
+// senderOK reports whether from may send for the partition: one of its HotSenders, or else its HotAddresses entry.
+func (c Config) senderOK(partitionID string, from common.Address) (bool, common.Address, error) {
+	if list, ok := c.HotSenders[partitionID]; ok {
+		for _, a := range list {
+			if a == from {
+				return true, from, nil
+			}
+		}
+		if len(list) > 0 {
+			return false, list[0], nil
+		}
+	}
+	hot, err := c.hot(partitionID)
+	return err == nil && from == hot, hot, err
+}
+
+// WithHot returns a Verifier that judges by another view of the hot addresses: active replaces HotAddresses (the destinations a rebalance may pay: the
+// active address of each shard; a shard with none is absent) and senders replaces HotSenders. The receiver is not changed.
+func (v *Verifier) WithHot(active map[string]common.Address, senders map[string][]common.Address) *Verifier {
+	cfg := v.cfg
+	cfg.HotAddresses, cfg.HotSenders = active, senders
+	return &Verifier{cfg: cfg}
 }
 
 func (c Config) symbolOf(token common.Address) (string, bool) {
