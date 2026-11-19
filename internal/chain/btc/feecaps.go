@@ -302,7 +302,7 @@ type feeCapsLive struct {
 // newest valid record. Reads are lock-free; Refresh is called at the start of each build or decision.
 type FeeCapsView struct {
 	static  FeeCaps
-	rules   *FeeCapsRules // nil: signed changes are off, the static caps stand
+	rules   atomic.Pointer[FeeCapsRules] // nil: signed changes are off, the static caps stand
 	q       Queryer
 	onSkip  func(skipped int)
 	live    atomic.Pointer[feeCapsLive]
@@ -311,8 +311,13 @@ type FeeCapsView struct {
 
 // NewFeeCapsView makes a view. rules nil turns signed changes off.
 func NewFeeCapsView(static FeeCaps, rules *FeeCapsRules, q Queryer, onSkip func(skipped int)) *FeeCapsView {
-	return &FeeCapsView{static: static, rules: rules, q: q, onSkip: onSkip}
+	f := &FeeCapsView{static: static, q: q, onSkip: onSkip}
+	f.rules.Store(rules)
+	return f
 }
+
+// SetRules replaces the rules changes are judged by (the zone's approvers change while it runs). Safe against concurrent Refresh.
+func (f *FeeCapsView) SetRules(rules *FeeCapsRules) { f.rules.Store(rules) }
 
 // Now is the caps and the sequence number in force.
 func (f *FeeCapsView) Now() (FeeCaps, int64) {
@@ -324,10 +329,11 @@ func (f *FeeCapsView) Now() (FeeCaps, int64) {
 
 // Refresh reads the current record. An error leaves what was in force; the caller does not go on with the build.
 func (f *FeeCapsView) Refresh(ctx context.Context) error {
-	if f.rules == nil || f.q == nil {
+	rules := f.rules.Load()
+	if rules == nil || f.q == nil {
 		return nil
 	}
-	cur, skipped, err := CurrentFeeCaps(ctx, f.q, *f.rules, f.static)
+	cur, skipped, err := CurrentFeeCaps(ctx, f.q, *rules, f.static)
 	if err != nil {
 		return fmt.Errorf("btc: read fee caps: %w", err)
 	}

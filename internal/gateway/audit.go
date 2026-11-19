@@ -36,6 +36,9 @@ type auditRecord struct {
 	approvers []string
 	reason    string
 	members   []memberFacts // a batch: its withdrawals, each with its approvers
+	// lagUntil is the not_after (unix seconds) up to which a refusal about approvals is only a retry, because an approval names an approver this
+	// zone does not count yet (Decider.lagRetry); 0: not so. A batch takes the earliest not_after of its lagging members.
+	lagUntil int64
 }
 
 type intentFacts struct {

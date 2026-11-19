@@ -178,7 +178,7 @@ func TestRouteChangeIgnoresWebAuthnApprovers(t *testing.T) {
 	h := newHarness(t)
 	addWebAuthn(t, h.cfg, "wa", "wa", webauthn.ES256)
 	c := RouteChange{Pair: string(mpcsigner.PairAB), Seq: 1, SignedAt: 1, Signatures: []RouteSignature{{Actor: "wa", Signature: "00"}}}
-	if got, _ := verifyRoute(h.cfg, c); len(got) != 0 {
+	if got, _ := verifyRoute(h.cfg, h.cfg.Approvers, c); len(got) != 0 {
 		t.Fatalf("counted %v", got)
 	}
 }

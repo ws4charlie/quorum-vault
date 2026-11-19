@@ -152,3 +152,26 @@ CREATE TABLE IF NOT EXISTS btc_fee_cap_changes (
 CREATE OR REPLACE TRIGGER btc_fee_cap_changes_no_update_delete
     BEFORE UPDATE OR DELETE ON btc_fee_cap_changes
     FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+
+-- Signed changes of the approver set (see approvers.go). Every row carries the signatures of configured operators over (action, name, the approver
+-- entry of an enrolment, seq, signed_at); the zone checks them again every time it reads the log, so a row written by anyone else is ignored. The
+-- gateway and every cosigner keep their own copy. Append-only; seq is not unique on purpose, so a forged row cannot take a sequence number from a
+-- real change.
+CREATE TABLE IF NOT EXISTS approver_changes (
+    id         bigserial PRIMARY KEY,
+    seq        bigint NOT NULL CHECK (seq >= 1),
+    action     text   NOT NULL,
+    name       text   NOT NULL,
+    approver   jsonb,
+    signed_at  bigint NOT NULL,
+    signatures jsonb  NOT NULL,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE TRIGGER approver_changes_no_update_delete
+    BEFORE UPDATE OR DELETE ON approver_changes
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+
+CREATE OR REPLACE TRIGGER approver_changes_no_truncate
+    BEFORE TRUNCATE ON approver_changes
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();

@@ -542,6 +542,9 @@ func (v *Verifier) BindFeeCaps(rules *FeeCapsRules, q Queryer, onSkip func(skipp
 	v.view = NewFeeCapsView(FeeCaps{MaxTxFeeSats: v.cfg.MaxTxFeeSats, MaxFeeRate: v.cfg.MaxFeeRate}, rules, q, onSkip)
 }
 
+// SetFeeCapsRules replaces the rules the bound view judges signed changes by (the approvers in force now).
+func (v *Verifier) SetFeeCapsRules(rules *FeeCapsRules) { v.view.SetRules(rules) }
+
 // RefreshFeeCaps reads the current record; call it before deciding on a transaction.
 func (v *Verifier) RefreshFeeCaps(ctx context.Context) error { return v.view.Refresh(ctx) }
 

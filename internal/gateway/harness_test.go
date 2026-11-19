@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -24,6 +25,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain/eth"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
+	"github.com/ws4charlie/quorum-vault/internal/domain"
 	"github.com/ws4charlie/quorum-vault/internal/hsm/hsmtest"
 	"github.com/ws4charlie/quorum-vault/internal/hsmsigner"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
@@ -113,24 +115,53 @@ func newGuardDB(t *testing.T) *pgxpool.Pool {
 func newHarness(t *testing.T) *harness { return newHarnessChainID(t, 31337) }
 
 func newHarnessChainID(t *testing.T, chainID uint64) *harness {
+	return newHarnessWith(t, chainID, false)
+}
+
+// newHarnessSoft is newHarness with a software signing key instead of an HSM token. The gateway package opens one token per harness and
+// SoftHSM starts to refuse logins after about this many in one process, so tests that do not need the token take this.
+func newHarnessSoft(t *testing.T) *harness { return newHarnessWith(t, 31337, true) }
+
+// softSigner signs with a key in memory.
+type softSigner struct{ key *ecdsa.PrivateKey }
+
+func (s softSigner) Backend() domain.Backend     { return domain.BackendHSM }
+func (s softSigner) Key() domain.Key             { return domain.Key{} }
+func (s softSigner) PublicKey() *ecdsa.PublicKey { return &s.key.PublicKey }
+func (s softSigner) SignDigest(_ context.Context, d [32]byte, _ signer.SignOptions) (signer.Result, error) {
+	sig, err := crypto.Sign(d[:], s.key)
+	if err != nil {
+		return signer.Result{}, err
+	}
+	return signer.Result{Sig: signer.NormalizeLowS(signer.Signature{R: new(big.Int).SetBytes(sig[:32]), S: new(big.Int).SetBytes(sig[32:64])}), Participants: []string{"soft"}}, nil
+}
+
+func newHarnessWith(t *testing.T, chainID uint64, soft bool) *harness {
 	t.Helper()
 	ctx := context.Background()
 	h := &harness{t: t, biz: dbtest.New(t), guardDB: newGuardDB(t), chainID: chainID, keys: map[string]ed25519.PrivateKey{},
 		now: time.Now()}
 
-	tok := hsmtest.Token(t, "quorumvault")
-	gen := hsmsigner.NewGenerator(tok)
-	key, err := gen.Generate(ctx, "gw-"+uuid.NewString()[:8], 1)
-	if err != nil {
-		t.Fatal(err)
+	if soft {
+		k, _ := crypto.GenerateKey()
+		h.signer = &countingSigner{Signer: softSigner{k}}
+		h.hot = crypto.PubkeyToAddress(k.PublicKey)
+	} else {
+		tok := hsmtest.Token(t, "quorumvault")
+		gen := hsmsigner.NewGenerator(tok)
+		key, err := gen.Generate(ctx, "gw-"+uuid.NewString()[:8], 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { tok.DestroyPrivateKey(ctx, key.HSMKeyID) })
+		s, err := hsmsigner.New(tok, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.signer = &countingSigner{Signer: s}
+		h.hot = common.HexToAddress(key.Address)
 	}
-	t.Cleanup(func() { tok.DestroyPrivateKey(ctx, key.HSMKeyID) })
-	s, err := hsmsigner.New(tok, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.signer = &countingSigner{Signer: s}
-	h.hot = common.HexToAddress(key.Address)
+	var err error
 
 	approvers := map[string]ApproverFile{}
 	for _, name := range []string{"alice", "bob", "carol", "auto", "dave"} {

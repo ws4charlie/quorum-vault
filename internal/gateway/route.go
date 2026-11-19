@@ -180,7 +180,7 @@ type RouteSetting struct {
 }
 
 // verifyRoute counts the distinct enabled approvers of the config whose signature over the change is valid.
-func verifyRoute(cfg *Config, c RouteChange) ([]string, error) {
+func verifyRoute(cfg *Config, approvers map[string]Approver, c RouteChange) ([]string, error) {
 	pair, err := mpcsigner.ParsePair(c.Pair)
 	if err != nil || !pair.Valid() || c.Seq < 1 {
 		return nil, fmt.Errorf("a change needs a pair (A+B, A+C or B+C) and a sequence number of at least 1")
@@ -189,7 +189,7 @@ func verifyRoute(cfg *Config, c RouteChange) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
 	for _, s := range c.Signatures {
-		ap, ok := cfg.Approvers[s.Actor]
+		ap, ok := approvers[s.Actor]
 		if !ok || !ap.Enabled || ap.WebAuthn != nil || seen[s.Actor] { // route changes are signed with Ed25519 keys only
 			continue
 		}
@@ -213,7 +213,11 @@ func verifyRoute(cfg *Config, c RouteChange) ([]string, error) {
 // ApplyRoute checks a signed change and records it, with its audit event, in one transaction. A change that is unsigned, signed by too few or
 // unknown approvers, stale, or not newer than the current one is refused and nothing changes.
 func (g *Guard) ApplyRoute(ctx context.Context, cfg *Config, c RouteChange, now time.Time) error {
-	approvers, err := verifyRoute(cfg, c)
+	set, err := g.EffectiveApprovers(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	approvers, err := verifyRoute(cfg, set.Approvers, c)
 	if err != nil {
 		return fmt.Errorf("gateway: route change refused: %w", err)
 	}
@@ -258,6 +262,10 @@ func (g *Guard) ApplyRoute(ctx context.Context, cfg *Config, c RouteChange, now 
 // CurrentRoute is the newest row whose signatures verify against cfg; rows that do not verify are skipped (and counted in skipped, so the
 // caller can raise an alert). No valid row: A+B.
 func (g *Guard) CurrentRoute(ctx context.Context, cfg *Config) (cur RouteSetting, skipped int, err error) {
+	set, err := g.EffectiveApprovers(ctx, cfg)
+	if err != nil {
+		return RouteSetting{}, 0, err
+	}
 	rows, err := g.pool.Query(ctx, `SELECT seq, pair, signed_at, signatures FROM mpc_route_changes ORDER BY seq DESC`)
 	if err != nil {
 		return RouteSetting{}, 0, err
@@ -270,7 +278,7 @@ func (g *Guard) CurrentRoute(ctx context.Context, cfg *Config) (cur RouteSetting
 			return RouteSetting{}, skipped, err
 		}
 		if json.Unmarshal(sigs, &c.Signatures) == nil {
-			if _, verr := verifyRoute(cfg, c); verr == nil {
+			if _, verr := verifyRoute(cfg, set.Approvers, c); verr == nil {
 				p, _ := mpcsigner.ParsePair(c.Pair)
 				return RouteSetting{Pair: p, Seq: c.Seq}, skipped, nil
 			}

@@ -52,7 +52,11 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 	if cc == nil || codec == nil {
 		return nil, reject(ReasonIntent, "chain %q is not configured", b.Chain)
 	}
-	if err := refreshFeeCaps(ctx, codec); err != nil {
+	set, err := d.approverSet(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.refreshFeeCaps(ctx, b.Chain, codec, set); err != nil {
 		return nil, err
 	}
 	bc, ok := codec.(BatchCodec)
@@ -96,8 +100,11 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 			return nil, err
 		}
 		mh := m.Intent.Hash()
-		approvers := d.validApprovers(mh[:], m.Approvals)
-		if err := d.checkRequester(m.Intent, approvers); err != nil {
+		approvers := set.validApprovers(mh[:], m.Approvals)
+		if set.lagging(m.Approvals) && (arec.lagUntil == 0 || m.Intent.NotAfter < arec.lagUntil) {
+			arec.lagUntil = m.Intent.NotAfter
+		}
+		if err := d.checkRequester(set, m.Intent, approvers); err != nil {
 			return nil, err
 		}
 		arec.members = append(arec.members, memberFacts{ID: m.Intent.ID, To: pays[i].Destination, Amount: pays[i].Amount.String(), Approvers: approvers})

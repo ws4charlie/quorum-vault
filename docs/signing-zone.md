@@ -20,6 +20,8 @@ Jobs nobody requests, such as sweeps and moves to cold, carry no requester and f
 ## Approvals come from keys the zone knows
 An approver signs with a software key or a passkey (WebAuthn). The zone checks a passkey's answer itself: made for this exact job, by a key in its own config, with the person present ([runbook](runbooks/webauthn-approver.md)). A person with several keys counts once. Logging in is a separate step ([Identity](identity.md)).
 
+The approver list is not just a config file. Enrolling, disabling or revoking an approver needs signatures from several operators, who hold a different key set from the approvers. Each change is audited and added to a log the gateway and every cosigner keep on their own, and it applies to the next decision without a restart ([runbook](runbooks/approvers.md)).
+
 ## Two checkers that don't trust each other
 Parties B and C each have their own checker, rules and records. Taking over the gateway, party A or the business database still can't get a payment nobody approved.
 

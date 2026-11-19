@@ -49,6 +49,9 @@ type File struct {
 	// MPCRoute turns on the routing of 2-of-3 signatures: health checks of the parties and the operators' preferred pair (route.go). Absent: the
 	// legacy order, party A then party B, each coordinator choosing its own peer.
 	MPCRoute *MPCRouteFile `json:"mpc_route,omitempty"`
+	// Operators is the root of trust of signed approver changes (approvers.go): the operator keys and how many must sign. Absent: approvers change
+	// only by editing this file.
+	Operators *OperatorsFile `json:"operators,omitempty"`
 }
 
 // SignerFile locates a partition's key: in an HSM token (backend "hsm", the default) or in the cb-mpc service
@@ -286,6 +289,8 @@ type Config struct {
 	// Route is nil when the config has no mpc_route section; RouteFile is that section as written (certificate files to load).
 	Route     *RouteConfig
 	RouteFile *MPCRouteFile
+	// Operators is nil when the config has no operators section: signed approver changes are off and Approvers is the whole set.
+	Operators *OperatorConfig
 }
 
 // Approver is a configured approver key.
@@ -439,36 +444,23 @@ func (f File) build() (*Config, error) {
 	keys := map[string]string{}
 	enabled := 0
 	for name, a := range f.Approvers {
-		if name == "" {
-			return nil, errors.New("gateway: config: empty approver name")
+		ap, kid, err := a.build(name)
+		if err != nil {
+			return nil, err
 		}
-		ap := Approver{Enabled: a.Enabled, Identity: cmp.Or(a.Identity, name)}
-		var raw []byte
-		switch a.Scheme {
-		case "", "ed25519":
-			var err error
-			raw, err = hex.DecodeString(a.PublicKey)
-			if err != nil || len(raw) != ed25519.PublicKeySize {
-				return nil, fmt.Errorf("gateway: config: approver %q: public_key must be %d hex bytes", name, ed25519.PublicKeySize)
-			}
-			ap.Key = ed25519.PublicKey(raw)
-		case "webauthn":
-			wk, err := a.webauthnKey()
-			if err != nil {
-				return nil, fmt.Errorf("gateway: config: approver %q: %w", name, err)
-			}
-			ap.WebAuthn = wk
-			raw = append([]byte("webauthn:"), wk.CredentialID...)
-		default:
-			return nil, fmt.Errorf("gateway: config: approver %q: scheme %q is neither ed25519 nor webauthn", name, a.Scheme)
-		}
-		if other, dup := keys[string(raw)]; dup {
+		if other, dup := keys[kid]; dup {
 			return nil, fmt.Errorf("gateway: config: approvers %q and %q share one public key or credential", other, name)
 		}
-		keys[string(raw)] = name
+		keys[kid] = name
 		c.Approvers[name] = ap
 		if a.Enabled {
 			enabled++
+		}
+	}
+	if f.Operators != nil {
+		var err error
+		if c.Operators, err = f.Operators.build(keys); err != nil {
+			return nil, err
 		}
 	}
 	if len(f.Chains) == 0 {
@@ -753,6 +745,32 @@ func checkDepositSigner(p string, sf SignerFile) error {
 		}
 	}
 	return nil
+}
+
+// build turns an approver entry (of the config file or of a signed enrolment) into an Approver. The second result identifies its key or credential,
+// for the check that no two approvers share one.
+func (a ApproverFile) build(name string) (Approver, string, error) {
+	if name == "" {
+		return Approver{}, "", errors.New("gateway: config: empty approver name")
+	}
+	ap := Approver{Enabled: a.Enabled, Identity: cmp.Or(a.Identity, name)}
+	switch a.Scheme {
+	case "", "ed25519":
+		raw, err := hex.DecodeString(a.PublicKey)
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			return Approver{}, "", fmt.Errorf("gateway: config: approver %q: public_key must be %d hex bytes", name, ed25519.PublicKeySize)
+		}
+		ap.Key = ed25519.PublicKey(raw)
+		return ap, string(raw), nil
+	case "webauthn":
+		wk, err := a.webauthnKey()
+		if err != nil {
+			return Approver{}, "", fmt.Errorf("gateway: config: approver %q: %w", name, err)
+		}
+		ap.WebAuthn = wk
+		return ap, string(append([]byte("webauthn:"), wk.CredentialID...)), nil
+	}
+	return Approver{}, "", fmt.Errorf("gateway: config: approver %q: scheme %q is neither ed25519 nor webauthn", name, a.Scheme)
 }
 
 // webauthnKey reads the key of a webauthn approver: the algorithm, the public key, the credential and where it may be used.

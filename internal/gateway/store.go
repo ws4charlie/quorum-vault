@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/big"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,7 +24,11 @@ var storeSQL string
 // never the business database, so an attacker who rewrites the business
 // database can neither erase what was signed nor reset the caps and rate limits
 // that are counted from here.
-type Guard struct{ pool *pgxpool.Pool }
+type Guard struct {
+	pool *pgxpool.Pool
+	// approverIgnored is the number of ignored approver-log rows last reported, so an ALERT is raised when it changes, not at every decision.
+	approverIgnored atomic.Int64
+}
 
 // OpenGuard applies the schema to pool and returns the guard.
 func OpenGuard(ctx context.Context, pool *pgxpool.Pool) (*Guard, error) {
