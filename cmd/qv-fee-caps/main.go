@@ -184,7 +184,19 @@ func withStores(cmd string, args []string) error {
 	}
 	var rows []row
 	for _, s := range stores {
-		cur, skipped, err := btc.CurrentFeeCaps(ctx, s.pool, *rules, static)
+		var cur btc.FeeCapsRecord
+		var skipped int
+		var err error
+		if s.core {
+			// The core judges the record by its own approver list, which is the zone config's (same names and keys).
+			cur, skipped, err = btc.CurrentFeeCaps(ctx, s.pool, *rules, static)
+		} else {
+			// The zone judges it by its effective approver set (the config's with the signed enrolments and revocations), like the gateway does.
+			var g *gateway.Guard
+			if g, err = gateway.OpenGuard(ctx, s.pool); err == nil {
+				cur, skipped, err = g.CurrentFeeCaps(ctx, cfg, *chainName)
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("%s: %w", s.name, err)
 		}
@@ -241,6 +253,24 @@ func apply(ctx context.Context, cfg *gateway.Config, stores []store, c btc.FeeCa
 	}
 	if _, err := rules.Verify(c); err != nil {
 		return fmt.Errorf("change refused: %w", err)
+	}
+	// Each zone database judges the change by its own effective approver set (an approver revoked with operator signatures no longer counts there). Check
+	// that first, for every one of them, so a change the zone would refuse is not applied to the core alone: the core only knows the configured list.
+	for _, s := range stores {
+		if s.core {
+			continue
+		}
+		g, err := gateway.OpenGuard(ctx, s.pool)
+		if err != nil {
+			return fmt.Errorf("%s: %w", s.name, err)
+		}
+		set, err := g.EffectiveApprovers(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("%s: %w", s.name, err)
+		}
+		if _, err := cfg.FeeCapsRulesFor(c.Chain, set.Approvers).Verify(c); err != nil {
+			return fmt.Errorf("change refused by %s, nothing was applied: %w", s.name, err)
+		}
 	}
 	static := cfg.FeeCapsStatic(c.Chain)
 	// The core goes first: a send already queued for the zone was built under the old change and the zone, still on it, signs it; only sends built

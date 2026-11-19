@@ -127,7 +127,7 @@ func TestMain(m *testing.M) {
 		if mpcBin, err = mpcstack.Build(dir); err != nil {
 			buildErr = err
 		}
-		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway", "qv-cold", "qv-btc-xpub"} {
+		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway", "qv-cold", "qv-btc-xpub", "qv-fee-caps", "qv-approvers"} {
 			if buildErr != nil {
 				break
 			}
@@ -398,6 +398,8 @@ type system struct {
 	coldAddr string
 	kit      *coldKit
 	gwGuard  string
+	cosGuard string // party B's cosigner's guard database (withdraw)
+	ops      map[string]ed25519.PrivateKey
 	tc       client.Client
 	tag      string
 
@@ -465,6 +467,8 @@ type opts struct {
 	gwConsolidations   int
 	// batching turns batching on for the hot shard (it needs withdraw).
 	batching *batchingOpts
+	// feeCaps turns on signed fee-cap changes in the core's and the zone's config (feecaps_harness_test.go; it needs withdraw).
+	feeCaps *feeCapsOpts
 }
 
 // batchingOpts are the batching settings of a test: the core's max_outputs, max_wait ("10m", "0s" for none) and max_in_flight, and the signing zone's own

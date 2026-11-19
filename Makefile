@@ -15,7 +15,7 @@ export DATABASE_URL
 QV_SIGNING_DB_URL ?= postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/signing/admin/ca.crt&sslcert=$(QV_PKI_DIR)/signing/admin/tls.crt&sslkey=$(QV_PKI_DIR)/signing/admin/tls.key
 export QV_SIGNING_DB_URL
 
-.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images
+.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images
 
 setup: softhsm pki db-up chain-up
 
@@ -242,6 +242,12 @@ test-e2e-btc-sweeps:
 E2E_BTC_RECOVERY := TestRecovery
 test-e2e-btc-recovery:
 	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_RECOVERY)' -skip 'TestRecoverySweep' ./e2e/btc/...
+
+# Signed fee-cap changes end to end: qv-fee-caps sign, apply, show and metrics against real databases, a stuck send raised past its old cap, the window while the
+# core and the zone differ, refused changes, a revoked approver.
+E2E_BTC_FEECAPS := TestFeeCaps
+test-e2e-btc-feecaps:
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_FEECAPS)' ./e2e/btc/...
 
 # Reconciliation against the chain (scantxoutset) and hot-to-cold moves: bands, rounds under max_inputs, the attacks, crash boundaries, the cancel.
 E2E_BTC_COLD := TestCold|TestReconcile
