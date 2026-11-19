@@ -17,7 +17,8 @@ import (
 // extraAuthorizers are registered by build-tagged files (devauth.go). A default build has none.
 var extraAuthorizers = map[string]func(server.AuthorizerConfig) (server.Authorizer, error){}
 
-func pickAuthorizer(c server.AuthorizerConfig) (server.Authorizer, error) {
+func pickAuthorizer(cfg *server.Config) (server.Authorizer, error) {
+	c := cfg.Authorizer
 	switch c.Type {
 	case "deny-all":
 		return server.DenyAll{}, nil
@@ -28,7 +29,7 @@ func pickAuthorizer(c server.AuthorizerConfig) (server.Authorizer, error) {
 		if c.Socket == "" {
 			return nil, fmt.Errorf("authorizer cosigner needs authorizer.socket")
 		}
-		return server.NewCosignerAuthorizer(c.Socket, time.Duration(c.TimeoutMS)*time.Millisecond), nil
+		return server.NewCosignerAuthorizer(c.Socket, time.Duration(c.TimeoutMS)*time.Millisecond, c.CosignerPins, cfg.CertFile, cfg.KeyFile)
 	case "":
 		return nil, server.ErrNoAuthorizer
 	}
@@ -55,7 +56,7 @@ func main() {
 		log.Error("invalid configuration, refusing to start", "err", err.Error())
 		os.Exit(2)
 	}
-	authz, err := pickAuthorizer(cfg.Authorizer)
+	authz, err := pickAuthorizer(cfg)
 	if err != nil {
 		log.Error("no usable authorizer, refusing to start", "err", err.Error())
 		os.Exit(2)
