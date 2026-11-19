@@ -922,6 +922,69 @@ func ConsolidationWorkflow(ctx workflow.Context, in Input) error {
 	return fmt.Errorf("unexpected outcome %q", r.Kind)
 }
 
+// DrainPlannerWorkflow plans the moves of every draining key generation that has an active successor and makes sure each open drain move has a
+// workflow. It is its own loop, so a worker that started before drains existed keeps the histories of the loops it already runs.
+func DrainPlannerWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
+	for i := 0; i < 300; i++ {
+		var n int
+		if err := call(ctx, planOpts(ctx), &n, a.PlanDrains); err != nil {
+			return err
+		}
+		if err := call(ctx, opts(ctx), &n, a.StartOpenDrains); err != nil {
+			return err
+		}
+		if err := workflow.Sleep(ctx, in.T.ColdInterval); err != nil {
+			return err
+		}
+	}
+	return workflow.NewContinueAsNewError(ctx, DrainPlannerWorkflow, in)
+}
+
+// DrainWorkflow is one transfer of a drain, from an old key generation's address to its successor's. Its workflow ID is the move ID: build and
+// enqueue, wait for the gateway (which judges by its own signed keyset records), broadcast, wait, settle (the gas only). A refusal or a delay of the
+// zone ends this move cleanly, with the reason kept on the generation; the planner makes the next move from what the address holds then.
+func DrainWorkflow(ctx workflow.Context, in Input) error {
+	ctx = withTimings(ctx, in.T)
+	id, t := in.ID, in.T
+	var st ColdState
+	if err := call(ctx, opts(ctx), &st, a.LoadDrain, id); err != nil {
+		return err
+	}
+	if st.Status == "confirmed" || st.Status == "failed" || st.Parked {
+		return nil
+	}
+	o := OwnerArg{Kind: custody.OwnerKindDrain, ID: id, Part: st.Part}
+	ow := custody.Owner{Kind: custody.OwnerKindDrain, ID: id, PartitionID: st.Part}
+
+	var job string
+	if err := call(ctx, buildOpts(ctx), &job, a.BuildDrainJob, id); err != nil {
+		workflow.GetLogger(ctx).Warn("could not build the drain move; the planner will try again", "drain", id, "error", err.Error())
+		return call(ctx, opts(ctx), nil, a.FailDrain, id, "could not build: "+err.Error(), "")
+	}
+	r, err := driveTx(ctx, t, o, custody.OwnerTrack(ow), custody.OwnerTrack(ow).FirstJob(), true, false)
+	if err != nil {
+		return err
+	}
+	if r.Kind == txRefused {
+		cr, err := cancelNonce(ctx, t, o)
+		if err != nil {
+			return err
+		}
+		if cr.Kind == txCancelled {
+			return call(ctx, opts(ctx), nil, a.FailDrain, id, "the signing zone refused: "+r.Reason, cr.Hash)
+		}
+		r = cr
+	}
+	switch r.Kind {
+	case txMined, txReverted:
+		return call(ctx, opts(ctx), nil, a.SettleDrain, id, r.Hash, r.Kind == txReverted)
+	case txCancelled:
+		return call(ctx, opts(ctx), nil, a.FailDrain, id, "cancelled", r.Hash)
+	}
+	return fmt.Errorf("unexpected outcome %q", r.Kind)
+}
+
 // RebalanceWorkflow is one move between hot shards. Its workflow ID is the rebalance ID: build and enqueue, wait for the gateway
 // (which pins the destination to its own list of hot shards and caps the amount itself), broadcast, wait, settle. One that fails
 // ends cleanly and the planner plans another if the shard is still below its target.

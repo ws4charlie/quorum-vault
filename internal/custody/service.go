@@ -49,6 +49,10 @@ type Service struct {
 	// planHook, set by tests only, is called inside a cold planner pass at the named stage ("balance read": the hot balance is read, the open refills are not yet).
 	planHook func(stage string)
 
+	// DrainRetryAfter is how long the planner leaves a leaving generation alone after the zone refused a drain move (default 1 minute); DrainWindow is the
+	// not_after of a drain intent from now (default 10 minutes), which bounds how long the zone waits for its own view to catch up.
+	DrainRetryAfter, DrainWindow time.Duration
+
 	// Screen, when set, is the destination rule the core applies again to every withdrawal of a batch when the batch is sealed and again when it is
 	// built, before anything is signed (the signing zone applies its own). A withdrawal it refuses is removed from the batch and parked with an alert.
 	Screen func(ctx context.Context, w Withdrawal) error
@@ -166,6 +170,7 @@ var audited = map[string]string{
 	"cold_action.requested": "cold_action.requested",
 	"cold_move.planned":     "cold_move.started",
 	"rebalance.planned":     "rebalance.started",
+	"drain.planned":         "drain.started",
 }
 
 // emit writes one outbox event for a flow, in the flow's transaction. An audited event is written a second time to the audit

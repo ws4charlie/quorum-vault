@@ -187,7 +187,7 @@ func TestKeysetRoutesAreAdminHumanStepUpAndAudited(t *testing.T) {
 		}
 	}
 	step("/v2/keysets/candidates", body, 201)
-	step("/v2/keysets/candidates", body, 400) // the same address again
+	step("/v2/keysets/candidates", body, 400)                                                                                           // the same address again
 	step("/v2/keysets/candidates", map[string]any{"shard_id": shard0(s), "address": "0x00000000000000000000000000000000000000B3"}, 409) // a second candidate
 	step("/v2/keysets/drains", map[string]any{"shard_id": shard0(s), "generation": 1, "successor": 2}, 200)
 	step("/v2/keysets/retirements", map[string]any{"shard_id": shard0(s), "generation": 2}, 409)
