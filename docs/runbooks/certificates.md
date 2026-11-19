@@ -85,6 +85,7 @@ openssl x509 -in party.crt -pubkey -noout | openssl pkey -pubin -outform DER | o
 A test checks this command against the code's value. Do not use `openssl x509 -fingerprint`: that hashes the whole certificate (the old scheme) and is refused.
 
 - **Renewal with the same key** (cert-manager `rotationPolicy: Never`, or `openssl x509 -req` with the old key): the pin does not change. Install the new certificate and restart the process that presents it; no peer config changes.
+- **The trade-off.** With whole-certificate pins a stolen private key was useful only until that certificate expired; with key pins, whoever holds the key can issue a new certificate for it, so the validity check no longer bounds a stolen key. The bound is now your key rotation: rotate every pinned key on a fixed schedule (at least yearly, or when someone who could read it leaves), and on a suspected leak rotate the key and remove its old pin at once, without waiting for the certificate to expire.
 - **Key rotation**, one link at a time: add the new key's pin next to the old one on every peer that trusts it and restart them; deploy the new key and certificate on the presenting side and restart it; then remove the old pin and restart the peers. With `rotationPolicy: Always` this cannot be automatic: set `Never` on the certificates of pinned links.
 
 ## Checking and alerts
