@@ -16,21 +16,26 @@ while IFS=: read -r name zone bins; do
     # -h makes Go's flag package print the usage (exit 0 or 2); the subcommand tools (qv-route, qv-fee-caps, qv-approvers, qv-guardian) print theirs
     # and exit 1 for -h, so a second try without arguments counts too. What fails: a binary that does not start, a missing library, a write to the root fs.
     out="$("${RUN[@]}" --entrypoint "/usr/local/bin/$b" "$img" -h 2>&1)"; rc=$?
-    if ! { [ "$rc" -le 2 ] && printf '%s' "$out" | grep -qi 'usage'; }; then out="$("${RUN[@]}" --entrypoint "/usr/local/bin/$b" "$img" 2>&1)"; rc=$?; fi
+    if ! { [ "$rc" -le 2 ] && grep -qi 'usage' <<<"$out"; }; then out="$("${RUN[@]}" --entrypoint "/usr/local/bin/$b" "$img" 2>&1)"; rc=$?; fi
     set -e
-    if [ "$rc" -le 2 ] && printf '%s' "$out" | grep -qi 'usage'; then
+    if [ "$rc" -le 2 ] && grep -qi 'usage' <<<"$out"; then
       echo "ok   $name: $b prints its usage"
     else
       echo "FAIL $name: $b exited $rc"; printf '%s\n' "$out" | head -5 | sed 's/^/    /'; fail=1
     fi
   done
 done < <(qv_all_images | grep -v -- '-dev:' )
-# the -dev images: same binaries, and SoftHSM present
+# the -dev images: same binaries, and SoftHSM present. Output is captured first, never piped into `grep -q` (it exits early, the writer gets SIGPIPE and
+# `pipefail` turns a pass into a random failure), and a failure prints what the command said.
 for d in $QV_DEV_IMAGES; do
   name="${d%%:*}"; img="${QV_IMAGE_PREFIX}${name}:${QV_IMAGE_TAG}"; b="${d##*:}"
-  if docker run --rm --network none --read-only --cap-drop ALL --entrypoint "/usr/local/bin/$b" "$img" -h 2>&1 | grep -qi usage \
-     && docker run --rm --network none --read-only --entrypoint /usr/bin/test "$img" -f /usr/lib/softhsm/libsofthsm2.so; then echo "ok   $name: $b -h, SoftHSM present"
-  else echo "FAIL $name"; fail=1; fi
+  set +e
+  out="$(docker run --rm --network none --read-only --cap-drop ALL --entrypoint "/usr/local/bin/$b" "$img" -h 2>&1)"; rc=$?
+  lib="$(docker image inspect "$img" >/dev/null 2>&1 && docker create "$img" 2>/dev/null)"
+  set -e
+  have=no; if [ -n "$lib" ]; then docker cp "$lib:/usr/lib/softhsm/libsofthsm2.so" - >/dev/null 2>&1 && have=yes; docker rm -f "$lib" >/dev/null 2>&1; fi
+  if [ "$rc" -le 2 ] && grep -qi usage <<<"$out" && [ "$have" = yes ]; then echo "ok   $name: $b -h, SoftHSM present"
+  else echo "FAIL $name: $b -h exited $rc, SoftHSM library in the image: $have"; printf '%s\n' "$out" | head -8 | sed 's/^/    /'; fail=1; fi
 done
 # test-only code is absent from production binaries. These strings exist only in files behind `//go:build devauth`.
 probe() { # probe <image> <binary> <string>
