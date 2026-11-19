@@ -307,6 +307,41 @@ func (s *Service) AddApproval(ctx context.Context, id, actor string, sig []byte)
 	if !ValidID(actor) || len(sig) != ed25519.SignatureSize {
 		return 0, fmt.Errorf("%w: need an actor and a %d-byte signature", ErrInvalid, ed25519.SignatureSize)
 	}
+	return s.addApproval(ctx, id, signjob.Approval{Actor: actor, Signature: sig})
+}
+
+// Size limits for a stored WebAuthn assertion (the core checks shape, never validity).
+const (
+	maxCredentialID   = 1024
+	maxAuthenticator  = 2048
+	maxClientDataJSON = 4096
+	maxAssertionSig   = 1024
+	minAuthenticator  = 37 // rpIdHash(32) + flags(1) + counter(4)
+)
+
+// AddWebAuthnApproval records a WebAuthn approval: an assertion whose challenge is the withdrawal's intent hash.
+// Like AddApproval it checks only the shape (sizes, client data is a JSON object); the signing zone verifies the
+// assertion against the approver's registered credential, so a wrong or foreign assertion is refused there.
+func (s *Service) AddWebAuthnApproval(ctx context.Context, id, actor string, as signjob.WebAuthnAssertion) (int, error) {
+	if !ValidID(actor) {
+		return 0, fmt.Errorf("%w: need an actor", ErrInvalid)
+	}
+	var cd map[string]any
+	switch {
+	case len(as.CredentialID) == 0 || len(as.CredentialID) > maxCredentialID:
+		return 0, fmt.Errorf("%w: credential_id must be 1..%d bytes", ErrInvalid, maxCredentialID)
+	case len(as.AuthenticatorData) < minAuthenticator || len(as.AuthenticatorData) > maxAuthenticator:
+		return 0, fmt.Errorf("%w: authenticator_data must be %d..%d bytes", ErrInvalid, minAuthenticator, maxAuthenticator)
+	case len(as.ClientDataJSON) == 0 || len(as.ClientDataJSON) > maxClientDataJSON || json.Unmarshal(as.ClientDataJSON, &cd) != nil || cd == nil:
+		return 0, fmt.Errorf("%w: client_data_json must be a JSON object of at most %d bytes", ErrInvalid, maxClientDataJSON)
+	case len(as.Signature) == 0 || len(as.Signature) > maxAssertionSig:
+		return 0, fmt.Errorf("%w: signature must be 1..%d bytes", ErrInvalid, maxAssertionSig)
+	}
+	return s.addApproval(ctx, id, signjob.Approval{Actor: actor, WebAuthn: &as})
+}
+
+func (s *Service) addApproval(ctx context.Context, id string, ap signjob.Approval) (int, error) {
+	actor := ap.Actor
 	n := 0
 	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		w, err := scanWd(tx.QueryRow(ctx, `SELECT `+wdCols+` FROM withdrawals WHERE id=$1 FOR UPDATE`, id))
@@ -328,7 +363,7 @@ func (s *Service) AddApproval(ctx context.Context, id, actor string, sig []byte)
 				return nil // a repeat (or a repeated signal): nothing changes
 			}
 		}
-		w.Approvals = append(w.Approvals, signjob.Approval{Actor: actor, Signature: sig})
+		w.Approvals = append(w.Approvals, ap)
 		b, err := json.Marshal(w.Approvals)
 		if err != nil {
 			return err

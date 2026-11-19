@@ -2,6 +2,7 @@ package custody
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
+	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
 // Orchestrator starts and wakes the withdrawal workflow. internal/workflow
@@ -247,6 +249,12 @@ func (a *API) approve(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Actor     string `json:"actor"`
 		Signature string `json:"signature"` // hex Ed25519 signature over the intent hash
+		WebAuthn  *struct {
+			CredentialID      string `json:"credential_id"`      // base64url
+			AuthenticatorData string `json:"authenticator_data"` // base64url
+			ClientDataJSON    string `json:"client_data_json"`   // base64url
+			Signature         string `json:"signature"`          // base64url
+		} `json:"webauthn"`
 	}
 	if err := decode(r, &body); err != nil {
 		a.fail(w, err)
@@ -256,13 +264,35 @@ func (a *API) approve(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, fmt.Errorf("%w: body actor %q differs from the token subject %q", ErrInvalid, body.Actor, actor))
 		return
 	}
-	sig, err := hex.DecodeString(body.Signature)
-	if err != nil {
-		a.fail(w, fmt.Errorf("%w: signature is not hex", ErrInvalid))
+	if (body.Signature == "") == (body.WebAuthn == nil) {
+		a.fail(w, fmt.Errorf("%w: give exactly one of signature (Ed25519) or webauthn (an assertion)", ErrInvalid))
 		return
 	}
 	id := r.PathValue("id")
-	n, err := a.svc.AddApproval(r.Context(), id, actor, sig)
+	var n int
+	var err error
+	if body.WebAuthn == nil {
+		var sig []byte
+		if sig, err = hex.DecodeString(body.Signature); err != nil {
+			a.fail(w, fmt.Errorf("%w: signature is not hex", ErrInvalid))
+			return
+		}
+		n, err = a.svc.AddApproval(r.Context(), id, actor, sig)
+	} else {
+		var as signjob.WebAuthnAssertion
+		for _, f := range []struct {
+			name string
+			in   string
+			out  *[]byte
+		}{{"credential_id", body.WebAuthn.CredentialID, &as.CredentialID}, {"authenticator_data", body.WebAuthn.AuthenticatorData, &as.AuthenticatorData},
+			{"client_data_json", body.WebAuthn.ClientDataJSON, &as.ClientDataJSON}, {"signature", body.WebAuthn.Signature, &as.Signature}} {
+			if *f.out, err = base64.RawURLEncoding.DecodeString(f.in); err != nil {
+				a.fail(w, fmt.Errorf("%w: webauthn.%s is not unpadded base64url", ErrInvalid, f.name))
+				return
+			}
+		}
+		n, err = a.svc.AddWebAuthnApproval(r.Context(), id, actor, as)
+	}
 	if err != nil {
 		a.fail(w, err)
 		return
