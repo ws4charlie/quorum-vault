@@ -1,0 +1,26 @@
+# Build context of deploy/images/Dockerfile (the repository root): only what the binaries are built from. Everything else is out, so the
+# context is small and nothing local (.env, data/, bin/, keys, tokens, mpc-party/.deps) can ever reach a layer.
+*
+!go.mod
+!go.sum
+!cmd
+!internal
+!migrations
+!deploy/postgres/*.go
+!deploy/postgres/signing_roles.sql
+!mpc-party/go.mod
+!mpc-party/go.sum
+!mpc-party/cbmpc.pin
+!mpc-party/api
+!mpc-party/cmd
+!mpc-party/internal
+!mpc-party/scripts/install-toolchain-linux.sh
+!mpc-party/scripts/fetch-build-cbmpc.sh
+**/*_test.go
+**/testdata
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.sealed
+mpc-party/.deps
