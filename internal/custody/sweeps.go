@@ -352,20 +352,17 @@ func (s *Service) BuildSweepJob(ctx context.Context, id string) (string, error) 
 // sweepDestination is where a sweep of the partition pays: the factory's destination on the evm family, the partition's own shard address on Bitcoin.
 func (s *Service) sweepDestination(partitionID string) (string, error) {
 	if s.Cfg.Family == FamilySOL {
-		i, err := s.Cfg.ShardIndex(partitionID)
-		if err != nil || i >= len(s.Cfg.SOLHot) {
+		a, _, err := s.ShardAddressOf(partitionID)
+		if err != nil {
 			return "", fmt.Errorf("custody: partition %q has no hot shard", partitionID)
 		}
-		return s.Cfg.SOLHot[i], nil
+		return a, nil
 	}
 	if s.Cfg.Family != FamilyBTC {
 		return s.Cfg.EVM.SweepDestination.Hex(), nil
 	}
-	i, err := s.Cfg.ShardIndex(partitionID)
-	if err != nil {
-		return "", err
-	}
-	return s.Cfg.BTC.HotShards[i].Address, nil
+	a, _, err := s.ShardAddressOf(partitionID)
+	return a, err
 }
 
 // RecordSweepBroadcast stores the transaction hash and books the expected

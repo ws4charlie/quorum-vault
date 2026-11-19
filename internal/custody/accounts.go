@@ -67,7 +67,7 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	if err := s.checkColdNotForwarder(ctx); err != nil {
 		return err
 	}
-	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+	if err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		for _, sym := range c.AssetList {
 			a := c.Assets[sym]
 			var contract any
@@ -119,7 +119,10 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	return s.loadKeysets(ctx)
 }
 
 // coldAddressList is every configured cold address, lower case.

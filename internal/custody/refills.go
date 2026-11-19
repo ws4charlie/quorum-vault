@@ -609,8 +609,12 @@ func (s *Service) RequestAction(ctx context.Context, kind, param, signer string)
 	}
 	if kind == coldsign.KindSetDestination {
 		ok := false
-		for _, h := range s.Cfg.HotShards {
-			ok = ok || strings.EqualFold(h.Hex(), param)
+		for i := range s.Cfg.HotShards {
+			h, _, err := s.ShardAddressOf(s.Cfg.PartitionKey(s.Cfg.Native, i).String())
+			if err != nil {
+				return Refill{}, err
+			}
+			ok = ok || strings.EqualFold(h, param)
 		}
 		if !ok {
 			return Refill{}, fmt.Errorf("%w: the sweep destination must be one of the hot shards", ErrInvalid)
@@ -946,26 +950,17 @@ func (s *Service) StuckHint(ctx context.Context, id string) string {
 
 // refillEnds are the cold address a refill of the partition's asset pays from and the hot address it pays to, in the form the family's chain cell takes.
 func (s *Service) refillEnds(partitionID, asset string) (coldHex, hotHex string, err error) {
-	switch s.Cfg.Family {
-	case FamilyBTC:
+	if s.Cfg.Family == FamilyBTC || s.Cfg.Family == FamilySOL {
 		if coldHex, err = s.Cfg.ColdAddressOf(partitionID, asset); err != nil {
 			return "", "", err
 		}
-		i, err := s.Cfg.ShardIndex(partitionID)
+	} else {
+		cold, err := s.Cfg.EVM.ColdAddress(partitionID, asset)
 		if err != nil {
 			return "", "", err
 		}
-		return coldHex, s.Cfg.BTC.HotShards[i].Address, nil
-	case FamilySOL:
-		if coldHex, err = s.Cfg.ColdAddressOf(partitionID, asset); err != nil {
-			return "", "", err
-		}
-		hotHex, _, err = s.Cfg.ShardAddressOf(partitionID)
-		return coldHex, hotHex, err
+		coldHex = cold.Hex()
 	}
-	cold, err := s.Cfg.EVM.ColdAddress(partitionID, asset)
-	if err != nil {
-		return "", "", err
-	}
-	return cold.Hex(), s.Cfg.EVM.HotAddresses[partitionID].Hex(), nil
+	hotHex, _, err = s.ShardAddressOf(partitionID)
+	return coldHex, hotHex, err
 }

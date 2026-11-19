@@ -212,7 +212,7 @@ func (s *Service) BuildConsolidationJob(ctx context.Context, id string) (string,
 		if m.JobID != "" || m.Status != "planned" {
 			return nil
 		}
-		to, err := s.Cfg.BTCShardAddress(m.PartitionID)
+		to, _, err := s.ShardAddressOf(m.PartitionID)
 		if err != nil {
 			return err
 		}
