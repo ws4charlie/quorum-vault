@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"time"
@@ -17,7 +18,6 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
-	"github.com/ws4charlie/quorum-vault/internal/webauthn"
 )
 
 // Mode says who is deciding.
@@ -124,6 +124,9 @@ func (d *Decider) DecideKey(ctx context.Context, job signjob.Job, key SignerKey)
 		// A refusal is recorded before it is reported. If the record cannot be written, that is an outage, not a refusal:
 		// the caller retries, and nothing is answered without a record.
 		if rj, ok := IsRejection(err); ok {
+			if lag := d.lagRetry(*arec, err); lag != nil {
+				return nil, lag
+			}
 			arec.reason = rj
 			if aerr := d.guard.auditAlone(ctx, *arec, EventSignRefused); aerr != nil {
 				return nil, aerr
@@ -132,6 +135,25 @@ func (d *Decider) DecideKey(ctx context.Context, job signjob.Job, key SignerKey)
 		return nil, err
 	}
 	return v, nil
+}
+
+// approverSet is the set of approvers in force for the decision about to be made: read from the guard database at every decision, so a signed change
+// applies to the next one without a restart.
+func (d *Decider) approverSet(ctx context.Context) (*ApproverSet, error) {
+	return d.guard.EffectiveApprovers(ctx, d.cfg)
+}
+
+// lagRetry turns a refusal that may come only from an approver list that is behind into a retry: the refusal is about approvals (none valid, or too few
+// for the amount), and an approval names an approver this zone does not count yet (ApproverSet.lagging), and the job has not expired. The job waits
+// and is decided again; once its not_after has passed the refusal stands. nil: not such a refusal.
+func (d *Decider) lagRetry(arec auditRecord, err error) error {
+	var rj *rejection
+	if !errors.As(err, &rj) || (rj.code != ReasonApprovals && rj.code != ReasonTier) || arec.lagUntil <= d.now().Unix() {
+		return nil
+	}
+	slog.Error("ALERT approver registry: a job waits because an approval names an approver this zone does not count yet; apply the same signed approver changes to the gateway and every cosigner (docs/runbooks/approvers.md)",
+		"job", arec.job.ID, "mode", d.mode.actor(), "refusal", rj.Error())
+	return fmt.Errorf("%w: %s: %s", ErrApproverLag, ApproverLagNote, rj.Error())
 }
 
 func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, arec *auditRecord) (*Verdict, error) {
@@ -149,7 +171,11 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 		return nil, reject(ReasonIntent, "chain %q is not configured", intent.Chain)
 	}
 
-	if err := refreshFeeCaps(ctx, codec); err != nil {
+	set, err := d.approverSet(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.refreshFeeCaps(ctx, intent.Chain, codec, set); err != nil {
 		return nil, err
 	}
 
@@ -177,9 +203,12 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 		return nil, reject(ReasonTx, "amount %q", intent.Amount)
 	}
 
-	// 3. Approvals, from configured keys only.
+	// 3. Approvals, from the effective approver set only: the config's approvers with the signed changes of this zone's own log applied.
 	hash := intent.Hash()
-	approvers := d.validApprovers(hash[:], job.Approvals)
+	approvers := set.validApprovers(hash[:], job.Approvals)
+	if set.lagging(job.Approvals) {
+		arec.lagUntil = intent.NotAfter
+	}
 	valid := len(approvers)
 	arec.intent = &intentFacts{ID: intent.ID, Kind: intent.Kind, Asset: intent.Asset, Amount: amount.String(), Sender: info.Sender,
 		Claims: info.Claims, IntentHash: hash[:]}
@@ -187,7 +216,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 	if err := checkRequesterField(intent); err != nil {
 		return nil, err
 	}
-	if err := d.checkRequester(intent, approvers); err != nil {
+	if err := d.checkRequester(set, intent, approvers); err != nil {
 		return nil, err
 	}
 	if intent.Kind == "withdrawal" && valid == 0 {
@@ -367,52 +396,16 @@ func checkRequesterField(i signjob.Intent) error {
 
 // checkRequester refuses a job one of whose counted approvers is the person who requested it. The comparison is on identity (the person), not on
 // the key's name, so a person with two keys cannot approve through the second.
-func (d *Decider) checkRequester(i signjob.Intent, approvers []string) error {
+func (d *Decider) checkRequester(set *ApproverSet, i signjob.Intent, approvers []string) error {
 	if i.RequestedBy == "" {
 		return nil
 	}
 	for _, a := range approvers {
-		if d.cfg.Approvers[a].Identity == i.RequestedBy {
+		if set.identity(a) == i.RequestedBy {
 			return reject(ReasonRequester, "%s: approver %q is the requester %q: a requester cannot approve their own withdrawal", i.ID, a, i.RequestedBy)
 		}
 	}
 	return nil
-}
-
-// countApprovals counts distinct enabled, configured people whose Ed25519
-// signature over hash verifies. Unknown or disabled actors, bad signatures and
-// repeats of one person (the same actor, or two keys of one identity) count for nothing.
-func (d *Decider) countApprovals(hash []byte, approvals []signjob.Approval) int {
-	return len(d.validApprovers(hash, approvals))
-}
-
-// validApprovers names the distinct approvers counted by countApprovals, in the order they were given.
-func (d *Decider) validApprovers(hash []byte, approvals []signjob.Approval) []string {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, a := range approvals {
-		ap, ok := d.cfg.Approvers[a.Actor]
-		if !ok || !ap.Enabled || seen[ap.Identity] {
-			continue
-		}
-		if d.approvalHolds(ap, hash, a) {
-			seen[ap.Identity] = true
-			out = append(out, a.Actor)
-		}
-	}
-	return out
-}
-
-// approvalHolds reports whether a is a valid approval over hash by the configured key ap. An approval carries exactly the proof its key's scheme
-// asks for: an Ed25519 signature, or a WebAuthn assertion whose challenge is the intent hash. The other field present makes it invalid.
-func (d *Decider) approvalHolds(ap Approver, hash []byte, a signjob.Approval) bool {
-	if ap.WebAuthn != nil {
-		if a.WebAuthn == nil || len(a.Signature) != 0 {
-			return false
-		}
-		return webauthn.Verify(ap.WebAuthn, hash, (*webauthn.Assertion)(a.WebAuthn)) == nil
-	}
-	return a.WebAuthn == nil && len(a.Signature) == ed25519.SignatureSize && ed25519.Verify(ap.Key, hash, a.Signature)
 }
 
 func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i signjob.Intent, codec ChainCodec,
