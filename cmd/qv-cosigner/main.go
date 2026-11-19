@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -45,6 +46,9 @@ func run(log *slog.Logger) error {
 	auditSource := flag.String("audit-source", "cosigner", "name this chain's heads are published under on qv.audit.heads (several deployments sharing one topic need distinct names)")
 	metricsListen := flag.String("metrics-listen", os.Getenv("QV_COSIGNER_METRICS_LISTEN"), "serve Prometheus metrics (certificate expiry) in plain http on a loopback address, e.g. 127.0.0.1:9104; off when empty (env QV_COSIGNER_METRICS_LISTEN)")
 	anchorEvery := flag.Duration("anchor-interval", time.Minute, "publish the audit chain head at least this often, and at once when it changes")
+	sockCert := flag.String("socket-cert", os.Getenv("QV_COSIGNER_SOCKET_CERT"), "certificate (PEM) the cosigner presents on the socket (env QV_COSIGNER_SOCKET_CERT)")
+	sockKey := flag.String("socket-key", os.Getenv("QV_COSIGNER_SOCKET_KEY"), "private key of -socket-cert (env QV_COSIGNER_SOCKET_KEY)")
+	partyPins := flag.String("party-pins", os.Getenv("QV_COSIGNER_PARTY_PINS"), "comma-separated SHA-256 fingerprints of the certificate(s) of the ONE party this cosigner serves: nobody else may ask (env QV_COSIGNER_PARTY_PINS)")
 	tlsFor := pki.Flags(flag.CommandLine, "")
 	// the audit heads go to the business Kafka: the explicit link, with a certificate the business authority issued (business/cosigner-link)
 	linkFor := pki.Flags(flag.CommandLine, "link-")
@@ -120,11 +124,30 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	ln, err := cosigner.ListenUnix(*socket)
+	// The channel to the party is mutually authenticated. Missing material stops the process; plain text only under the development switch.
+	var sockTLS *tls.Config
+	if *sockCert == "" && *sockKey == "" && *partyPins == "" {
+		if !pki.PlaintextAllowed() {
+			return fmt.Errorf("-socket-cert, -socket-key and -party-pins are required: the party and the cosigner authenticate each other (docs/runbooks/certificates.md); plain text needs QV_ALLOW_PLAINTEXT=1 and QV_ENV=dev or test, and production refuses it")
+		}
+		log.Warn("the cosigner socket is plain text (development switch)")
+	} else {
+		var pins []string
+		for _, p := range strings.Split(*partyPins, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				pins = append(pins, p)
+			}
+		}
+		if sockTLS, err = cosigner.SocketTLS(*sockCert, *sockKey, pins); err != nil {
+			return err
+		}
+	}
+	ln, err := cosigner.ListenUnixTLS(*socket, sockTLS)
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: c.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{Handler: c.Handler(), ReadHeaderTimeout: 5 * time.Second,
+		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn)} // a refused handshake (an unpinned caller) shows in the log
 	go func() {
 		<-ctx.Done()
 		sc, cancel := context.WithTimeout(context.Background(), 10*time.Second)

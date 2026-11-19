@@ -370,6 +370,7 @@ type Stack struct {
 	Bin Binaries
 
 	CertA, CertB, CertGW, CertProx Cert
+	CertCosB                       Cert // the certificate B's cosigner presents on its socket (B pins it; the cosigner pins B)
 	adminPub                       ed25519.PublicKey
 	admin                          ed25519.PrivateKey
 	adminSkew                      atomic.Int64
@@ -407,6 +408,7 @@ func Start(t testing.TB, dir string, bin Binaries, o Opts) *Stack {
 	}
 	s := &Stack{t: t, Dir: dir, Bin: bin, KeysetID: "hot"}
 	s.CertA, s.CertB, s.CertGW, s.CertProx = NewCert(t, "party-a"), NewCert(t, "party-b"), NewCert(t, "gateway"), NewCert(t, "proxy")
+	s.CertCosB = NewCert(t, "cosigner-b")
 	s.adminPub, s.admin, _ = ed25519.GenerateKey(rand.Reader)
 	s.CallerA, s.CallerB, s.PeerB = FreeAddr(t), FreeAddr(t), FreeAddr(t)
 	s.peerForA = s.PeerB
@@ -461,7 +463,7 @@ func (s *Stack) writeParty(role, peerPin string, o Opts) string {
 		cfg["authorizer"] = map[string]any{"type": "pinned-caller"}
 	} else {
 		cfg["caller_listen"], cfg["peer_listen"] = s.CallerB, s.PeerB
-		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.Sock, "timeout_ms": 5000}
+		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.Sock, "timeout_ms": 5000, "cosigner_pins": []string{s.CertCosB.Pin}}
 	}
 	raw, _ := json.MarshalIndent(cfg, "", " ")
 	p := filepath.Join(s.Dir, "party-"+role+".json")
@@ -588,8 +590,10 @@ func (s *Stack) GatewaySigner(sh Shard) gateway.SignerFile {
 // StartCosigner starts qv-cosigner (B's authorizer) with its own config and guard database.
 func (s *Stack) StartCosigner(cfgPath, guardDSN, gatewayGuardDSN string) {
 	s.t.Helper()
+	crt, key := s.CertCosB.Write(s.t, s.Dir)
 	s.Cos = NewProc(s.t, "cosigner", filepath.Join(s.Dir, "cosigner.log"), s.Bin.Cosigner, nil,
-		"-config", cfgPath, "-guard-dsn", guardDSN, "-gateway-guard-dsn", gatewayGuardDSN, "-socket", s.Sock)
+		"-config", cfgPath, "-guard-dsn", guardDSN, "-gateway-guard-dsn", gatewayGuardDSN, "-socket", s.Sock,
+		"-socket-cert", crt, "-socket-key", key, "-party-pins", s.CertB.Pin)
 	s.StartCosignerAgain()
 }
 
@@ -599,7 +603,7 @@ func (s *Stack) StartCosignerAgain() {
 	s.Cos.Start(s.t)
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if c, err := net.Dial("unix", s.Sock); err == nil {
+		if c, err := net.Dial("unix", s.Sock); err == nil { // the socket accepts: the TLS handshake is the parties' business
 			c.Close()
 			return
 		}

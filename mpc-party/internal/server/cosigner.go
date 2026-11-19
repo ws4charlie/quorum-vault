@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -18,10 +21,22 @@ import (
 type cosignerAuthorizer struct {
 	client  *http.Client
 	timeout time.Duration
+	base    string
 }
 
-// NewCosignerAuthorizer talks to the cosigner on the unix socket path.
-func NewCosignerAuthorizer(socket string, timeout time.Duration) Authorizer {
+// plaintextAllowed is the one switch that lets the cosigner channel run without TLS: QV_ALLOW_PLAINTEXT=1 together with
+// QV_ENV=dev or test (the same rule as every other service). Production refuses.
+func plaintextAllowed() bool {
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("QV_ENV")))
+	return os.Getenv("QV_ALLOW_PLAINTEXT") == "1" && (env == "dev" || env == "test")
+}
+
+// NewCosignerAuthorizer talks to the cosigner on the unix socket path over mutual TLS: it presents this party's own
+// certificate (certFile, keyFile: the one used on the party's ports) and accepts only a cosigner certificate listed in
+// cosignerPins. It refuses to build (so the party refuses to start) when the pins are missing, the party's certificate
+// is missing or outside its validity period. With no pins at all, and only under the development switch, the channel is
+// plain text.
+func NewCosignerAuthorizer(socket string, timeout time.Duration, cosignerPins []string, certFile, keyFile string) (Authorizer, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -31,7 +46,27 @@ func NewCosignerAuthorizer(socket string, timeout time.Duration) Authorizer {
 		},
 		DisableKeepAlives: false, MaxIdleConns: 16,
 	}
-	return &cosignerAuthorizer{client: &http.Client{Transport: tr}, timeout: timeout}
+	scheme := "http"
+	if len(cosignerPins) == 0 {
+		if !plaintextAllowed() {
+			return nil, errors.New("authorizer cosigner needs authorizer.cosigner_pins (the pinned certificate of the cosigner): the channel is mutually authenticated; plain text needs QV_ALLOW_PLAINTEXT=1 and QV_ENV=dev or test, and production refuses it")
+		}
+	} else {
+		pins, err := wire.ParsePins(cosignerPins)
+		if err != nil {
+			return nil, fmt.Errorf("authorizer.cosigner_pins: %w", err)
+		}
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("authorizer cosigner: this party's certificate: %w", err)
+		}
+		if err := wire.CheckValid(cert, time.Now()); err != nil {
+			return nil, fmt.Errorf("authorizer cosigner: this party's certificate: %w", err)
+		}
+		tr.TLSClientConfig = wire.ClientTLS(cert, pins)
+		scheme = "https"
+	}
+	return &cosignerAuthorizer{client: &http.Client{Transport: tr}, timeout: timeout, base: scheme + "://cosigner"}, nil
 }
 
 // UnavailableError: the authorizer could not decide (cosigner socket down, timeout, non-200, bad body, or the cosigner
@@ -49,7 +84,7 @@ func (c *cosignerAuthorizer) Authorize(ctx context.Context, r AuthRequest) error
 	defer cancel()
 	body, _ := json.Marshal(wire.Request{JobID: r.JobID, KeyID: r.KeyID, KeysetID: r.KeysetID, Algorithm: int32(r.Algorithm),
 		Digest: r.Digest, IntentPackage: r.IntentPackage, PublicKey: r.PublicKey})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://cosigner"+wire.Path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+wire.Path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

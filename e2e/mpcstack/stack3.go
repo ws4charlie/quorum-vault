@@ -34,6 +34,7 @@ type Stack3 struct {
 	Bin Binaries
 
 	CertA, CertB, CertC, CertGW Cert
+	CertCosB, CertCosC          Cert // what the cosigners present on their sockets (the party pins it; the cosigner pins its party)
 	certPAB, certPAC, certPBC   Cert
 	adminPub                    ed25519.PublicKey
 	admin                       ed25519.PrivateKey
@@ -62,6 +63,7 @@ func Start3(t testing.TB, dir string, bin Binaries, o Opts) *Stack3 {
 	}
 	s := &Stack3{t: t, Dir: dir, Bin: bin, cfg: map[string]string{}, client: map[string]pb.MpcPartyClient{}}
 	s.CertA, s.CertB, s.CertC, s.CertGW = NewCert(t, "party-a"), NewCert(t, "party-b"), NewCert(t, "party-c"), NewCert(t, "gateway")
+	s.CertCosB, s.CertCosC = NewCert(t, "cosigner-b"), NewCert(t, "cosigner-c")
 	s.adminPub, s.admin, _ = ed25519.GenerateKey(rand.Reader)
 	s.CallerA, s.CallerB, s.CallerC, s.PeerB, s.PeerC = FreeAddr(t), FreeAddr(t), FreeAddr(t), FreeAddr(t), FreeAddr(t)
 	s.SockB = filepath.Join(os.TempDir(), fmt.Sprintf("qvcs-b-%d.sock", time.Now().UnixNano()%1e9))
@@ -160,10 +162,10 @@ func (s *Stack3) writeParty(role string, o Opts, extra map[string]any) string {
 		cfg["authorizer"] = map[string]any{"type": "pinned-caller"}
 	case "B":
 		cfg["caller_listen"] = s.CallerB
-		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.SockB, "timeout_ms": 5000}
+		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.SockB, "timeout_ms": 5000, "cosigner_pins": []string{s.CertCosB.Pin}}
 	case "C":
 		cfg["caller_listen"] = s.CallerC
-		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.SockC, "timeout_ms": 5000}
+		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.SockC, "timeout_ms": 5000, "cosigner_pins": []string{s.CertCosC.Pin}}
 	}
 	for k, v := range extra {
 		cfg[k] = v
@@ -375,15 +377,19 @@ func (s *Stack3) RouteFile(interval string, failCount int, window string, recove
 // StartCosigner starts qv-cosigner next to B with its own config and replay-guard database; StartCosignerC next to C, with ITS own.
 func (s *Stack3) StartCosigner(cfgPath, guardDSN, gatewayGuardDSN string) {
 	s.t.Helper()
+	crt, key := s.CertCosB.Write(s.t, s.Dir)
 	s.Cos = NewProc(s.t, "cosigner-B", filepath.Join(s.Dir, "cosigner-B.log"), s.Bin.Cosigner, nil,
-		"-config", cfgPath, "-guard-dsn", guardDSN, "-gateway-guard-dsn", gatewayGuardDSN, "-socket", s.SockB)
+		"-config", cfgPath, "-guard-dsn", guardDSN, "-gateway-guard-dsn", gatewayGuardDSN, "-socket", s.SockB,
+		"-socket-cert", crt, "-socket-key", key, "-party-pins", s.CertB.Pin)
 	s.StartCosignerAgain()
 }
 
 func (s *Stack3) StartCosignerC(cfgPath, guardDSN, gatewayGuardDSN string) {
 	s.t.Helper()
+	crt, key := s.CertCosC.Write(s.t, s.Dir)
 	s.CosC = NewProc(s.t, "cosigner-C", filepath.Join(s.Dir, "cosigner-C.log"), s.Bin.Cosigner, nil,
-		"-config", cfgPath, "-guard-dsn", guardDSN, "-gateway-guard-dsn", gatewayGuardDSN, "-socket", s.SockC)
+		"-config", cfgPath, "-guard-dsn", guardDSN, "-gateway-guard-dsn", gatewayGuardDSN, "-socket", s.SockC,
+		"-socket-cert", crt, "-socket-key", key, "-party-pins", s.CertC.Pin)
 	s.StartCosignerCAgain()
 }
 
