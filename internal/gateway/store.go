@@ -28,6 +28,8 @@ type Guard struct {
 	pool *pgxpool.Pool
 	// approverIgnored is the number of ignored approver-log rows last reported, so an ALERT is raised when it changes, not at every decision.
 	approverIgnored atomic.Int64
+	// keysetIgnored is the same for the keyset log (keysets.go).
+	keysetIgnored atomic.Int64
 }
 
 // OpenGuard applies the schema to pool and returns the guard.
@@ -190,6 +192,18 @@ func (t *GuardTx) AmountSince(ctx context.Context, kind, asset string, since tim
 	var sum string
 	err := t.tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0)::text FROM signed_intents
 		WHERE chain=$1 AND asset=$2 AND kind=$3 AND created_at >= $4`, t.chain, asset, kind, since).Scan(&sum)
+	if err != nil {
+		return nil, err
+	}
+	return parseBig(sum), nil
+}
+
+// AmountFrom is the sum of the amounts of the intents of kind that moved asset away from sender on this chain (a drain's cap is per source address,
+// for good: the source key's address is unique to its generation).
+func (t *GuardTx) AmountFrom(ctx context.Context, kind, sender, asset string) (*big.Int, error) {
+	var sum string
+	err := t.tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0)::text FROM signed_intents
+		WHERE chain=$1 AND kind=$2 AND sender=$3 AND asset=$4`, t.chain, kind, sender, asset).Scan(&sum)
 	if err != nil {
 		return nil, err
 	}

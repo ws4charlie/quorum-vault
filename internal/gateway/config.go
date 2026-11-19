@@ -123,6 +123,9 @@ type ChainFile struct {
 	CancelsPerHour     int `json:"cancels_per_hour"`
 	// ToColdPerHour limits hot-to-cold moves; 0 refuses them all.
 	ToColdPerHour int `json:"to_cold_per_hour"`
+	// DrainsPerHour limits drains (moves of everything a draining hot shard key holds to its successor, keysets.go) first signed in a rolling hour on
+	// this chain. Absent: 10; 0 refuses them all. A drain is also bounded by the caps of the signed start-draining record.
+	DrainsPerHour *int `json:"drains_per_hour,omitempty"`
 	// RebalancePerHour limits moves between hot shards; 0 refuses them all.
 	RebalancePerHour int `json:"rebalance_per_hour"`
 	// ConsolidationsPerHour limits how many consolidations of a Bitcoin shard are first signed in a rolling hour; 0 refuses them all. A consolidation
@@ -313,6 +316,8 @@ type ChainConfig struct {
 	SweepsPerHour  int
 	CancelsPerHour int
 	ToColdPerHour  int
+	// DrainsPerHour limits drains first signed per rolling hour (default 10; zero: none allowed).
+	DrainsPerHour int
 	// WithdrawalsPerHour limits withdrawals first signed per rolling hour.
 	WithdrawalsPerHour int
 	// RebalancePerHour limits moves between hot shards (zero: none allowed).
@@ -564,7 +569,17 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	}
 	sort.Strings(want)
 	cc := &ChainConfig{Name: name, Family: family, EVM: ec, Assets: map[string]AssetPolicy{},
-		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour, ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour}
+		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour, ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour,
+		DrainsPerHour: 10}
+	if cf.DrainsPerHour != nil {
+		if *cf.DrainsPerHour < 0 {
+			return nil, fmt.Errorf("gateway: config: chain %q: drains_per_hour must be >= 0", name)
+		}
+		cc.DrainsPerHour = *cf.DrainsPerHour
+	}
+	if err := checkShardAddresses(name, ec.HotAddresses); err != nil {
+		return nil, err
+	}
 	for _, s := range want {
 		af, ok := cf.Assets[s]
 		if !ok {

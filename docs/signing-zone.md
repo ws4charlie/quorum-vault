@@ -22,6 +22,8 @@ An approver signs with a software key or a passkey (WebAuthn). The zone checks a
 
 The approver list is not just a config file. Enrolling, disabling or revoking an approver needs signatures from several operators, who hold a different key set from the approvers. Each change is audited and added to a log the gateway and every cosigner keep on their own, and it applies to the next decision without a restart ([runbook](runbooks/approvers.md)).
 
+Each hot shard of an EVM chain also has a keyset state (active, draining, retired and so on), which the zone learns only from operator-signed records in the same kind of log, never from the business side. The state decides what the shard's key may sign, and it is the only authority for a **drain**, which moves everything from an old shard key to its named successor without any approver: the operator signatures that started the drain are the approval ([runbook](runbooks/key-replacement.md)).
+
 ## Two checkers that don't trust each other
 Parties B and C each have their own checker, rules and records. Taking over the gateway, party A or the business database still can't get a payment nobody approved.
 

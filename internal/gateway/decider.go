@@ -176,6 +176,17 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 	if err != nil {
 		return nil, err
 	}
+	// The keysets of an EVM chain's hot shards, from this zone's own config and signed log. With no change applied the config's view is the
+	// codec's own, so only a zone that has a log judges by an overlay.
+	var kv *KeysetView
+	if cc.Family == FamilyEVM {
+		if kv, err = d.keysetView(ctx); err != nil {
+			return nil, err
+		}
+		if ec, ok := codec.(*EVMCodec); ok && kv.Seq > 0 {
+			codec = ec.overlay(kv, cc)
+		}
+	}
 	if err := d.refreshFeeCaps(ctx, intent.Chain, codec, set); err != nil {
 		return nil, err
 	}
@@ -240,6 +251,9 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 			return reject(ReasonMemberReused, "%s was signed as part of batch %s: a withdrawal id is used once, in one batch", intent.ID, cmp.Or(rec.BatchID, rec.ID))
 		}
 		known := rec != nil && bytes.Equal(rec.Hash, hash[:])
+		if err := d.keysetRules(ctx, gt, kv, cc, intent, info, amount, known, now); err != nil {
+			return err
+		}
 		if rec == nil {
 			if fc, ok := codec.(FirstSendChecker); ok {
 				if err := fc.CheckFirstSend(u, intent); err != nil {
@@ -366,7 +380,7 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 		return i, reject(ReasonIntent, "intent has no id")
 	}
 	switch i.Kind {
-	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate", "cpfp", sol.KindNonceSetup, sol.KindNonceClose:
+	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate", "cpfp", signjob.KindDrain, sol.KindNonceSetup, sol.KindNonceClose:
 	default:
 		return i, reject(ReasonIntent, "intent kind %q", i.Kind)
 	}
