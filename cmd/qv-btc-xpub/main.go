@@ -1,7 +1,7 @@
 // Command qv-btc-xpub prints the Bitcoin account xpub of a keyset held by mpc-party, and optionally the hot shard addresses derived
 // from it, so an operator can paste them into the config of the core, the gateway and the cosigner.
 //
-// It connects to party A's caller port the way the gateway's signer does (mutual TLS, party A's certificate pinned by hash), asks for
+// It connects to party A's caller port the way the gateway's signer does (mutual TLS, party A's public key pinned by its SHA-256), asks for
 // the public account node m/84'/coin'/0', and prints public values only. It never reads or prints a share, a PIN or a private key.
 //
 // Output, one value per line, in a fixed order, on standard output only when everything succeeded:
@@ -41,7 +41,7 @@ func run(args []string, out, errw io.Writer) error {
 	addr := fs.String("party", "", "party A's caller address, host:port")
 	certFile := fs.String("cert", "", "client certificate file (PEM) party A accepts")
 	keyFile := fs.String("key", "", "client certificate key file (PEM)")
-	pin := fs.String("server-pin", "", "sha256 of party A's certificate, 64 hex characters")
+	pin := fs.String("server-pin", "", "SHA-256 of the public key (SPKI) in party A's certificate, 64 hex characters (docs/runbooks/certificates.md: Printing a pin)")
 	keyset := fs.String("keyset", "", "keyset id")
 	network := fs.String("network", "", "mainnet, testnet3, signet or regtest")
 	shards := fs.Int("shards", 0, "also print this many hot shard addresses (1/0 ... 1/N-1)")

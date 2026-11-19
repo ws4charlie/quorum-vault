@@ -43,7 +43,7 @@ func mkCert(t *testing.T, name string, notBefore, notAfter time.Time, parent *x5
 		t.Fatal(err)
 	}
 	leaf, _ := x509.ParseCertificate(der)
-	return tcert{cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: k}, pin: wire.PinOf(der).String()}, leaf, k
+	return tcert{cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: k}, pin: mustPin(t, der)}, leaf, k
 }
 
 func selfSigned(t *testing.T, name string) tcert {
@@ -195,5 +195,94 @@ func TestSocketTLSRefusals(t *testing.T) {
 	}
 	if _, err := cosigner.SocketTLS(crt, key, []string{pin}); err != nil {
 		t.Errorf("good material refused: %v", err)
+	}
+}
+
+func mustPin(t *testing.T, der []byte) string {
+	t.Helper()
+	p, err := wire.PinOf(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.String()
+}
+
+func sameKeyCert(t *testing.T, k *ecdsa.PrivateKey, serial int64, from, to time.Time) tcert {
+	t.Helper()
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: "p"}, NotBefore: from, NotAfter: to,
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, &k.PublicKey, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tcert{cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: k}, pin: mustPin(t, der)}
+}
+
+// Pins on the cosigner channel are SPKI pins: renewal with the same key needs no config change, a new key needs its pin (two
+// pins during a rotation), and an old-style whole-certificate pin fails with a message that names the scheme.
+func TestSocketPinsAreSPKI(t *testing.T) {
+	now := time.Now()
+	kp, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	kc, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	kn, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	party := sameKeyCert(t, kp, 1, now.Add(-time.Hour), now.Add(time.Hour))
+	cos := sameKeyCert(t, kc, 2, now.Add(-time.Hour), now.Add(time.Hour))
+	crt, key := writePair(t, cos)
+	cfg, err := cosigner.SocketTLS(crt, key, []string{party.pin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock, _ := serve(t, cfg)
+	client := func(own tcert, pins ...string) *tls.Config {
+		m, err := wire.ParsePins(pins)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wire.ClientTLS(own.cert, m)
+	}
+	if r, err := call(sock, client(party, cos.pin)); err != nil || !r.Allow {
+		t.Fatalf("baseline: %v", err)
+	}
+	// the party renewed its certificate with the same key; the cosigner config is unchanged
+	renewed := sameKeyCert(t, kp, 9, now.Add(-time.Minute), now.Add(90*24*time.Hour))
+	if r, err := call(sock, client(renewed, cos.pin)); err != nil || !r.Allow {
+		t.Fatalf("renewed party certificate (same key) refused: %v", err)
+	}
+	// the cosigner renewed its own certificate with the same key: the party's pin still holds
+	cos2 := sameKeyCert(t, kc, 10, now.Add(-time.Minute), now.Add(90*24*time.Hour))
+	crt2, key2 := writePair(t, cos2)
+	cfg2, err := cosigner.SocketTLS(crt2, key2, []string{party.pin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock2, _ := serve(t, cfg2)
+	if r, err := call(sock2, client(party, cos.pin)); err != nil || !r.Allow {
+		t.Fatalf("renewed cosigner certificate (same key) refused: %v", err)
+	}
+	// a new party key: refused until pinned; with two pins both keys work
+	newParty := sameKeyCert(t, kn, 11, now.Add(-time.Minute), now.Add(time.Hour))
+	if r, err := call(sock, client(newParty, cos.pin)); err == nil && r.Allow {
+		t.Fatal("a new party key was accepted before its pin was added")
+	}
+	crt3, key3 := writePair(t, cos)
+	cfg3, err := cosigner.SocketTLS(crt3, key3, []string{party.pin, newParty.pin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock3, _ := serve(t, cfg3)
+	for _, p := range []tcert{party, newParty} {
+		if r, err := call(sock3, client(p, cos.pin)); err != nil || !r.Allow {
+			t.Fatalf("rotation with two pins: %v", err)
+		}
+	}
+	// an old-style fingerprint of the cosigner's certificate on the party side
+	_, err = call(sock, client(party, wire.CertFingerprint(cos.cert.Certificate[0]).String()))
+	if err == nil || !strings.Contains(err.Error(), "SPKI") || !strings.Contains(err.Error(), "certificate fingerprint") {
+		t.Fatalf("old-style pin: want the scheme message, got %v", err)
+	}
+	// an expired certificate with a pinned key (existing test covers the CA-issued kind; this one reuses the pinned key)
+	expired := sameKeyCert(t, kp, 12, now.Add(-3*time.Hour), now.Add(-2*time.Hour))
+	if r, err := call(sock, client(expired, cos.pin)); err == nil && r.Allow {
+		t.Fatal("an expired certificate with a pinned key was accepted")
 	}
 }

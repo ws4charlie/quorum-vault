@@ -18,14 +18,14 @@ import (
 // Config is the JSON config file. Unknown fields are an error; a missing or invalid file stops the process.
 type Config struct {
 	Role         string `json:"role"`          // "A" (coordinator, P1), "B" (follower, P2; coordinator of B+C signing) or "C" (third party of 2-of-3 keysets)
-	CallerListen string `json:"caller_listen"` // gRPC for callers; mTLS, callers pinned by certificate fingerprint
+	CallerListen string `json:"caller_listen"` // gRPC for callers; mTLS, callers pinned by public key (SPKI)
 	PeerListen   string `json:"peer_listen"`   // B and C: gRPC for the parties that dial this one; mTLS, those pinned
 	PeerAddress  string `json:"peer_address"`  // A only: B's peer_listen address
 
 	CertFile string `json:"cert_file"` // this party's certificate (PEM), used on both ports
 	KeyFile  string `json:"key_file"`
 
-	// Pins are lowercase hex SHA-256 fingerprints of the DER leaf certificate.
+	// Pins are lowercase hex SHA-256 of the leaf certificate's public key (SPKI); renewal with the same key keeps them.
 	PeerPins   []string `json:"peer_pins"`   // the other party's certificate (exactly the cert it presents)
 	CallerPins []string `json:"caller_pins"` // certificates allowed on the caller port
 
@@ -72,7 +72,7 @@ type AuthorizerConfig struct {
 	// Socket is the unix socket of qv-cosigner, type "cosigner". TimeoutMS bounds one decision (default 5000).
 	Socket    string `json:"socket"`
 	TimeoutMS int    `json:"timeout_ms"`
-	// CosignerPins are the fingerprints (SHA-256 of the DER certificate) of the cosigner's certificate on Socket; several during a
+	// CosignerPins are the pins (SHA-256 of the public key, SPKI) of the cosigner's certificate on Socket; several during a
 	// rotation. The channel is mutual TLS: the party presents its own cert_file. Required for type "cosigner" unless the
 	// development switch (QV_ALLOW_PLAINTEXT=1 with QV_ENV=dev or test) is set.
 	CosignerPins []string `json:"cosigner_pins"`

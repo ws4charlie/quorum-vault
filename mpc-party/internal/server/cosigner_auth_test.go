@@ -42,7 +42,7 @@ func newPCert(t *testing.T, dir, name string, from, to time.Time, parent *x509.C
 		t.Fatal(err)
 	}
 	kb, _ := x509.MarshalECPrivateKey(k)
-	p := pcert{cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: k}, pin: wire.PinOf(der).String()}
+	p := pcert{cert: tls.Certificate{Certificate: [][]byte{der}, PrivateKey: k}, pin: pinOfDER(t, der)}
 	p.crt, p.key = filepath.Join(dir, name+".crt"), filepath.Join(dir, name+".key")
 	os.WriteFile(p.crt, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
 	os.WriteFile(p.key, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb}), 0o600)
@@ -180,4 +180,13 @@ func TestCosignerAuthorizerRefusesToStart(t *testing.T) {
 	if _, err := server.NewCosignerAuthorizer("/x.sock", time.Second, nil, p.crt, p.key); err != nil {
 		t.Errorf("the development switch is refused: %v", err)
 	}
+}
+
+func pinOfDER(t *testing.T, der []byte) string {
+	t.Helper()
+	p, err := wire.PinOf(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.String()
 }

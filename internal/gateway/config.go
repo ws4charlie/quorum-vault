@@ -82,7 +82,7 @@ type MPCSignerFile struct {
 	Address    string `json:"address"`        // host:port of party A's caller port
 	CertFile   string `json:"cert_file"`      // the gateway's client certificate (pinned by party A)
 	KeyFile    string `json:"key_file"`
-	ServerPin  string `json:"server_pin"`  // sha256 hex of party A's certificate
+	ServerPin  string `json:"server_pin"`  // SHA-256 (hex) of the public key (SPKI) of party A's certificate
 	MaxRetries int    `json:"max_retries"` // transport/limit retries inside sign_timeout (default 3)
 }
 

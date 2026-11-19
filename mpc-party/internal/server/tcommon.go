@@ -12,6 +12,7 @@ package server
 import (
 	"context"
 	"errors"
+	wire "github.com/ws4charlie/quorum-vault/mpc-party/api/cosigner"
 	"sync"
 	"time"
 
@@ -171,7 +172,7 @@ func (s *Server) callerRole(ctx context.Context) string {
 		if !ok || len(ti.State.PeerCertificates) == 0 {
 			return ""
 		}
-		pin := PinOf(ti.State.PeerCertificates[0].Raw)
+		pin := wire.PinOfCert(ti.State.PeerCertificates[0])
 		switch {
 		case s.peerA[pin]:
 			return "A"

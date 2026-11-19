@@ -5,15 +5,11 @@ package mpcsigner
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/asn1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +21,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/domain"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
+	wire "github.com/ws4charlie/quorum-vault/mpc-party/api/cosigner"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
 
@@ -35,7 +32,7 @@ type Config struct {
 	KeyID       string // from Derive
 	PublicKey   []byte // 65-byte uncompressed secp256k1 of the derived key
 	ClientCert  tls.Certificate
-	ServerPin   string        // sha256 hex of party A's certificate
+	ServerPin   string        // SHA-256 of party A's certificate public key (SPKI) in hex
 	MaxRetries  int           // default 3
 	Timeout     time.Duration // bounds one SignDigest including retries; default 30s
 	// Dial overrides the connection (tests).
@@ -101,9 +98,8 @@ func New(cfg Config) (*Signer, error) {
 	if err != nil {
 		return nil, err
 	}
-	pin, err := hex.DecodeString(strings.ToLower(cfg.ServerPin))
-	if err != nil || len(pin) != 32 {
-		return nil, errors.New("server_pin must be 64 hex chars (sha256 of party A's certificate)")
+	if _, err := wire.ParsePin(cfg.ServerPin); err != nil {
+		return nil, fmt.Errorf("server_pin: %w", err)
 	}
 	if cfg.KeyID == "" || cfg.Address == "" {
 		return nil, errors.New("key id and address are required")
@@ -114,20 +110,10 @@ func New(cfg Config) (*Signer, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 30 * time.Second
 	}
-	tc := &tls.Config{
-		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cfg.ClientCert},
-		InsecureSkipVerify: true, //nolint:gosec // pinned below
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
-				return errors.New("no certificate")
-			}
-			if sum := sha256.Sum256(raw[0]); string(sum[:]) != string(pin) {
-				return errors.New("party A certificate is not the pinned one")
-			}
-			return nil
-		},
+	creds, err := pinnedCreds(cfg.ClientCert, cfg.ServerPin)
+	if err != nil {
+		return nil, err
 	}
-	creds := credentials.NewTLS(tc)
 	dial := cfg.Dial
 	if dial == nil {
 		dial = func(addr string, c credentials.TransportCredentials) (*grpc.ClientConn, error) {

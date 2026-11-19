@@ -3,10 +3,7 @@ package mpcsigner
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,6 +18,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/domain"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
+	wire "github.com/ws4charlie/quorum-vault/mpc-party/api/cosigner"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
 
@@ -30,7 +28,7 @@ type Coordinator struct {
 	Name       string // "A" or "B": for logs and Participants
 	Address    string // the party's caller port
 	ClientCert tls.Certificate
-	ServerPin  string // sha256 hex of that party's certificate
+	ServerPin  string // SHA-256 of that party's certificate public key (SPKI), hex
 }
 
 // ThresholdConfig is the signer of one EVM hot shard held as a 2-of-3 keyset on parties A, B and C (E23-3). The keyset IS the key:
@@ -82,22 +80,14 @@ type thresholdCore struct {
 }
 
 func pinnedCreds(cert tls.Certificate, pinHex string) (credentials.TransportCredentials, error) {
-	pin, err := hex.DecodeString(strings.ToLower(pinHex))
-	if err != nil || len(pin) != 32 {
-		return nil, errors.New("server_pin must be 64 hex chars (sha256 of the party's certificate)")
+	pin, err := wire.ParsePin(pinHex)
+	if err != nil {
+		return nil, fmt.Errorf("server_pin: %w", err)
 	}
 	return credentials.NewTLS(&tls.Config{
 		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert},
-		InsecureSkipVerify: true, //nolint:gosec // pinned below
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
-				return errors.New("no certificate")
-			}
-			if sum := sha256.Sum256(raw[0]); string(sum[:]) != string(pin) {
-				return errors.New("the party's certificate is not the pinned one")
-			}
-			return nil
-		},
+		InsecureSkipVerify:    true, //nolint:gosec // pinned: VerifyPinned
+		VerifyPeerCertificate: wire.VerifyPinned(map[wire.Pin]bool{pin: true}, time.Now),
 	}), nil
 }
 

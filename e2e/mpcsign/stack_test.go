@@ -10,7 +10,6 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -18,6 +17,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	wire "github.com/ws4charlie/quorum-vault/mpc-party/api/cosigner"
 	"math/big"
 	"net"
 	"net/url"
@@ -112,8 +112,11 @@ func newCert(t testing.TB, name string) cert {
 	kb, _ := x509.MarshalECPrivateKey(k)
 	c := cert{name: name, certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		keyPEM: pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb})}
-	sum := sha256.Sum256(der)
-	c.pin = hex.EncodeToString(sum[:])
+	pin, perr := wire.PinOf(der)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	c.pin = pin.String()
 	c.tls, err = tls.X509KeyPair(c.certPEM, c.keyPEM)
 	if err != nil {
 		t.Fatal(err)
@@ -134,17 +137,12 @@ func (c cert) write(t testing.TB, dir string) (crt, key string) {
 
 // pinnedTLS: TLS 1.3, our certificate, trusts exactly the pinned peer certificate.
 func pinnedTLS(own cert, peerPin string) *tls.Config {
-	want, _ := hex.DecodeString(peerPin)
+	pins, err := wire.ParsePins([]string{peerPin})
+	if err != nil {
+		panic(err)
+	}
 	return &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{own.tls}, InsecureSkipVerify: true, //nolint:gosec
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
-				return fmt.Errorf("no certificate")
-			}
-			if sum := sha256.Sum256(raw[0]); !bytes.Equal(sum[:], want) {
-				return fmt.Errorf("certificate is not the pinned one")
-			}
-			return nil
-		}}
+		VerifyPeerCertificate: wire.VerifyPinned(pins, time.Now)}
 }
 
 // ---- processes ----
