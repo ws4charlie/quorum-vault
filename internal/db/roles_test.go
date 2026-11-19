@@ -200,7 +200,7 @@ func TestWorkerCannotPruneOrChangeRoles(t *testing.T) {
 		for _, q := range []string{
 			`SET ROLE qv_relay`, `SET ROLE qv`, `CREATE ROLE evil`, `DROP ROLE qv_relay`,
 			`UPDATE outbox SET published_at = now()`, `SELECT * FROM outbox`, `DELETE FROM outbox`,
-			`SELECT * FROM audit_log`, `INSERT INTO audit_log (at, actor, type, payload, prev_hash, hash) VALUES (now(), 'x', 't', '{}', '\x00', '\x01')`,
+			`INSERT INTO audit_log (at, actor, type, payload, prev_hash, hash) VALUES (now(), 'x', 't', '{}', '\x00', '\x01')`,
 			`UPDATE ledger_entries SET amount = 0`, `DELETE FROM ledger_entries`, `TRUNCATE ledger_entries`, `UPDATE ledger_txns SET id = id`, `DELETE FROM ledger_txns`,
 		} {
 			_, err := c.Exec(context.Background(), q)
@@ -208,6 +208,9 @@ func TestWorkerCannotPruneOrChangeRoles(t *testing.T) {
 			if !errors.As(err, &pe) || (pe.Code != "42501" && !strings.Contains(pe.Message, "permission denied") && !strings.Contains(pe.Message, "must be")) {
 				t.Errorf("%s: %s: err = %v, want permission denied", s.role, q, err)
 			}
+		}
+		if s == worker {
+			denied(t, c, s.role, `SELECT * FROM audit_log`) // only core reads the chain (the verify endpoint)
 		}
 		// what it does need
 		allowed(t, c, s.role, `SELECT count(*) FROM schema_migrations`)
