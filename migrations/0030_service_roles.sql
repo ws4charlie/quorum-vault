@@ -171,7 +171,9 @@ SELECT pg_temp.grant_matrix(ARRAY[
     ['qv_relay',  'audit_log',              'SELECT, INSERT'],
     ['qv_relay',  'schema_migrations',      'SELECT']
 ]::text[][]);
--- Column-level: the relay may change only published_at and chained_at of an outbox row.
+-- Column-level. Core and worker enqueue with INSERT ... ON CONFLICT (id) DO NOTHING, which must read the conflicting id and nothing else of the row.
+GRANT SELECT (id) ON outbox TO qv_core, qv_worker;
+-- The relay may change only published_at and chained_at of an outbox row.
 GRANT UPDATE (published_at, chained_at) ON outbox TO qv_relay;
 -- outbox_prune() is SECURITY DEFINER (owned by the owner role): the relay may call it, no other service may.
 REVOKE ALL ON FUNCTION outbox_prune(interval, int) FROM PUBLIC;

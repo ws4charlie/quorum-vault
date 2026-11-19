@@ -214,6 +214,7 @@ func TestWorkerCannotPruneOrChangeRoles(t *testing.T) {
 		allowed(t, c, s.role, `SELECT count(*) FROM ledger_entries`)
 		allowed(t, c, s.role, `SELECT count(*) FROM withdrawals`)
 		allowed(t, c, s.role, `INSERT INTO outbox (id, topic, key, payload) VALUES (gen_random_uuid(), 't', 'k', '{}')`)
+		allowed(t, c, s.role, `INSERT INTO outbox (id, topic, key, payload) VALUES (gen_random_uuid(), 't', 'k', '{}') ON CONFLICT (id) DO NOTHING`)
 	}
 }
 
