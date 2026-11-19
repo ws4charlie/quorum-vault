@@ -145,10 +145,11 @@ func (d *Decider) approverSet(ctx context.Context) (*ApproverSet, error) {
 
 // lagRetry turns a refusal that may come only from an approver list that is behind into a retry: the refusal is about approvals (none valid, or too few
 // for the amount), and an approval names an approver this zone does not count yet (ApproverSet.lagging), and the job has not expired. The job waits
-// and is decided again; once its not_after has passed the refusal stands. nil: not such a refusal.
+// and is decided again; once its not_after has passed the refusal stands. Only a zone with an operators section has a list that can be behind.
+// nil: not such a refusal.
 func (d *Decider) lagRetry(arec auditRecord, err error) error {
 	var rj *rejection
-	if !errors.As(err, &rj) || (rj.code != ReasonApprovals && rj.code != ReasonTier) || arec.lagUntil <= d.now().Unix() {
+	if d.cfg.Operators == nil || !errors.As(err, &rj) || (rj.code != ReasonApprovals && rj.code != ReasonTier) || arec.lagUntil <= d.now().Unix() {
 		return nil
 	}
 	slog.Error("ALERT approver registry: a job waits because an approval names an approver this zone does not count yet; apply the same signed approver changes to the gateway and every cosigner (docs/runbooks/approvers.md)",
