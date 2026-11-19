@@ -2,6 +2,7 @@ package helmcheck
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -11,7 +12,7 @@ var valuesFiles = []struct {
 	requireDigest bool
 	enableLogin   bool
 }{
-	{"values.yaml", true, true},
+	{"values.yaml", true, false},
 	{"values-kind.yaml", false, true},
 }
 
@@ -54,7 +55,7 @@ func TestContractPasses(t *testing.T) {
 	for _, vf := range valuesFiles {
 		t.Run(vf.file, func(t *testing.T) {
 			objs := render(t, vf.file)
-			if len(Workloads(objs)) < 6 {
+			if len(Workloads(objs)) < 5 {
 				t.Fatalf("only %d workloads rendered", len(Workloads(objs)))
 			}
 			for _, m := range CheckContract(objs, c) {
@@ -76,7 +77,7 @@ func TestPolicyCatches(t *testing.T) {
 		{"capability added", `drop: ["ALL"]`, `drop: ["ALL"]` + "\n              add: [NET_ADMIN]", "capabilities added"},
 		{"host network", "hostNetwork: false", "hostNetwork: true", "hostNetwork"},
 		{"privilege escalation", "allowPrivilegeEscalation: false", "allowPrivilegeEscalation: true", "allowPrivilegeEscalation is not false"},
-		{"bare tag in production", "qv-core@sha256:0000000000000000000000000000000000000000000000000000000000000000", "qv-core:latest", "not referenced by digest"},
+		{"bare tag in production", "qv-core@sha256:1111111111111111111111111111111111111111111111111111111111111111", "qv-core:latest", "not referenced by digest"},
 		{"no memory limit", "              memory: 1Gi\n", "", "memory request and limit"},
 		{"service token mounted", "automountServiceAccountToken: false\n      hostNetwork: false", "automountServiceAccountToken: true\n      hostNetwork: false", "automountServiceAccountToken true"},
 		{"password in a ConfigMap", `QV_TEMPORAL_ADDR: "temporal-gate:7233"`, `QV_TEMPORAL_ADDR: "temporal-gate:7233"` + "\n  QV_DB_PASSWORD: \"hunter2\"", "secret-named key"},
@@ -85,7 +86,7 @@ func TestPolicyCatches(t *testing.T) {
 		{"default deny removed", "policyTypes: [Ingress, Egress]", "policyTypes: [Egress]", "no default-deny"},
 		{"public NodePort", "type: ClusterIP", "type: NodePort", "Service type"},
 		{"Secret rendered", "kind: ServiceAccount", "kind: Secret", "must not render a Secret"},
-		{"PEM in output", "  config.json: |", "  tls.pem: |\n    -----BEGIN PRIVATE KEY-----\n  config.json: |", "PEM block"},
+		{"PEM in output", `QV_TEMPORAL_ADDR: "temporal-gate:7233"`, `QV_TEMPORAL_ADDR: "temporal-gate:7233"` + "\n  TLS_PEM: \"-----BEGIN PRIVATE KEY-----\"", "PEM block"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -172,7 +173,7 @@ func TestContractCatches(t *testing.T) {
 }
 
 func TestMigrationOrderCaught(t *testing.T) {
-	text, err := Render("values.yaml")
+	text, err := Render("values-kind.yaml")
 	if err != nil {
 		t.Skip(err)
 	}
@@ -188,14 +189,36 @@ func TestMigrationOrderCaught(t *testing.T) {
 	}
 }
 
-func TestChainCredentialsRefused(t *testing.T) {
-	_, err := Render("values.yaml", "--set", "custody.config.chain.rpc_password=x")
-	if err == nil || !strings.Contains(err.Error(), "overlay Secret") {
-		t.Errorf("rpc_password in custody.config must be refused, got %v", err)
+func TestPlaceholderDigestRefused(t *testing.T) {
+	zero := "sha256:" + strings.Repeat("0", 64)
+	_, err := Render("values.yaml", "--set", "images.core.digest="+zero)
+	if err == nil || !strings.Contains(err.Error(), "all-zero placeholder") {
+		t.Errorf("an all-zero digest must fail the render, got %v", err)
 	}
-	_, err = Render("values.yaml", "--set", "images.core.digest=")
-	if err == nil {
+	if _, err := Render("values.yaml", "--set", "images.core.digest=", "--set", "images.core.tag="); err == nil {
 		t.Error("an image without digest or tag must be refused")
+	}
+	// the shipped production values themselves must not render: their digests are placeholders
+	helm, _ := exec.LookPath("helm")
+	if helm != "" {
+		if out, err := exec.Command(helm, "template", "qv", ChartDir(), "-f", ChartDir()+"/values.yaml").CombinedOutput(); err == nil {
+			t.Errorf("values.yaml rendered with placeholder digests:\n%s", out[:200])
+		}
+	}
+}
+
+func TestNoCustodyConfigInChart(t *testing.T) {
+	for _, vf := range valuesFiles {
+		for _, o := range render(t, vf.file) {
+			if o.Kind == "ConfigMap" {
+				if _, ok := o.Data["config.json"]; ok {
+					t.Errorf("%s renders a custody config", o.Metadata.Name)
+				}
+			}
+			if pod, ok := o.Pod(); ok && len(pod.InitContainers) > 0 {
+				t.Errorf("%s has init containers", o.Metadata.Name)
+			}
+		}
 	}
 }
 

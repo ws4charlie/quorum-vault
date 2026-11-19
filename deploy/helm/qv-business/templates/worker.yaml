@@ -22,15 +22,13 @@ spec:
       securityContext: {{- include "qv.podSecurityContext" . | nindent 8 }}
       {{- include "qv.pullSecrets" . | nindent 6 }}
       {{- include "qv.spread" (dict "ctx" . "c" "worker") | nindent 6 }}
-      initContainers:
-        {{- include "qv.renderInit" (dict "ctx" .) | nindent 8 }}
       containers:
         - name: worker
           image: {{ include "qv.image" (dict "ctx" . "k" "worker") | quote }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           args:
             - -config
-            - /etc/qv/custody/config.json
+            - /etc/qv/custody/{{ .Values.custody.key }}
             {{- with .Values.worker.taskQueue }}
             - -task-queue
             - {{ . | quote }}
@@ -52,7 +50,7 @@ spec:
             {{- end }}
       volumes:
         {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.worker.secretName) | nindent 8 }}
-        {{- include "qv.custodyVolumes" (dict "ctx" .) | nindent 8 }}
+        {{- include "qv.custodyVolume" (dict "ctx" .) | nindent 8 }}
         {{- if .Values.custody.autoApprover.enabled }}
         - name: approver
           secret: { secretName: {{ .Values.custody.autoApprover.secretName }}, defaultMode: 288 }

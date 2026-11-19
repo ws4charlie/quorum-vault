@@ -235,7 +235,7 @@ func CheckContract(objs []Obj, c Contract) []string {
 						under = true
 					}
 				}
-				if !under && !(ct.Name == "render-config") {
+				if !under {
 					add("%s: mount %s is outside the contract's directories %v", cid, vm.MountPath, c.MountRoots)
 				}
 				if vl, ok := vols[vm.Name]; ok && (vl.Secret != nil || vl.ConfigMap != nil) && !vm.ReadOnly {

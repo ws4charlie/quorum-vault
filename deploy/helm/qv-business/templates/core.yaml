@@ -22,13 +22,11 @@ spec:
       securityContext: {{- include "qv.podSecurityContext" . | nindent 8 }}
       {{- include "qv.pullSecrets" . | nindent 6 }}
       {{- include "qv.spread" (dict "ctx" . "c" "core") | nindent 6 }}
-      initContainers:
-        {{- include "qv.renderInit" (dict "ctx" .) | nindent 8 }}
       containers:
         - name: core
           image: {{ include "qv.image" (dict "ctx" . "k" "core") | quote }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
-          args: ["-config", "/etc/qv/custody/config.json"]
+          args: ["-config", "/etc/qv/custody/{{ .Values.custody.key }}"]
           envFrom:
             - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "core-env") }} }
           ports:
@@ -44,7 +42,7 @@ spec:
             {{- end }}
       volumes:
         {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.core.secretName) | nindent 8 }}
-        {{- include "qv.custodyVolumes" (dict "ctx" .) | nindent 8 }}
+        {{- include "qv.custodyVolume" (dict "ctx" .) | nindent 8 }}
         {{- if .Values.oidc.caSecret }}
         - name: oidc-ca
           secret: { secretName: {{ .Values.oidc.caSecret }}, defaultMode: 292 }

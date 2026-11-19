@@ -156,6 +156,9 @@ func Render(valuesFile string, extra ...string) (string, error) {
 		return "", fmt.Errorf("helm not found on PATH: %w", err)
 	}
 	args := []string{"template", "qv", ChartDir(), "--namespace", "qv", "-f", filepath.Join(ChartDir(), valuesFile)}
+	if valuesFile == "values.yaml" {
+		args = append(args, "-f", "ci-digests.yaml")
+	}
 	args = append(args, extra...)
 	args = append(args, strings.Fields(os.Getenv("QV_HELM_ARGS"))...) // e.g. QV_HELM_ARGS="--set core.replicas=0": to see a check fail on a real render
 	cmd := exec.Command(helm, args...)

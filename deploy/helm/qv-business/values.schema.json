@@ -33,7 +33,7 @@
   "properties": {
     "images": {
       "type": "object",
-      "required": ["core", "worker", "relay", "archiver", "migrate", "render"],
+      "required": ["core", "worker", "relay", "archiver", "migrate"],
       "additionalProperties": { "$ref": "#/definitions/image" }
     },
     "runAsUser": { "const": 65532 },

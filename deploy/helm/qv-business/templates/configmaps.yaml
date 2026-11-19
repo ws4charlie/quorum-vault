@@ -1,13 +1,4 @@
-# Plain configuration only. No secret is ever rendered into a ConfigMap: certificates and keys are Secret volumes, the chain credentials are an overlay Secret.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "qv.fullname" (dict "ctx" . "c" "custody") }}
-  labels: {{- include "qv.labels" (dict "ctx" . "c" "custody") | nindent 4 }}
-data:
-  config.json: |
-    {{- include "qv.custodyJSON" . | nindent 4 }}
----
+# Plain configuration only. No secret is ever rendered into a ConfigMap: certificates, keys and the custody config are Secret volumes.
 apiVersion: v1
 kind: ConfigMap
 metadata:

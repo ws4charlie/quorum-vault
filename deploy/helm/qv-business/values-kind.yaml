@@ -7,7 +7,6 @@ images:
   relay:    { digest: "", tag: local, repository: qv-image/qv-relay }
   archiver: { digest: "", tag: local, repository: qv-image/qv-anchor-archiver }
   migrate:  { digest: "", tag: local, repository: qv-image/qv-migrate }
-  render:   { digest: "", tag: local, repository: qv-image/qv-config-render }
 database: { host: qv-business-db-rw }
 oidc: { issuer: https://keycloak:8443/realms/qv, caSecret: qv-oidc-ca }
 archive:
@@ -29,6 +28,7 @@ relay:
   resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 256Mi } }
 archiver:
   resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 256Mi } }
+migration: { enableLogin: true }
 podDisruptionBudgets: { enabled: false }
 topologySpread: { enabled: false }
 ingress:

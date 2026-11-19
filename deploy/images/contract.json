@@ -67,7 +67,5 @@
       "flagOnlyIn": { "enable-login": "enable-login" }
     }
   },
-  "externalImages": {
-    "qv-config-render": { "_comment": "Not a QuorumVault binary image: a small image with sh and jq, used by an init container that merges the credential overlay into the custody config." }
-  }
+  "externalImages": {}
 }

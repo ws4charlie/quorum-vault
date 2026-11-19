@@ -27,20 +27,21 @@ make helm-check                                                                 
 
 `make helm-check` needs `helm` and `kubeconform` (`brew install helm kubeconform`). CI runs the same script in the `helm` workflow for changes under `deploy/helm/**` and `ci/helm/**`, with pinned, checksum-verified tools. The tests live in [`ci/helm`](../../../ci/helm): `TestPolicy*` (security rules over the rendered manifests) and `TestContract*` (the chart against `contract.json`); each check also has a test that breaks a manifest and wants the violation.
 
-Production images are referenced **by digest**. The digests in `values.yaml` are all-zero placeholders: the release pipeline sets the real ones (from `deploy/images/publish.sh`). `values-kind.yaml` uses local tags.
+Production images are referenced **by digest**. The digests in `values.yaml` are all-zero placeholders and the chart **refuses to render** them: the release pipeline sets the real ones (from `deploy/images/publish.sh`) with `--set` or a values file. The checks use `ci/helm/ci-digests.yaml`. `values-kind.yaml` uses local tags.
+
+Tested with Helm 4.3.2 (the chart is `apiVersion: v2`).
 
 ## Configuration and secrets
 
 | What | Where |
 |---|---|
 | Plain settings (addresses, OIDC, flags' environment) | one ConfigMap per component |
-| Custody config without credentials | ConfigMap `<release>-custody` |
-| Chain credentials (`rpc_user`, `rpc_password`, an RPC URL that carries a key) | Secret `custody.credentials.secretName`, key `overlay.json`, merged over the config by an init container into a memory-backed `emptyDir` |
+| The **whole custody config** (chain RPC URL, `rpc_user`, `rpc_password`, addresses, limits) | An existing Secret, `custody.existingSecret`, key `custody.key` (default `config.json`), mounted read-only at `/etc/qv/custody`. The chart renders no custody config. |
 | Certificates and keys | Secret volumes mounted read-only, made by cert-manager (task D5); referenced by name under `tls.*` |
 | Auto-approver seed (worker) | Secret `custody.autoApprover.secretName`, mounted as a file |
 | Archive keys | Secret `archive.credentialsSecret` as files, or empty for workload identity |
 
-The chart refuses to render if `custody.config` holds `rpc_user` or `rpc_password`, and the policy test refuses a ConfigMap with secret-looking fields, a password in a URL, a PEM block, or any Secret object. The init container uses `images.render`: a small image with `sh` and `jq` (the QuorumVault images have no shell). **That image does not exist yet** (see the task report).
+The Secret is made outside the chart (External Secrets, sealed secrets, the kind lane's setup) and must hold one JSON file in the shape of `internal/custody/config.example.json`: the file `qv-core` and `qv-worker` read with `-config`. Both read the same Secret. The policy test refuses a ConfigMap with secret-looking fields, a password in a URL, a PEM block, or any Secret object in the chart's output. A later code task may split the credentials into their own file, so that only they need to be secret.
 
 Database access: each service's DSN names its own role (`qv_core`, `qv_worker`, `qv_relay`) and the files of its own certificate; there is no password. Key files are mounted mode 0440 with `fsGroup` 65532, so only the image's user reads them.
 
@@ -48,8 +49,8 @@ Database access: each service's DSN names its own role (`qv_core`, `qv_worker`, 
 
 Two Helm hooks, `pre-install` and `pre-upgrade`, run before the Deployments are created or changed:
 
-1. `qv-migrate` (hook weight -5) applies pending migrations as the owner role (certificate `admin`, Postgres role `qv`). Migrations must be backward compatible by one release, because old pods keep running while the new ones start.
-2. `qv-migrate -enable-login` (weight -4, `migration.enableLogin`) runs `ALTER ROLE ... LOGIN` for the service roles (`docs/runbooks/database-roles.md`, "Login"). Set it to `false` if the operator enables login itself (for example through CloudNativePG managed roles).
+1. `qv-migrate` (hook weight -5) applies pending migrations as the owner role (certificate `admin`, Postgres role `qv`; the Secret name is `tls.admin.secretName`). Migrations must be backward compatible by one release, because old pods keep running while the new ones start. A dedicated migrator certificate name is planned with the certificate task (D5); `admin` is used until then.
+2. `qv-migrate -enable-login` (weight -4) runs `ALTER ROLE ... LOGIN` for the service roles. It is **off by default** (`migration.enableLogin: false`) and on in `values-kind.yaml`. In production the database operator enables login for the roles (for example CloudNativePG managed roles); the binary's own flag is for development.
 
 **Why a hook and not a separate step.** A hook gives the order with `helm upgrade` and with Flux's helm-controller (hooks run) and Argo CD (hooks map to PreSync) without extra tooling, and the migration is tied to the chart version that needs it. The services check at start that no migration is pending and refuse to run otherwise, so a skipped or failed hook fails safe: the new pods crash-loop and the old ones keep serving. If a deployment tool ignores hooks, run the same Job as its own step before the release; the templates are in `templates/migrate.yaml`.
 
@@ -76,9 +77,12 @@ The hook Jobs need the `admin` certificate Secret and the database to exist at i
 | Temporal | the frontend reachable only through the **name gate** that admits the certificate names `worker`, `core`, `admin`; the namespace in `temporal.namespace` | [`deploy/temporal-gate`](../../temporal-gate) |
 | Audit bucket | an S3 bucket with Object Lock in COMPLIANCE mode and default retention of at least `archive.retention`, in a separate account, write-only for the archiver | `docs/runbooks/audit-archive.md` |
 | cert-manager (task D5) | Secrets `qv-core-tls`, `qv-worker-tls`, `qv-relay-tls`, `qv-archiver-tls`, `qv-admin-tls` with `tls.crt`, `tls.key`, `ca.crt`; certificate names as in `internal/pki/catalog.go` | `docs/runbooks/certificates.md` |
-| Operator-made Secrets | the chain credential overlay, the auto-approver seed, archive keys if used | n/a |
+| Operator-made Secrets | the custody config, the auto-approver seed, archive keys if used | n/a |
 
-## Limits of this chart
+## Known limits
+
+- Hook resources (the migration job's service account and network policies) are not removed by `helm uninstall`.
+- Default egress to the IdP, chain nodes and archive store is "public addresses on 443"; narrow it per deployment (NetworkPolicy has no names).
 
 - Nothing here was installed on a cluster (the kind lane is task D8). The tests prove the manifests follow the rules and the image contract, not that the pods start.
 - Same logic in kind and production: only the values differ (images by tag, replica counts, requests, the dependency peers, the ingress host).

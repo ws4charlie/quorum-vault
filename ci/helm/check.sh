@@ -7,10 +7,11 @@ chart=deploy/helm/qv-business
 KUBE_VERSION="${KUBE_VERSION:-1.31.0}"
 out="$(mktemp -d)"; trap 'rm -rf "$out"' EXIT
 for v in values values-kind; do
+  dig=""; [ "$v" = values ] && dig="-f ci/helm/ci-digests.yaml"   # production digests are placeholders the chart refuses
   echo "== $v: lint"
-  helm lint "$chart" -f "$chart/$v.yaml" --strict
+  helm lint "$chart" -f "$chart/$v.yaml" $dig --strict
   echo "== $v: template + kubeconform (Kubernetes $KUBE_VERSION)"
-  helm template qv "$chart" --namespace qv -f "$chart/$v.yaml" > "$out/$v.yaml"
+  helm template qv "$chart" --namespace qv -f "$chart/$v.yaml" $dig > "$out/$v.yaml"
   kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" "$out/$v.yaml"
 done
 echo "== policy and contract tests"
