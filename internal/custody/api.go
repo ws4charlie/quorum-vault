@@ -77,7 +77,7 @@ func (a *API) Handler() http.Handler {
 	a.handle(mux, "POST /v2/cold-close/submit", a.submitColdSetup)
 	a.handle(mux, "POST /v2/guardian/freezes", a.guardianFreeze)
 	a.handle(mux, "GET /v2/audit/verify", a.auditVerify)
-	return mux
+	return approvalCORS(mux)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
