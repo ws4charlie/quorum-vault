@@ -18,6 +18,9 @@ Each hot wallet has a low mark, a high mark and a target.
 ## Hot to cold needs no approval
 The cold address is written into the signing zone's own config, which the business side cannot change. A move can only send coins somewhere safer, so a hijacked core still cannot send "cold" money elsewhere.
 
+## A hot wallet can change its key
+On an EVM chain a hot wallet can get a new key without a new set of books. New payments leave from the new key, the old key moves everything it holds to the new one, and only then is it retired. While both exist, the books add up the balance of both addresses. See the [key replacement runbook](runbooks/key-replacement.md).
+
 ## Cold to hot needs people
 A refill makes coins more exposed, so it goes through a ceremony.
 1. The core opens a refill request. One stays open per cold address; on Solana one per asset.

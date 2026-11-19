@@ -13,7 +13,7 @@ Every service connects to Postgres as a role of its own. The certificate's name 
 | `qv-gateway` (link) | `qv_gateway` | Read and update `sign_jobs`. |
 | admin, `qv-migrate` | `qv` | Owner. |
 
-`keysets` (key registry): core and worker select, insert, update; nobody deletes. The exact grants are the matrix in `migrations/0030_service_roles.sql`. A table added by a later migration is closed to every service role until that migration grants it.
+`keysets` (key registry): core and worker select, insert, update; nobody deletes. `drain_moves` and `keyset_drains` (key replacement, migration 0031): the worker selects, inserts and updates them (it plans and drives drains); the core only selects (its admin API shows them). The exact grants are the matrix in `migrations/0030_service_roles.sql`. A table added by a later migration is closed to every service role until that migration grants it.
 
 ## Migrations
 
