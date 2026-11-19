@@ -166,7 +166,7 @@ type proc struct {
 
 func startProc(t testing.TB, name, bin string, env []string, args ...string) *proc {
 	t.Helper()
-	p := &proc{name: name, cmd: exec.Command(bin, args...), out: &syncBuf{}, done: make(chan struct{})}
+	p := &proc{name: name, cmd: exec.Command(bin, dbtest.RoleArgs(t, bin, args)...), out: &syncBuf{}, done: make(chan struct{})}
 	p.cmd.Env = append(append(os.Environ(), pkitest.EnvFor(filepath.Base(bin))...), env...)
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
 	mpcstack.Guard(p.cmd)

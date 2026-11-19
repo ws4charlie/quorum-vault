@@ -122,7 +122,7 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	defer pool.Close()
-	if err := db.Migrate(ctx, pool); err != nil {
+	if err := db.Check(ctx, pool); err != nil {
 		return err
 	}
 	backend, err := chainfactory.Open(ctx, cfg, pool)

@@ -174,10 +174,10 @@ func TestPoolFollowsRotatedCertificate(t *testing.T) {
 
 // A signing-zone service reaches the signing zone's Postgres through its own Source (the cosigner and the gateway do this), as the business ones do.
 func TestSigningServiceUsesItsSourceForTheGuardDatabase(t *testing.T) {
-	admin := dbtest.SigningURL(t)
 	_, _, ca := pkitest.Files(pki.ZoneSigning, "admin")
-	dsn := db.WithClientCert(admin, "", "", ca)
-	for _, who := range []string{"gateway", "cosigner"} {
+	// each service is its own role (deploy/postgres/signing.pg_ident.conf) and reaches the guard database that role owns
+	for who, role := range map[string]string{"gateway": dbtest.RoleGatewayGuard, "cosigner": dbtest.RoleCosignerGuard} {
+		dsn := db.WithClientCert(dbtest.GuardDSN(t, dbtest.CreateGuardDB(t, "qv_guard_"), role), "", "", ca)
 		src, _ := pkitest.CopyIdentity(t, pki.ZoneSigning, who)
 		p, err := db.OpenTLS(context.Background(), dsn, src, pki.Allow{pki.ID(pki.ZoneSigning, "signing-db")})
 		if err != nil {
