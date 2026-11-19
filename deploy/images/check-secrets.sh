@@ -49,6 +49,7 @@ PY
   # zones: no binary of the other zone
   other="$QV_SIGNING_BINS"; [ "$zone" = signing ] && other="$QV_BUSINESS_BINS"
   if [ -n "$zone" ]; then for b in $other; do
+    case " $QV_ZONE_ALLOW " in *" $name:$b "*) continue ;; esac   # the documented exception (images.sh)
     if grep -qE "(^|/)$b\$" "$files"; then echo "FAIL $img ($zone zone) contains the other zone's binary $b"; fail=1; fi
   done; fi
   # non-root

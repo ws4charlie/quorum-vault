@@ -10,7 +10,7 @@ qv-tools-business:business:qv-guardian,qv-sol-nonces
 qv-gateway:signing:qv-gateway
 qv-cosigner:signing:qv-cosigner
 mpc-party:signing:mpc-party
-qv-tools-signing:signing:qv-route,qv-fee-caps,qv-approvers,qv-btc-xpub
+qv-tools-signing:signing:qv-route,qv-fee-caps,qv-approvers,qv-btc-xpub,qv-migrate
 "
 # development variants (SoftHSM2 added), signing zone only
 QV_DEV_IMAGES="qv-gateway-dev:signing:qv-gateway qv-cosigner-dev:signing:qv-cosigner mpc-party-dev:signing:mpc-party"
@@ -19,3 +19,6 @@ QV_SIGNING_BINS="qv-gateway qv-cosigner mpc-party qv-route qv-fee-caps qv-approv
 QV_IMAGE_PREFIX="${QV_IMAGE_PREFIX:-qv-image/}"
 QV_IMAGE_TAG="${QV_IMAGE_TAG:-local}"
 qv_all_images() { { printf '%s\n' $QV_IMAGES; printf '%s\n' $QV_DEV_IMAGES; } | grep .; }
+# The one business binary a signing image may hold: qv-migrate is a schema tool run as a Job in each signing cluster (-zone signing); the business
+# migrations embedded in it are public SQL and give no access. image:binary pairs.
+QV_ZONE_ALLOW="qv-tools-signing:qv-migrate"

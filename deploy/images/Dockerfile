@@ -4,7 +4,7 @@
 #
 # Zones never mix: a final stage copies only its own zone's binaries out of the build stages.
 #   business   qv-core qv-worker qv-relay qv-anchor-archiver qv-migrate qv-tools-business (qv-guardian qv-sol-nonces)
-#   signing    qv-gateway qv-cosigner mpc-party qv-tools-signing (qv-route qv-fee-caps qv-approvers qv-btc-xpub)
+#   signing    qv-gateway qv-cosigner mpc-party qv-tools-signing (qv-route qv-fee-caps qv-approvers qv-btc-xpub qv-migrate)
 #   not images qv-cold (offline), qv-pki (development CA, scripts/pki.sh)
 #
 # Production images contain no test-only code (no -tags devauth: no insecure sealer, no dev authorizer, no failpoints), no SoftHSM, and no secret,
@@ -142,6 +142,9 @@ ENTRYPOINT ["/usr/local/bin/mpc-party"]
 # Operator tools of the signing zone. No entrypoint. qv-keysets joins here when it merges (K2a): add it to gobin-cgo's list and to the COPY below.
 FROM ${CC_BASE} AS qv-tools-signing
 COPY --from=gobin-cgo /out/qv-route /out/qv-fee-caps /out/qv-approvers /out/qv-btc-xpub /usr/local/bin/
+# qv-migrate is a schema tool, not a business service: the signing clusters run it as a Job (-zone signing) for their guard databases' roles. Its embedded business
+# migrations are public SQL and give no access. The one allowed exception to "no business binary in a signing image" (check-secrets.sh, ZONE_ALLOW).
+COPY --from=gobin-static /out/qv-migrate /usr/local/bin/qv-migrate
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------
 # Development variants (tag suffix -dev): the production image plus SoftHSM2, for local and kind clusters. Never deployed to production.
