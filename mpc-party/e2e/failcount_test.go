@@ -3,7 +3,6 @@ package e2e
 import (
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,23 +12,14 @@ import (
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/server"
+	"github.com/ws4charlie/quorum-vault/mpc-party/internal/testenv"
 )
 
 // Failure counters on real party processes, read from each party's metrics port (config metrics_listen) as Prometheus would.
 
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	return ln.Addr().String()
-}
-
 // withMetrics gives every party a metrics port and returns the addresses; tweak (may be nil) runs after it.
 func withMetrics(t *testing.T, tweak func(role string, c *server.Config)) (func(role string, c *server.Config), map[string]string) {
-	addrs := map[string]string{"A": freeAddr(t), "B": freeAddr(t), "C": freeAddr(t)}
+	addrs := map[string]string{"A": testenv.FreeAddr(t), "B": testenv.FreeAddr(t), "C": testenv.FreeAddr(t)}
 	return func(role string, c *server.Config) {
 		c.MetricsListen = addrs[role]
 		if tweak != nil {

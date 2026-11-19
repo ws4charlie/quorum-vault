@@ -133,6 +133,9 @@ func (cl *cluster) waitReady(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
+		if cl.a.exited() || cl.b.exited() {
+			t.Fatalf("a party exited before it was ready.\nA: %s\nB: %s", cl.a.stderr, cl.b.stderr)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		h, err := cl.client.Health(ctx, &pb.HealthRequest{})
 		cancel()
