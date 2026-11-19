@@ -39,3 +39,20 @@ func TestValidateRejectsSeparator(t *testing.T) {
 		t.Error("want error for entity containing /")
 	}
 }
+
+func TestShardID(t *testing.T) {
+	a := Key{Entity: "acme", Chain: "eth", Asset: "ETH", Tier: TierHot, Pool: PoolOmnibus, Shard: 2}
+	b := a
+	b.Asset = "USDC"
+	if a.ShardID() != "acme/eth/omnibus/2" || a.ShardID() != b.ShardID() {
+		t.Errorf("ShardID = %q, %q; the assets of a shard share it", a.ShardID(), b.ShardID())
+	}
+	if id, err := ParseShardID("acme/eth/omnibus/2"); err != nil || id.Shard() != 2 {
+		t.Errorf("ParseShardID = %q, %v", id, err)
+	}
+	for _, bad := range []string{"", "acme/eth/omnibus", "acme/eth/omnibus/x", "acme/eth/omnibus/-1", "acme/eth/other/1", "acme//omnibus/1"} {
+		if _, err := ParseShardID(bad); err == nil {
+			t.Errorf("ParseShardID(%q) accepted", bad)
+		}
+	}
+}

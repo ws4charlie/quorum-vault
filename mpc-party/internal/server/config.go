@@ -72,6 +72,10 @@ type AuthorizerConfig struct {
 	// Socket is the unix socket of qv-cosigner, type "cosigner". TimeoutMS bounds one decision (default 5000).
 	Socket    string `json:"socket"`
 	TimeoutMS int    `json:"timeout_ms"`
+	// CosignerPins are the fingerprints (SHA-256 of the DER certificate) of the cosigner's certificate on Socket; several during a
+	// rotation. The channel is mutual TLS: the party presents its own cert_file. Required for type "cosigner" unless the
+	// development switch (QV_ALLOW_PLAINTEXT=1 with QV_ENV=dev or test) is set.
+	CosignerPins []string `json:"cosigner_pins"`
 	// AcceptRisk must be exactly DevAllowAllRiskPhrase for "dev-allow-all".
 	AcceptRisk string `json:"accept_risk"`
 }
@@ -220,7 +224,7 @@ func (c *Config) Validate() error {
 	if len(c.CallerPins) == 0 {
 		errs = append(errs, errors.New("caller_pins: at least one pin is required"))
 	}
-	for _, p := range append(append(append(append(append([]string{}, c.PeerPins...), c.CallerPins...), c.PeerCPins...), c.PeerAPins...), c.PeerBPins...) {
+	for _, p := range append(append(append(append(append(append([]string{}, c.PeerPins...), c.CallerPins...), c.PeerCPins...), c.PeerAPins...), c.PeerBPins...), c.Authorizer.CosignerPins...) {
 		if _, err := ParsePin(p); err != nil {
 			errs = append(errs, err)
 		}

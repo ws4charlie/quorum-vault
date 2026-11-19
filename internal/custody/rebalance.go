@@ -201,7 +201,7 @@ func (s *Service) PlanRebalances(ctx context.Context, log *slog.Logger) ([]Rebal
 					if amt.Sign() <= 0 {
 						break
 					}
-					toAddr, _, err := c.ShardAddressOf(d.part)
+					toAddr, _, err := s.ShardAddressOf(d.part)
 					if err != nil {
 						return err
 					}

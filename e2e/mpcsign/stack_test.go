@@ -222,16 +222,17 @@ func freeAddr(t testing.TB) string {
 // ---- the stack ----
 
 type stack struct {
-	t        *testing.T
-	dir      string
-	gateways []*proc // every gateway started, for their log when a job does not finish
-	certA    cert
-	certB    cert
-	certC    cert
-	certGW   cert // the gateway's client certificate (pinned by the parties' caller ports)
-	certProx cert
-	adminPub ed25519.PublicKey
-	admin    ed25519.PrivateKey
+	t                  *testing.T
+	dir                string
+	gateways           []*proc // every gateway started, for their log when a job does not finish
+	certA              cert
+	certB              cert
+	certC              cert
+	certGW             cert // the gateway's client certificate (pinned by the parties' caller ports)
+	certProx           cert
+	certCosB, certCosC cert // what the cosigners present on their sockets (the party pins it; the cosigner pins its party)
+	adminPub           ed25519.PublicKey
+	admin              ed25519.PrivateKey
 
 	callerA, callerB, callerC string
 	peerB, peerC              string
@@ -288,6 +289,7 @@ func newStack(t *testing.T, o stackOpts) *stack {
 	}
 	s := &stack{t: t, dir: t.TempDir(), chainID: o.chainID, keysetID: "hot"}
 	s.certA, s.certB, s.certC, s.certGW, s.certProx = newCert(t, "party-a"), newCert(t, "party-b"), newCert(t, "party-c"), newCert(t, "gateway"), newCert(t, "proxy")
+	s.certCosB, s.certCosC = newCert(t, "cosigner-b"), newCert(t, "cosigner-c")
 	s.adminPub, s.admin, _ = ed25519.GenerateKey(rand.Reader)
 	s.callerA, s.callerB, s.callerC, s.peerB, s.peerC = freeAddr(t), freeAddr(t), freeAddr(t), freeAddr(t), freeAddr(t)
 	s.peerForA = s.peerB
@@ -333,11 +335,11 @@ func (s *stack) writeParty(t *testing.T, role, seal, peerPin string) string {
 		cfg["peer_pins"] = []string{abPin}
 		cfg["caller_listen"], cfg["peer_listen"] = s.callerB, s.peerB
 		cfg["peer_c_address"], cfg["peer_c_pins"] = s.peerC, []string{s.certC.pin}
-		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.sock, "timeout_ms": 5000}
+		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.sock, "timeout_ms": 5000, "cosigner_pins": []string{s.certCosB.pin}}
 	case "C":
 		cfg["caller_listen"], cfg["peer_listen"] = s.callerC, s.peerC
 		cfg["peer_a_pins"], cfg["peer_b_pins"] = []string{s.certA.pin}, []string{s.certB.pin}
-		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.sockC, "timeout_ms": 5000}
+		cfg["authorizer"] = map[string]any{"type": "cosigner", "socket": s.sockC, "timeout_ms": 5000, "cosigner_pins": []string{s.certCosC.pin}}
 	}
 	raw, _ := json.MarshalIndent(cfg, "", " ")
 	p := filepath.Join(s.dir, "party-"+role+".json")
@@ -432,7 +434,8 @@ func (s *stack) provision(t *testing.T, noCosigner bool) {
 func mustJSON(v any) []byte { b, _ := json.MarshalIndent(v, "", " "); return b }
 
 func (s *stack) startCosignerC(t *testing.T) {
-	s.cosignerC = startProc(t, "cosigner-c", binCosigner, nil, "-config", s.cosignerCfgC, "-guard-dsn", s.csGuardDSNC, "-gateway-guard-dsn", s.gwGuardDSN, "-socket", s.sockC)
+	ccrt, ckey := s.certCosC.write(t, s.dir)
+	s.cosignerC = startProc(t, "cosigner-c", binCosigner, nil, "-config", s.cosignerCfgC, "-guard-dsn", s.csGuardDSNC, "-gateway-guard-dsn", s.gwGuardDSN, "-socket", s.sockC, "-socket-cert", ccrt, "-socket-key", ckey, "-party-pins", s.certC.pin)
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if c, err := net.Dial("unix", s.sockC); err == nil {
@@ -445,7 +448,8 @@ func (s *stack) startCosignerC(t *testing.T) {
 }
 
 func (s *stack) startCosigner(t *testing.T) {
-	s.cosigner = startProc(t, "cosigner", binCosigner, nil, "-config", s.cosignerCfg, "-guard-dsn", s.csGuardDSN, "-gateway-guard-dsn", s.gwGuardDSN, "-socket", s.sock)
+	bcrt, bkey := s.certCosB.write(t, s.dir)
+	s.cosigner = startProc(t, "cosigner", binCosigner, nil, "-config", s.cosignerCfg, "-guard-dsn", s.csGuardDSN, "-gateway-guard-dsn", s.gwGuardDSN, "-socket", s.sock, "-socket-cert", bcrt, "-socket-key", bkey, "-party-pins", s.certB.pin)
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if c, err := net.Dial("unix", s.sock); err == nil {

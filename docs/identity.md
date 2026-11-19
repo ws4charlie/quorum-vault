@@ -40,4 +40,6 @@ On the core API, people log in at the identity provider and need no certificate;
 Every write first leaves a row naming the issuer, `sub`, authentication level, login time and token id, then the change itself carries the same identity. If that row cannot be written, nothing changes.
 
 ## Development only
+Approvers are added and removed by operators, not by approvers: a change needs signatures from several operators, is audited, and takes effect without a restart ([runbook](runbooks/approvers.md)).
+
 A plain header that names the actor, and a test issuer with a local key, work only in development and test; production refuses them. Tests log in without a passkey ([Limits](limits.md)).

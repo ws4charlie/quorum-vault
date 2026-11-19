@@ -460,7 +460,7 @@ func TestThresholdFallbackOnCosignerOutage(t *testing.T) {
 	forSchemes(t, func(t *testing.T, sc pb.Scheme) {
 		cl := newCluster3S(t, sc, func(role string, c *server.Config) {
 			if role == "B" {
-				c.Authorizer = server.AuthorizerConfig{Type: "cosigner", Socket: "/nonexistent/cosigner.sock", TimeoutMS: 500}
+				c.Authorizer = server.AuthorizerConfig{Type: "cosigner", Socket: "/nonexistent/cosigner.sock", TimeoutMS: 500, CosignerPins: []string{strings.Repeat("ab", 32)}}
 			}
 		})
 		pub := cl.dkg(t, "k")
