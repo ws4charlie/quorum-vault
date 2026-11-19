@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "definitions": {
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$" },
+        "tag": { "type": "string", "not": { "enum": ["latest"] } }
+      },
+      "anyOf": [
+        { "required": ["digest"], "properties": { "digest": { "minLength": 71 } } },
+        { "required": ["tag"], "properties": { "tag": { "minLength": 1 } } }
+      ]
+    },
+    "resources": {
+      "type": "object",
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": { "type": "object", "required": ["cpu", "memory"] },
+        "limits": { "type": "object", "required": ["cpu", "memory"] }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": { "mode": { "enum": ["tcp", "http", "none"] } }
+    }
+  },
+  "required": ["images", "database", "temporal", "kafka", "tls", "custody", "core", "worker", "relay", "archiver", "migration", "network"],
+  "properties": {
+    "images": {
+      "type": "object",
+      "required": ["core", "worker", "relay", "archiver", "migrate", "render"],
+      "additionalProperties": { "$ref": "#/definitions/image" }
+    },
+    "runAsUser": { "const": 65532 },
+    "database": { "type": "object", "properties": { "sslmode": { "enum": ["verify-full"] } } },
+    "core": {
+      "type": "object",
+      "required": ["replicas", "port", "resources", "probes"],
+      "properties": { "replicas": { "type": "integer", "minimum": 1 }, "resources": { "$ref": "#/definitions/resources" }, "probes": { "$ref": "#/definitions/probes" } }
+    },
+    "worker": {
+      "type": "object",
+      "required": ["replicas", "resources", "probes"],
+      "properties": { "replicas": { "type": "integer", "minimum": 1 }, "resources": { "$ref": "#/definitions/resources" }, "probes": { "$ref": "#/definitions/probes" } }
+    },
+    "relay": {
+      "type": "object",
+      "required": ["replicas", "resources", "probes"],
+      "properties": { "replicas": { "type": "integer", "minimum": 1 }, "resources": { "$ref": "#/definitions/resources" }, "probes": { "$ref": "#/definitions/probes" } }
+    },
+    "archiver": {
+      "type": "object",
+      "required": ["replicas", "resources", "probes"],
+      "properties": { "replicas": { "const": 1 }, "resources": { "$ref": "#/definitions/resources" }, "probes": { "$ref": "#/definitions/probes" } }
+    },
+    "migration": { "type": "object", "properties": { "enableLogin": { "type": "boolean" } } },
+    "network": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "const": true } } }
+  }
+}

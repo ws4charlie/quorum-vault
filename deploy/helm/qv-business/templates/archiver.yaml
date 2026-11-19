@@ -1,0 +1,54 @@
+{{- if .Values.archiver.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "archiver") }}
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "archiver") | nindent 4 }}
+spec:
+  replicas: {{ .Values.archiver.replicas }}
+  selector:
+    matchLabels: {{- include "qv.selector" (dict "ctx" . "c" "archiver") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "qv.labels" (dict "ctx" . "c" "archiver") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "qv.fullname" (dict "ctx" . "c" "archiver") }}
+      automountServiceAccountToken: {{ .Values.archiver.serviceAccount.automountToken }}
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      terminationGracePeriodSeconds: {{ .Values.archiver.terminationGracePeriodSeconds }}
+      securityContext: {{- include "qv.podSecurityContext" . | nindent 8 }}
+      {{- include "qv.pullSecrets" . | nindent 6 }}
+      containers:
+        - name: archiver
+          image: {{ include "qv.image" (dict "ctx" . "k" "archiver") | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          args: ["-retention", {{ .Values.archive.retention | quote }}]
+          envFrom:
+            - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "archiver-env") }} }
+          {{- if ne .Values.archiver.probes.mode "none" }}
+          {{- include "qv.probes" (dict "probes" .Values.archiver.probes "port" .Values.archiver.probes.healthPort) | nindent 10 }}
+          {{- end }}
+          resources: {{- toYaml .Values.archiver.resources | nindent 12 }}
+          securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/qv/tls, readOnly: true }
+            {{- if .Values.archive.credentialsSecret }}
+            - { name: archive-credentials, mountPath: /etc/qv/archive, readOnly: true }
+            {{- end }}
+            {{- if .Values.archive.tls.secretName }}
+            - { name: archive-tls, mountPath: /etc/qv/archive-tls, readOnly: true }
+            {{- end }}
+      volumes:
+        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.archiver.secretName) | nindent 8 }}
+        {{- if .Values.archive.credentialsSecret }}
+        - name: archive-credentials
+          secret: { secretName: {{ .Values.archive.credentialsSecret }}, defaultMode: 288 }
+        {{- end }}
+        {{- if .Values.archive.tls.secretName }}
+        {{- include "qv.secretVolume" (dict "name" "archive-tls" "secret" .Values.archive.tls.secretName) | nindent 8 }}
+        {{- end }}
+{{- end }}

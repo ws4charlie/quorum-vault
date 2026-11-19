@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "worker") }}
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels: {{- include "qv.selector" (dict "ctx" . "c" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "qv.labels" (dict "ctx" . "c" "worker") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "qv.fullname" (dict "ctx" . "c" "worker") }}
+      automountServiceAccountToken: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      securityContext: {{- include "qv.podSecurityContext" . | nindent 8 }}
+      {{- include "qv.pullSecrets" . | nindent 6 }}
+      {{- include "qv.spread" (dict "ctx" . "c" "worker") | nindent 6 }}
+      initContainers:
+        {{- include "qv.renderInit" (dict "ctx" .) | nindent 8 }}
+      containers:
+        - name: worker
+          image: {{ include "qv.image" (dict "ctx" . "k" "worker") | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          args:
+            - -config
+            - /etc/qv/custody/config.json
+            {{- with .Values.worker.taskQueue }}
+            - -task-queue
+            - {{ . | quote }}
+            {{- end }}
+            - -namespace
+            - {{ .Values.temporal.namespace | quote }}
+          envFrom:
+            - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "worker-env") }} }
+          {{- if ne .Values.worker.probes.mode "none" }}
+          {{- include "qv.probes" (dict "probes" .Values.worker.probes "port" .Values.worker.probes.healthPort) | nindent 10 }}
+          {{- end }}
+          resources: {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/qv/tls, readOnly: true }
+            - { name: custody, mountPath: /etc/qv/custody, readOnly: true }
+            {{- if .Values.custody.autoApprover.enabled }}
+            - { name: approver, mountPath: /etc/qv/approver, readOnly: true }
+            {{- end }}
+      volumes:
+        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.worker.secretName) | nindent 8 }}
+        {{- include "qv.custodyVolumes" (dict "ctx" .) | nindent 8 }}
+        {{- if .Values.custody.autoApprover.enabled }}
+        - name: approver
+          secret: { secretName: {{ .Values.custody.autoApprover.secretName }}, defaultMode: 288 }
+        {{- end }}

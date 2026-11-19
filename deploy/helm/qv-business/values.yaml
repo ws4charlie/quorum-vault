@@ -1,0 +1,186 @@
+# qv-business: production defaults. values-kind.yaml overrides what differs on a local cluster.
+# One release serves ONE chain cell: qv-core and qv-worker each read one custody config, so a second chain is a second release (set archiver.enabled=false there).
+
+nameOverride: ""
+
+# Images. Production references an image by DIGEST only (values.schema.json rejects a bare tag unless `tag` is set and `digest` is empty, and the policy test
+# in ci/helm refuses that for these values). The all-zero digests are PLACEHOLDERS: the release pipeline replaces them (--set or a values file) with the digests
+# that deploy/images/publish.sh pushed.
+imagePullPolicy: IfNotPresent
+imagePullSecrets: []
+images:
+  core:      { repository: ghcr.io/ws4charlie/quorum-vault/qv-core,           digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  worker:    { repository: ghcr.io/ws4charlie/quorum-vault/qv-worker,         digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  relay:     { repository: ghcr.io/ws4charlie/quorum-vault/qv-relay,          digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  archiver:  { repository: ghcr.io/ws4charlie/quorum-vault/qv-anchor-archiver, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  migrate:   { repository: ghcr.io/ws4charlie/quorum-vault/qv-migrate,        digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  # A small image with `sh` and `jq` that merges the credential overlay into the custody config (see custody.credentials). The qv images have no shell.
+  render:    { repository: ghcr.io/ws4charlie/quorum-vault/qv-config-render,  digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+
+# The uid/gid every image runs as (deploy/images/README.md).
+runAsUser: 65532
+
+# --- Dependencies: named here, created elsewhere (README, "What the dependencies must provide") ---
+database:
+  host: qv-business-db-rw        # CloudNativePG read-write service
+  port: 5432
+  name: quorumvault
+  sslmode: verify-full           # the certificate's DNS names must include `host`
+temporal:
+  address: temporal-gate:7233    # the name gate in front of the frontend (deploy/temporal-gate), never the frontend itself
+  namespace: default
+kafka:
+  brokers: redpanda:9092
+  auditSource: core              # relay: name this chain's audit heads are published under
+archive:                         # the write-once audit bucket (a separate account in production)
+  endpoint: ""                   # empty = AWS S3
+  bucket: qv-audit-archive
+  region: us-east-1
+  pathStyle: false
+  retention: 61320h              # 7 years; the bucket's default retention in COMPLIANCE mode must be at least this
+  credentialsSecret: ""          # empty = workload identity (see archiver.serviceAccount.annotations); else a Secret with the two keys below
+  accessKeyKey: access-key
+  secretKeyKey: secret-key
+  tls: { secretName: "" }        # client identity for an https store with our CA (SeaweedFS in kind); empty for AWS
+oidc:
+  issuer: https://idp.example.invalid/realms/qv   # PLACEHOLDER
+  audience: qv-core
+  jwksUrl: ""
+  rolesClaim: roles
+  roleMap: ""
+  serviceClients: ""
+  stepupAcr: aal3
+  caSecret: ""                   # Secret holding the CA bundle of a private IdP (key `ca.crt`); empty for a public one
+serviceAllow: "business/guardian,business/worker"   # QV_CORE_SERVICE_ALLOW
+
+# --- Certificates: Secrets made by cert-manager (task D5), each with tls.crt, tls.key, ca.crt. Referenced by name. ---
+tls:
+  reload: 1m
+  core:     { secretName: qv-core-tls }
+  worker:   { secretName: qv-worker-tls }
+  relay:    { secretName: qv-relay-tls }
+  archiver: { secretName: qv-archiver-tls }
+  admin:    { secretName: qv-admin-tls }    # the migration Job only: certificate name `admin`, Postgres role `qv` (owner)
+
+# --- The custody config (business zone) ---
+custody:
+  # Rendered to JSON into a ConfigMap. NEVER put rpc_user, rpc_password or an RPC URL that carries a key here: the chart refuses (README). Those go in the overlay Secret.
+  config:
+    entity: qv-example
+    chain:
+      name: evm-example
+      chain_id: 11155111
+      rpc_url: https://chain-rpc.invalid
+      confirmations: 2
+      factory: "0x0000000000000000000000000000000000000001"
+      sweep_destination: "0x0000000000000000000000000000000000000003"
+      hot_shards: ["0x0000000000000000000000000000000000000003"]
+      max_tx_fee_wei: "10000000000000000"
+      assets:
+        ETH: { decimals: 18, min_deposit: "0", price_wei: "1" }
+    sweep: { k: 20, min_sweep_wei: "1000000000000000", plan_interval: 5s }
+    withdrawal:
+      approval_window: 1h
+      approval_timeout: 55m
+      sign_timeout: 30s
+      stuck_after: 2m
+      hot_wait: 30m
+      max_replacements: 5
+      tiers:
+        ETH: [{ min_amount: "0", approvals: 1, auto: true }, { min_amount: "1000000000000000000", approvals: 2 }]
+    scan: { interval: 2s, start_height: 0 }
+  # A JSON object merged over `config` at pod start (jq `.[0] * .[1]`) by an init container, into a memory-backed emptyDir. The Secret is made by
+  # External Secrets or by hand; it holds e.g. {"chain":{"rpc_url":"https://...?key=..."}} or {"btc":{"rpc_user":"..","rpc_password":".."}} in the shape of config.
+  credentials:
+    secretName: qv-chain-credentials
+    key: overlay.json
+  autoApprover:                  # worker only: the Ed25519 seed (64 hex chars) of the auto approver
+    enabled: true
+    secretName: qv-auto-approver
+    key: seed
+
+# --- Workloads ---
+core:
+  replicas: 2
+  port: 8443
+  resources: { requests: { cpu: 500m, memory: 512Mi }, limits: { cpu: "2", memory: 1Gi } }
+  # tcp (default), http (needs /healthz from task D2) or none
+  probes: { mode: tcp, httpPath: /healthz }
+  terminationGracePeriodSeconds: 30
+worker:
+  replicas: 2
+  taskQueue: ""                  # empty: qv-core-<chain> (the same default the core uses)
+  resources: { requests: { cpu: 500m, memory: 512Mi }, limits: { cpu: "2", memory: 1Gi } }
+  # The worker, relay and archiver listen on no port (metrics are loopback-only), so a TCP probe has nothing to connect to: default none.
+  # With mode http, set healthPort to the port D2's health route listens on.
+  probes: { mode: none, httpPath: /healthz, healthPort: 8081 }
+  terminationGracePeriodSeconds: 60
+relay:
+  replicas: 2
+  resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { cpu: "1", memory: 512Mi } }
+  probes: { mode: none, httpPath: /healthz, healthPort: 8081 }
+  terminationGracePeriodSeconds: 30
+archiver:
+  enabled: true
+  replicas: 1
+  resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { cpu: "1", memory: 512Mi } }
+  probes: { mode: none, httpPath: /healthz, healthPort: 8081 }
+  terminationGracePeriodSeconds: 30
+  serviceAccount: { annotations: {}, automountToken: false }   # IRSA / workload identity needs automountToken: true and an annotation
+podDisruptionBudgets: { enabled: true }                         # core, worker, relay: minAvailable 1 (archiver has one replica: none)
+topologySpread: { enabled: true }                               # spread replicas over nodes (soft)
+
+# --- Migration: a Helm hook Job (README, "Migration") ---
+migration:
+  enabled: true
+  enableLogin: true              # a second hook Job runs `qv-migrate -enable-login`: ALTER ROLE ... LOGIN for the service roles. Set false if the operator enables login itself.
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 256Mi } }
+
+# --- Network ---
+ingress:
+  # Public: TLS ends at the controller (certificate for the public name), then re-encrypted to the core, which verifies the client certificate only when one is
+  # shown. People come with tokens and need no certificate.
+  public:
+    enabled: true
+    className: nginx
+    host: custody.example.invalid
+    tlsSecret: qv-public-tls     # the public certificate (cert-manager ACME or the company's)
+    annotations:
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+      nginx.ingress.kubernetes.io/proxy-ssl-verify: "on"
+      nginx.ingress.kubernetes.io/proxy-ssl-name: "qv-core"
+  # Service callers (guardian, admin) that cannot run in the cluster: TLS passthrough on a PRIVATE ingress class, so their client certificate reaches the core.
+  passthrough:
+    enabled: false
+    className: nginx-internal
+    host: custody-internal.example.invalid
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+network:
+  enabled: true
+  # Peers (NetworkPolicy `to`/`from` entries). Pod selectors name the dependencies when they run in this namespace; use ipBlock or namespaceSelector otherwise.
+  dns: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } } }]
+  postgres:
+    peers: [{ podSelector: { matchLabels: { cnpg.io/cluster: qv-business-db } } }]
+    port: 5432
+  kafka:
+    peers: [{ podSelector: { matchLabels: { app.kubernetes.io/name: redpanda } } }]
+    port: 9092
+  temporal:
+    peers: [{ podSelector: { matchLabels: { app.kubernetes.io/name: temporal-gate } } }]
+    port: 7233
+  # Outside the cluster: the identity provider, the chain nodes, the archive store. NetworkPolicy matches addresses, not names: replace with the provider's
+  # addresses or a private endpoint. The default allows public addresses only (not the cluster's private ranges).
+  idp:     { peers: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16] } }], ports: [443] }
+  chain:   { peers: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16] } }], ports: [443] }
+  archive: { peers: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16] } }], ports: [443] }
+  # Who may reach the core: the ingress controller (any pod of this namespace may too: service callers in the cluster).
+  ingressController: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } } }]
+  # THE signing link: who in the signing zone may reach the job queue (Postgres) and the audit-heads topic (Kafka). Nothing else is admitted from outside.
+  # In production these are the private endpoint addresses of the signing clusters (ipBlock). Empty = no link at all.
+  signingLink: { from: [] }
+  # Rules that let the dependencies' own pods accept the chart's workloads and the signing link, because the default deny covers the whole namespace.
+  # Operators and replication of the dependencies need more: their charts bring that.
+  dependencyPolicies: { enabled: true }

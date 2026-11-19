@@ -1,0 +1,16 @@
+{{- if .Values.podDisruptionBudgets.enabled }}
+{{- range $c := list "core" "worker" "relay" }}
+{{- if gt (int (index $.Values $c).replicas) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" $ "c" $c) }}
+  labels: {{- include "qv.labels" (dict "ctx" $ "c" $c) | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {{- include "qv.selector" (dict "ctx" $ "c" $c) | nindent 6 }}
+---
+{{- end }}
+{{- end }}
+{{- end }}
