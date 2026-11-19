@@ -23,6 +23,8 @@ An approver signs with a software key or a passkey (WebAuthn). The zone checks a
 ## Two checkers that don't trust each other
 Parties B and C each have their own checker, rules and records. Taking over the gateway, party A or the business database still can't get a payment nobody approved.
 
+Each party and its checker also prove who they are to each other, so a process that only owns the socket path can't answer for the checker, and no other party can ask it.
+
 ## When something goes wrong
 
 | What happened | What the zone does |

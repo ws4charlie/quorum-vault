@@ -245,6 +245,11 @@ func TestProductionBinaryRefusals(t *testing.T) {
 	if code == 0 || !strings.Contains(out, "pin_env or pin_file") {
 		t.Errorf("no PIN: exit %d out=%s", code, out)
 	}
+	// a cosigner channel without the cosigner's pinned certificate: refuses to start (no plain-text fallback in production)
+	code, out = run(base("B", server.SealerConfig{Type: "pkcs11", Token: "qv-party-2", PinEnv: "QV_GOODPIN"}, "cosigner"), "QV_GOODPIN="+pin, "QV_ALLOW_PLAINTEXT=", "QV_ENV=")
+	if code == 0 || !strings.Contains(out, "cosigner_pins") {
+		t.Errorf("cosigner without pins: exit %d out=%s", code, out)
+	}
 	// the binary does not contain the insecure sealer or the failpoints; the dev binary does
 	for bin, want := range map[string]bool{binProd: false, binDev: true} {
 		o, err := exec.Command("go", "tool", "nm", bin).CombinedOutput()
