@@ -205,7 +205,15 @@ func (t *sessTransport) waitAck(ctx context.Context) error {
 	case fin := <-t.fins: // refused or failed before the ACK
 		return peerFail("session", fin)
 	case <-t.done:
-		return t.err
+		// The pump queues a refusing FIN and then fails the session, so both channels can be ready at once and select picks
+		// at random. The FIN names the cause (frozen, refused, unavailable), and the bare session error maps to a transport
+		// failure: take the FIN first, as waitFin does.
+		select {
+		case fin := <-t.fins:
+			return peerFail("session", fin)
+		default:
+			return t.err
+		}
 	case <-ctx.Done():
 		return ctx.Err()
 	}
