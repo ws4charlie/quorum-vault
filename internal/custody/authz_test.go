@@ -217,6 +217,9 @@ func TestApprovalsRouteAcceptsEd25519OrWebAuthn(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newSvc(t)
 	is, h := apiWith(t, s, false)
+	if _, _, err := s.CreateCustomer(ctx, "ops", "c1", ""); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.transferForTest(ctx, "c1", 1000); err != nil {
 		t.Fatal(err)
 	}
