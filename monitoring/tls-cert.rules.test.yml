@@ -53,3 +53,29 @@ tests:
             exp_annotations:
               summary: "core cannot load its renewed TLS files"
               description: "It keeps the old certificate until that expires. Check its log for the reload error (a half-written pair, a certificate of the wrong zone or authority, an expired replacement)."
+  # the party-to-cosigner channel: both ends publish the same metric; the hours alerts cover them, and a month before the end a ticket is raised
+  - interval: 1m
+    input_series:
+      - series: 'qv_tls_cert_seconds_to_expiry{name="qv-cosigner-socket",zone="signing",kind="leaf"}'
+        values: '2000000+0x30'            # 23 days
+      - series: 'qv_tls_cert_seconds_to_expiry{name="mpc-party-b",zone="signing",kind="leaf"}'
+        values: '120 60 0 -60 -120 -180'   # the party's own certificate runs out
+      - series: 'qv_tls_cert_seconds_to_expiry{name="mpc-party-c",zone="signing",kind="leaf"}'
+        values: '31536000+0x30'            # a year: no alert
+      - series: 'qv_tls_cert_seconds_to_expiry{name="core",zone="business",kind="leaf"}'
+        values: '2000000+0x30'             # not a pinned certificate: renewed by itself, the month rule does not apply
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: QVPinnedCertExpiringSoon
+        exp_alerts:
+          - exp_labels: {severity: ticket, name: qv-cosigner-socket, zone: signing}
+            exp_annotations:
+              summary: "The pinned certificate of qv-cosigner-socket (signing zone) expires in 23d 3h 33m 20s"
+              description: "It is not renewed automatically and the process reads it only at start: issue the new one, add its pin on the other side, restart, remove the old pin. Runbook: docs/runbooks/certificates.md"
+      - eval_time: 4m
+        alertname: QVTLSCertExpired
+        exp_alerts:
+          - exp_labels: {severity: page, name: mpc-party-b, zone: signing}
+            exp_annotations:
+              summary: "The TLS certificate of mpc-party-b (signing zone) has expired"
+              description: "Its peers refuse it. Renew the files; the service reloads them. Runbook: docs/runbooks/certificates.md"

@@ -21,6 +21,16 @@ groups:
         annotations:
           summary: "The TLS certificate of {{ $labels.name }} ({{ $labels.zone }} zone) has expired"
           description: "Its peers refuse it. Renew the files; the service reloads them. Runbook: docs/runbooks/certificates.md"
+      # The party-to-cosigner channel (pinned certificates, no CA): qv-cosigner-socket on the cosigner's side, mpc-party-<role> on the party's
+      # side (its metrics_listen). Both are loaded once at start and renewed by hand (runbook: add the new pin, restart, remove the old),
+      # so they get a month of warning, not the hours of the two rules above (which cover them as well: same metric name, kind="leaf").
+      - alert: QVPinnedCertExpiringSoon
+        expr: min by (name, zone) (qv_tls_cert_seconds_to_expiry{kind="leaf", name=~"qv-cosigner-socket|mpc-party-.*"}) < 30 * 86400
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "The pinned certificate of {{ $labels.name }} ({{ $labels.zone }} zone) expires in {{ $value | humanizeDuration }}"
+          description: "It is not renewed automatically and the process reads it only at start: issue the new one, add its pin on the other side, restart, remove the old pin. Runbook: docs/runbooks/certificates.md"
       # the zone's authority: 30 days is the time to replace it before every certificate it signed stops working
       - alert: QVTLSCAExpiringSoon
         expr: min by (name, zone) (qv_tls_cert_seconds_to_expiry{kind="ca"}) < 30 * 86400

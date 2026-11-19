@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -45,8 +47,10 @@ func main() {
 		return
 	}
 	cfgPath := flag.String("config", "", "path to the JSON config file (required)")
+	healthListen := flag.String("health-listen", os.Getenv("QV_HEALTH_LISTEN"), "serve /livez and /readyz (plain http, no credentials, no detail) on this address for container probes, e.g. 0.0.0.0:9100; off when empty (env QV_HEALTH_LISTEN)")
 	flag.Parse()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	slog.SetDefault(log) // the sealer logs which pin_file mode it accepted through the default logger
 	if *cfgPath == "" {
 		fmt.Fprintln(os.Stderr, "usage: mpc-party -config <file>")
 		os.Exit(2)
@@ -66,6 +70,17 @@ func main() {
 	if err != nil {
 		log.Error("cannot create server", "err", err.Error())
 		os.Exit(1)
+	}
+	if *healthListen != "" {
+		ln, err := net.Listen("tcp", *healthListen)
+		if err != nil {
+			log.Error("cannot listen for health probes", "err", err.Error())
+			os.Exit(1)
+		}
+		hs := &http.Server{Handler: srv.HealthHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second, MaxHeaderBytes: 8 << 10}
+		go hs.Serve(ln)
+		defer hs.Close()
+		log.Info("health probes on", "addr", ln.Addr().String())
 	}
 	if err := srv.Start(); err != nil {
 		log.Error("cannot start", "err", err.Error())

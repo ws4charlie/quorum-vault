@@ -17,6 +17,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/auditchain"
 	"github.com/ws4charlie/quorum-vault/internal/db"
+	"github.com/ws4charlie/quorum-vault/internal/health"
 	"github.com/ws4charlie/quorum-vault/internal/kafkatls"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
 	"github.com/ws4charlie/quorum-vault/internal/pki"
@@ -43,8 +44,9 @@ func run(log *slog.Logger) error {
 	pruneRetention := flag.Duration("prune-retention", 0, "keep published outbox rows this long, then delete them (0: 720h = 30 days; minimum 168h = 7 days)")
 	pruneEvery := flag.Duration("prune-interval", time.Hour, "how often to delete old published outbox rows")
 	pruneBatch := flag.Int("prune-batch", 1000, "rows per delete statement when pruning")
-	metricsListen := flag.String("metrics-listen", "", "serve Prometheus metrics (outbox pruning) on this address, e.g. 127.0.0.1:9102; off when empty")
+	metricsListen := flag.String("metrics-listen", "", "serve Prometheus metrics (outbox pruning) on this address, e.g. 127.0.0.1:9102 (loopback only, unless QV_METRICS_ALLOW_NON_LOOPBACK=1); off when empty")
 	tlsFor := pki.Flags(flag.CommandLine, "")
+	healthListen := health.Flag(flag.CommandLine)
 	flag.Parse()
 	if *dsn == "" || *brokers == "" {
 		return fmt.Errorf("-dsn and -brokers are required")
@@ -54,6 +56,12 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	probe := health.New(log)
+	stopHealth, err := probe.Serve(ctx, *healthListen)
+	if err != nil {
+		return err
+	}
+	defer stopHealth()
 	tsrc, err := tlsFor("qv-relay", pki.ZoneBusiness, log)
 	if err != nil {
 		return err
@@ -66,12 +74,14 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer pool.Close()
+	probe.Check("database", health.Ping(pool))
+	probe.Check("certificates", health.Certs(tsrc))
 	pruner, err := outbox.NewPruner(pool, outbox.PruneOptions{Retention: *pruneRetention, Interval: *pruneEvery, Batch: *pruneBatch, Logger: log})
 	if err != nil {
 		return err // retention below the hard minimum: refused at start
 	}
 	if *metricsListen != "" {
-		if err := pki.RequireLoopback(*metricsListen); err != nil {
+		if err := pki.CheckMetricsAddr(*metricsListen, pki.ZoneBusiness); err != nil {
 			return fmt.Errorf("-metrics-listen: %w", err)
 		}
 		mux := http.NewServeMux()
@@ -94,6 +104,7 @@ func run(log *slog.Logger) error {
 	}
 	defer pub.Close()
 	log.Info("qv-relay started")
+	probe.SetReady(true)
 	// The audit chain: one chainer appends the audit events of the outbox to the hash chain, and the head of the chain is
 	// published on qv.audit.heads. Neither waits for Kafka: if it is down, chaining goes on and the heads catch up.
 	var wg sync.WaitGroup
