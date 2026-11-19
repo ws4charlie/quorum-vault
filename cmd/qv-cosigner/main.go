@@ -48,7 +48,7 @@ func run(log *slog.Logger) error {
 	anchorEvery := flag.Duration("anchor-interval", time.Minute, "publish the audit chain head at least this often, and at once when it changes")
 	sockCert := flag.String("socket-cert", os.Getenv("QV_COSIGNER_SOCKET_CERT"), "certificate (PEM) the cosigner presents on the socket (env QV_COSIGNER_SOCKET_CERT)")
 	sockKey := flag.String("socket-key", os.Getenv("QV_COSIGNER_SOCKET_KEY"), "private key of -socket-cert (env QV_COSIGNER_SOCKET_KEY)")
-	partyPins := flag.String("party-pins", os.Getenv("QV_COSIGNER_PARTY_PINS"), "comma-separated SHA-256 fingerprints of the certificate(s) of the ONE party this cosigner serves: nobody else may ask (env QV_COSIGNER_PARTY_PINS)")
+	partyPins := flag.String("party-pins", os.Getenv("QV_COSIGNER_PARTY_PINS"), "comma-separated pins (SHA-256 of the public key, SPKI) of the certificate(s) of the ONE party this cosigner serves: nobody else may ask (env QV_COSIGNER_PARTY_PINS)")
 	tlsFor := pki.Flags(flag.CommandLine, "")
 	// the audit heads go to the business Kafka: the explicit link, with a certificate the business authority issued (business/cosigner-link)
 	linkFor := pki.Flags(flag.CommandLine, "link-")

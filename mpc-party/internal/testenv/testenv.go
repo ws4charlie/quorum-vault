@@ -63,7 +63,7 @@ func NewCert(t testing.TB, name string) Cert {
 	c := Cert{Name: name,
 		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 		KeyPEM:  pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb}),
-		Pin:     server.PinOf(der).String()}
+		Pin:     mustPinOf(t, der)}
 	c.TLS, err = tls.X509KeyPair(c.CertPEM, c.KeyPEM)
 	if err != nil {
 		t.Fatal(err)
@@ -335,4 +335,13 @@ func pinFromDotEnv(dir string) string {
 			return ""
 		}
 	}
+}
+
+func mustPinOf(t testing.TB, der []byte) string {
+	t.Helper()
+	p, err := server.PinOf(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.String()
 }
