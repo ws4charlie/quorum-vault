@@ -175,3 +175,29 @@ CREATE OR REPLACE TRIGGER approver_changes_no_update_delete
 CREATE OR REPLACE TRIGGER approver_changes_no_truncate
     BEFORE TRUNCATE ON approver_changes
     FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
+
+-- Signed changes of the keyset states of the hot shards (see keysets.go). Every row carries the signatures of configured operators over (action,
+-- shard, generation, address, successor, caps, seq, signed_at); the zone checks them again every time it reads the log, so a row written by anyone
+-- else is ignored. The gateway and every cosigner keep their own copy. Append-only; seq is not unique on purpose, so a forged row cannot take a
+-- sequence number from a real change.
+CREATE TABLE IF NOT EXISTS keyset_changes (
+    id         bigserial PRIMARY KEY,
+    seq        bigint NOT NULL CHECK (seq >= 1),
+    action     text   NOT NULL,
+    shard      text   NOT NULL,
+    generation integer NOT NULL,
+    address    text   NOT NULL DEFAULT '',
+    successor  integer NOT NULL DEFAULT 0,
+    caps       jsonb,
+    signed_at  bigint NOT NULL,
+    signatures jsonb  NOT NULL,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE TRIGGER keyset_changes_no_update_delete
+    BEFORE UPDATE OR DELETE ON keyset_changes
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+
+CREATE OR REPLACE TRIGGER keyset_changes_no_truncate
+    BEFORE TRUNCATE ON keyset_changes
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();

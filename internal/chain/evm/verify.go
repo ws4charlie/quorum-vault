@@ -61,11 +61,11 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 	if u.KeyRef.PartitionID != i.PartitionID {
 		return reject("key partition %q, intent partition %q", u.KeyRef.PartitionID, i.PartitionID)
 	}
-	hot, err := cfg.hot(i.PartitionID)
+	ok, hot, err := cfg.senderOK(i.PartitionID, from)
 	if err != nil {
 		return reject("%v", err)
 	}
-	if from != hot {
+	if !ok {
 		return reject("sender %s is not the hot address %s of partition %q", from, hot, i.PartitionID)
 	}
 	amount, err := parseAmount(i.Amount)
@@ -96,6 +96,8 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		return v.verifyRebalance(tx.To(), tx.Value(), tx.Data(), from, i, amount, tok, native)
 	case "cancel":
 		return v.verifyCancel(tx, from, i, amount)
+	case signjob.KindDrain:
+		return v.verifyDrain(tx.To(), tx.Value(), tx.Data(), from, i, amount, tok, native)
 	default:
 		return reject("intent kind %q", i.Kind)
 	}
@@ -271,6 +273,52 @@ func (v *Verifier) verifyRebalance(to *common.Address, value *big.Int, data []by
 	if native {
 		if *to != dest || value.Cmp(amount) != 0 || len(data) != 0 {
 			return reject("rebalance transfer is to %s value %s data %d bytes; the destination is %s and the amount %s", to, value, len(data), dest, amount)
+		}
+		return nil
+	}
+	if *to != tok.Address {
+		return reject("call target %s is not the %s token %s", to, i.Asset, tok.Address)
+	}
+	if value.Sign() != 0 {
+		return reject("token transfer carries value %s", value)
+	}
+	want, err := packTransfer(dest, amount)
+	if err != nil {
+		return reject("%v", err)
+	}
+	if !bytes.Equal(want, data) {
+		return reject("calldata is not transfer(%s, %s)", dest, amount)
+	}
+	return nil
+}
+
+// verifyDrain accepts only the shape of a drain: a plain transfer, from the intent's source address (which is the sender) to the intent's destination, of
+// exactly the intent's amount: native value with no data, or an ERC-20 transfer(dest, amount) on the configured token. Whether the source may be drained
+// and whether the destination is its successor is the zone's keyset state (internal/gateway/keysets.go), which the verifier does not know.
+func (v *Verifier) verifyDrain(to *common.Address, value *big.Int, data []byte, from common.Address, i signjob.Intent, amount *big.Int, tok Token, native bool) error {
+	if amount.Sign() == 0 {
+		return reject("zero amount")
+	}
+	src, err := parseIntentAddress(i.From)
+	if err != nil {
+		return reject("drain source: %v", err)
+	}
+	if src != from {
+		return reject("drain source %s is not the sender %s", src, from)
+	}
+	dest, err := parseIntentAddress(i.To)
+	if err != nil {
+		return reject("%v", err)
+	}
+	if dest == from {
+		return reject("drain destination %s is the source", dest)
+	}
+	if to == nil {
+		return reject("contract creation")
+	}
+	if native {
+		if *to != dest || value.Cmp(amount) != 0 || len(data) != 0 {
+			return reject("drain transfer is to %s value %s data %d bytes; the destination is %s and the amount %s", to, value, len(data), dest, amount)
 		}
 		return nil
 	}
