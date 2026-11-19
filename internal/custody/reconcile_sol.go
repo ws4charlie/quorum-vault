@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
 // reconcileSOL compares the books with Solana. A Solana node keeps no balances of the past, so the comparison cannot be pinned to a height as
@@ -58,7 +59,7 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 		if err != nil {
 			return err
 		}
-		rows, err := s.Pool.Query(ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 ORDER BY address`, c.Chain)
+		rows, err := s.Pool.Query(ctx, `SELECT d.address FROM deposit_addresses d WHERE d.chain=$1 AND `+partition.WatchedSQL+` ORDER BY d.address`, c.Chain)
 		if err != nil {
 			return err
 		}
@@ -172,7 +173,7 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 func (s *Service) solStamp(ctx context.Context) (string, error) {
 	var st string
 	err := s.Pool.QueryRow(ctx, `SELECT concat_ws('|', (SELECT count(*)::text FROM deposits WHERE chain=$1), (SELECT COALESCE(next_height,0)::text FROM chain_cursors WHERE chain=$1),
-		(SELECT count(*)::text FROM deposit_addresses WHERE chain=$1),
+		(SELECT count(*)::text FROM deposit_addresses d WHERE d.chain=$1 AND `+partition.WatchedSQL+`),
 		(SELECT COALESCE(string_agg(posted::text, ',' ORDER BY id), '') FROM ledger_accounts WHERE chain=$1),
 		(SELECT count(*)::text FROM withdrawals WHERE chain=$1 AND status IN ('confirmed','failed')),
 		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM sweeps WHERE chain=$1),

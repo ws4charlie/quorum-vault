@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
 // Adapter is the Bitcoin chain cell. Address derivation and deposit scanning work; everything that moves funds out returns
@@ -56,6 +58,15 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 		return nil, errors.New("btc: nil database pool")
 	}
 	a := &Adapter{cfg: v, rpc: NewRPC(cfg.RPCURL, cfg.RPCUser, cfg.RPCPass), pool: pool, acct: &Account{Params: v.params, key: v.account}, byAddr: map[string]shard{}, cold: map[string]string{}, coldBy: map[string]string{}}
+	a.acct.SetGenerationLoader(func(gen uint32) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		k, err := partition.DepositGeneration(ctx, pool, cfg.Chain, int(gen))
+		if err != nil {
+			return "", err
+		}
+		return k.Address, nil
+	})
 	for _, h := range v.HotShards {
 		d, err := DecodeAddress(h.Address, v.params)
 		if err != nil {
@@ -136,6 +147,46 @@ func (a *Adapter) DeriveDepositAddress(_ context.Context, customerID string, ind
 	}
 	return chain.DepositAddress{Chain: a.cfg.Chain, Address: addr, Kind: chain.KindXpub, DerivationIndex: index, Asset: Native}, nil
 }
+
+// DepositIdentity is what the keyset registry records of the chain's deposit key tree at generation 1: the account xpub (the identity the addresses derive
+// from) and the account's compressed public key. The hot shard addresses derive from the same account (branch 1), so the registry's deposit-tree entry and its
+// hot shard entries name one key until the hot shards get their own (research/Key-replacement.md D1).
+func DepositIdentity(network, accountXpub string) (identity string, pub []byte, err error) {
+	acct, err := NewAccount(network, accountXpub)
+	if err != nil {
+		return "", nil, err
+	}
+	pk, err := acct.key.ECPubKey()
+	if err != nil {
+		return "", nil, err
+	}
+	return accountXpub, pk.SerializeCompressed(), nil
+}
+
+// DeriveDepositAddressAt is DeriveDepositAddress under the account key of a generation of the deposit tree (chain.GenerationDeriver). Generation 1 is the
+// configured key: the same address as DeriveDepositAddress.
+func (a *Adapter) DeriveDepositAddressAt(ctx context.Context, key chain.DepositKey, customerID string, index uint64) (chain.DepositAddress, error) {
+	if key.Generation <= 1 {
+		return a.DeriveDepositAddress(ctx, customerID, index)
+	}
+	if customerID == "" {
+		return chain.DepositAddress{}, errors.New("btc: empty customer id")
+	}
+	if index >= 1<<31 {
+		return chain.DepositAddress{}, fmt.Errorf("btc: derivation index %d is hardened", index)
+	}
+	acct, err := NewAccount(a.cfg.Network, key.Identity)
+	if err != nil {
+		return chain.DepositAddress{}, err
+	}
+	addr, err := acct.Address([]uint32{BranchDeposit, uint32(index)})
+	if err != nil {
+		return chain.DepositAddress{}, err
+	}
+	return chain.DepositAddress{Chain: a.cfg.Chain, Address: addr, Kind: chain.KindXpub, DerivationIndex: index, Asset: Native}, nil
+}
+
+var _ chain.GenerationDeriver = (*Adapter)(nil)
 
 var errLater = fmt.Errorf("btc: %w (a later P7 task)", chain.ErrNotSupported)
 

@@ -11,6 +11,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
 // Check is one comparison Reconcile made.
@@ -217,7 +218,7 @@ func (s *Service) reconcileBTC(ctx context.Context, rep *Report) error {
 	for _, a := range c.BTC.ColdAddresses {
 		colds = append(colds, a)
 	}
-	rows, err := s.Pool.Query(ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 ORDER BY address`, c.Chain)
+	rows, err := s.Pool.Query(ctx, `SELECT d.address FROM deposit_addresses d WHERE d.chain=$1 AND `+partition.WatchedSQL+` ORDER BY d.address`, c.Chain)
 	if err != nil {
 		return err
 	}

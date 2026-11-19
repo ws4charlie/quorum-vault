@@ -122,7 +122,10 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	return s.loadKeysets(ctx)
+	if err := s.loadKeysets(ctx); err != nil {
+		return err
+	}
+	return s.loadDepositTree(ctx)
 }
 
 // coldAddressList is every configured cold address, lower case.

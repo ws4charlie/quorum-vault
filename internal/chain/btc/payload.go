@@ -36,6 +36,9 @@ type PayloadInput struct {
 	Value    uint64   `json:"value"`
 	Path     []uint32 `json:"path"`
 	Sequence uint32   `json:"sequence"`
+	// Gen is the generation of the deposit key tree the input's key belongs to; absent (0) is generation 1, so a payload of one generation is byte for
+	// byte what it always was. Only deposit inputs carry a generation above 1.
+	Gen uint32 `json:"gen,omitempty"`
 }
 
 // PayloadOutput pays value satoshis to address.
