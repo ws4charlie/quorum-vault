@@ -42,6 +42,20 @@ func TestGuardRolesAreSeparated(t *testing.T) {
 		if _, err := OpenGuard(ctx, p); err != nil { // a second start: CREATE IF NOT EXISTS and ALTER on tables it owns
 			t.Fatalf("%s: second OpenGuard: %v", name, err)
 		}
+		// the approver registry's append-only table (I4): readable and appendable in its own database, and immutable
+		var n int
+		if err := p.QueryRow(ctx, `SELECT count(*) FROM approver_changes`).Scan(&n); err != nil {
+			t.Fatalf("%s: read approver_changes: %v", name, err)
+		}
+		if _, err := p.Exec(ctx, `INSERT INTO approver_changes (seq, action, name, signed_at, signatures) VALUES (1, 'add', 'zed', 1, '[]')`); err != nil {
+			t.Fatalf("%s: append approver_changes: %v", name, err)
+		}
+		if _, err := p.Exec(ctx, `UPDATE approver_changes SET name = 'x'`); err == nil {
+			t.Errorf("%s: approver_changes was updated", name)
+		}
+		if _, err := p.Exec(ctx, `DELETE FROM approver_changes`); err == nil {
+			t.Errorf("%s: approver_changes rows were deleted", name)
+		}
 		p.Close()
 	}
 	// neither can open the other's guard database, nor the bootstrap database, with the right certificate or the wrong one

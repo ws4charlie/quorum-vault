@@ -184,5 +184,10 @@ GRANT EXECUTE ON FUNCTION outbox_prune(interval, int) TO qv_relay;
 -- qv_archiver reads Kafka and writes an archive store, never this database: its certificate maps to a role with no rights at all, so the
 -- certificate opens nothing here.
 
--- ---- Tables other changes add in the same batch (grants go in the migration that adds the table, or here when that PR merged first):
---   keysets (0029, K1): qv_core and qv_worker SELECT, INSERT, UPDATE; no DELETE; no other role.   << PLACE FOR THE keysets GRANT >>
+-- ---- Tables other changes add in the same batch:
+--   keysets (0029, K1): qv_core and qv_worker SELECT, INSERT, UPDATE; no DELETE; no other role (they write its audit events through the
+--   outbox, already granted). approver_changes (guard store.sql, I4) needs no line here: it is in a guard database, owned by its role.
+SELECT pg_temp.grant_matrix(ARRAY[
+    ['qv_core',   'keysets', 'SELECT, INSERT, UPDATE'],
+    ['qv_worker', 'keysets', 'SELECT, INSERT, UPDATE']
+]::text[][]);

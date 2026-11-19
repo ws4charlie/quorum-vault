@@ -216,12 +216,22 @@ func TestWorkerCannotPruneOrChangeRoles(t *testing.T) {
 		allowed(t, c, s.role, `SELECT count(*) FROM schema_migrations`)
 		allowed(t, c, s.role, `SELECT count(*) FROM ledger_entries`)
 		allowed(t, c, s.role, `SELECT count(*) FROM withdrawals`)
+		allowed(t, c, s.role, `SELECT count(*) FROM keysets`)
+		allowed(t, c, s.role, `UPDATE keysets SET state = state WHERE false`)
+		denied(t, c, s.role, `DELETE FROM keysets`)
 		allowed(t, c, s.role, `INSERT INTO outbox (id, topic, key, payload) VALUES (gen_random_uuid(), 't', 'k', '{}')`)
 		allowed(t, c, s.role, `INSERT INTO outbox (id, topic, key, payload) VALUES (gen_random_uuid(), 't', 'k', '{}') ON CONFLICT (id) DO NOTHING`)
 	}
 }
 
 // The gateway's link role still sees the job queue and nothing else; the archiver's certificate opens nothing.
+func TestRelayAndGatewayAndArchiverHaveNoKeysets(t *testing.T) {
+	pool := dbtest.New(t)
+	for _, s := range []service{relay, archive, gateway} {
+		denied(t, as(t, pool, s), s.role, `SELECT * FROM keysets`)
+	}
+}
+
 func TestGatewayLinkAndArchiverReachOnlyTheirOwn(t *testing.T) {
 	pool := dbtest.New(t)
 	g := as(t, pool, gateway)
