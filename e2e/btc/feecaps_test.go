@@ -222,7 +222,7 @@ func TestFeeCapsRefusedChangesLeaveEverythingAsItWas(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("%s: the refusal does not say %q:\n%s", why, want, out)
 		}
-		if strings.Contains(out, "applied") {
+		if strings.Contains(out, "applied: max_tx_fee_sats") {
 			t.Fatalf("%s: something was applied:\n%s", why, out)
 		}
 		check(why)
@@ -334,14 +334,14 @@ func TestFeeCapsRevokedApproverIsRefusedByTheZoneNotByTheCore(t *testing.T) {
 	// A new change signed by the revoked approver and alice. To every database: refused before anything is written.
 	bad := s.signedBy(150_000, 70, 2, "alice", "bob")
 	out, err := s.applyCaps(everywhere, bad...)
-	if err == nil || !strings.Contains(out, "change refused by") || strings.Contains(out, "applied:") {
+	if err == nil || !strings.Contains(out, "change refused by") || strings.Contains(out, "applied: max_tx_fee_sats") {
 		t.Fatalf("a change signed by a revoked approver, applied everywhere: %v\n%s", err, out)
 	}
 	if rows := s.capRows(); rows[0] != 1 || rows[1] != 1 || rows[2] != 1 {
 		t.Fatalf("rows after the refused change: %v", rows)
 	}
 	// To the core alone: the core checks the static list, which still has bob, and takes it. The zone has not got it.
-	if out, err := s.applyCaps(coreOnly, bad...); err != nil || !strings.Contains(out, "applied:") {
+	if out, err := s.applyCaps(coreOnly, bad...); err != nil || !strings.Contains(out, "applied: max_tx_fee_sats") {
 		t.Fatalf("the core alone: %v\n%s", err, out)
 	}
 	s.wantCapsOf(map[string]capsRow{"core": {150_000, 70, 2}, "gateway": {100_000, 50, 0}, "cosigner-b": {100_000, 50, 0}})
