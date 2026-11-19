@@ -17,6 +17,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
 // Reader reads the chain for balance reconciliation and settlement. It is
@@ -39,6 +40,8 @@ type Service struct {
 	Reader Reader
 	Cfg    *Config
 	Now    func() time.Time
+
+	keysets atomic.Pointer[map[partition.ShardID]partition.Keyset] // the active keyset of every shard of this chain, from the registry (nil until Bootstrap)
 
 	reconSkipSince  atomic.Int64 // Unix time the chain comparisons of Reconcile began to be skipped (0: they are not)
 	mismatchAlerted atomic.Bool  // the "destination changed on chain" ALERT was given and the mismatch has not cleared since
