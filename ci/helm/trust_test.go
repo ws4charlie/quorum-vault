@@ -3,6 +3,7 @@ package helmcheck
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -97,5 +98,38 @@ func TestCoreDrainsBeforeItStops(t *testing.T) {
 	bad, err := exec.Command("helm", "template", "r", "../../deploy/helm/qv-business", "-n", "n", "-f", "../../deploy/helm/qv-business/values-kind.yaml", "--set", "core.preStopSeconds=25").CombinedOutput()
 	if err == nil || !strings.Contains(string(bad), "preStopSeconds + 12") {
 		t.Errorf("a preStop longer than the grace period was not refused: %v", err)
+	}
+}
+
+// Production clusters must run Kubernetes 1.30 or newer: core's preStop `sleep` action is on by default only from 1.30 (feature gate PodLifecycleSleepAction), and the image has no shell to run
+// an exec hook with. All charts state the same minimum, so a 1.29 cluster is refused at install, not at the API server.
+func TestChartsRequireKubernetes130(t *testing.T) {
+	charts, _ := filepath.Glob("../../deploy/helm/*/Chart.yaml")
+	if len(charts) < 5 {
+		t.Fatalf("found %d charts", len(charts))
+	}
+	for _, c := range charts {
+		b, err := os.ReadFile(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !regexp.MustCompile(`(?m)^kubeVersion: ">=1\.30\.0-0"$`).Match(b) {
+			t.Errorf("%s: kubeVersion is not >=1.30.0-0", c)
+		}
+	}
+	if _, err := exec.LookPath("helm"); err != nil {
+		if os.Getenv("CI") == "" {
+			t.Skip("helm not on PATH")
+		}
+		t.Fatal(err)
+	}
+	args := func(v string) []string {
+		return []string{"template", "r", "../../deploy/helm/qv-business", "-n", "n", "-f", "../../deploy/helm/qv-business/values-kind.yaml", "--kube-version", v}
+	}
+	if out, err := exec.Command("helm", args("1.29.9")...).CombinedOutput(); err == nil || !strings.Contains(string(out), "kubeVersion") {
+		t.Errorf("a 1.29 render of qv-business is not refused on kubeVersion: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("helm", args("1.30.0")...).CombinedOutput(); err != nil {
+		t.Errorf("a 1.30 render is refused: %v\n%s", err, out)
 	}
 }

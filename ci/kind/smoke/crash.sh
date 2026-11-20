@@ -3,13 +3,14 @@
 #   1. party A is deleted while the sign job is in flight (the gateway falls back to coordinator B, party A comes back from its StatefulSet and its volume)
 #   2. the worker is deleted right after the sign job exists (Temporal replays the workflow on the new worker)
 #   3. the gateway is rolled while the withdrawal is signing (a new gateway pod finds the job in the queue and the guard database)
-# Needs the `withdraw` case's state (EVM custody config, a customer with a balance); it makes its own customer, so it runs alone too.
+# Stands alone after a fresh `kind-up`: it books the hot shard's gas money itself (fund_hot, idempotent) and makes its own customer.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/wd-lib.sh"
 trap wd_down EXIT
 use_custody evm
+fund_hot
 AMT=10000000000000000
-wd setup -asset ETH -customer kind-crash -amount 5000000000000000000
+wd setup -asset ETH -customer kind-crash -amount 5000000000000000000 -hot "$(evm_hot)"
 
 crash() { # name command-that-kills
   local name="$1"; shift

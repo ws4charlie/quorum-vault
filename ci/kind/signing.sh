@@ -27,11 +27,13 @@ configs)
     -auto-seed "$S/auto-approver.seed" -out "$C" -btc-user-file "$S/btc-rpc-user" -btc-pass-file "$S/btc-rpc-pass"
   log "cosigners of B and C: the real signing config"
   jq '{cosigner:{config:.}}' "$C/cosigner.json" > "$WORK/cosigner-config.yaml"
+  pids=()
   for r in b c; do
     ns="$NS_B"; [ "$r" = c ] && ns="$NS_C"
     hm upgrade --install "qv-party-$r" deploy/helm/qv-party -n "$ns" --set role="$(echo $r | tr a-z A-Z)" -f deploy/helm/qv-party/values-kind.yaml $(trust_args "$ns") -f "$WORK/party-$r.yaml" -f "$WORK/cosigner-config.yaml" --wait --timeout 6m > /dev/null &
+    pids+=("$!")
   done
-  wait
+  wait_all "${pids[@]}"
   ;;
 core)
   log "qv-signing-core"

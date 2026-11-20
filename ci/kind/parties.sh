@@ -90,5 +90,8 @@ jq '{cosigner:{config:(del(._comment))}}' "$src" > "$WORK/cosigner-config.yaml"
 rel() { # role ns
   hm upgrade --install "qv-party-$1" deploy/helm/qv-party -n "$2" --set role="$(echo $1 | tr a-z A-Z)" -f deploy/helm/qv-party/values-kind.yaml $(trust_args "$2") -f "$WORK/party-$1.yaml" $( [ "$1" != a ] && echo "-f $WORK/cosigner-config.yaml" ) --wait --timeout 6m >/dev/null
 }
-rel c "$NS_C" & rel b "$NS_B" & rel a "$NS_SIGN" & wait
+rel c "$NS_C" & pc=$!
+rel b "$NS_B" & pb=$!
+rel a "$NS_SIGN" & pa=$!
+wait_all "$pa" "$pb" "$pc"
 log "parties ready"

@@ -94,7 +94,7 @@ func (e *env) run(cmd string, args []string) error {
 	amount := fs.String("amount", "", "amount in base units (wei, satoshis)")
 	id := fs.String("id", "", "withdrawal id")
 	to := fs.String("to", "", "destination address")
-	hot := fs.String("hot", "", "setup, BTC: also fund this hot address with this many satoshis (-hot-sats)")
+	hot := fs.String("hot", "", "setup: the hot address. BTC: also fund it with -hot-sats satoshis; ETH: the deposit must be swept into it (waits for that)")
 	hotSats := fs.Int64("hot-sats", 0, "")
 	key := fs.String("key", "", "idempotency key (default: random)")
 	until := fs.String("until", "signing", "await: the statuses to wait for (comma separated; the first one reached ends the wait)")
@@ -304,7 +304,13 @@ func (e *env) setup(asset, customer, amount, hotAddr string, hotSats int64) erro
 		return err
 	}
 	addr, _ := out["address"].(string)
+	var hotBefore *big.Int
 	if asset == "ETH" {
+		if hotAddr != "" {
+			if hotBefore, err = e.evmBalance(hotAddr); err != nil {
+				return err
+			}
+		}
 		err = e.evmPay(addr, amt)
 	} else {
 		err = e.btcDeposit(addr, amt, hotAddr, hotSats)
@@ -312,9 +318,28 @@ func (e *env) setup(asset, customer, amount, hotAddr string, hotSats int64) erro
 	if err != nil {
 		return err
 	}
-	return e.waitFor(3*time.Minute, "the deposit to be available", func() (bool, error) {
+	if err := e.waitFor(3*time.Minute, "the deposit to be available", func() (bool, error) {
 		a, err := e.available(customer, asset)
 		return a != nil && a.Cmp(amt) >= 0, err
+	}); err != nil {
+		return err
+	}
+	if asset != "ETH" || hotBefore == nil {
+		return nil
+	}
+	// The deposit must be SWEPT, by the pods: the deposit address is emptied and the hot shard holds the amount (less the gas of the sweep, which the hot shard pays). Without this a broken
+	// sweep would pass: the withdrawals below are paid from the hot shard's seeded gas money, which is there whether or not a deposit ever arrives.
+	slack := new(big.Int).Div(amt, big.NewInt(10)) // the sweep's gas, at most a tenth of the deposit (the lane deposits 5 ETH; a sweep costs well under 0.01)
+	return e.waitFor(3*time.Minute, "the deposit to be swept to the hot shard", func() (bool, error) {
+		d, err := e.evmBalance(addr)
+		if err != nil || d.Sign() != 0 {
+			return false, err
+		}
+		h, err := e.evmBalance(hotAddr)
+		if err != nil {
+			return false, err
+		}
+		return h.Cmp(new(big.Int).Sub(new(big.Int).Add(hotBefore, amt), slack)) >= 0, nil
 	})
 }
 

@@ -16,7 +16,7 @@ pf_start "$NS_SIGN" svc/qv-party-a-caller 7001
 K=(-addr 127.0.0.1:$PF_PORT -cert "$WORK/gwp.crt" -key "$WORK/gwp.key" -pin "$PA" -id hot-0)
 # A pod is Ready before its peer port takes calls on a cold cluster ("connection refused" from A to B), so a DKG that fails before it starts is tried again
 retry() { local i; for i in 1 2 3 4 5 6; do "$@" && return 0; sleep 10; done; return 1; }
-# each DKG is made once (a keyset that exists is refused), so its public result is kept in the work dir
+# each DKG is made once; its public result is kept in the work dir, and kindctl rebuilds it from the party's keyset status if a run lost it (the key made, the file never written)
 [ -s "$WORK/hot-0.json" ] || retry go run ./ci/kind/tools/kindctl dkg "${K[@]}" -seed "$WORK/secrets/admin.seed" -scheme ecdsa-2of3 > "$WORK/hot-0.json"
 [ -s "$WORK/btc-0.xpub" ] || { retry go run ./ci/kind/tools/kindctl dkg "${K[@]/hot-0/btc-0}" -seed "$WORK/secrets/admin.seed" -scheme hd > /dev/null
   go run ./ci/kind/tools/kindctl xpub "${K[@]/hot-0/btc-0}" > "$WORK/btc-0.xpub"; }

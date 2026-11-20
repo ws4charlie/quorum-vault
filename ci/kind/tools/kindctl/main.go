@@ -21,7 +21,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	"github.com/ws4charlie/quorum-vault/internal/mpcsigner"
 	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
@@ -136,15 +138,54 @@ func dkg(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
+	// A keyset that already exists is not made again: a run that lost its reply (the key made, the result never written) would get AlreadyExists for ever. The party knows the keyset
+	// and its public key, so the result is rebuilt from its status.
+	if done, err := existing(ctx, cl, *id); err != nil || done != nil {
+		if err != nil {
+			return err
+		}
+		return printResult(*id, done.PublicKey)
+	}
 	r, err := cl.DKG(ctx, req)
+	if status.Code(err) == codes.AlreadyExists { // made between the status and the call (or by a run whose reply was lost)
+		if done, e := existing(ctx, cl, *id); e == nil && done != nil {
+			return printResult(*id, done.PublicKey)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("DKG: %w", err)
 	}
-	pk, err := crypto.DecompressPubkey(r.RootPublicKey)
+	return printResult(*id, r.RootPublicKey)
+}
+
+// existing is the status of keyset id at party A when it exists and is resolved; nil when there is none yet. An existing keyset that is not resolved is an error (the caller retries).
+func existing(ctx context.Context, cl pb.MpcPartyClient, id string) (*pb.KeysetStatus, error) {
+	h, err := cl.Health(ctx, &pb.HealthRequest{})
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("Health: %w", err)
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]string{"keyset": *id, "public_key": hex.EncodeToString(crypto.FromECDSAPub(pk)), "address": crypto.PubkeyToAddress(*pk).Hex()})
+	for _, k := range h.Keysets {
+		if k.KeysetId == id && k.Generation != 0 {
+			if !k.Resolved {
+				return nil, fmt.Errorf("keyset %q exists but is not resolved yet", id)
+			}
+			return k, nil
+		}
+	}
+	return nil, nil
+}
+
+// printResult prints the public result of a DKG. A keyset without a group public key (an HD keyset's status has none) prints the id only: the lane reads its xpub with `xpub`.
+func printResult(id string, compressed []byte) error {
+	out := map[string]string{"keyset": id}
+	if len(compressed) != 0 {
+		pk, err := crypto.DecompressPubkey(compressed)
+		if err != nil {
+			return err
+		}
+		out["public_key"], out["address"] = hex.EncodeToString(crypto.FromECDSAPub(pk)), crypto.PubkeyToAddress(*pk).Hex()
+	}
+	return json.NewEncoder(os.Stdout).Encode(out)
 }
 
 // xpub prints the regtest account xpub of an HD keyset (public values only).

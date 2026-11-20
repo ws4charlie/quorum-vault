@@ -7,13 +7,9 @@ trap wd_down EXIT
 echo "-- EVM"
 use_custody evm
 # gas money on the hot shard: on the chain (kindcfg chain did that) and in the books (the operator's step)
-fwd P_DB "$NS_BIZ" svc/qv-business-db-rw 5432
-D="$(mktemp -d)"; chmod 700 "$D"; trap 'wd_down; rm -rf "$D"' EXIT
-g() { kn "$NS_BIZ" get secret qv-core-tls -o jsonpath="{.data.$1}" | base64 -d; }
-g 'tls\.crt' > "$D/c.crt"; g 'tls\.key' > "$D/c.key"; g 'ca\.crt' > "$D/ca.crt"; chmod 600 "$D/c.key"
-go run ./ci/kind/tools/kindcfg fundhot -cfg "$C/custody-evm.json" -rpc "http://127.0.0.1:$P_ANVIL" -eth 100 \
-  -dsn "postgres://qv_core@127.0.0.1:$P_DB/quorumvault?sslmode=verify-ca&sslrootcert=$D/ca.crt&sslcert=$D/c.crt&sslkey=$D/c.key"
-wd setup -asset ETH -customer kind-eth -amount 5000000000000000000
+fund_hot
+# -hot: setup waits for the deposit to be SWEPT into the hot shard by the pods, not only for the balance
+wd setup -asset ETH -customer kind-eth -amount 5000000000000000000 -hot "$(evm_hot)"
 OUT="$(wd pay -asset ETH -customer kind-eth -amount 10000000000000000)"; echo "$OUT"
 wd settle -asset ETH -id "$(jq -r .id <<< "$OUT")" -to "$(jq -r .to <<< "$OUT")" -amount 10000000000000000
 

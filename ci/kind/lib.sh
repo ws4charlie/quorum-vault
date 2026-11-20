@@ -59,9 +59,12 @@ pf_start() {
 trust_args() {
   local ns="$1" z n
   for z in business signing; do
-    n="$(kn "$ns" get configmap -l "quorumvault.io/trust-bundle=$z" -o jsonpath='{.items[0].metadata.name}' 2> /dev/null || true)"
+    n="$(kn "$ns" get configmap -l "quorumvault.io/trust-bundle=$z" -o jsonpath='{.items[0].metadata.name}' 2> /dev/null || true)"   # no bundle in this namespace (qv-certs not installed there): empty, the chart keeps the CA of its Secret
     if [ -n "$n" ]; then printf -- '--set tls.trust.%s=%s ' "$z" "$n"; fi
   done
   return 0
 }
+# Waits for each background job by pid: a bare `wait` returns 0 whatever the jobs returned, so a failed `helm upgrade ... &` would pass. Fails if any job failed (after all have ended).
+#   job_a & pa=$!; job_b & pb=$!; wait_all "$pa" "$pb"
+wait_all() { local p rc=0; for p in "$@"; do wait "$p" || rc=1; done; return $rc; }
 pf_stop() { [ -n "${PF_PID:-}" ] && kill "$PF_PID" 2>/dev/null; PF_PID=""; return 0; }
