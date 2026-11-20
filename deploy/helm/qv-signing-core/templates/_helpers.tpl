@@ -109,6 +109,9 @@ QV_LINK_TLS_RELOAD: {{ .Values.tls.reload | quote }}
 {{- if .Values.env }}
 QV_ENV: {{ .Values.env | quote }}
 {{- end }}
+{{- if ne .Values.hsm.mode "none" }}
+QV_HSM_PIN_FILE: /etc/qv/hsm-pin/pin
+{{- end }}
 {{- if eq .Values.hsm.mode "pkcs11" }}
 QV_PKCS11_LIB: {{ .Values.hsm.pkcs11.module | quote }}
 {{- else if eq .Values.hsm.mode "softhsm" }}

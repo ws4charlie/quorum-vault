@@ -63,8 +63,8 @@ hsm:
     volume: {}                   # REQUIRED when mode is pkcs11
     # Public client configuration, mounted at <mountPath>/etc as files (CloudHSM: cloudhsm-pkcs11.json with the cluster's address, customerCA.crt = the cluster's CA). No secret.
     clientConfig: {}
-  # The crypto-user PIN: a Secret that already exists (External Secrets from the account's secret store). The gateway reads it ONLY from the environment variable QV_HSM_PIN
-  # (cmd/qv-gateway/main.go), so it is injected from the Secret (secretKeyRef), never written into the chart. A file would be better: README "HSM", Known limits.
+  # The crypto-user PIN: a Secret that already exists (External Secrets from the account's secret store), mounted as a FILE (only the key below, mode 0440, group = fsGroup)
+  # and named by QV_HSM_PIN_FILE (/etc/qv/hsm-pin/pin). Never an environment variable and never in values: the gateway refuses QV_HSM_PIN outside dev and test.
   pin: { secretName: qv-gateway-hsm-pin, key: pin, soKey: so-pin }
   softhsm: { size: 64Mi, tokenLabel: qv-hsm }   # kind: a PVC for the token files and an init Job that makes the token (the PIN Secret comes from the kind setup)
 

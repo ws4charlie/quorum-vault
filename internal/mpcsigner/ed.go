@@ -136,6 +136,17 @@ func (d *EdDeriving) SignMessage(context.Context, []byte, signer.SignOptions) (s
 	return signer.MessageResult{}, &Error{Kind: KindInternal, Message: "a deriving signer signs through At(path)"}
 }
 
+// WithKeyset returns a deriving signer for another Ed25519 HD keyset of the same party A (connection shared with d): a later generation of the
+// Solana deposit tree.
+func (d *EdDeriving) WithKeyset(keysetID string) (*EdDeriving, error) {
+	if keysetID == "" {
+		return nil, errors.New("keyset id is required")
+	}
+	cfg := d.cfg
+	cfg.KeysetID = keysetID
+	return &EdDeriving{cfg: cfg, conn: d.conn, cl: d.cl, by: map[string]*edSigner{}}, nil
+}
+
 // At implements signer.MessageDeriver.
 func (d *EdDeriving) At(ctx context.Context, path []uint32) (signer.MessageSigner, error) {
 	key := fmt.Sprint(path)

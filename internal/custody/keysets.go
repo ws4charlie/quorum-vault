@@ -86,6 +86,18 @@ func (s *Service) ShardAddressOf(partitionID string) (string, int, error) {
 
 // ActiveAddressOf is the address of the active keyset of the partition's shard, read from q.
 func (s *Service) ActiveAddressOf(ctx context.Context, q kq, partitionID string) (string, error) {
+	if s.Cfg.Family == FamilyBTC {
+		// The hot shards of a Bitcoin cell derive from the account key of the deposit tree: its active generation says which address serves new work.
+		if h, ok := s.Chain.(interface {
+			ActiveHotAddress(context.Context, string) (string, error)
+		}); ok {
+			a, err := h.ActiveHotAddress(ctx, partitionID)
+			if errors.Is(err, chain.ErrNotEnoughOutputs) {
+				return "", fmt.Errorf("%w: %v", ErrNoActiveKeyset, err)
+			}
+			return a, err
+		}
+	}
 	k, err := partition.Parse(partitionID)
 	if err != nil {
 		return "", err

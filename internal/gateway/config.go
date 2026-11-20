@@ -272,7 +272,16 @@ func (cf ChainFile) buildBTC(name string, enabledApprovers int) (*ChainConfig, e
 	}
 	return &ChainConfig{Name: name, Family: FamilyBTC, BTC: sc, Assets: map[string]AssetPolicy{btc.Native: pol},
 		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour,
-		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour, ConsolidationsPerHour: cf.ConsolidationsPerHour}, nil
+		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour, ConsolidationsPerHour: cf.ConsolidationsPerHour,
+		DrainsPerHour: drainsPerHour(cf)}, nil
+}
+
+// drainsPerHour is the chain's limit on drains (default 10; zero: none allowed). A Bitcoin key replacement drains the hot shard of the old generation.
+func drainsPerHour(cf ChainFile) int {
+	if cf.DrainsPerHour != nil && *cf.DrainsPerHour >= 0 {
+		return *cf.DrainsPerHour
+	}
+	return 10
 }
 
 // TokenFile is a configured ERC-20.

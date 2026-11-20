@@ -83,6 +83,76 @@ func MPCGenerationSigner() GenerationSigner {
 	}
 }
 
+// MPCDepositGenerationSigner builds the deriving signer of a later generation of a Bitcoin deposit tree: the same party A, certificate and hardened path
+// as the partition's configured signer, the 2-party HD keyset named by the record's key reference.
+func MPCDepositGenerationSigner() GenerationSigner {
+	return func(p string, base signer.Signer, e *KeysetEntry) (signer.Signer, error) {
+		d, ok := base.(*mpcsigner.Deriving)
+		if !ok {
+			return nil, nil
+		}
+		if e.KeyRef == "" {
+			return nil, fmt.Errorf("generation %d of %s has no key reference in its signed record", e.Generation, e.Shard)
+		}
+		return d.WithKeyset(e.KeyRef)
+	}
+}
+
+// depositDeriver picks the deriving signer of a Bitcoin job under generation gen of the account key. Like signerFor it authorises nothing: the decision
+// still refuses a state that does not allow the job, and a signer whose derived key is not the key of the job's input.
+func (g *Gateway) depositDeriver(ctx context.Context, job signjob.Job, base signer.Deriver, gen uint32) (signer.Deriver, error) {
+	kv, err := g.guard.EffectiveKeysets(ctx, g.cfg)
+	if err != nil {
+		return nil, err
+	}
+	e := kv.tree(job.Chain)[int(gen)]
+	if e == nil {
+		return base, nil // the decision refuses a generation this zone does not know
+	}
+	s, err := g.gens.get(job.PartitionID, base, e)
+	if err == nil {
+		if d, ok := s.(signer.Deriver); ok {
+			return d, nil
+		}
+		err = fmt.Errorf("the signer built for generation %d of %s cannot derive", e.Generation, e.Shard)
+	}
+	slog.Error("ALERT keyset registry: the zone cannot sign from a generation of a deposit tree: its signed record names no usable keyset", "job", job.ID, "partition", job.PartitionID, "generation", gen, "error", err.Error())
+	return base, nil
+}
+
+// edDepositDeriver is depositDeriver for the Ed25519 deposit tree of Solana.
+func (g *Gateway) edDepositDeriver(ctx context.Context, job signjob.Job, base signer.MessageDeriver, gen uint32) (signer.MessageDeriver, error) {
+	kv, err := g.guard.EffectiveKeysets(ctx, g.cfg)
+	if err != nil {
+		return nil, err
+	}
+	e := kv.tree(job.Chain)[int(gen)]
+	if e == nil {
+		return base, nil
+	}
+	ed, ok := base.(*mpcsigner.EdDeriving)
+	if !ok || e.KeyRef == "" {
+		slog.Error("ALERT keyset registry: the zone cannot sign from a generation of a deposit tree: its signed record names no usable keyset", "job", job.ID, "partition", job.PartitionID, "generation", gen)
+		return base, nil
+	}
+	k := job.PartitionID + "|" + e.KeyRef
+	g.edMu.Lock()
+	defer g.edMu.Unlock()
+	if d := g.edGens[k]; d != nil {
+		return d, nil
+	}
+	d, err := ed.WithKeyset(e.KeyRef)
+	if err != nil {
+		slog.Error("ALERT keyset registry: the zone cannot sign from a generation of a deposit tree", "job", job.ID, "generation", gen, "error", err.Error())
+		return base, nil
+	}
+	if g.edGens == nil {
+		g.edGens = map[string]signer.MessageDeriver{}
+	}
+	g.edGens[k] = d
+	return d, nil
+}
+
 // HSMGenerationSigner builds the signer of a later generation of an HSM shard: the same token as the partition's configured signer, the key whose
 // CKA_ID (hex) is the record's key reference.
 func HSMGenerationSigner(cfg *Config, tokens map[string]*hsm.Token) GenerationSigner {

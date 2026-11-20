@@ -138,6 +138,9 @@ func setDrainState(ctx context.Context, tx pgx.Tx, shard string, gen int, state,
 // move open makes the next move: a token with a balance, then the native asset last. It returns the moves it created. It changes nothing for a chain
 // whose cell cannot build a drain (Bitcoin, Solana) or a shard with one generation.
 func (s *Service) PlanDrains(ctx context.Context, log *slog.Logger) ([]DrainMove, error) {
+	if s.Cfg.Family == FamilyBTC {
+		return s.planBTCDrains(ctx, log)
+	}
 	if s.Cfg.Family != FamilyEVM && s.Cfg.Family != "" {
 		return nil, nil
 	}
@@ -278,6 +281,9 @@ func (s *Service) planDrain(ctx context.Context, log *slog.Logger, shardIdx int,
 // view to catch up (docs/runbooks/key-replacement.md).
 func (s *Service) BuildDrainJob(ctx context.Context, id string) (string, error) {
 	jobID := OwnerTrack(Owner{Kind: OwnerKindDrain, ID: id}).FirstJob()
+	if s.Cfg.Family == FamilyBTC {
+		return s.buildBTCDrainJob(ctx, id, jobID)
+	}
 	db, ok := s.Chain.(drainBuilder)
 	if !ok {
 		return "", fmt.Errorf("%w: this chain cannot drain", ErrInvalid)
@@ -294,18 +300,23 @@ func (s *Service) BuildDrainJob(ctx context.Context, id string) (string, error) 
 		if err != nil {
 			return err
 		}
-		ib, err := json.Marshal(signjob.Intent{Kind: signjob.KindDrain, ID: id, PartitionID: m.PartitionID, Chain: s.Cfg.Chain, Asset: m.Asset,
-			From: m.From, To: m.To, Amount: m.Amount.String(), NotAfter: s.Now().Add(s.drainWindow()).Unix()})
-		if err != nil {
-			return err
-		}
-		if err := EnqueueUnsigned(ctx, tx, jobID, m.PartitionID, u, ib, nil); err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `UPDATE drain_moves SET status='signing', job_id=$2, updated_at=now() WHERE id=$1`, id, jobID)
-		return err
+		return s.enqueueDrain(ctx, tx, m, jobID, u)
 	})
 	return jobID, err
+}
+
+// enqueueDrain writes the intent of a drain move and its first sign job, and marks the move signing.
+func (s *Service) enqueueDrain(ctx context.Context, tx pgx.Tx, m DrainMove, jobID string, u chain.UnsignedTx) error {
+	ib, err := json.Marshal(signjob.Intent{Kind: signjob.KindDrain, ID: m.ID, PartitionID: m.PartitionID, Chain: s.Cfg.Chain, Asset: m.Asset,
+		From: m.From, To: m.To, Amount: m.Amount.String(), NotAfter: s.Now().Add(s.drainWindow()).Unix()})
+	if err != nil {
+		return err
+	}
+	if err := EnqueueUnsigned(ctx, tx, jobID, m.PartitionID, u, ib, nil); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE drain_moves SET status='signing', job_id=$2, updated_at=now() WHERE id=$1`, m.ID, jobID)
+	return err
 }
 
 // RecordDrainBroadcast stores the hash. Nothing is booked for the amount: it stays in the shard. Repeating it changes nothing.
@@ -351,6 +362,11 @@ func (s *Service) SettleDrain(ctx context.Context, id, txHash string, status cha
 		final, evt, reason := "confirmed", "drain.confirmed", ""
 		if status != chain.TxConfirmed {
 			final, evt, reason = "failed", "drain.failed", "transaction reverted"
+		}
+		if st, ok := s.Chain.(chain.Settler); ok { // the cell's own books (Bitcoin: spent inputs, the output at the successor, or a mined cancel's change)
+			if err := st.Settle(ctx, tx, OwnerKindDrain, id, txHash); err != nil {
+				return err
+			}
 		}
 		if err := s.recordFee(ctx, tx, txHash, m.PartitionID, fee); err != nil {
 			return err

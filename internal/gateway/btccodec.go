@@ -40,7 +40,7 @@ func (c *BTCCodec) Decode(u chain.UnsignedTx) (TxInfo, error) {
 		return TxInfo{}, fmt.Errorf("gateway: decode btc payload: %w", err)
 	}
 	info := TxInfo{Sender: i.Sender, Destination: i.Destination, Claims: i.Claims, Pins: i.Pins, Identity: i.Identity, SignerKey: i.SignerKey,
-		Fees: []*big.Int{new(big.Int).SetUint64(i.Fee)}}
+		Fees: []*big.Int{new(big.Int).SetUint64(i.Fee)}, Gen: i.Gen, DestGen: i.DestGen}
 	if i.Parent != nil {
 		info.Parent = &ParentFacts{VSize: i.Parent.VSize, Fee: i.Parent.Fee, ChangeVout: i.Parent.ChangeVout, ChangeValue: i.Parent.ChangeValue}
 	}
@@ -88,8 +88,17 @@ func (c *BTCCodec) FeesRaised(prev, next []*big.Int) bool {
 	return len(prev) == 1 && len(next) == 1 && next[0].Cmp(prev[0]) > 0
 }
 
-// KeyPath implements KeyPathCodec: the key reference of a job is the derivation path "<branch>/<index>".
-func (c *BTCCodec) KeyPath(keyRef string) ([]uint32, error) { return btc.ParsePath(keyRef) }
+// KeyPath implements KeyPathCodec: the key reference of a job is the derivation path "<branch>/<index>", or "g<N>/<branch>/<index>" under a later
+// generation of the account key.
+func (c *BTCCodec) KeyPath(keyRef string) ([]uint32, error) {
+	_, path, err := btc.ParseKeyRef(keyRef)
+	return path, err
+}
+
+// KeyPathGen is KeyPath with the generation of the account key the reference names (1 without a prefix).
+func (c *BTCCodec) KeyPathGen(keyRef string) (uint32, []uint32, error) {
+	return btc.ParseKeyRef(keyRef)
+}
 
 // StrictCancel implements StrictCancelCodec: a Bitcoin cancel spends exactly what an attempt claimed.
 func (c *BTCCodec) StrictCancel() bool { return true }
