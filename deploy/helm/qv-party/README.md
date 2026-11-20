@@ -129,7 +129,8 @@ Both processes serve their metrics on **loopback only** inside the pod (`127.0.0
 ## Known limits
 
 - Nothing here was installed on a cluster (the kind lane is task D8). The tests prove that the manifests follow the rules and the image contract, not that the pods start.
-- Restore needs the party's HSM and the recovery private key together. Where the HSM is a cloud HSM reachable only from the party's cluster, the restore runs in a pod there with the key delivered by the custodians for the duration: a procedure to settle (see the report), so the chart has no restore Job.
+- **Restore with a cloud HSM (open, on the lead's backlog).** `mpc-party backup restore` needs the party's HSM and the recovery private key together; for an HSM reachable only from the party's cluster it would run in a pod there with the key delivered by the custodians. Undecided, so the chart has no restore Job.
 - `mlockall` depends on the node's memlock limit (above).
-- The admin tool and the metrics agent are not in the chart.
+- **Admin tool (open, backlog).** No in-cluster tool exists for the signed admin calls (DKG, refresh, freeze, unfreeze); the chart gives only the pod label and the network path.
+- **Metrics agent (open, backlog).** The remote-write sidecar is a documented stub, not built.
 - Tested with Helm 4.3.2 (the chart is `apiVersion: v2`).
