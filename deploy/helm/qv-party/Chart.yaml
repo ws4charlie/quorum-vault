@@ -1,0 +1,7 @@
+apiVersion: v2
+name: qv-party
+description: One MPC party (A, B or C) of the 2-of-3 signer, as a single-replica StatefulSet. Parties B and C run their own cosigner (qv-cosigner) in the same pod; party A does not. Install it three times, once per party, each in its own cluster (A in the signing-core cluster). Dependencies (guard database, Kafka, HSM, certificates) are referenced, not bundled.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"

@@ -1,0 +1,62 @@
+{{- $role := include "qp.role" . -}}
+{{- include "qp.serviceGuard" (dict "svc" .Values.service.caller "n" "caller") -}}
+{{- include "qp.serviceGuard" (dict "svc" .Values.service.peer "n" "peer") -}}
+# Headless: the StatefulSet's governing service (no ports, no cluster IP).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qp.fullname" . }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector: {{- include "qp.selector" . | nindent 4 }}
+  ports:
+    - { name: caller, port: {{ .Values.ports.caller }}, targetPort: {{ .Values.ports.caller }} }
+---
+{{/* The caller port: the gateway and the operators' tool. Other clusters reach it through a private endpoint (type LoadBalancer, internal). */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "caller") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+  annotations:
+    {{- if eq .Values.service.caller.type "LoadBalancer" }}
+    quorumvault.io/endpoint: private
+    {{- end }}
+    {{- with .Values.service.caller.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ .Values.service.caller.type }}
+  selector: {{- include "qp.selector" . | nindent 4 }}
+  ports:
+    - { name: caller, port: {{ .Values.ports.caller }}, targetPort: {{ .Values.ports.caller }}, protocol: TCP }
+  {{- if eq .Values.service.caller.type "LoadBalancer" }}
+  externalTrafficPolicy: Local
+  loadBalancerSourceRanges: {{ toJson .Values.service.caller.sourceRanges }}
+  {{- end }}
+{{- if ne $role "A" }}
+---
+{{/* The peer port: the parties that dial this one. Mutual TLS with pinned certificates passes through the endpoint untouched (TCP, no TLS termination). */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "peer") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+  annotations:
+    {{- if eq .Values.service.peer.type "LoadBalancer" }}
+    quorumvault.io/endpoint: private
+    {{- end }}
+    {{- with .Values.service.peer.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ .Values.service.peer.type }}
+  selector: {{- include "qp.selector" . | nindent 4 }}
+  ports:
+    - { name: peer, port: {{ .Values.ports.peer }}, targetPort: {{ .Values.ports.peer }}, protocol: TCP }
+  {{- if eq .Values.service.peer.type "LoadBalancer" }}
+  externalTrafficPolicy: Local
+  loadBalancerSourceRanges: {{ toJson .Values.service.peer.sourceRanges }}
+  {{- end }}
+{{- end }}

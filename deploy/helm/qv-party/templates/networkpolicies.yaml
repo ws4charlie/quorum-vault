@@ -1,0 +1,155 @@
+{{- /*
+  Default deny for every pod in the namespace, then one allow per path. A rule with an empty peer list is never rendered (an empty `to` or `from` would mean "everyone").
+  No rule reaches the internet: every egress peer is an address you name in values.
+*/ -}}
+{{- $role := include "qp.role" . -}}
+{{- $v := .Values -}}
+{{- $cos := ne $role "A" -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "default-deny") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "dns") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $v.network.dns.to | nindent 8 }}
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+{{/* Ingress to the caller port: the gateway (a peer you name) and the operators' pods of this namespace. Nothing else, and not the peer or health ports. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "caller-ingress") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+  annotations:
+    quorumvault.io/ingress-purpose: party-caller
+spec:
+  podSelector:
+    matchLabels: {{- include "qp.selector" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{- toYaml $v.operator.podLabel | nindent 14 }}
+        {{- with $v.network.callerIngress.from }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports: [{ port: {{ $v.ports.caller }}, protocol: TCP }]
+{{- if and $cos $v.network.peerIngress.from }}
+---
+{{/* Ingress to the peer port: only the parties that dial this one, through their private endpoints. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "peer-ingress") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+  annotations:
+    quorumvault.io/ingress-purpose: party-peer
+spec:
+  podSelector:
+    matchLabels: {{- include "qp.selector" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from: {{- toYaml $v.network.peerIngress.from | nindent 8 }}
+      ports: [{ port: {{ $v.ports.peer }}, protocol: TCP }]
+{{- end }}
+{{- if and (ne $role "C") $v.network.peerEgress.to }}
+---
+{{/* Egress to the parties this one dials (A: B and C; B: C), on their peer port. C dials nobody. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "peer-egress") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "qp.selector" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $v.network.peerEgress.to | nindent 8 }}
+      ports: [{ port: {{ $v.ports.peer }}, protocol: TCP }]
+{{- end }}
+{{- if and $cos $v.network.guardDatabase.to }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "guard-database-egress") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "qp.selector" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $v.network.guardDatabase.to | nindent 8 }}
+      ports:
+        {{- range $v.network.guardDatabase.ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+{{- end }}
+{{- if and $cos $v.network.kafka.to }}
+---
+{{/* The explicit link to the business Kafka (audit heads): outward from this cluster only. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "kafka-egress") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "qp.selector" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $v.network.kafka.to | nindent 8 }}
+      ports:
+        {{- range $v.network.kafka.ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+{{- end }}
+{{- if and (eq $v.sealer.type "pkcs11") (not $v.hsm.softhsm.enabled) $v.network.hsm.to $v.network.hsm.ports }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "hsm-egress") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name | quote }}] }
+      - { key: app.kubernetes.io/component, operator: In, values: [party, party-backup] }
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $v.network.hsm.to | nindent 8 }}
+      ports:
+        {{- range $v.network.hsm.ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+{{- end }}
+---
+{{/* The operators' pod (an admin Job or bastion pod in this namespace, labelled): egress to this party's caller port and DNS, nothing else. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "operator-egress") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- toYaml $v.operator.podLabel | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {{- include "qp.selector" . | nindent 14 }}
+      ports: [{ port: {{ $v.ports.caller }}, protocol: TCP }]
