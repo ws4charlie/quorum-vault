@@ -24,3 +24,6 @@ Each nonce account holds rent. An operator retires one so nothing new uses it, t
 
 ## Sweeps take several addresses at once
 A sweep moves several deposit addresses into the hot wallet in one transaction, always leaving one nonce account for withdrawals. An empty token account is closed after a while and its rent returns to the hot wallet. Deposit keys need parties A and B, so sweeps wait if either is down.
+
+## The deposit key can be replaced
+The key that derives customer deposit addresses can be replaced by a second one that the two parties make and operators activate with signed records. New customers get addresses of the new key. Old addresses stay watched and swept for a stated period, signed with the old key, into the same hot wallet. The hot wallet itself is replaced separately. After the period, and once nothing is left on the old addresses, the old key is retired.

@@ -4,16 +4,16 @@
 
 A hot wallet signs all day, so it holds only what the day needs. The rest sits in cold storage, whose key lives offline. Think of a shop's till and its safe.
 
-<p align="center"><img src="images/tiers.png" width="60%" alt="Above its high mark a hot wallet sends the excess to cold on its own. Below its low mark it asks for a refill, which people carry across an air gap."></p>
+<p align="center"><img src="images/tiers.png" width="60%" alt="Above its upper limit a hot wallet moves the excess to cold automatically. Below its lower limit it asks for a refill, which people carry across an air gap."></p>
 
 ## Bands decide when to move
-Each hot wallet has a low mark, a high mark and a target.
+Each hot wallet has a lower limit, an upper limit and a target.
 
 | Hot balance | What the system does |
 |---|---|
-| Above the high mark | Moves the excess down to the target, into cold |
-| Between the marks | Nothing |
-| Below the low mark | Raises one alert and opens a refill request |
+| Above the upper limit | Moves the excess down to the target, into cold |
+| Between the limits | Nothing |
+| Below the lower limit | Raises one alert and opens a refill request |
 
 ## Hot to cold needs no approval
 The cold address is written into the signing zone's own config, which the business side cannot change. A move can only send coins somewhere safer, so a hijacked core still cannot send "cold" money elsewhere.
