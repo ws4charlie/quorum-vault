@@ -50,8 +50,8 @@ ZH = {
     "Withdraw": "提现", "approvals": "审批",
     "Sign": "签名", "MPC signs": "MPC 签名",
     "Settle": "结算", "books match": "账链一致",
-    "Hot above its high mark": "热钱包高于上限", "excess goes to cold on its own": "多出的部分自动转冷",
-    "Hot below its low mark": "热钱包低于下限", "people refill it from cold": "由人从冷钱包补充",
+    "Hot above its upper limit": "热钱包高于上限", "excess moves to cold automatically": "多出的部分自动转冷",
+    "Hot below its lower limit": "热钱包低于下限", "refilled from cold by people": "由人从冷钱包补充",
     # identity
     "Person": "人", "logs in with a passkey": "用通行密钥登录",
     "Identity provider": "身份提供方", "signs a token": "签发令牌",
@@ -84,8 +84,8 @@ ZH = {
     "Bitcoin, Solana deposit addresses": "Bitcoin、Solana 存款地址",
     # tiers
     "Hot wallet": "热钱包", "signs all day": "整天签名", "Cold storage": "冷钱包", "key stays offline": "密钥离线",
-    "above high mark": "高于上限", "moves on its own": "自动转冷",
-    "below low mark": "低于下限", "Air gap": "隔离网络", "M of N operators approve": "N 人中 M 人批准",
+    "above upper limit: moves automatically": "高于上限：自动转冷",
+    "below lower limit: refilled by people": "低于下限：由人补充", "Air gap": "隔离网络", "M of N operators approve": "N 人中 M 人批准",
     "refill file": "补充文件",
     # evm
     "Factory": "工厂合约", "owned by the cold key": "归冷密钥所有",
@@ -212,8 +212,8 @@ def flow():
     row(d, [("Deposit", "pays in", "white"), ("Credit", "when final", "purple"), ("Sweep", "to hot", "amber"),
             ("Withdraw", "approvals", "blue"), ("Sign", "MPC signs", "green"), ("Settle", "books match", "purple")],
         y=20, h=92, gap=36, size=22)
-    cards(d, [("Hot above its high mark", "excess goes to cold on its own", "amber"),
-              ("Hot below its low mark", "people refill it from cold", "gray")], 160, h=96, gap=40)
+    cards(d, [("Hot above its upper limit", "excess moves to cold automatically", "amber"),
+              ("Hot below its lower limit", "refilled from cold by people", "gray")], 160, h=96, gap=40)
     d.write()
 
 
@@ -322,8 +322,8 @@ def tiers():
     d = D("tiers", 1140, 300)
     d.box(30, 40, 290, 120, "Hot wallet", "signs all day", "amber")
     d.box(820, 40, 290, 120, "Cold storage", "key stays offline", "blue")
-    d.arrow(320, 70, 820, 70, "above high mark: moves on its own", ly=58)
-    d.arrow(820, 130, 320, 130, "below low mark: refill by people", ly=122)
+    d.arrow(320, 70, 820, 70, "above upper limit: moves automatically", ly=58)
+    d.arrow(820, 130, 320, 130, "below lower limit: refilled by people", ly=122)
     d.box(430, 190, 280, 80, "Air gap", "M of N operators approve", "gray", size=22)
     d.arrow(570, 190, 570, 138, "", dash=True)
     d.write()
