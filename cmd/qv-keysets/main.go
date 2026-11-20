@@ -311,9 +311,11 @@ func partyAuth(args []string) error {
 	if err != nil {
 		return err
 	}
-	a := admin.Sign(priv, *op, *keyset, time.Now())
-	j, _ := json.MarshalIndent(map[string]any{"op": *op, "keyset": *keyset, "unix_seconds": a.UnixSeconds,
-		"public_key": hex.EncodeToString(a.PublicKey), "signature": hex.EncodeToString(a.Signature)}, "", "  ")
+	f, err := admin.NewFile(priv, *op, *keyset, time.Now()) // one place makes the file: api/admin (qv-party-admin sign does the same)
+	if err != nil {
+		return err
+	}
+	j := f.JSON()
 	if *out == "" {
 		fmt.Println(string(j))
 		return nil

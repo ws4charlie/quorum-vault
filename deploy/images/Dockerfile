@@ -4,7 +4,7 @@
 #
 # Zones never mix: a final stage copies only its own zone's binaries out of the build stages.
 #   business   qv-core qv-worker qv-relay qv-anchor-archiver qv-migrate qv-approval-web qv-tools-business (qv-guardian qv-sol-nonces)
-#   signing    qv-gateway qv-cosigner mpc-party qv-attest-broker qv-tools-signing (qv-route qv-fee-caps qv-approvers qv-btc-xpub qv-keysets qv-migrate)
+#   signing    qv-gateway qv-cosigner mpc-party qv-attest-broker qv-tools-signing (qv-route qv-fee-caps qv-approvers qv-btc-xpub qv-keysets qv-party-admin qv-migrate)
 #   not images qv-cold (offline), qv-pki (development CA, scripts/pki.sh)
 #
 # Production images contain no test-only code (no -tags devauth: no insecure sealer, no dev authorizer, no failpoints), no SoftHSM, and no secret,
@@ -92,12 +92,18 @@ FROM src AS gobin-broker
 RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; cd mpc-party; \
     CGO_ENABLED=1 go build -ldflags "$LDFLAGS" -o /out/qv-attest-broker ./cmd/qv-attest-broker
 
+# gobin-partyadmin: qv-party-admin (mpc-party's module), the operator's tool for the parties' admin calls: pure Go, no cgo, no cb-mpc. Lives in qv-tools-signing.
+FROM src AS gobin-partyadmin
+RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; cd mpc-party; \
+    CGO_ENABLED=0 go build -ldflags "$LDFLAGS" -o /out/qv-party-admin ./cmd/qv-party-admin
+
 # bins: every binary, for the reproducibility check (build.sh repro). Not an image.
 FROM scratch AS bins
 COPY --from=gobin-static /out/ /
 COPY --from=gobin-cgo /out/ /
 COPY --from=gobin-party /out/ /
 COPY --from=gobin-broker /out/ /
+COPY --from=gobin-partyadmin /out/ /
 
 # dirs: empty directories owned by the non-root user, for the volumes the charts mount (a distroless image has no shell to make them).
 FROM ${UBUNTU_BASE} AS dirs
@@ -163,6 +169,7 @@ ENTRYPOINT ["/usr/local/bin/qv-attest-broker"]
 # Operator tools of the signing zone. No entrypoint.
 FROM ${CC_BASE} AS qv-tools-signing
 COPY --from=gobin-cgo /out/qv-route /out/qv-fee-caps /out/qv-approvers /out/qv-btc-xpub /out/qv-keysets /usr/local/bin/
+COPY --from=gobin-partyadmin /out/qv-party-admin /usr/local/bin/qv-party-admin
 # qv-migrate is a schema tool, not a business service: the signing clusters run it as a Job (-zone signing) for their guard databases' roles. Its embedded business
 # migrations are public SQL and give no access. The one allowed exception to "no business binary in a signing image" (check-secrets.sh, ZONE_ALLOW).
 COPY --from=gobin-static /out/qv-migrate /usr/local/bin/qv-migrate

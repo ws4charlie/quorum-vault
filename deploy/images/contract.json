@@ -79,7 +79,7 @@
     },
     "qv-tools-signing": {
       "zone": "signing",
-      "flags": ["config", "guard-dsn", "chain", "core-dsn", "out", "action", "cert", "dsn", "enable-login", "generation", "key", "keyset", "network", "operator", "party", "seq", "server-pin", "shard", "shards", "zone"],
+      "flags": ["config", "guard-dsn", "chain", "core-dsn", "out", "action", "auth", "cert", "curve", "dsn", "enable-login", "generation", "key", "keyset", "network", "operator", "party", "scheme", "seq", "server-pin", "shard", "shards", "timeout", "window", "zone"],
       "env": ["QV_GATEWAY_GUARD_DSN", "QV_CORE_DSN", "QV_SIGNING_DB_URL"],
       "requiredFlags": ["config"],
       "requiredAny": [["guard-dsn", "QV_GATEWAY_GUARD_DSN"]],

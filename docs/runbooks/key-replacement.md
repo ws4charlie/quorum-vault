@@ -164,3 +164,5 @@ Once the old generation is `draining` (or `compromised`) in the core and the suc
 ## What is not covered yet
 - Solana hot shards (K4). A cosigner-side self-test of a candidate (a bounded transaction before activation) is not built: `dkg` checks the parties agree on the key (MPC) or test-signs in the token (HSM), and the first withdrawal after `activate` is the first real signature.
 - Destroying the old key's shares and backups after the window: do it by the parties' own procedures (docs/runbooks/mpc-backup-restore.md); the tool never destroys anything.
+
+The MPC parties' admin calls (the `dkg` step's signature, refresh, unfreeze) step by step: [key-ceremony.md](key-ceremony.md).
