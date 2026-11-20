@@ -971,7 +971,7 @@ func DrainWorkflow(ctx workflow.Context, in Input) error {
 		if err != nil {
 			return err
 		}
-		if cr.Kind == txCancelled {
+		if cr.Kind == txCancelled && !(st.SettlesCancel && cr.Hash != "") {
 			return call(ctx, opts(ctx), nil, a.FailDrain, id, "the signing zone refused: "+r.Reason, cr.Hash)
 		}
 		r = cr
@@ -980,6 +980,9 @@ func DrainWorkflow(ctx workflow.Context, in Input) error {
 	case txMined, txReverted:
 		return call(ctx, opts(ctx), nil, a.SettleDrain, id, r.Hash, r.Kind == txReverted)
 	case txCancelled:
+		if st.SettlesCancel && r.Hash != "" {
+			return call(ctx, opts(ctx), nil, a.SettleDrain, id, r.Hash, false) // Bitcoin: settled like the drain, with the cancel's fee; the planner plans the next move
+		}
 		return call(ctx, opts(ctx), nil, a.FailDrain, id, "cancelled", r.Hash)
 	}
 	return fmt.Errorf("unexpected outcome %q", r.Kind)

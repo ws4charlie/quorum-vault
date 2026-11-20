@@ -83,26 +83,27 @@ type coldBand struct{ low, high, target string }
 type wdSys struct {
 	root *testing.T // the test that owns the processes
 	*system
-	m3      *mpcstack.Stack3
-	o       wdOpts
-	hot     [32]byte
-	hotATA  [32]byte
-	hots    [][32]byte // every hot shard; hot is the first
-	coldKey key        // the pool's cold key when the test holds it (a plain address; the ceremony tests use the token's key)
-	coldAdr string
-	seeded  [][2]uint64 // per shard: the lamports and tokens put on it
-	svc     *custody.Service
-	adapter *sol.Adapter
-	approv  map[string]ed25519.PrivateKey
-	gwPath  string
-	guard   string
-	keyPath string
-	gateway *mpcstack.Proc
-	tag     string
-	cfg     *custody.Config
-	gf      gateway.File
-	apprPub map[string]string
-	proxy   *rpcProxy
+	m3        *mpcstack.Stack3
+	o         wdOpts
+	hot       [32]byte
+	hotATA    [32]byte
+	hots      [][32]byte // every hot shard; hot is the first
+	coldKey   key        // the pool's cold key when the test holds it (a plain address; the ceremony tests use the token's key)
+	coldAdr   string
+	seeded    [][2]uint64 // per shard: the lamports and tokens put on it
+	svc       *custody.Service
+	adapter   *sol.Adapter
+	approv    map[string]ed25519.PrivateKey
+	gwPath    string
+	guard     string
+	cosGuards []string // the guard databases of cosigner B and C
+	keyPath   string
+	gateway   *mpcstack.Proc
+	tag       string
+	cfg       *custody.Config
+	gf        gateway.File
+	apprPub   map[string]string
+	proxy     *rpcProxy
 }
 
 func (s *wdSys) hotAddr() string { return sol.Address(s.hot) }
@@ -329,8 +330,9 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	cosB, cosC := filepath.Join(s.dir, "cosigner-b.json"), filepath.Join(s.dir, "cosigner-c.json")
 	writeJSONFile(t, cosB, cos)
 	writeJSONFile(t, cosC, cos)
-	s.m3.StartCosigner(cosB, s.newGuardDB(), s.guard)
-	s.m3.StartCosignerC(cosC, s.newGuardDB(), s.guard)
+	s.cosGuards = []string{s.newGuardDB(), s.newGuardDB()}
+	s.m3.StartCosigner(cosB, s.cosGuards[0], s.guard)
+	s.m3.StartCosignerC(cosC, s.cosGuards[1], s.guard)
 	tm.Phase("configs")
 
 	// In-process service: funding, the nonce pool, Reconcile.

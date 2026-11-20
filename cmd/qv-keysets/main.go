@@ -7,6 +7,9 @@
 //	                 | -action mark-compromised [-successor H -cap ASSET=BASE_UNITS ...]
 //	                 | -action set-drain-caps -cap ASSET=BASE_UNITS [-cap ...]     (the new total each named asset's drains may move)
 //	                 register-candidate also takes -key-ref REF -public-key HEX (how the zone signs from the new key)
+//	                 The deposit key tree of a Bitcoin or Solana chain is the shard entity/chain/deposit-tree/0: its register-candidate carries -key-ref (the
+//	                 2-party HD keyset ID) and -public-key (the account xpub, or <node key hex>:<chain code hex>) and no -address; its start-draining takes
+//	                 -window SECONDS (how long its addresses stay swept before it may retire) and, on Bitcoin, -cap BTC=SATS (the hot shards' drain)
 //	                 [-signed-at UNIX] [-out F]       (on the operator's machine; no database)
 //	qv-keysets sign  -operator NAME -key FILE -join F [-out F]    add this operator's signature to a change file another operator wrote
 //	qv-keysets apply -config C -guard-dsn ... F...    join the signature files of one change and apply it to every guard database
@@ -93,6 +96,7 @@ func sign(args []string) error {
 	successor := fs.Int("successor", 0, "start-draining, mark-compromised: the generation a drain pays")
 	var caps listFlag
 	fs.Var(&caps, "cap", "start-draining, mark-compromised with a successor: ASSET=BASE_UNITS, the most all drains of that asset from this generation may move (repeat)")
+	window := fs.Int64("window", 0, "start-draining of a deposit tree: seconds its deposit addresses stay swept before the generation may retire")
 	seq := fs.Int64("seq", 0, "sequence number: the current one from `qv-keysets show`, plus one")
 	signedAt := fs.Int64("signed-at", 0, "signing time, unix seconds (default now). Every operator of one change signs the same time: pass the first operator's, or use -join")
 	join := fs.String("join", "", "a change file of another operator: add this operator's signature to it")
@@ -121,7 +125,7 @@ func sign(args []string) error {
 		if *action == "" || *shard == "" || *gen < 1 || *seq < 1 {
 			return fmt.Errorf("-action, -shard, -generation and -seq are required")
 		}
-		c = gateway.KeysetChange{Action: *action, Shard: *shard, Generation: *gen, Address: *address, KeyRef: *keyRef, PublicKey: *publicKey, Successor: *successor, Seq: *seq, SignedAt: *signedAt}
+		c = gateway.KeysetChange{Action: *action, Shard: *shard, Generation: *gen, Address: *address, KeyRef: *keyRef, PublicKey: *publicKey, Successor: *successor, Window: *window, Seq: *seq, SignedAt: *signedAt}
 		if c.SignedAt == 0 {
 			c.SignedAt = time.Now().Unix()
 		}
@@ -154,6 +158,9 @@ func describe(c gateway.KeysetChange) string {
 	}
 	if c.KeyRef != "" {
 		s += ", key " + c.KeyRef
+	}
+	if c.Window > 0 {
+		s += fmt.Sprintf(", window %ds", c.Window)
 	}
 	if c.Successor > 0 {
 		s += fmt.Sprintf(", successor generation %d, caps %v", c.Successor, c.Caps)
@@ -241,7 +248,11 @@ func show(ctx context.Context, cfg *gateway.Config, stores []store) error {
 		fmt.Printf("%-12s sequence %d (next change uses sequence %d)\n", s.name, v.Seq, v.Seq+1)
 		for _, shard := range v.Shards() {
 			for _, e := range v.Generations(shard) {
-				line := fmt.Sprintf("%-12s %s generation %d  %-11s %s", "", shard, e.Generation, e.State, e.Address)
+				what := e.Address
+				if what == "" && e.PublicKey != "" { // a deposit tree: its identity (xpub, node)
+					what = "key " + e.PublicKey
+				}
+				line := fmt.Sprintf("%-12s %s generation %d  %-11s %s", "", shard, e.Generation, e.State, what)
 				if e.KeyRef != "" {
 					line += "  key " + e.KeyRef
 				}

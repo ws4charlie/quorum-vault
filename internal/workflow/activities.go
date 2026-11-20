@@ -700,7 +700,8 @@ func (a *Activities) StartOpenDrains(ctx context.Context) (int, error) {
 // LoadDrain reads the drain move (the same view as a cold move).
 func (a *Activities) LoadDrain(ctx context.Context, id string) (ColdState, error) {
 	m, err := a.D.Svc.GetDrain(ctx, id)
-	return ColdState{Status: m.Status, Part: m.PartitionID, Parked: m.Parked()}, err
+	_, settles := a.D.Svc.Chain.(chain.Settler) // Bitcoin: a cancel that mines is settled like the drain (the same inputs back to the shard)
+	return ColdState{Status: m.Status, Part: m.PartitionID, Parked: m.Parked(), SettlesCancel: settles}, err
 }
 
 // BuildDrainJob builds the drain transfer and enqueues its sign job in one transaction.

@@ -41,10 +41,10 @@ Take B out as the example (use `A+C`); for A use `B+C`; for C no change is neede
 2. Each approver signs the change on their own machine (sequence = current + 1), then one operator applies all signature files:
    ```bash
    qv-route sign -actor alice -key alice.key -pair A+C -seq 5 -out alice.json
-   qv-route sign -actor bob   -key bob.key   -pair A+C -seq 5 -out bob.json   # skip if min_approvers is 1
+   qv-route sign -actor bob   -key bob.key   -like alice.json -out bob.json   # skip if min_approvers is 1
    qv-route apply -config gateway.json -guard-dsn "$QV_GATEWAY_GUARD_DSN" alice.json bob.json
    ```
-   Signatures are valid for `max_change_age` (default 10 minutes) around the signing time; sign again if late.
+   The signing time is part of what is signed and two people never sign in the same second, so later approvers sign the same change with `-like` (pair, sequence and signing time come from the first file; a disagreeing flag stops the tool; `-signed-at UNIX` is the alternative). The tool prints in plain words what it signs: read it before you send the file on. Signatures are valid for `max_change_age` (default 10 minutes) around the signing time, which is the first approver's; sign again if late.
 3. Confirm: the gateway log shows `mpc preferred pair changed`, the metrics show `qv_mpc_preferred_pair{pair="A+C"} 1` and `qv_mpc_effective_pair{pair="A+C"} 1`, and the audit chain has the `mpc.route.changed` event (`qv-gateway verify` checks the chain).
 4. Wait for jobs already signing on `A+B` to finish (they are never moved). Then stop B, patch it, start it. B must be reconciled with A and C before it is used again (`Health` shows its keysets `resolved`).
 5. Wait until `qv_mpc_party_healthy{party="B"}` and the A to B link are 1 again (`recover_count` good checks).

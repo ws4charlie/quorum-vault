@@ -230,17 +230,21 @@ func TestFeeCapsRefusedChangesLeaveEverythingAsItWas(t *testing.T) {
 
 	refused("unsigned", "0 valid signatures", s.stripSignatures(s.signCaps("alice", 150_000, 80, 1)))
 	refused("one approver of two", "1 valid signatures of distinct, enabled approvers, 2 needed", s.signCaps("alice", 150_000, 80, 1))
-	refused("one person twice", "1 valid signatures", s.signCaps("alice", 150_000, 80, 1), s.signCaps("alice", 150_000, 80, 1))
+	a1 := s.signCaps("alice", 150_000, 80, 1)
+	refused("one person twice", "1 valid signatures", a1, a1)
 	// Signed for 80, edited to 90 afterwards: the signatures do not cover it.
-	a, b := s.signCaps("alice", 150_000, 80, 1), s.signCaps("bob", 150_000, 80, 1)
+	a := s.signCaps("alice", 150_000, 80, 1)
+	b := s.cosignCaps("bob", a)
 	tampered := s.tamper(a, b, 90)
 	refused("edited after signing", "valid signatures", tampered)
 	refused("above the zone's bounds", "outside the zone's bounds", s.signedBy(fcMaxTx, fcMaxRate+1, 1, "alice", "bob")...)
 	refused("below the zone's bounds", "outside the zone's bounds", s.signedBy(fcMinTx-1, 1, 1, "alice", "bob")...)
 	refused("breaks the cap consistency rule", "is below max_fee_rate", s.signedBy(50_000, 200, 1, "alice", "bob")...)
 	// Not an approver: a name the zone does not know, and a known name signed with another key, count for nothing.
-	refused("an actor the zone does not know", "valid signatures", s.signedAs("mallory", 150_000, 80, 1), s.signCaps("bob", 150_000, 80, 1))
-	refused("an approver's name with another key", "valid signatures", s.signedAs("alice", 150_000, 80, 1), s.signCaps("bob", 150_000, 80, 1))
+	m := s.signedAs("mallory", 150_000, 80, 1)
+	refused("an actor the zone does not know", "valid signatures", m, s.cosignCaps("bob", m))
+	fa := s.signedAs("alice", 150_000, 80, 1)
+	refused("an approver's name with another key", "valid signatures", fa, s.cosignCaps("bob", fa))
 
 	// A change that is fine: applied once; the same file again changes nothing; another change with the same or a lower sequence number is refused.
 	good := s.signedBy(150_000, 80, 1, "alice", "bob")
@@ -370,4 +374,25 @@ func TestFeeCapsRevokedApproverIsRefusedByTheZoneNotByTheCore(t *testing.T) {
 	}
 	s.ledgerOK()
 	s.reconcileClean()
+}
+
+// Two approvers on two machines never sign in the same second. Bob signs the change alice signed a few seconds earlier, with -like, and the pair applies;
+// signing the same values again later without -like gives a different signing time and is refused as two different changes.
+func TestFeeCapsApproversSignSecondsApart(t *testing.T) {
+	s := feeCapsSystem(t, opts{})
+	a := s.signCaps("alice", 150_000, 80, 1)
+	time.Sleep(3 * time.Second)
+	b := s.cosignCaps("bob", a)
+	s.mustApply(everywhere, a, b)
+	s.wantCaps(everywhere, 150_000, 80, 1)
+
+	// The mistake -like prevents: the values typed again, a few seconds later.
+	a2 := s.signCaps("alice", 160_000, 80, 2)
+	time.Sleep(2 * time.Second)
+	b2 := s.signCaps("bob", 160_000, 80, 2)
+	out, err := s.applyCaps(everywhere, a2, b2)
+	if err == nil || !strings.Contains(out, "the signatures are over different changes") {
+		t.Fatalf("two signing times: %v\n%s", err, out)
+	}
+	s.wantCaps(everywhere, 150_000, 80, 1)
 }
