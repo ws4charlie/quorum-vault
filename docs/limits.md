@@ -13,9 +13,11 @@ This page lists what QuorumVault cannot do yet, so you don't have to find out th
 - **Restore is drilled on one machine,** not across sites.
 
 **Simulated parts**
+- **CloudHSM support is untested on hardware.** The party's sealing module has a profile for AWS CloudHSM, proven against its documentation and a test double. Nobody has run it on a real cluster; the first run follows [a checklist](runbooks/cloudhsm-sealer.md).
 - **SoftHSM, not hardware.** The tokens are software with no tamper resistance. The structure is what a real HSM would need, but it is not one.
 - **M-of-N is simulated.** The cold signing machine checks the cold signers' signatures in software; a hardware HSM would enforce the rule itself.
 - **The enclave is simulated.** A stand-in produces the proof, so nobody has shown that real hardware measures what the stand-in measures ([Enclaves](enclaves.md)).
+- **Nothing has run the enclave charts on a real cluster.** The broker chart and the party's enclave mode are checked by tests and, later, a local cluster with the simulated enclave. There is no production attester yet, so the chart refuses an enclave party outside development and test.
 - **Service identity is simulated.** The two certificate authorities are made by a script on a developer's machine, and their keys sit in a file. Production must bring its own PKI and a certificate manager ([certificate runbook](runbooks/certificates.md)). Metrics are plain http, reachable on the local machine only.
 - **All parties run on one machine, run by one team.** The cryptographic separation is real. The operational separation is not.
 
@@ -35,6 +37,7 @@ This page lists what QuorumVault cannot do yet, so you don't have to find out th
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **A Solana hot wallet cannot be replaced yet.** Every other key can ([Key replacement](key-replacement.md)).
+- **An emergency cannot save what a thief moves first.** The old key stays valid on chain until its funds are moved; only the signing zone refuses it. The key ceremony that points deposits at the new key takes hours and sweeps wait meanwhile; the emergency drill has run on local chains only ([stolen hot key](runbooks/stolen-hot-key.md)).
 
 **Chains**
 - **Bitcoin has one hot shard per pool,** so there is no rebalance. Taproot addresses are not supported, because the signing library cannot derive them ([spike note](spikes/btc-taproot.md)).

@@ -1,0 +1,3 @@
+# A made-up digest so the production values render in the checks (the shipped all-zero one is refused by the chart).
+images:
+  broker: { digest: "sha256:6666666666666666666666666666666666666666666666666666666666666666" }

@@ -33,7 +33,7 @@ Only zone operators change a state. Several of them sign each change, the zone w
 | Switch | New payments move to the new key and the drain starts together | The old key is marked compromised at once; from then on it can only move its funds out |
 | Old key | Retired once it is empty | Never retired; it stays on the watch list |
 
-In an emergency the thief's own copy of the key is not affected. The time before the compromised mark is the loss window, which is why the [stolen hot key runbook](runbooks/stolen-hot-key.md) starts with freezing the factory.
+In an emergency the thief's own copy of the key is not affected, so the time before the compromised mark is the loss window. One signed record does the whole switch: it stops the old key's normal signing, lets it move funds only to its successor, carries the larger limits for that move, and tells the core to stop paying from it. A tool runs the steps and moves the most valuable assets first. What the thief moves before the move lands cannot be saved; the [stolen hot key runbook](runbooks/stolen-hot-key.md) says so and lists the steps, and a drill plays them.
 
 ## The system empties the old key
 
