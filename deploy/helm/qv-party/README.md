@@ -35,7 +35,7 @@ make helm-check                                                                 
 | `peers.a/b/c.pins`, `peers.b/c.address` | the other parties' certificate pins (SHA-256 of the public key) and, for A and B, where their peer ports are reached. A: `b` and `c`. B: `a` and `c`. C: `a` and `b` (pins only) |
 | `hsm.module.path`, `hsm.module.volume`, `hsm.pinSecret`, `hsm.token` | production HSM, see below |
 | `cosigner.*` (B, C) | `config` (the cosigner's own signing-zone config, public data), `socketPins` (the cosigner's socket certificate, which the party checks), `partyPins` (this party's certificate, which the cosigner checks), `database`, `kafka` |
-| `tls.*` | names of the certificate Secrets (made by cert-manager, task D5): `mpc-party-<role>-tls`, `qv-cosigner-tls`, `qv-cosigner-link-tls`, `qv-cosigner-socket-tls`, each with `tls.crt`, `tls.key`, `ca.crt` |
+| `tls.*` | names of the certificate Secrets (made by cert-manager, task D5): `qv-signing-mpc-party-<role>-tls`, `qv-signing-cosigner-tls`, `qv-cosigner-link-tls`, `qv-signing-cosigner-socket-tls`, each with `tls.crt`, `tls.key`, `ca.crt` |
 | `network.*`, `service.*` | the private endpoints and addresses, see "Network" |
 
 The party config (`party.json`) and the cosigner's config are rendered into **immutable ConfigMaps whose names carry a hash of the content**: a change is a new ConfigMap and a rollout, never an edit in place. They hold public keys, pins, addresses and limits only. The policy test refuses a secret-looking field, a PEM block or any Secret object in the output.
@@ -119,9 +119,10 @@ Both processes serve their metrics on **loopback only** inside the pod (`127.0.0
 
 | Need | For |
 |---|---|
-| Kubernetes 1.29+ and a CNI that enforces NetworkPolicy | default deny |
+| Kubernetes 1.30+ and a CNI that enforces NetworkPolicy | default deny |
 | A CSI volume class that supports `ReadWriteOncePod` and `flock` (block volumes; check NFS) | the data volume. In kind: `ReadWriteOnce` |
 | cert-manager (or the operators' own process) | the Secrets above, with long-lived pinned certificates (renewal changes the certificate; pins are over the public key, so a renewal with the same key keeps them) |
+| The qv-certs trust bundles `qv-trust-signing-<hash>` and `qv-trust-business-<hash>`, named in `tls.trust.signing` and `tls.trust.business` | the CA files of the certificate volumes (projected next to the Secret's `tls.crt` and `tls.key`, instead of cert-manager's `ca.crt`); empty is development only |
 | A guard database per cosigner, its own, never the gateway's, reached with the certificate name `cosigner` (Postgres role `qv_cosigner_guard`) | B, C |
 | The HSM with the token and the PIN Secret | production |
 | Private endpoints to the other parties, the business Kafka and the guard database | between clusters |

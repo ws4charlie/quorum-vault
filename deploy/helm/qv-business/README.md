@@ -55,7 +55,7 @@ Tested with Helm 4.3.2 (the chart is `apiVersion: v2`).
 |---|---|
 | Plain settings (addresses, OIDC, flags' environment) | one ConfigMap per component |
 | The **whole custody config** (chain RPC URL, `rpc_user`, `rpc_password`, addresses, limits) | An existing Secret, `custody.existingSecret`, key `custody.key` (default `config.json`), mounted read-only at `/etc/qv/custody`. The chart renders no custody config. |
-| Certificates and keys | Secret volumes mounted read-only, made by cert-manager (task D5); referenced by name under `tls.*` |
+| Certificates and keys | Secret volumes mounted read-only, made by cert-manager (task D5); referenced by name under `tls.*`. `tls.trust.business` names the qv-certs trust bundle (`qv-trust-business-<hash>`): set, it is the CA file of every certificate volume (projected next to the Secret's `tls.crt` and `tls.key`) instead of cert-manager's `ca.crt` |
 | Auto-approver seed (worker) | Secret `custody.autoApprover.secretName`, mounted as a file |
 | Archive keys | Secret `archive.credentialsSecret` as files, or empty for workload identity |
 

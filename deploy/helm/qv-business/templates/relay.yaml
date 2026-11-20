@@ -37,4 +37,4 @@ spec:
           volumeMounts:
             - { name: tls, mountPath: /etc/qv/tls, readOnly: true }
       volumes:
-        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.relay.secretName) | nindent 8 }}
+        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.relay.secretName "trust" .Values.tls.trust.business) | nindent 8 }}
