@@ -128,7 +128,7 @@ Default deny for the namespace, then, for this release:
 
 ## Metrics
 
-The gateway opens no port: it writes `mpc.prom` (route and party health) and `mpc-tls.prom` (certificate expiry) to `/var/lib/qv/metrics`, a writable `emptyDir` (`QV_MPC_METRICS_FILE`). A signing cluster takes **no inbound scrape**. With `metrics.agent.enabled` a sidecar (Grafana Alloy, `images.agent`) reads those files in the pod (the node-exporter textfile collector) and remote-writes **outward** to `metrics.agent.remoteWrite.url`; egress to that endpoint is a named rule. Off by default. **[Unverified]** at run time: the Alloy configuration is rendered and its container passes the policy tests, but I did not start it; check it in the kind lane. The alert rules stay central (`monitoring/`).
+The gateway opens no port: it writes `mpc.prom` (route and party health) and `mpc-tls.prom` (certificate expiry) to `/var/lib/qv/metrics`, a writable `emptyDir` (`QV_MPC_METRICS_FILE`). A signing cluster takes **no inbound scrape**. With `metrics.agent.enabled` a sidecar (Grafana Alloy, `images.agent`, digest pinned in `deploy/images/contract.json`) reads those files in the pod (the textfile collector) and remote-writes **outward** to `metrics.agent.remoteWrite.url` with the client certificate in the Secret `metrics.agent.remoteWrite.tlsSecret` (`tls.crt`, `tls.key`, `ca.crt`; no token); egress to that endpoint is one named rule. Off by default. The Alloy configuration passes `alloy validate`; it was not run against a real endpoint (kind lane). Same sidecar as in `qv-party`; see `qv-monitoring`. The alert rules stay central (`monitoring/`).
 
 ## Configuration and secrets
 

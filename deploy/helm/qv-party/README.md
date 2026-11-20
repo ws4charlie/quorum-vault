@@ -112,7 +112,7 @@ DKG, refresh, freeze, unfreeze and the backup are done by that party's own opera
 
 ## Metrics
 
-Both processes serve their metrics on **loopback only** inside the pod (`127.0.0.1:9102` party, `127.0.0.1:9104` cosigner): a signing cluster takes no inbound scrape. The chart creates no metrics Service. Monitoring uses an in-cluster agent that scrapes the loopback ports from a sidecar and **remote-writes outward**. That agent is a **documented stub**, not part of the chart: add it as a sidecar in your overlay (it must share the pod's network namespace to reach loopback), with an egress allow to the central monitoring endpoint. The rules live in `monitoring/`.
+Both processes serve their metrics on **loopback only** inside the pod (`127.0.0.1:9102` party, `127.0.0.1:9104` cosigner): a signing cluster takes no inbound scrape. The chart creates no metrics Service. Monitoring uses an in-cluster agent that scrapes the loopback ports from a sidecar and **remote-writes outward**. With `metrics.agent.enabled` the chart adds that agent as a sidecar (Grafana Alloy, digest pinned in `deploy/images/contract.json`): it scrapes the loopback ports of the pod (party; cosigner for B and C) and remote-writes **outward** to `metrics.agent.remoteWrite.url` with the client certificate in `metrics.agent.remoteWrite.tlsSecret` (`tls.crt`, `tls.key`, `ca.crt`). `network.metricsRemoteWrite.to` names the endpoint and is required (one egress rule, port 443; a NetworkPolicy applies to the whole pod). Off by default. The configuration passes `alloy validate`; not run against a real endpoint yet. The rules live in `monitoring/`; see chart `qv-monitoring`.
 
 ## What the cluster must provide
 
@@ -132,5 +132,5 @@ Both processes serve their metrics on **loopback only** inside the pod (`127.0.0
 - **Restore with a cloud HSM (open, on the lead's backlog).** `mpc-party backup restore` needs the party's HSM and the recovery private key together; for an HSM reachable only from the party's cluster it would run in a pod there with the key delivered by the custodians. Undecided, so the chart has no restore Job.
 - `mlockall` depends on the node's memlock limit (above).
 - **Admin tool (open, backlog).** No in-cluster tool exists for the signed admin calls (DKG, refresh, freeze, unfreeze); the chart gives only the pod label and the network path.
-- **Metrics agent (open, backlog).** The remote-write sidecar is a documented stub, not built.
+- **Metrics agent.** Built (off by default); first real remote-write is for the kind lane.
 - Tested with Helm 4.3.2 (the chart is `apiVersion: v2`).
