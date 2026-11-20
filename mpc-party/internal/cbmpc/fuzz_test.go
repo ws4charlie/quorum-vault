@@ -25,24 +25,24 @@ import (
 var (
 	fuzzOnce sync.Once
 	fz       struct {
-		ecdsaP1, ecdsaP2, edP1 []byte
-		ek                     []byte
-		dk                     *Secret
-		ct                     []byte
-		label                  []byte
-		sp                     *KeysetSplit
-		spEd                   *KeysetSplit
-		k                      *Keyset
-		edk                    *Keyset
-		tk                     *TKey // threshold fixture, member 0
-		tshare                 []byte
-		tpub, tx, tpubX, tct   []byte
-		tlabel                 []byte
-		tdkSecret              *Secret
-		etk                    *TKey // Ed25519 threshold fixture, member 0
-		eshare                 []byte
-		epub, ex, epubX, ect   []byte
-		elabel                 []byte
+		ecdsaP1, ecdsaP2, edP1, edP2 []byte
+		ek                           []byte
+		dk                           *Secret
+		ct                           []byte
+		label                        []byte
+		sp                           *KeysetSplit
+		spEd                         *KeysetSplit
+		k                            *Keyset
+		edk                          *Keyset
+		tk                           *TKey // threshold fixture, member 0
+		tshare                       []byte
+		tpub, tx, tpubX, tct         []byte
+		tlabel                       []byte
+		tdkSecret                    *Secret
+		etk                          *TKey // Ed25519 threshold fixture, member 0
+		eshare                       []byte
+		epub, ex, epubX, ect         []byte
+		elabel                       []byte
 	}
 )
 
@@ -50,7 +50,7 @@ func fuzzSetup(t testing.TB) {
 	fuzzOnce.Do(func() {
 		doc := readGolden(t)
 		dec := func(s string) []byte { b, _ := base64.StdEncoding.DecodeString(s); return b }
-		fz.ecdsaP1, fz.ecdsaP2, fz.edP1 = dec(doc.Sets[0].P1Blob), dec(doc.Sets[0].P2Blob), dec(doc.Sets[2].P1Blob)
+		fz.ecdsaP1, fz.ecdsaP2, fz.edP1, fz.edP2 = dec(doc.Sets[0].P1Blob), dec(doc.Sets[0].P2Blob), dec(doc.Sets[2].P1Blob), dec(doc.Sets[2].P2Blob)
 		var err error
 		fz.k, err = LoadKeyset(ECDSA, P1, append([]byte(nil), fz.ecdsaP1...))
 		must(t, err)
@@ -246,11 +246,12 @@ func FuzzEntryPoints(f *testing.F) {
 			if IsInternal(err) {
 				t.Fatalf("garbage peer produced an internal error: %v", err)
 			}
-			_, err = fz.edk.Refresh(ctx, &garbagePeer{data: cp()}, WithRecvTimeout(5*time.Second))
+			// A refresh is a coin flip: P1 commits to r1, P2 sends r2, P1 opens r1. P1 checks nothing about r2 but its length, so
+			// fuzz data of the right shape IS an honest-looking contribution and can complete the call. The contract is
+			// therefore: never an internal error, and a result never works with the real peer (see checkGarbageRefresh).
+			nk, err := fz.edk.Refresh(ctx, &garbagePeer{data: cp()}, WithRecvTimeout(5*time.Second))
 			checkErr(err)
-			if err == nil {
-				t.Fatal("garbage peer completed a refresh")
-			}
+			checkGarbageRefresh(t, nk, err)
 		case 8:
 			k, err := LoadTKey(Member(sel>>4%3), cp())
 			checkErr(err)
@@ -374,4 +375,83 @@ func mustBytes(t testing.TB, s *Secret) []byte {
 	b, err := s.Bytes()
 	must(t, err)
 	return b
+}
+
+// checkGarbageRefresh is the oracle for a refresh that ran against a peer that never took part. The call may fail (any
+// documented class, never internal). If it succeeds, the new keyset must keep the root public key and must NOT work with
+// the real peer, which still holds the old share: the product's mandatory self-test (internal/server) then refuses it and
+// the old generation stays. A result that did sign with the real peer would mean a share changed without the peer.
+func checkGarbageRefresh(t testing.TB, nk *Keyset, err error) {
+	t.Helper()
+	if err != nil {
+		var e *Error
+		if errors.As(err, &e) && e.Kind == KindInternal {
+			t.Fatalf("garbage peer produced an internal error: %v", err)
+		}
+		return
+	}
+	defer nk.Wipe()
+	root, e1 := nk.RootPublicKey()
+	oldRoot, e2 := fz.edk.RootPublicKey()
+	if e1 != nil || e2 != nil || !bytes.Equal(root, oldRoot) {
+		t.Fatalf("refresh against a garbage peer changed the root public key (%v, %v)", e1, e2)
+	}
+	p2, e := LoadKeyset(Ed25519, P2, append([]byte(nil), fz.edP2...))
+	must(t, e)
+	defer p2.Wipe()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	a, b := NewMemPair()
+	defer a.Close()
+	defer b.Close()
+	ea, _ := bothOn(a, b,
+		func(tr Transport) error { _, err := nk.SelfTest(ctx, tr, WithRecvTimeout(5*time.Second)); return err },
+		func(tr Transport) error { _, err := p2.SelfTest(ctx, tr, WithRecvTimeout(5*time.Second)); return err })
+	if ea == nil {
+		t.Fatal("keyset refreshed against a garbage peer passed the self-test with the real peer")
+	}
+}
+
+// TestRefreshForgedContribution reproduces the fuzz finding deterministically: P2's second-round message of a real refresh
+// (its random contribution r2) is captured and replayed to P1 by a peer that never ran the protocol. P1 completes, keeps the
+// root public key, and ends with a share that does not work with the real peer's.
+func TestRefreshForgedContribution(t *testing.T) {
+	fuzzSetup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	p1, err := LoadKeyset(Ed25519, P1, append([]byte(nil), fz.edP1...))
+	must(t, err)
+	defer p1.Wipe()
+	p2, err := LoadKeyset(Ed25519, P2, append([]byte(nil), fz.edP2...))
+	must(t, err)
+	defer p2.Wipe()
+
+	// capture what P2 sends in a real refresh
+	a, b := NewMemPair()
+	var sent [][]byte
+	var mu sync.Mutex
+	b.Tap = func(n int, msg []byte) []byte { mu.Lock(); sent = append(sent, msg); mu.Unlock(); return msg }
+	var n1, n2 *Keyset
+	ea, eb := bothOn(a, b,
+		func(tr Transport) (e error) { n1, e = p1.Refresh(ctx, tr); return },
+		func(tr Transport) (e error) { n2, e = p2.Refresh(ctx, tr); return })
+	must(t, ea)
+	must(t, eb)
+	defer n1.Wipe()
+	defer n2.Wipe()
+	if len(sent) == 0 {
+		t.Fatal("captured nothing from P2")
+	}
+	t.Logf("P2 sent %d messages in a refresh; replaying the first (%d bytes) as a forged r2", len(sent), len(sent[0]))
+	// the real pair works after a real refresh (control)
+	c, d := NewMemPair()
+	ec, _ := bothOn(c, d,
+		func(tr Transport) error { _, e := n1.SelfTest(ctx, tr); return e },
+		func(tr Transport) error { _, e := n2.SelfTest(ctx, tr); return e })
+	must(t, ec)
+
+	// P1 against a peer that replays the captured bytes
+	nk, err := p1.Refresh(ctx, &garbagePeer{data: sent[0]}, WithRecvTimeout(5*time.Second))
+	must(t, err)
+	checkGarbageRefresh(t, nk, nil)
 }
