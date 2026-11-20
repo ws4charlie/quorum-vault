@@ -108,7 +108,8 @@ DKG, refresh, freeze, unfreeze and the backup are done by that party's own opera
 - **Admin calls** go to the caller port of the coordinator (A; they are signed with an operator's Ed25519 key and verified by every party against its own `adminKeys`). Run the operators' tool as a Job or a bastion pod **in the namespace of the party you call**, labelled `quorumvault.io/party-operator: "true"`: the chart's policies let exactly such pods reach the caller port and nothing else, and let the party accept them there. The pod's client certificate must be one of `callerPins`.
 - **No admin key is stored in the cluster.** The Ed25519 key stays with the operator; only the signature enters the cluster. The chart has no Secret for it.
 - Operators of party A cannot touch B or C: each cluster has its own operators and its own IAM; nobody has admin on two party clusters.
-- The tool that makes the admin calls is not part of this change; this chart provides the network path and the label.
+- The tool is `qv-party-admin` (image `qv-tools-signing`). `sign` runs on the operator's machine; `send` (`dkg`, `refresh`, `unfreeze`) and `status` run in the cluster. The step-by-step ceremony is `docs/runbooks/key-ceremony.md`.
+- **The operator Job** (`operator.job.enabled`, off by default; one call per Job): `command` is `dkg`, `refresh`, `unfreeze` or `status`; `authConfigMap` holds the signed file as key `auth.json` (public data, valid for `adminMaxAgeSeconds`, once per party: create it right before the Job); `callerCertSecret` is a Secret (`tls.crt`, `tls.key`) made for the ceremony with a certificate that is in `callerPins`; `partyPin` is the pin of this party's certificate. The Job calls this release's own caller Service, so run it in the coordinator's (A's) cluster for the signed commands and `status` in each party's cluster. The pod carries the operator label and mounts only those two objects; it has no service account token.
 
 ## Metrics
 

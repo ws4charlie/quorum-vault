@@ -534,6 +534,10 @@ func newHSMKeys(cfg *gateway.Config, part string) (*hsmKeys, func(), error) {
 	if !ok || sf.Backend == "mpc" || sf.Token == "" {
 		return nil, nil, fmt.Errorf("partition %q has no HSM signer in the zone config", part)
 	}
+	pin, err := hsm.ServicePIN() // the file named by QV_HSM_PIN_FILE; the environment form only when QV_ENV is dev or test
+	if err != nil {
+		return nil, nil, err
+	}
 	lib, err := hsm.LoadLib(hsm.DefaultLibPath())
 	if err != nil {
 		return nil, nil, fmt.Errorf("load pkcs11: %w", err)
@@ -542,7 +546,7 @@ func newHSMKeys(cfg *gateway.Config, part string) (*hsmKeys, func(), error) {
 		lib.Close()
 		return nil, nil, err
 	}
-	tok, err := lib.OpenToken(sf.Token, os.Getenv("QV_HSM_PIN"))
+	tok, err := lib.OpenToken(sf.Token, pin)
 	if err != nil {
 		lib.Close()
 		return nil, nil, err

@@ -23,4 +23,4 @@ The core API is the one door into QuorumVault. People and services ask it for th
 3. Returns the first answer again when a request is repeated, so a retry is safe.
 4. Starts a [workflow](workflows.md) and answers at once; the caller reads the status later.
 
-An approval sent here is only carried along: the [signing zone](signing-zone.md) checks it by itself.
+An approval sent here is only carried along: the [signing zone](signing-zone.md) checks it itself.

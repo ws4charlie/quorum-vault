@@ -37,7 +37,7 @@ ZH = {
     "Ledger": "账本", "double entry, Reconcile": "复式记账、对账",
     "Audit trail": "审计记录", "hash chains": "哈希链",
     "Signing zone": "签名区", "checks every job before any key signs": "每个任务先核对，密钥才签名",
-    "Hot and cold": "冷热钱包", "bands, refills": "水位线、补充",
+    "Hot and cold": "冷热钱包", "limits, refills": "上下限、补充",
     "MPC parties A, B, C": "MPC 参与方 A、B、C", "key shares, each sealed in its own HSM token": "密钥份额，各封存在自己的 HSM 令牌里",
     "EVM": "EVM", "forwarders, nonces": "转发合约、nonce",
     "Bitcoin": "Bitcoin", "coins, change": "UTXO、找零",
@@ -127,6 +127,25 @@ ZH = {
     "Lane": "泳道", "own DB, chains, tokens": "自己的数据库、链、令牌",
     "Group": "测试组", "Every test ends with Reconcile": "每个测试都以对账收尾",
     "Lanes run at the same time": "几条泳道同时运行",
+    # key replacement
+    "New key": "新密钥", "made, signs nothing yet": "已生成，暂不签名",
+    "Takes over": "接手", "new payments use it": "新的付款用它",
+    "Old key drains": "旧密钥清空", "funds move to the new key": "资金转到新密钥",
+    "Old key retired": "旧密钥退役", "its addresses stay watched": "它的地址继续监控",
+    "Emergency": "紧急情况", "a stolen key may only move its funds to the new key": "被盗的密钥只能把资金转到新密钥",
+    # deployment
+    "Business": "业务", "core, worker, databases": "核心、worker、数据库",
+    "Signing core": "签名核心", "gateway and party A": "网关和参与方 A",
+    "Party B cluster": "参与方 B 集群", "party B and its checker": "参与方 B 和它的检查程序",
+    "Party C cluster": "参与方 C 集群", "party C and its checker": "参与方 C 和它的检查程序",
+    "Signing side": "签名一侧", "only calls out, nothing pushes in": "只向外调用，没有东西能推进来",
+    "Cold signer": "冷签名机", "offline, never in a cluster": "离线，从不进集群",
+    # enclaves
+    "Party": "参与方", "starts in": "在飞地里", "an enclave": "启动",
+    "Proof": "证明", "of the exact": "确切程序", "program": "的度量结果",
+    "Broker": "代理", "checks, then": "核对后", "releases the key": "才放出密钥",
+    "Key in memory": "内存里的密钥", "opens the": "打开封存", "sealed shares": "的份额",
+    "Simulated today": "目前是模拟", "no real enclave has run it yet": "还没有真正的飞地运行过",
 }
 
 
@@ -256,7 +275,7 @@ def architecture():
     d.arrow(cols[1], 2, cols[1], 56)
     d.write()
 
-    tile("tiers", 380, H, "Hot and cold", "bands, refills", "blue").write()
+    tile("tiers", 380, H, "Hot and cold", "limits, refills", "blue").write()
 
     d = D("arch-merge2", 1140, 58)
     d.arrow(cols[1], 2, cols[1], 56, "queues sign jobs", lx=cols[1] + 14, ly=36, anchor="start")
@@ -420,8 +439,36 @@ def testing():
     d.write()
 
 
+def key_replacement():
+    d = D("key-replacement", 1140, 262)
+    row(d, [("New key", "made, signs nothing yet", "gray"), ("Takes over", "new payments use it", "green"),
+            ("Old key drains", "funds move to the new key", "amber"), ("Old key retired", "its addresses stay watched", "gray")],
+        y=20, h=100, gap=44, size=23)
+    d.box(30, 160, 1080, 76, "Emergency", "a stolen key may only move its funds to the new key", "red")
+    d.write()
+
+
+def deployment():
+    d = D("deployment", 1140, 272)
+    cards(d, [("Business", "core, worker, databases", "gray"), ("Signing core", "gateway and party A", "green"),
+              ("Party B cluster", "party B and its checker", "green"), ("Party C cluster", "party C and its checker", "green")],
+          y=20, h=100, gap=24, size=22)
+    d.box(30, 160, 520, 80, "Signing side", "only calls out, nothing pushes in", "amber")
+    d.box(590, 160, 520, 80, "Cold signer", "offline, never in a cluster", "gray")
+    d.write()
+
+
+def enclaves():
+    d = D("enclaves", 1140, 262)
+    row(d, [("Party", "starts in\nan enclave", "blue"), ("Proof", "of the exact\nprogram", "amber"),
+            ("Broker", "checks, then\nreleases the key", "green"), ("Key in memory", "opens the\nsealed shares", "purple")],
+        y=20, h=100, gap=44, size=23)
+    d.box(30, 160, 1080, 76, "Simulated today", "no real enclave has run it yet", "red")
+    d.write()
+
+
 def build_all():
-    for f in (flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, bitcoin_sending, solana, identity, api, audit, testing):
+    for f in (deployment, enclaves, key_replacement, flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, bitcoin_sending, solana, identity, api, audit, testing):
         f()
 
 

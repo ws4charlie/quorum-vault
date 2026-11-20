@@ -28,7 +28,7 @@ Key generation for an operator: `allowlist keygen -key operator.key -pub operato
 Metrics (`/metrics`): `qv_attest_broker_events_total{event=...}` (`release_ok`, `release_refused`, `rate_limited`, `reload_refused`...). Alert on refusals and on `reload_refused`.
 
 ## Rate limit
-Per party, challenge and key calls together: `rate_per_minute` (30) and `rate_burst` (10). A party that restarts needs one challenge and one release per keyset.
+Per party, challenge and key calls together: `rate_per_minute` (600) and `rate_burst` (100). A party that restarts needs one challenge and one release per keyset (2N+2 calls for N keysets); at 200 keysets the limit adds about 34 s to a start (`docs/measurements/tee-sim.md`). A batch release call is a possible later change.
 
 ## Broker outage
 Parties **cannot restart** (they cannot unseal) and cannot create new data keys (DKG, refresh) while the broker is down. **Running parties keep signing**: the data keys are released once at start and live in the enclave's memory, so signing does not call the broker (design: "release once, at start, not per signature"; the party code does exactly that, see "Party side"). Restore the broker first, then restart parties one at a time, keeping any two parties up (a 2-of-3 set must stay signable). A lost HSM token without a backup makes every wrapped data key unrecoverable: back up the token like any HSM.
@@ -101,3 +101,67 @@ The host with the data directory **can**: delete files (a party loses state, nev
 - State: the data directory (volume) holds only ciphertext and wrapped keys; the data-dir lock (one process per directory) still applies. A rolling update or a second replica cannot corrupt it; a restart asks the broker again (one challenge and one release per keyset, within `rate_per_minute`: many keysets at once can be rate limited and are retried).
 - Config: JSON and files only; no secret in config, image or log. The broker link needs a certificate name in the certificate catalog (`internal/pki/catalog.go`; not added here).
 - Test and production differ only by the build tag (`teesim`: mock attester, test root) and the trust roots in the broker's config; the sealer, the verifier and the broker are the same code.
+
+# Run mode tee-sim (SIMULATED enclave, end to end)
+
+The whole signing path with every party on the attested sealer, in simulation. **Nothing here proves isolation**: the evidence is a mock Nitro document signed by a test CA. It proves our code binds keys to a measurement, refuses what it must, and keeps working around an enclave. The list of what it cannot prove is the last section.
+
+## Start it
+One command runs the stack, the gateway, anvil and the tests of the lane:
+```
+make test-e2e-tee-sim                     # the lane (also: make test-e2e-all GROUPS=e2e-tee-sim)
+QV_CUSTODY_SIGNER=mpc QV_CUSTODY_TEE=sim make test-e2e-evm TEST=TestMPCRefreshDuringLiveWithdrawals   # any mpc test in this mode
+```
+`QV_CUSTODY_TEE=sim` (with `QV_CUSTODY_SIGNER=mpc`) is the switch. Without it nothing changes: the default stacks and tests are untouched. What `e2e/mpcstack/tee.go` does, in the order an operator would do it:
+1. Builds `mpc-party`, `qv-attest-broker` and `qv-attest-ca` with `-tags teesim` into their own directory (the production party binary is a different file and has no mock: tested), and makes a test CA and three operator keys. **All keys, certificates, PIN files and allowlists are made at setup in the test's temporary directory; none is in the repository.**
+2. Starts **one broker per party**, each with its own SoftHSM token (A: `qv-party-1`, B: `qv-party-2`, C: `qv-party-3`; the parties do not use their PKCS#11 tokens in this mode) and its own audit log. Each lists only its own party.
+3. Writes an allowlist signed by two of the three operators (`qv-attest-broker allowlist new` and `sign`).
+4. **Enrols** each party: `mpc-party tls-init -config enroll.json` (see "TLS key").
+5. Writes the real configs, **measures** them and replaces the allowlist by one that holds only these measurements (the enrolment entries are revoked).
+6. Starts the three parties and the cosigners. Every start asks the party's own broker for its keys.
+
+## Measurement: what runs
+In simulation the measurement (PCR0) is the SHA-384 of the **party binary file and the config file the party was started with**, each preceded by its length (`attest.MeasureImage`). The party computes it itself at start from `os.Executable()` and the `-config` path; the operator who signs an allowlist entry computes the same with `qv-attest-ca measure -binary mpc-party -config party-A.json`, as a release build would publish it. One changed byte of either file gives another measurement: the broker refuses (audit rule `allowlist:...`), the party logs the ALERT line, stays not ready, and releases nothing (test `TestTEESimWrongBinaryOrConfigIsRefused`). The config therefore carries everything the design wants measured: peer pins, caller pins, `admin_keys`, peer addresses.
+
+**Open point for T7.** The design also says the config hash goes into the evidence's `user_data`. That changes the broker's protocol (the broker would need the expected hash per party), so it is not done here. In the Nitro image the config is part of the image and so of PCR0, exactly as it is part of this mock PCR0; a separate `user_data` binding is only needed if the config is NOT inside the measured image. `attest.Attester` is unchanged: T7 replaces the mock with the NSM device and its PCRs.
+
+## TLS key
+With `"tls_sealed": true` (attested sealer only; `cert_file` and `key_file` must be empty) the party's TLS private key is **made inside the party** and sealed like the shares, under its local data key. The data directory holds `tls-key.sealed.json` (ciphertext) and `tls-cert.pem` (public). The pin (SHA-256 of the public key) is what the other parties, the gateway and the cosigner pin. At start the key is loaded only after the data keys are released; until then every TLS handshake fails.
+
+Enrolment: `mpc-party tls-init -config enroll.json` (role, `data_dir`, `tls_sealed`, `sealer`), once per party, offline. It attests like a start, makes the key, seals it, prints the pin, and run again prints the same pin and changes nothing. The enrolment config is a different file than the running config, so it has its own measurement: the allowlist holds the enrolment measurement while the ceremony runs and not afterwards. Because the pins of the other parties are in the running config and the config is measured, enrolment must come first: that is why it is a separate step.
+
+Not sealed: the key of the link to the broker (`broker_cert_file`, `broker_key_file`). It is needed before any data key exists. It is a different key, it only authenticates the link, and the broker releases nothing without passing evidence. On Nitro this key can be made in the enclave at each start if the broker accepts any pin with valid evidence; that is a broker change (not done).
+
+## What an operator sees (and the tests that show it)
+| Case | Party | Broker | Rest of the system |
+|---|---|---|---|
+| Binary or config changed by one byte | not ready, Health UNAVAILABLE, `ALERT ... not allowlisted` | refused, rule `allowlist:...` | the other two sign 2-of-3 |
+| Debug evidence (zero PCRs) | not ready, `broker_code verify:*` | refused, rule `verify:...` | the other two sign |
+| Entry revoked while the party runs | **keeps its keys and keeps signing** (they are in its memory; the broker cannot take them back) | allowlist loaded, no record for the party | nothing changes until the party restarts |
+| Entry revoked, party restarts | not ready, `ALERT ... not allowlisted`; comes back by itself within the backoff when the entry is back, no restart | refused, rule `allowlist:...` | the other two sign 2-of-3 |
+| Data directory rolled back | keyset unresolved, "party A is on generation 1 but ... 2 (a stale restore?)" | released (the old key is still released: the broker has no destroy call) | the other two sign |
+| Broker down at start | not ready, `the broker is unreachable`, retries; no fallback to another sealer | - | the other two sign; the party is ready when the broker is back |
+| Restart of one healthy party | attests again, keys released again, ready | one `release` per keyset | signing continues |
+
+Revocation therefore takes effect **at the next start of the party**. To take effect at once an operator revokes and then stops the party (or the whole enclave); a party that must lose its keys now has to be stopped, not only revoked.
+
+## Numbers
+`docs/measurements/tee-sim.md` (labelled simulated): party RSS, start-up time with 10, 50 and 200 keysets, sign latency against the PKCS#11 sealer, and what the broker's rate limit does to a start with many keysets.
+
+## What simulation cannot prove: the real-hardware checklist for T7
+Each line is something only real hardware, the vendor's service or a real network can show. Do them on the Nitro stack before any production key moves.
+
+| # | Not proven here | Check on real hardware |
+|---|---|---|
+| 1 | Memory isolation and confidentiality: the mock runs as a normal process, so the host can read its memory | An attempt to read the enclave's memory from the parent instance fails; no debug console; the enclave started without debug mode |
+| 2 | That the hardware measures what the mock measures | PCR0 of the built EIF equals the published value; two independent builders get the same value; PCR8 (the signing certificate) is the release key's |
+| 3 | The vendor chain, revocation and TCB handling | The broker accepts the Nitro root G1 chain only; a document from another AWS account or a test root is refused; behaviour at certificate expiry |
+| 4 | **AWS KMS's own condition evaluation** (if KMS replaces the broker) | A KMS key policy with `kms:RecipientAttestation:ImageSha384` refuses a Decrypt from a different image; CloudTrail shows the call |
+| 5 | vsock and proxy behaviour and limits | Throughput and latency of the parent proxy; what happens when the proxy dies mid-session; the enclave's behaviour with no network |
+| 6 | EPC, memory limits and real overhead | Party RSS and sign latency inside the enclave against the numbers in `docs/measurements/tee-sim.md`; the enclave's memory size for the largest keyset count; `mlock` inside the enclave |
+| 7 | Side channels and physical attacks | Out of scope for tests; record the vendor's statement |
+| 8 | Rollback with real storage | The blob store the host controls: an older directory back (same results as the table above), and a rollback of both parties to the same generation (nothing detects it today, D7) |
+| 9 | The broker's HSM | The broker on a real HSM, not SoftHSM (the broker refuses SoftHSM in production); the wrapping key is not extractable; the audit chain is archived |
+| 10 | Clock and time limits | Evidence freshness with the enclave's real clock; the 60 s nonce TTL against real network delay |
+| 11 | The rate limit with many keysets | A real start with the production keyset count against the broker's limit (measured in simulation: 200 keysets start in about 98 s with the defaults 600 per minute, burst 100) |
+| 12 | Revocation at once | A procedure to stop a revoked enclave (terminate the instance), since revocation alone does not take its keys away |

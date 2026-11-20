@@ -15,6 +15,8 @@ imagePullSecrets: []
 images:
   party:    { repository: ghcr.io/ws4charlie/quorum-vault/mpc-party,   digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
   cosigner: { repository: ghcr.io/ws4charlie/quorum-vault/qv-cosigner, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  # The signing zone's operator tools (qv-party-admin is in it): only the optional operator Job uses it.
+  tools:    { repository: ghcr.io/ws4charlie/quorum-vault/qv-tools-signing, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
 
 # The uid/gid every image runs as. Both containers of the pod use the SAME uid: the cosigner's socket is mode 0600, owner only (deploy/images/README.md).
 runAsUser: 65532
@@ -119,6 +121,20 @@ network:
 operator:
   # Pods with this label (in this namespace) may reach the caller port: the in-cluster admin Job or bastion pod of that party's operators (README "Operators").
   podLabel: { quorumvault.io/party-operator: "true" }
+  # The operator's tool as a Job (README "Operators"), ONE call per Job. Disabled by default. The signature is made on the operator's machine (`qv-party-admin sign`) and arrives as a
+  # ConfigMap; the caller certificate is a Secret made for the ceremony. No signing key is stored in the cluster.
+  job:
+    enabled: false
+    name: manual                        # part of the Job name; change it for each run
+    command: ""                         # dkg, refresh, unfreeze or status
+    keysetId: ""                        # the keyset (dkg, refresh, unfreeze; status: optional filter)
+    scheme: hd                          # dkg: hd, ecdsa-2of3 or ed25519-2of3
+    curve: secp256k1                    # dkg, scheme hd: secp256k1 or ed25519
+    authConfigMap: ""                   # ConfigMap whose key auth.json is the signed file (not for status)
+    callerCertSecret: ""                # Secret with tls.crt and tls.key: a certificate this party pins (callerPins)
+    partyPin: ""                        # the pin (SHA-256 of the public key) of THIS party's certificate: the Job refuses any other server
+    timeoutSeconds: 240
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 128Mi } }
 
 # --- Backup (README "Backup and restore"). The export writes a PVE-encrypted file; only the recovery PUBLIC key is needed. ---
 backup:
