@@ -1,0 +1,13 @@
+# Local kind cluster, SIMULATED enclave. Only configuration differs from production: the tee-sim broker image by tag (it accepts the TEST ONLY evidence root), SoftHSM on the
+# data volume (QV_ENV=dev, token made by an init container), plain ReadWriteOnce storage (kind has no ReadWriteOncePod), small requests.
+imagePullPolicy: IfNotPresent
+env: dev
+simulation: true
+images:
+  broker: { digest: "", tag: local, repository: qv-image/qv-attest-broker-teesim }
+hsm:
+  softhsm: { enabled: true }
+persistence: { size: 1Gi, accessModes: [ReadWriteOnce] }
+resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 256Mi } }
+rate: { perMinute: 6000, burst: 1000 }
+podDisruptionBudget: { enabled: true, maxUnavailable: 1 }

@@ -90,13 +90,15 @@ var tokenLabelRe = regexp.MustCompile(`"token":\s*"[^"]*"`)
 func partyPolicy(objs []Obj, kind bool) []string {
 	var cleaned []Obj
 	for _, o := range objs {
-		if s, ok := o.Data["party.json"]; ok && o.Kind == "ConfigMap" {
-			data := map[string]any{}
-			for k, x := range o.Data {
-				data[k] = x
+		for _, f := range []string{"party.json", "party-pkcs11.json"} { // the second is the migration's -from config (attested mode, phase migrate)
+			if s, ok := o.Data[f]; ok && o.Kind == "ConfigMap" {
+				data := map[string]any{}
+				for k, x := range o.Data {
+					data[k] = x
+				}
+				data[f] = tokenLabelRe.ReplaceAllString(fmt.Sprint(s), `"token": ""`)
+				o.Data = data
 			}
-			data["party.json"] = tokenLabelRe.ReplaceAllString(fmt.Sprint(s), `"token": ""`)
-			o.Data = data
 		}
 		cleaned = append(cleaned, o)
 	}
@@ -114,7 +116,14 @@ func partyPolicy(objs []Obj, kind bool) []string {
 // partyContract runs the shared image contract. The contract was written for the business chart: its zone test is replaced here by one that wants the SIGNING zone,
 // and the token-making init container of kind (a shell and softhsm2-util in the -dev image: not the image's entrypoint) is checked by partySoftHSMInit instead.
 func partyContract(objs []Obj, c Contract) []string {
-	for n, d := range c.DevImages { // a -dev image is the same binary: it is checked against its production image's entry
+	sims := map[string]DevImage{}
+	for n, d := range c.DevImages {
+		sims[n] = d
+	}
+	for n, d := range c.SimImages {
+		sims[n] = d
+	}
+	for n, d := range sims { // a -dev (or tee-sim) image is the same binary: it is checked against its production image's entry
 		if ic, ok := c.Images[d.Of]; ok {
 			ic.Env = append(append([]string{}, ic.Env...), "QV_ENV", "SOFTHSM2_CONF")
 			ic.PathEnv = append(append([]string{}, ic.PathEnv...), "SOFTHSM2_CONF")
@@ -996,7 +1005,7 @@ func TestPartyChecksCatch(t *testing.T) {
 		{"service token mounted", "B", false, "automountServiceAccountToken: false\n      enableServiceLinks", "automountServiceAccountToken: true\n      enableServiceLinks", "automountServiceAccountToken true", true},
 		{"PEM in output", "B", false, `"metrics_listen": "127.0.0.1:9102"`, `"metrics_listen": "127.0.0.1:9102",` + "\n    \"x\": \"-----BEGIN PRIVATE KEY-----\"", "PEM block", true},
 		{"no softhsm-init in kind", "A", true, "        - name: softhsm-init", "        - name: other-init", "no softhsm-init container", false},
-		{"kind without QV_ENV", "A", true, "            - { name: QV_ENV, value: dev }\n            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }\n          startupProbe", "            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }\n          startupProbe", "does not set QV_ENV=dev", false},
+		{"kind without QV_ENV", "A", true, "            - { name: QV_ENV, value: \"dev\" }\n            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }\n          startupProbe", "            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }\n          startupProbe", "does not set QV_ENV=dev", false},
 	}
 	cache := map[string]string{}
 	for _, c := range cases {
@@ -1081,8 +1090,8 @@ func TestPartyRefusals(t *testing.T) {
 		{"all-zero digest", false, "A", []string{"--set", "images.party.digest=sha256:" + strings.Repeat("0", 64)}, "all-zero placeholder"},
 		{"no digest, no tag", false, "A", []string{"--set", "images.party.digest="}, "needs a digest"},
 		{"SoftHSM with a digest image", false, "A", []string{"--set", "hsm.softhsm.enabled=true"}, "SoftHSM is never used with an image referenced by digest"},
-		{"attested sealer", false, "A", []string{"--set", "sealer.type=attested"}, "extension point"},
-		{"attestation broker", false, "A", []string{"--set", "attestBroker.enabled=true"}, "extension point"},
+		{"attested sealer without a broker", false, "A", []string{"--set", "sealer.type=attested"}, "attested.broker.url is required"},
+		{"the former attestBroker switch", false, "A", []string{"--set", "attestBroker.enabled=true"}, "additional properties 'attestBroker' not allowed"},
 		{"no PKCS#11 module", false, "A", []string{"--set", "hsm.module.path="}, "hsm.module.path is required"},
 		{"module outside the volume", false, "A", []string{"--set", "hsm.module.path=/usr/lib/x.so"}, "must lie under /etc/qv/hsm/"},
 		{"load balancer without annotations", false, "B", []string{"--set", "service.peer.type=LoadBalancer"}, "internal-load-balancer annotations"},

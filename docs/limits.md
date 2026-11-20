@@ -13,9 +13,11 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **Restore is drilled on one machine,** not across sites.
 
 **Simulated parts**
+- **CloudHSM support is untested on hardware.** The party's sealer has a profile for AWS CloudHSM, proven against its documentation and a test double. Nobody has run it on a real cluster; the first run follows [a checklist](runbooks/cloudhsm-sealer.md).
 - **SoftHSM, not hardware.** The tokens are software with no tamper resistance. The structure is what a real HSM would need, but it is not one.
 - **M-of-N is simulated.** The cold signer checks operator signatures in software; a hardware HSM would enforce it itself.
 - **The enclave is simulated.** A stand-in produces the proof, so nobody has shown that real hardware measures what the stand-in measures ([Enclaves](enclaves.md)).
+- **Nothing has run the enclave charts on a real cluster.** The broker chart and the party's enclave mode are checked by tests and, later, a local cluster with the simulated enclave. There is no production attester yet, so the chart refuses an enclave party outside development and test.
 - **Service identity is simulated.** The two certificate authorities are made by a script on a developer's machine, and their keys sit in a file. Production must bring its own PKI and a certificate manager ([certificate runbook](runbooks/certificates.md)). Metrics are plain http, reachable on the local machine only.
 - **All parties run on one machine, run by one team.** The cryptographic separation is real. The operational separation is not.
 
@@ -35,6 +37,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **A cosigner started against an empty guard database cannot tell it from a new install.** It starts without replay history or audit chain, so after a wrong database setting or a restore from nothing the checks are silently weaker until noticed ([Certificates](runbooks/certificates.md)).
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **A Solana hot wallet cannot be replaced yet.** Every other key can ([Key replacement](key-replacement.md)).
+- **An emergency cannot save what a thief moves first.** The old key stays valid on chain until its funds are moved; only the signing zone refuses it. The cold ceremony that points deposits at the new key takes hours and sweeps wait meanwhile; the emergency drill has run on local chains only ([stolen hot key](runbooks/stolen-hot-key.md)).
 
 **Chains**
 - **Bitcoin has one hot shard per pool,** so no rebalance. Taproot addresses are not supported, because the signing library cannot derive them ([spike note](spikes/btc-taproot.md)).

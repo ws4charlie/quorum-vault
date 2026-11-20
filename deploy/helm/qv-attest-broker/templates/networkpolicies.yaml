@@ -1,0 +1,75 @@
+{{- /*
+  Default deny for every pod in the namespace, then one allow per path. A rule with an empty peer list is never rendered (an empty `to` or `from` would mean "everyone").
+  In: only this party, on the mutual-TLS port. Out: DNS, and the network HSM if you name one. Nothing else: the broker never dials anything.
+*/ -}}
+{{- $v := .Values -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qab.child" (dict "ctx" . "c" "default-deny") }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qab.child" (dict "ctx" . "c" "dns") }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $v.network.dns.to | nindent 8 }}
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qab.child" (dict "ctx" . "c" "party-ingress") }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+  annotations:
+    quorumvault.io/ingress-purpose: attest-broker-party
+spec:
+  podSelector:
+    matchLabels: {{- include "qab.selector" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from: {{- toYaml $v.network.partyIngress.from | nindent 8 }}
+      ports: [{ port: {{ $v.ports.mtls }}, protocol: TCP }]
+{{- if $v.network.metricsIngress.from }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qab.child" (dict "ctx" . "c" "metrics-ingress") }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+  annotations:
+    quorumvault.io/ingress-purpose: metrics-scrape
+spec:
+  podSelector:
+    matchLabels: {{- include "qab.selector" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from: {{- toYaml $v.network.metricsIngress.from | nindent 8 }}
+      ports: [{ port: {{ $v.ports.health }}, protocol: TCP }]
+{{- end }}
+{{- if and (not $v.hsm.softhsm.enabled) $v.network.hsm.to $v.network.hsm.ports }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qab.child" (dict "ctx" . "c" "hsm-egress") }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "qab.selector" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $v.network.hsm.to | nindent 8 }}
+      ports:
+        {{- range $v.network.hsm.ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+{{- end }}

@@ -65,6 +65,12 @@ import (
 // (the source not draining, the successor not active) is not refused finally: the decision is a retry (ErrKeysetLag) until the intent's not_after,
 // with an ALERT, like ErrApproverLag. A drain that cannot become valid (a retired source, a wrong destination in a ready state) is a refusal.
 //
+// The emergency. mark-compromised is the one signed event of a suspected theft. In the same record it (1) ends ordinary signing for the generation in
+// this zone (the next decision reads the log: nothing is cached), (2) leaves the generation one thing to sign, a drain to the successor the record names,
+// (3) carries the emergency caps for that drain (the record's caps are the only ones: no second setting that could be forgotten), and (4) takes the
+// drains_per_hour limit off that source. What bounds the gas the drains burn is max_drains_per_source (drainLimits), for every drain. The business core mirrors the flag (qv-rekey emergency) and then stops paying from the generation and sweeping
+// into it. The record also says nothing is retired: compromised is final.
+//
 // An old binary (before this file) does not know the kind "drain": it refuses the job with a normal refusal ("intent kind"). Until every replica is
 // upgraded, the planner must expect refusals from the old ones (docs/runbooks/key-replacement.md).
 
@@ -86,6 +92,8 @@ const (
 	ReasonKeyset    = "keyset_state"
 	ReasonDrainRate = "policy_drain_rate" // 4 too many drains in the last hour
 	ReasonDrainCap  = "policy_drain_cap"  // 4 the drains of this source and asset would exceed the cap of the signed record
+	// ReasonDrainGas: this source has had the most drains the zone allows in all (the gas bound).
+	ReasonDrainGas = "policy_drain_gas"
 )
 
 // KeysetLagNote ends the reason of a decision that waits because this zone's keyset view may be behind the other side's.
@@ -108,9 +116,9 @@ type KeysetChange struct {
 	PublicKey string `json:"public_key,omitempty"`
 	// Window (start-draining of a deposit tree, seconds, optional) is how long after this record the generation's deposit addresses
 	// stay swept before it may retire: a retire record of a deposit tree is valid only when its signing time is at least that much later. Zero: no window.
-	Window int64 `json:"window_seconds,omitempty"`
-	Seq    int64 `json:"seq"`       // must be higher than the current one
-	SignedAt  int64  `json:"signed_at"` // unix seconds
+	Window   int64 `json:"window_seconds,omitempty"`
+	Seq      int64 `json:"seq"`       // must be higher than the current one
+	SignedAt int64 `json:"signed_at"` // unix seconds
 	// Signatures of the operators over KeysetChangeMessage.
 	Signatures []OperatorSignature `json:"signatures"`
 }
@@ -931,12 +939,30 @@ func (d *Decider) drainLimits(ctx context.Context, gt *GuardTx, cc *ChainConfig,
 		return reject(ReasonDrainCap, "the signed record names no cap for %s on generation %d of %s", asset, src.Generation, shard)
 	}
 	pending := d.pendingSince(now)
-	n, err := gt.SignedDrainsSince(ctx, now.Add(-time.Hour), pending)
+	// The gas of a drain. The cap counts value moved, not what each transaction costs the source in gas: many one-unit drains to the right successor
+	// would burn its native balance (each costs up to the zone's fee cap) and strand its tokens. So the number of drains signed from one source in all is
+	// bounded, planned or emergency, and each drain's fee is bounded by the fee cap, which makes the burn at most count times that cap. The bound is the
+	// zone's own config (max_drains_per_source, default 40) and both the gateway and the cosigners read it, which is why it is not a field of the signed
+	// record: a new field would change the signed message that deployed binaries verify. A drain moves one asset, so 40 is room for every asset, repeats and
+	// retries, and far below what would drain the balance in gas.
+	made, err := gt.SignedDrainCountFrom(ctx, sender, pending)
 	if err != nil {
 		return err
 	}
-	if n >= cc.DrainsPerHour {
-		return reject(ReasonDrainRate, "%d drains in the last hour, limit %d", n, cc.DrainsPerHour)
+	if made >= cc.maxDrainsPerSource() {
+		return reject(ReasonDrainGas, "%d drains already signed from %s, the most the zone allows in all (max_drains_per_source %d): each costs gas, so more would burn the balance the drain is moving", made, sender, cc.maxDrainsPerSource())
+	}
+	// The hourly rate is for a planned drain: it slows a business zone that drains by many small steps. A compromised source is the emergency: the
+	// operators' record names the successor and the cap together, which already bound where and how much, and a rate would only give the thief the time
+	// the limit takes (keysets.go, "The emergency").
+	if src.State != partition.StateCompromised {
+		n, err := gt.SignedDrainsSince(ctx, now.Add(-time.Hour), pending)
+		if err != nil {
+			return err
+		}
+		if n >= cc.DrainsPerHour {
+			return reject(ReasonDrainRate, "%d drains in the last hour, limit %d", n, cc.DrainsPerHour)
+		}
 	}
 	sum, err := gt.SignedDrainAmountFrom(ctx, sender, asset, pending)
 	if err != nil {

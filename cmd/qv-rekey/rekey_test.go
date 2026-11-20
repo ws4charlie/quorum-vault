@@ -59,6 +59,8 @@ func (z *fakeZone) Apply(_ context.Context, c gateway.KeysetChange) error {
 			e.State, e.Successor = "draining", c.Successor
 		case gateway.KeysetRetire:
 			e.State = "retired"
+		case gateway.KeysetMarkCompromised:
+			e.State, e.Successor = "compromised", c.Successor
 		}
 		v.Gens[c.Generation] = e
 	}
@@ -78,7 +80,7 @@ type fakeCore struct {
 func (c *fakeCore) Keysets(context.Context, string) (map[int]CoreGen, error) {
 	out := map[int]CoreGen{}
 	for k, v := range c.gens {
-		if k == 1 && c.drain != "" && v.State == "draining" {
+		if k == 1 && c.drain != "" && (v.State == "draining" || v.State == "compromised") {
 			v.Drain = &struct {
 				State  string `json:"state"`
 				Reason string `json:"reason"`
@@ -100,6 +102,10 @@ func (c *fakeCore) Post(_ context.Context, route string, b map[string]any) error
 	case "drains":
 		g := c.gens[1]
 		g.State, g.Successor = "draining", 2
+		c.gens[1] = g
+	case "compromises":
+		g := c.gens[1]
+		g.State, g.Successor = "compromised", 2
 		c.gens[1] = g
 	case "activations":
 		g := c.gens[2]
