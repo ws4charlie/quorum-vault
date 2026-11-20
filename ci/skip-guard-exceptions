@@ -1,0 +1,18 @@
+# <file><TAB><number of lines><TAB><text the line contains, or *><TAB><reason>
+# Each line names the exact reviewed occurrence: that many lines of the file contain that text, and nothing else in the file names an allowlisted path.
+# A further line, a changed line or a vanished one fails ci/skip-guard.sh, so a new reader in these files is never hidden (it is reviewed, then this list is updated).
+.github/workflows/helm.yml	6	*	whole file, bounded by count: its own workflow (not a job of ci.yml) with its own paths filter; it exists to name deploy/helm, ci/helm and deploy/images/README.md. Not part of ci.yml.
+Makefile	1	ci/helm/check.sh	the helm-check target; ci.yml must not call it (the guard fails when ci.yml names helm-check)
+docs/images/build.py	1	docs/images/	comment-like docstring text of a script that draws docs/images by hand; no job runs it
+cmd/qv-core/tls_test.go	1	docs/runbooks/certificates.md	asserts that an error message names this runbook: a string compare, no file is opened
+internal/pki/pki_test.go	1	docs/runbooks/certificates.md	asserts that an error message names this runbook: a string compare, no file is opened
+internal/pki/services_test.go	1	docs/runbooks/certificates.md	asserts that an error message names this runbook: a string compare, no file is opened
+internal/pki/catalog_chart_test.go	1	../../deploy/helm/qv-certs/catalog.json	reads qv-certs catalog.json: that chart is deliberately NOT on the allowlist (this reader is why)
+internal/pki/chart.go	1	//go:generate go run ./gen -o ../../deploy/helm/qv-certs/catalog.json	go:generate of the same qv-certs file: the chart that is not on the allowlist
+mpc-party/internal/cbmpc/measure_test.go	1	emit(r.md())	r.md() formats a markdown table for the log; no file is opened
+cmd/qv-rekey/rekey.go	1	docs/runbooks/key-replacement.md	a line inside a multi-line raw string: the operator message that points at the runbook (the line holds no quote, so the guard cannot see the string); no file is opened
+docs/check_links.py	7	*	whole file, bounded by count: a manual link checker for README*.md and docs/ (python3 docs/check_links.py); no workflow, Makefile target, script or ci.yml job runs it (grep: nothing names check_links). If a job ever runs it, shrink the allowlist instead.
+mpc-party/cmd/mpc-party/tlsinit.go	1	docs/runbooks/tee-broker.md	a line inside the multi-line usage text of `tls-init` that points at the runbook (the line holds no quote, so the guard cannot see the string); no file is opened
+ci/kind/charts.sh	1	deploy/helm/qv-business	run only by .github/workflows/kind.yml (and make kind-* by people); kind.yml runs on pull requests that change deploy/** (the guard checks that it covers every allowlisted chart path); ci.yml and the make targets it calls never run ci/kind
+ci/kind/install.sh	1	deploy/helm/qv-certs	same reason (kind.yml); the chart installed here is qv-certs, which is not even on the allowlist
+ci/kind/smoke/upgrade.sh	1	chart=deploy/helm/qv-business	same reason (kind.yml)

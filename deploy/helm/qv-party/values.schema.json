@@ -76,6 +76,26 @@
             }
           }
         },
+        "agent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[0-9a-f]{64})?$"
+            },
+            "tag": {
+              "type": "string"
+            }
+          }
+        },
         "tools": {
           "type": "object",
           "additionalProperties": false,
@@ -673,6 +693,32 @@
               }
             }
           }
+        },
+        "metricsRemoteWrite": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
         }
       }
     },
@@ -688,6 +734,45 @@
         },
         "job": {
           "type": "object"
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "remoteWrite": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "tlsSecret": {
+                  "type": "string"
+                }
+              }
+            },
+            "cluster": {
+              "type": "string"
+            },
+            "externalLabels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
         }
       }
     }

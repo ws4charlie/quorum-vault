@@ -132,3 +132,26 @@ tests:
         exp_alerts:
           - exp_labels: {severity: page}
             exp_annotations: {summary: "The failure counters of fewer than three parties are collected", description: "Check that Prometheus scrapes every party's metrics port (metrics_listen)."}
+
+  # series that do not exist before their first failure (as the parties publish them): the first failure counts at once, and its total is exact
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_session_failures_total{party="A",side="coordinator",op="sign",peer="B",kind="CRYPTOGRAPHIC"}'
+        values: '_x10 2x80'
+      - series: 'qv_mpc_party_session_failures_total{party="B",side="follower",op="sign",peer="A",kind="CRYPTOGRAPHIC"}'
+        values: '0x90'
+      - series: 'qv_mpc_party_session_failures_total{party="C",side="follower",op="sign",peer="A",kind="TRANSPORT"}'
+        values: '0x90'
+    alert_rule_test:
+      - {eval_time: 12m, alertname: QVMpcPeerCryptographicFailures, exp_alerts: [{exp_labels: {severity: page, peer: B, kind: CRYPTOGRAPHIC}, exp_annotations: {summary: "A signing session failed a cryptographic check with party B (suspect, not proven)", description: "The failed message came in from party B, or its link failed. The cause may equally be the reporting party, the link or the third party. The keyset is frozen. Runbook: docs/runbooks/mpc-failures.md"}}]}
+    promql_expr_test:
+      - expr: qv_mpc:peer_session_failures:increase1h{kind="CRYPTOGRAPHIC"}
+        eval_time: 15m
+        exp_samples:
+          - {labels: 'qv_mpc:peer_session_failures:increase1h{peer="A",kind="CRYPTOGRAPHIC"}', value: 0}
+          - {labels: 'qv_mpc:peer_session_failures:increase1h{peer="B",kind="CRYPTOGRAPHIC"}', value: 2}
+      - expr: qv_mpc:peer_session_failures:increase1h{kind="CRYPTOGRAPHIC"}
+        eval_time: 85m
+        exp_samples:
+          - {labels: 'qv_mpc:peer_session_failures:increase1h{peer="A",kind="CRYPTOGRAPHIC"}', value: 0}
+          - {labels: 'qv_mpc:peer_session_failures:increase1h{peer="B",kind="CRYPTOGRAPHIC"}', value: 0}

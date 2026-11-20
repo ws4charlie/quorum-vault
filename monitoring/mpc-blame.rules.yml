@@ -38,13 +38,15 @@ groups:
         labels: {name: other_1h}
 
       # ---- recording rules: failed sessions per link (reporting party, suspect) and per suspect, over 5 minutes, 1 hour and 24 hours ----
-      # increase() treats a restart as a counter reset. The parties start every series at 0, so a first failure is an increase.
+      # The parties create a series only at its first failure, so its first samples are 1, 1, 1 and increase() alone says 0. Each expression is therefore increase() for a series
+      # that existed a window ago, and the value itself for a series that did not exist then (it started at 0 inside the window). Limit: a target missing for over 5 minutes that returns
+      # makes its series look new once and re-reports its old total for one window.
       - record: qv_mpc:link_session_failures:increase5m
-        expr: sum by (party, peer, kind) (increase(qv_mpc_party_session_failures_total[5m]))
+        expr: sum by (party, peer, kind) ((increase(qv_mpc_party_session_failures_total[5m]) unless (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 5m)) or (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 5m))
       - record: qv_mpc:link_session_failures:increase1h
-        expr: sum by (party, peer, kind) (increase(qv_mpc_party_session_failures_total[1h]))
+        expr: sum by (party, peer, kind) ((increase(qv_mpc_party_session_failures_total[1h]) unless (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 1h)) or (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 1h))
       - record: qv_mpc:link_session_failures:increase24h
-        expr: sum by (party, peer, kind) (increase(qv_mpc_party_session_failures_total[24h]))
+        expr: sum by (party, peer, kind) ((increase(qv_mpc_party_session_failures_total[24h]) unless (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 24h)) or (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 24h))
       - record: qv_mpc:peer_session_failures:increase5m
         expr: sum by (peer, kind) (qv_mpc:link_session_failures:increase5m)
       - record: qv_mpc:peer_session_failures:increase1h

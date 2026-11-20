@@ -1,0 +1,42 @@
+{{- /* Metrics for the central monitoring (task D10). Off by default. One ClusterIP Service per component that has a metrics port (core, relay, archiver; the worker has none),
+       and one NetworkPolicy that lets the monitoring namespace reach that port: nothing else. The ServiceMonitor objects are in chart qv-monitoring. */}}
+{{- if .Values.metrics.enabled }}
+{{- $m := .Values.metrics }}
+{{- $comps := list "core" "relay" }}
+{{- if .Values.archiver.enabled }}{{ $comps = append $comps "archiver" }}{{ end }}
+{{- range $c := $comps }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" $ "c" $c) }}-metrics
+  labels:
+    {{- include "qv.labels" (dict "ctx" $ "c" $c) | nindent 4 }}
+    quorumvault.io/metrics: "true"
+spec:
+  type: ClusterIP
+  selector: {{- include "qv.selector" (dict "ctx" $ "c" $c) | nindent 4 }}
+  ports:
+    - { name: metrics, port: {{ $m.port }}, targetPort: {{ $m.port }}, protocol: TCP }
+---
+{{- end }}
+{{- if .Values.network.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-metrics-scrape
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "network") | nindent 4 }}
+  annotations:
+    quorumvault.io/ingress-purpose: metrics-scrape
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ join ", " $comps }}] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ $m.monitoringNamespace | quote }} } }
+      ports: [{ port: {{ $m.port }}, protocol: TCP }]
+{{- end }}
+{{- end }}

@@ -231,6 +231,12 @@ func checkNetworkPolicy(o Obj, opt PolicyOptions, hasDeny *bool, add func(string
 			if len(r.Ports) == 0 {
 				add("%s: the signing link must name its ports", id)
 			}
+		case "metrics-scrape": // task D10: the monitoring namespace only, no address range, no pod of another namespace-wide rule (monitoring_test.go checks the port)
+			for _, f := range r.From {
+				if f.IPBlock != nil || f.NamespaceSelector == nil || f.PodSelector != nil {
+					add("%s: the metrics rule must name the monitoring namespace and nothing else", id)
+				}
+			}
 		case "party-caller", "party-peer": // qv-party: its own test (party_test.go) checks the ports and who may come
 		default:
 			add("%s: ingress from outside the namespace that is neither the ingress controller nor the signing link", id)

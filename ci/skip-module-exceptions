@@ -1,0 +1,3 @@
+# <tree/><TAB><reason>. A tree whose files may be skipped although they have an extension that a job compiles or runs (.go go.mod go.sum .sh .py .sql .proto
+# .js Makefile Dockerfile*). Reviewed claim: the tree is its own Go module (its own go.mod) and NO ci.yml job enters it. ci/skip-guard.sh checks both on every run.
+ci/helm/	own module (ci/helm/go.mod, not in `go test ./...` of the root module); run only by helm.yml and `make helm-check`, which ci.yml does not call (nothing in ci.yml, .github/actions, the make targets and scripts it calls names ci/helm)
