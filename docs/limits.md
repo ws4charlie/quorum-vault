@@ -34,7 +34,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **A new key is not test-signed before it takes over.** The first real signature after activation is the first proof that it works ([Key replacement](key-replacement.md)).
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
-- **Key replacement of Bitcoin and Solana deposit keys is not finished,** and a Solana hot shard cannot be replaced yet ([Key replacement](key-replacement.md)).
+- **A Solana hot wallet cannot be replaced yet.** Every other key can ([Key replacement](key-replacement.md)).
 
 **Chains**
 - **Bitcoin has one hot shard per pool,** so no rebalance. Taproot addresses are not supported, because the signing library cannot derive them ([spike note](spikes/btc-taproot.md)).

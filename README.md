@@ -77,7 +77,7 @@ The first command builds the MPC library once, which takes a few minutes. The se
 | Attacks on the signing side | A compromised gateway, party or database is refused |
 | Login and approvals | A real OpenID Connect token is required; passkey approvals are checked by the signing zone. Tested with Keycloak and software authenticators, not hardware keys |
 | Audit record | Chain heads are copied into write-once storage; tamper checks in tests |
-| Replacing an EVM hot key | End-to-end tests, planned and emergency, with a real gateway, cosigners and parties. Bitcoin and Solana deposit keys: not finished |
+| Replacing an EVM hot key | End-to-end tests, planned and emergency, with a real gateway, cosigners and parties. Bitcoin and Solana deposit keys are tested the same way; a Solana hot wallet cannot be replaced yet |
 | Enclave start-up | Simulated only: the broker and sealed shares are tested with a stand-in for the enclave. **No real enclave yet** |
 | Kubernetes shape | Charts and images are built and checked by tests. **No real cluster has run them yet** ([Deployment](docs/deployment.md)) |
 | Real networks, real load | **Not yet.** No testnet or mainnet use, and no load test. See [Limits](docs/limits.md) |

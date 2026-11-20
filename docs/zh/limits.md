@@ -34,7 +34,7 @@
 - **新密钥在接手之前不会先试签。** 激活后的第一次真实签名，才是它能用的第一个证明（见[密钥更换](key-replacement.md)）。
 - **cb-mpc 没有在这里经过外部评审。** 所以任何密码学失败都会让密钥冻结。
 - **两方密钥需要两方都在。** A 或 B 宕机时，Bitcoin 和 Solana 存款的归集会暂停。
-- **Bitcoin 和 Solana 存款密钥的更换还没有完成**，Solana 的热钱包分片也还不能更换（见[密钥更换](key-replacement.md)）。
+- **Solana 的热钱包目前还不能更换。** 其余的密钥都可以（见[密钥更换](key-replacement.md)）。
 
 **各条链**
 - **Bitcoin 每个池只有一个热钱包分片**，所以没有再平衡。不支持 Taproot 地址，因为签名库派生不出来（见[调研笔记](../spikes/btc-taproot.md)）。
