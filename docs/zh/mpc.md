@@ -4,7 +4,7 @@
 
 这里没有哪台机器持有完整的密钥。每把密钥被切成份额，分给不同的参与方，签名由几方一起完成，就像金库门要几位持钥人同时开锁（多方安全计算，MPC）。
 
-<p align="center"><img src="../images/zh/mpc.png" width="60%" alt="三个参与方各自把密钥份额封存在自己的 HSM 令牌里。EVM 和 Solana 热钱包任意两方即可签名；Bitcoin 和存款地址的密钥需要 A 和 B 一起。"></p>
+<p align="center"><img src="../images/zh/mpc.png" width="60%" alt="三个参与方各自把密钥份额封存在自己的 HSM 令牌里。EVM 和 Solana 热钱包任意两方即可签名；Bitcoin 和充值地址的密钥需要 A 和 B 一起。"></p>
 
 ## 两种密钥
 

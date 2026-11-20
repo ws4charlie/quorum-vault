@@ -31,7 +31,7 @@ INK, MUTED = "#1F2933", "#52606D"
 # Chinese text for every English string used below. A string missing here is drawn as is.
 ZH = {
     # architecture tiles
-    "Operators": "运营和审批人", "approve and ask": "审批和发起",
+    "People": "人员", "ask, approve, run": "发起、审批、运营",
     "Core API": "核心 API", "queues jobs, never signs": "只排队任务，从不签名",
     "Workflows": "工作流", "survive crashes": "崩溃后接着走",
     "Ledger": "账本", "double entry, Reconcile": "复式记账、对账",
@@ -44,7 +44,7 @@ ZH = {
     "Solana": "Solana", "durable nonces": "durable nonce",
     "queues sign jobs": "排队签名任务", "asks the parties to sign": "请参与方签名", "signed transactions": "签好的交易",
     # flow
-    "Deposit": "存款", "pays in": "客户转入",
+    "Deposit": "充值", "pays in": "客户转入",
     "Credit": "入账", "when final": "确认后",
     "Sweep": "归集", "to hot": "到热钱包",
     "Withdraw": "提现", "approvals": "审批",
@@ -63,9 +63,9 @@ ZH = {
     "Audit": "审计", "who, how, when": "谁、怎么登录、何时",
     "Signing zone": "签名区", "still checks approver keys itself": "仍自己核对审批人密钥",
     # signing zone
-    "Business side": "业务区", "queues a job": "排队一个任务",
+    "Business side": "业务侧", "queues a job": "排队一个任务",
     "Gateway": "网关", "checks the job": "核对任务",
-    "Cosigners B and C": "B、C 的 cosigner", "check again, alone": "各自再核对一遍",
+    "Cosigners B and C": "B、C 的协签程序", "check again, alone": "各自再核对一遍",
     "Key shares": "密钥份额", "sign together": "一起签名",
     "A check fails": "任何一项核对失败", "nothing is signed, the job says why": "不签名，任务写明原因",
     # ledger
@@ -85,11 +85,11 @@ ZH = {
     "Two-of-three key": "三选二密钥", "any two sign": "任意两方签名",
     "EVM and Solana hot wallets": "EVM、Solana 热钱包",
     "Two-party key tree": "两方密钥树", "A and B both needed": "A 和 B 缺一不可",
-    "Bitcoin, Solana deposit addresses": "Bitcoin、Solana 存款地址",
+    "Bitcoin, Solana deposit addresses": "Bitcoin、Solana 充值地址",
     # tiers
     "Hot wallet": "热钱包", "signs all day": "整天签名", "Cold storage": "冷钱包", "key stays offline": "密钥离线",
     "above upper limit: moves automatically": "高于上限：自动转冷",
-    "below lower limit: refilled by people": "低于下限：由人补充", "Air gap": "隔离网络", "M of N operators approve": "N 人中 M 人批准",
+    "below lower limit: refilled by people": "低于下限：由人补充", "Air gap": "物理隔离", "M of N cold signers approve": "N 位签名人中 M 位批准",
     "refill file": "补充文件",
     # evm
     "Factory": "工厂合约", "owned by the cold key": "归冷密钥所有",
@@ -107,13 +107,13 @@ ZH = {
     "Many small coins": "很多小额币", "merge into one": "合并成一枚", "Consolidate": "合并",
     # solana
     "Address": "地址", "from public data": "来自公开数据",
-    "Deposit": "存款", "read at finalized": "最终确认后读取",
+    "Deposit": "充值", "read at finalized": "最终确认后读取",
     "Batched sweep": "批量归集", "several addresses, one transaction": "多个地址，一笔交易",
     "Nonce account": "nonce 账户", "withdrawal signs its value": "提现签它的值",
     "First version to land": "最先上链的版本", "uses it up; others are refused": "把它用掉，其余被拒绝",
     # new in the sweep
     "Identity": "身份", "login, roles": "登录、角色", "queues jobs only": "只排队任务",
-    "Deposit": "存款", "credited when confirmed": "确认够了才入账",
+    "Deposit": "充值", "credited when confirmed": "确认够了才入账",
     "Send": "发送", "keeps change for a higher fee": "找零里留着加价的余量",
     "Replace": "替换", "same coins, higher fee": "同样的币、更高手续费",
     "Child": "子交易", "pulls a stuck send in": "把卡住的交易拉上链",
@@ -121,7 +121,7 @@ ZH = {
     "Batch": "批量", "many withdrawals, one transaction": "多个提现，一笔交易",
     "Write-once storage": "一次写入存储", "an archiver copies every head": "归档程序复制每个链头",
     # audit
-    "Core": "核心服务", "Cosigner": "Cosigner", "entry": "记录",
+    "Core": "核心服务", "Cosigner": "协签程序", "entry": "记录",
     "Kafka": "Kafka", "heads published, so a cut chain stands out": "链头对外发布，截短的链一眼可见",
     # testing
     "Lane": "泳道", "own DB, chains, tokens": "自己的数据库、链、令牌",
@@ -136,14 +136,14 @@ ZH = {
     # deployment
     "Business": "业务", "core, worker, databases": "核心、worker、数据库",
     "Signing core": "签名核心", "gateway and party A": "网关和参与方 A",
-    "Party B cluster": "参与方 B 集群", "party B and its checker": "参与方 B 和它的检查程序",
-    "Party C cluster": "参与方 C 集群", "party C and its checker": "参与方 C 和它的检查程序",
-    "Signing side": "签名一侧", "only calls out, nothing pushes in": "只向外调用，没有东西能推进来",
-    "Cold signer": "冷签名机", "offline, never in a cluster": "离线，从不进集群",
+    "Party B cluster": "参与方 B 集群", "party B and its cosigner": "参与方 B 和它的协签程序",
+    "Party C cluster": "参与方 C 集群", "party C and its cosigner": "参与方 C 和它的协签程序",
+    "Signing side": "签名侧", "only calls out, nothing pushes in": "只向外调用，没有东西能推进来",
+    "Cold signer": "冷钱包签名机", "offline, never in a cluster": "离线，从不进集群",
     # enclaves
     "Party": "参与方", "starts in": "在飞地里", "an enclave": "启动",
     "Proof": "证明", "of the exact": "确切程序", "program": "的度量结果",
-    "Broker": "代理", "checks, then": "核对后", "releases the key": "才放出密钥",
+    "Broker": "密钥代理", "checks, then": "核对后", "releases the key": "才放出密钥",
     "Key in memory": "内存里的密钥", "opens the": "打开封存", "sealed shares": "的份额",
     "Simulated today": "目前是模拟", "no real enclave has run it yet": "还没有真正的飞地运行过",
 }
@@ -249,7 +249,7 @@ def architecture():
         d.box(left, 2, w - left - right, h - 4, title, sub, c, size=26, sub_size=21)
         return d
 
-    tile("operators", 380, H, "Operators", "approve and ask", "gray").write()
+    tile("operators", 380, H, "People", "ask, approve, run", "gray").write()
 
     d = D("arch-a", 380, 58)  # operators to identity
     d.arrow(190, 2, 190, 56)
@@ -347,7 +347,7 @@ def tiers():
     d.box(820, 40, 290, 120, "Cold storage", "key stays offline", "blue")
     d.arrow(320, 70, 820, 70, "above upper limit: moves automatically", ly=58)
     d.arrow(820, 130, 320, 130, "below lower limit: refilled by people", ly=122)
-    d.box(430, 190, 280, 80, "Air gap", "M of N operators approve", "gray", size=22)
+    d.box(430, 190, 280, 80, "Air gap", "M of N cold signers approve", "gray", size=22)
     d.arrow(570, 190, 570, 138, "", dash=True)
     d.write()
 
@@ -451,7 +451,7 @@ def key_replacement():
 def deployment():
     d = D("deployment", 1140, 272)
     cards(d, [("Business", "core, worker, databases", "gray"), ("Signing core", "gateway and party A", "green"),
-              ("Party B cluster", "party B and its checker", "green"), ("Party C cluster", "party C and its checker", "green")],
+              ("Party B cluster", "party B and its cosigner", "green"), ("Party C cluster", "party C and its cosigner", "green")],
           y=20, h=100, gap=24, size=22)
     d.box(30, 160, 520, 80, "Signing side", "only calls out, nothing pushes in", "amber")
     d.box(590, 160, 520, 80, "Cold signer", "offline, never in a cluster", "gray")
