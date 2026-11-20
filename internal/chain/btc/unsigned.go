@@ -58,7 +58,7 @@ func BuildUnsigned(p Payload, acct *Account) (*Unsigned, error) {
 		if in.Value == 0 || in.Value > maxMoney {
 			return nil, fmt.Errorf("btc: input %d: value %d out of range", n, in.Value)
 		}
-		pub, err := acct.Pub(in.Path)
+		pub, err := acct.PubAt(in.Gen, in.Path)
 		if err != nil {
 			return nil, fmt.Errorf("btc: input %d: %w", n, err)
 		}

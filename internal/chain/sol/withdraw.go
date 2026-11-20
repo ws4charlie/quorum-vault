@@ -105,14 +105,27 @@ func scanAlloc(row pgx.Row) (allocRow, error) {
 	return r, err
 }
 
-func (a *Adapter) unsigned(partitionID string, msg []byte, depIdx ...uint32) (chain.UnsignedTx, error) {
-	pl, err := json.Marshal(Payload{Message: msg, DepositIndices: depIdx})
+// depKey is a deposit key a transaction is signed under: the derivation index and the generation of the deposit tree it belongs to (0 or 1: the first).
+type depKey struct{ index, gen uint32 }
+
+func (a *Adapter) unsigned(partitionID string, msg []byte, deps ...depKey) (chain.UnsignedTx, error) {
+	p := Payload{Message: msg}
+	later := false
+	for _, d := range deps {
+		p.DepositIndices = append(p.DepositIndices, d.index)
+		p.DepositGens = append(p.DepositGens, d.gen)
+		later = later || d.gen > 1
+	}
+	if !later {
+		p.DepositGens = nil // generation 1 only: the payload is what it always was
+	}
+	pl, err := json.Marshal(p)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
 	u := chain.UnsignedTx{Chain: a.cfg.Chain, Digest: msg, Payload: pl, KeyRef: chain.KeyRef{PartitionID: partitionID, Path: PathHot}}
-	for _, ix := range depIdx { // one signature per deposit key, over the same message, after the hot shard's
-		u.More = append(u.More, chain.SigInput{Digest: msg, KeyRef: chain.KeyRef{PartitionID: partitionID, Path: DepositPath(ix)}})
+	for _, d := range deps { // one signature per deposit key, over the same message, after the hot shard's
+		u.More = append(u.More, chain.SigInput{Digest: msg, KeyRef: chain.KeyRef{PartitionID: partitionID, Path: chain.KeyPathAt(int(d.gen), DepositPath(d.index))}})
 	}
 	return u, nil
 }
@@ -123,7 +136,14 @@ func (a *Adapter) unsignedFromStored(partitionID string, stored []byte, msg []by
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	return a.unsigned(partitionID, msg, p.DepositIndices...)
+	deps := make([]depKey, len(p.DepositIndices))
+	for i, ix := range p.DepositIndices {
+		deps[i].index = ix
+		if i < len(p.DepositGens) {
+			deps[i].gen = p.DepositGens[i]
+		}
+	}
+	return a.unsigned(partitionID, msg, deps...)
 }
 
 func msgOfPayload(payload []byte) ([]byte, error) {
@@ -219,7 +239,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 }
 
 // takeSlot finds a free, usable nonce account of the shard, allocates it to the owner and builds the message on its value.
-func (a *Adapter) takeSlot(ctx context.Context, tx pgx.Tx, kind, id, partitionID string, hot [32]byte, body []Ix, limit uint32, price uint64, depIdx ...uint32) (chain.UnsignedTx, error) {
+func (a *Adapter) takeSlot(ctx context.Context, tx pgx.Tx, kind, id, partitionID string, hot [32]byte, body []Ix, limit uint32, price uint64, deps ...depKey) (chain.UnsignedTx, error) {
 	rows, err := tx.Query(ctx, `SELECT n.address FROM sol_nonce_accounts n WHERE n.chain=$1 AND n.hot_address=$2 AND n.retired_at IS NULL
 		AND NOT EXISTS (SELECT 1 FROM sol_nonce_allocations a WHERE a.chain=n.chain AND a.address=n.address AND a.status IN ('allocated','broadcast'))
 		ORDER BY n.idx FOR UPDATE OF n SKIP LOCKED`, a.cfg.Chain, Address(hot))
@@ -263,10 +283,10 @@ func (a *Adapter) takeSlot(ctx context.Context, tx pgx.Tx, kind, id, partitionID
 		}
 		ixs = append(ixs, body...)
 		msg := Compile(hot, st.Value, ixs...)
-		if size := 1 + 64*(1+len(depIdx)) + len(msg); size > MaxTransaction {
+		if size := 1 + 64*(1+len(deps)) + len(msg); size > MaxTransaction {
 			return chain.UnsignedTx{}, fmt.Errorf("sol: the transaction would be %d bytes, the limit is %d", size, MaxTransaction)
 		}
-		u, err := a.unsigned(partitionID, msg, depIdx...)
+		u, err := a.unsigned(partitionID, msg, deps...)
 		if err != nil {
 			return chain.UnsignedTx{}, err
 		}

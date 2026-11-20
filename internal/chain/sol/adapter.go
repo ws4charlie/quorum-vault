@@ -2,14 +2,18 @@ package sol
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
 // Adapter is the Solana chain cell. Deposit address derivation, scanning and balance reads work; everything that moves funds out
@@ -90,9 +94,72 @@ func (a *Adapter) DeriveDepositAddress(_ context.Context, customerID string, ind
 	return chain.DepositAddress{Chain: a.cfg.Chain, Address: addr, Kind: chain.KindEd25519, DerivationIndex: index, Asset: ""}, nil
 }
 
-// watched lists the deposit addresses of the chain.
+// DepositIdentity is what the keyset registry records of the chain's deposit key tree at generation 1: "<node public key hex>:<chain code hex>" and the
+// node's public key.
+func DepositIdentity(accountPublicKey, accountChainCode string) (identity string, pub []byte, err error) {
+	n, err := nodeOfIdentity(accountPublicKey + ":" + accountChainCode)
+	if err != nil {
+		return "", nil, err
+	}
+	return hex.EncodeToString(n.PublicKey[:]) + ":" + hex.EncodeToString(n.ChainCode[:]), n.PublicKey[:], nil
+}
+
+// nodeOfIdentity reads a registry identity, "<public key hex>:<chain code hex>".
+func nodeOfIdentity(id string) (Node, error) {
+	pubHex, ccHex, ok := strings.Cut(id, ":")
+	pub, err1 := hex.DecodeString(pubHex)
+	cc, err2 := hex.DecodeString(ccHex)
+	if !ok || err1 != nil || err2 != nil || len(pub) != 32 || len(cc) != 32 || !onCurve(pub) {
+		return Node{}, errors.New("sol: deposit node identity must be <32-byte public key hex>:<32-byte chain code hex>")
+	}
+	var n Node
+	copy(n.PublicKey[:], pub)
+	copy(n.ChainCode[:], cc)
+	return n, nil
+}
+
+// nodeOf is the deposit node of a generation of the deposit tree: the configured one for generation 1, the registered one after.
+func (a *Adapter) nodeOf(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, gen int) (Node, error) {
+	if gen <= 1 {
+		return a.cfg.node, nil
+	}
+	k, err := partition.DepositGeneration(ctx, q, a.cfg.Chain, gen)
+	if err != nil {
+		return Node{}, err
+	}
+	return nodeOfIdentity(k.Address)
+}
+
+// DeriveDepositAddressAt is DeriveDepositAddress under the deposit node of a generation of the tree (chain.GenerationDeriver). Generation 1 is the
+// configured node: the same address as DeriveDepositAddress.
+func (a *Adapter) DeriveDepositAddressAt(ctx context.Context, key chain.DepositKey, customerID string, index uint64) (chain.DepositAddress, error) {
+	if key.Generation <= 1 {
+		return a.DeriveDepositAddress(ctx, customerID, index)
+	}
+	if customerID == "" {
+		return chain.DepositAddress{}, errors.New("sol: empty customer id")
+	}
+	if index >= 1<<31 {
+		return chain.DepositAddress{}, fmt.Errorf("sol: derivation index %d is hardened", index)
+	}
+	n, err := nodeOfIdentity(key.Identity)
+	if err != nil {
+		return chain.DepositAddress{}, err
+	}
+	addr, err := n.DepositAddressAt(uint32(index))
+	if err != nil {
+		return chain.DepositAddress{}, err
+	}
+	return chain.DepositAddress{Chain: a.cfg.Chain, Address: addr, Kind: chain.KindEd25519, DerivationIndex: index}, nil
+}
+
+var _ chain.GenerationDeriver = (*Adapter)(nil)
+
+// watched lists the deposit addresses of the chain: every generation of the deposit tree that is not retired.
 func (a *Adapter) watched(ctx context.Context) ([]string, error) {
-	rows, err := a.pool.Query(ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 ORDER BY address`, a.cfg.Chain)
+	rows, err := a.pool.Query(ctx, `SELECT d.address FROM deposit_addresses d WHERE d.chain=$1 AND `+partition.WatchedSQL+` ORDER BY d.address`, a.cfg.Chain)
 	if err != nil {
 		return nil, err
 	}

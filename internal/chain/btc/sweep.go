@@ -93,10 +93,12 @@ func (a *Adapter) RecordDeposit(ctx context.Context, tx pgx.Tx, d chain.Observed
 		return fmt.Errorf("btc: deposit %s amount %v out of range", d.DedupKey, d.Amount)
 	}
 	var idx int64
-	if err := tx.QueryRow(ctx, `SELECT derivation_index FROM deposit_addresses WHERE chain=$1 AND address=$2`, a.cfg.Chain, d.Address).Scan(&idx); err != nil {
+	var gen int
+	if err := tx.QueryRow(ctx, `SELECT derivation_index, generation FROM deposit_addresses WHERE chain=$1 AND address=$2`, a.cfg.Chain, d.Address).Scan(&idx, &gen); err != nil {
 		return fmt.Errorf("btc: deposit address %s: %w", d.Address, err)
 	}
-	path := PathString([]uint32{BranchDeposit, uint32(idx)})
+	// The path that spends the output carries the generation of the key it belongs to (nothing for generation 1: the stored path is what it always was).
+	path := chain.KeyPathAt(gen, PathString([]uint32{BranchDeposit, uint32(idx)}))
 	_, err = tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path, deposit, address) VALUES ($1,$2,$3,$4,$5,$6,true,$7) ON CONFLICT DO NOTHING`,
 		a.cfg.Chain, d.TxHash, int64(vout), d.Amount.Int64(), a.sinkPartition(), path, d.Address)
 	return err
@@ -251,11 +253,19 @@ func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent
 	}
 	p := Payload{Version: PayloadVersion}
 	for i, u := range picked {
-		path, err := ParsePath(paths[i])
+		gen, ps, err := chain.SplitKeyPath(paths[i])
 		if err != nil {
 			return chain.UnsignedTx{}, err
 		}
-		p.Inputs = append(p.Inputs, PayloadInput{TxID: u.txid, Vout: u.vout, Value: u.value, Path: path, Sequence: SequenceRBF})
+		path, err := ParsePath(ps)
+		if err != nil {
+			return chain.UnsignedTx{}, err
+		}
+		in := PayloadInput{TxID: u.txid, Vout: u.vout, Value: u.value, Path: path, Sequence: SequenceRBF}
+		if gen > 1 {
+			in.Gen = uint32(gen)
+		}
+		p.Inputs = append(p.Inputs, in)
 	}
 	p.Outputs = []PayloadOutput{{Address: sh.address, Value: sum - fee}}
 	built, raw, err := a.record(ctx, tx, "sweep", s.ID, "send", p, fee)
@@ -283,7 +293,7 @@ func (a *Adapter) MovedAssets(ctx context.Context, txid string) ([]chain.MovedAs
 	var addr string
 	sum := new(big.Int)
 	for _, in := range p.Inputs {
-		ad, err := a.acct.Address(in.Path)
+		ad, err := a.acct.AddressAt(in.Gen, in.Path)
 		if err != nil {
 			return nil, err
 		}

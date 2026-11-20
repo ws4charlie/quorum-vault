@@ -87,6 +87,9 @@ type SigningConfig struct {
 type Payload struct {
 	Message        []byte   `json:"message"`
 	DepositIndices []uint32 `json:"deposit_indices,omitempty"`
+	// DepositGens is the generation of the deposit tree of each key of DepositIndices, in the same order. Absent: all generation 1 (K5). The signing
+	// zone ignores it until K6, and then refuses a transaction whose key is not the one it derives, so a later generation fails closed.
+	DepositGens []uint32 `json:"deposit_gens,omitempty"`
 }
 
 // MaxSweepLegs bounds the deposit addresses of one sweep; the size of the transaction bounds it first.

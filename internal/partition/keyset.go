@@ -67,7 +67,7 @@ func audit(ctx context.Context, tx pgx.Tx, actor, typ string, k Keyset, from str
 // is registered it returns it, and refuses (ErrKeysetAddressChange) when its address is not the one given, because a shard's address changes only through a
 // new generation.
 func RegisterInitial(ctx context.Context, tx pgx.Tx, actor string, shard ShardID, address, keyRef string, publicKey []byte) (Keyset, error) {
-	if _, err := ParseShardID(string(shard)); err != nil {
+	if err := checkRegistryID(shard); err != nil {
 		return Keyset{}, err
 	}
 	if address == "" {
@@ -93,7 +93,7 @@ func RegisterInitial(ctx context.Context, tx pgx.Tx, actor string, shard ShardID
 
 // RegisterCandidate records the next generation of a shard as a candidate. Nothing in production calls it yet.
 func RegisterCandidate(ctx context.Context, tx pgx.Tx, actor string, shard ShardID, address, keyRef string, publicKey []byte) (Keyset, error) {
-	if _, err := ParseShardID(string(shard)); err != nil {
+	if err := checkRegistryID(shard); err != nil {
 		return Keyset{}, err
 	}
 	if address == "" {

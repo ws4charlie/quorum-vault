@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
 // safeHeight is the highest block with Confirmations confirmations when the tip is at height tip: tip - confirmations + 1.
@@ -111,7 +112,7 @@ func (a *Adapter) matchBlock(ctx context.Context, blk Block, h uint64, tip int64
 	if len(cands) == 0 {
 		return nil
 	}
-	rows, err := a.pool.Query(ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 AND address = ANY($2)`, a.cfg.Chain, cands)
+	rows, err := a.pool.Query(ctx, `SELECT d.address FROM deposit_addresses d WHERE d.chain=$1 AND d.address = ANY($2) AND `+partition.WatchedSQL, a.cfg.Chain, cands)
 	if err != nil {
 		return fmt.Errorf("btc: read deposit addresses: %w", err)
 	}

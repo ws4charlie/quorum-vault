@@ -52,6 +52,7 @@ func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent
 	type leg struct {
 		key   [32]byte
 		idx   uint32
+		gen   uint32
 		amt   uint64
 		close bool
 	}
@@ -62,15 +63,21 @@ func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent
 			return chain.UnsignedTx{}, fmt.Errorf("sol: sweep amount of %s", l.From)
 		}
 		var idx int64
-		if err := tx.QueryRow(ctx, `SELECT derivation_index FROM deposit_addresses WHERE chain=$1 AND address=$2 AND kind='ed25519'`, a.cfg.Chain, l.From).Scan(&idx); err != nil {
+		var gen int
+		if err := tx.QueryRow(ctx, `SELECT derivation_index, generation FROM deposit_addresses WHERE chain=$1 AND address=$2 AND kind='ed25519'`, a.cfg.Chain, l.From).Scan(&idx, &gen); err != nil {
 			return chain.UnsignedTx{}, fmt.Errorf("sol: %s is not a known deposit address: %w", l.From, err)
 		}
-		want, err := a.cfg.node.DepositAddressAt(uint32(idx))
+		// The address is checked against the key of its own generation, and the job names that generation's key.
+		node, err := a.nodeOf(ctx, tx, gen)
+		if err != nil {
+			return chain.UnsignedTx{}, err
+		}
+		want, err := node.DepositAddressAt(uint32(idx))
 		if err != nil || want != l.From {
 			return chain.UnsignedTx{}, fmt.Errorf("sol: deposit address %s does not match its derivation index %d", l.From, idx)
 		}
 		k, _ := ParseAddress(l.From)
-		ls = append(ls, leg{k, uint32(idx), l.Amount.Uint64(), l.Close})
+		ls = append(ls, leg{k, uint32(idx), uint32(gen), l.Amount.Uint64(), l.Close})
 		total.Add(total, l.Amount)
 	}
 	if len(s.Legs) > 0 && s.Amount != nil && s.Amount.Cmp(total) != 0 {
@@ -116,11 +123,11 @@ func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent
 			}
 		}
 	}
-	idxs := make([]uint32, len(ls))
+	deps := make([]depKey, len(ls))
 	for i, l := range ls {
-		idxs[i] = l.idx
+		deps[i] = depKey{index: l.idx, gen: l.gen}
 	}
-	return a.takeSlot(ctx, tx, "sweep", s.ID, s.ToPartition, hot, body, a.cfg.ComputeUnitLimit, a.cfg.ComputeUnitPrice, idxs...)
+	return a.takeSlot(ctx, tx, "sweep", s.ID, s.ToPartition, hot, body, a.cfg.ComputeUnitLimit, a.cfg.ComputeUnitPrice, deps...)
 }
 
 // EstimateSweepFee is the most one sweep of one address costs in lamports: two signatures and the priority fee at the configured price. A batch

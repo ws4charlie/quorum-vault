@@ -82,7 +82,7 @@ func (a *Adapter) record(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, kin
 // the deposit address's for a sweep).
 func unsignedOf(chainName string, built *Unsigned, raw []byte, partition string, p Payload) chain.UnsignedTx {
 	ref := func(i int) chain.KeyRef {
-		return chain.KeyRef{PartitionID: partition, Path: PathString(p.Inputs[i].Path)}
+		return chain.KeyRef{PartitionID: partition, Path: chain.KeyPathAt(int(p.Inputs[i].Gen), PathString(p.Inputs[i].Path))}
 	}
 	u := chain.UnsignedTx{Chain: chainName, Digest: built.Digests[0], Payload: raw, KeyRef: ref(0)}
 	for i, d := range built.Digests[1:] {
