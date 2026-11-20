@@ -12,3 +12,4 @@ internal/pki/chart.go	1	//go:generate go run ./gen -o ../../deploy/helm/qv-certs
 mpc-party/internal/cbmpc/measure_test.go	1	emit(r.md())	r.md() formats a markdown table for the log; no file is opened
 cmd/qv-rekey/rekey.go	1	docs/runbooks/key-replacement.md	a line inside a multi-line raw string: the operator message that points at the runbook (the line holds no quote, so the guard cannot see the string); no file is opened
 docs/check_links.py	7	*	whole file, bounded by count: a manual link checker for README*.md and docs/ (python3 docs/check_links.py); no workflow, Makefile target, script or ci.yml job runs it (grep: nothing names check_links). If a job ever runs it, shrink the allowlist instead.
+mpc-party/cmd/mpc-party/tlsinit.go	1	docs/runbooks/tee-broker.md	a line inside the multi-line usage text of `tls-init` that points at the runbook (the line holds no quote, so the guard cannot see the string); no file is opened
