@@ -13,19 +13,78 @@ JSON, flags `serve -config broker.json`; secrets are files (token PIN `pkcs11.pi
 
 The production build refuses to start without trust roots, without a valid signed allowlist, with `allow_debug`, or with a root marked TEST ONLY. The broker also refuses a SoftHSM module unless `QV_ENV` is `dev` or `test` (unset or any other value is production; the module is recognised from what it reports, not its file name), as the gateway and the party do: SoftHSM keeps the wrapping keys in files beside the broker. The simulation build (`-tags teesim`) is for dev and CI only and prints a warning.
 
-## Change the allowlist (new measurement, overlap, revoke)
-Operators are the Ed25519 keys in `operators` of the config; `min_operators` signatures are needed.
-1. Draft with a **higher sequence** than the list in force (`qv-attest-broker allowlist show -in current.json -operators broker.json` prints it):
-   `qv-attest-broker allowlist new -seq N -out list.json -entry A,<PCR0 hex>,<not_before>,<not_after> -entry ...`
-   Upgrade = keep the old entry and add the new one (overlap). Revoke = leave the old one out.
-2. Each operator reviews and signs (the tool prints what it signs): `allowlist sign -in list.json -key operator.key -operator NAME`.
-3. Check: `allowlist show -in list.json -operators broker.json` must print `valid`.
-4. Replace the mounted file. The broker reloads within `reload_interval` (default 10 s) or on `SIGHUP`, no restart. An unsigned, under-signed, malformed or not-newer list is refused and the previous list stays; this is logged and audited (`allowlist_load`, outcome `refused`). Revocation is immediate for new releases; a running party keeps its keys until it restarts.
-Key generation for an operator: `allowlist keygen -key operator.key -pub operator.pub`.
+## The allowlist (which builds may get the keys)
+Everything in this section runs in the **simulated** enclave today (`teesim`): a release's measurement is a hash the simulation computes, not a number from Nitro hardware. The signed-list rules, the tool and the procedures are the production ones; what changes with real Nitro (task T7) is how the measurement is computed and checked (see "What simulation cannot prove" at the end).
+
+### The file
+A signed JSON list. Entry: `party`, `measurement` (PCR0, hex), `version` (the release, e.g. `v1.4.0`), `not_before`, optional `not_after` (valid-until; none = no end) and `status` (`active`, or `revoked`). The list has a `seq` that must rise with every list. The operators sign `qv-attest-allowlist-v2` + seq, signed-at and every entry field with Ed25519: the same pattern as the approver registry (`internal/gateway/approvers.go`: named operator keys, `min_operators` distinct valid signatures, a domain-tagged message). Changing any field after signing, the version and the status included, breaks every signature.
+
+The broker, for the list in `allowlist_file`:
+- **Refuses** an unsigned, under-signed, malformed list, and a list whose `seq` is not higher than the one in force. It keeps serving the last good list, counts `reload_refused`, and audits `allowlist_load` / `refused` with the reason.
+- **Refuses an old list at a restart too.** The floor is the highest `seq` the audit log records as loaded. A host that puts an older (once valid) list back while the broker is down gets "refusing to start: allowlist sequence N is older than M". Limit: the floor lives in the audit log; a log that is cut or replaced loses it, so keep the log append-only and shipped off the host (see "Audit").
+- **Exposes the version in force:** metric `qv_attest_broker_allowlist_sequence`, and `GET /status` on `health_listen` (JSON: sequence, signed-at, loaded-at, counts, every entry with its release version and state, refusals by rule). No key or evidence in either.
+
+Entry states in `/status`: `allowing`, `not_yet_valid`, `expired`, `revoked`. A **revoked** entry refuses its (party, measurement) whatever any other entry says; revocation wins over an overlap, and it is permanent for that measurement (a fixed build has a new measurement; to undo a mistaken revocation, sign a new list that leaves the revoked entry out).
+
+### The tool (`qv-attest-broker allowlist ...`)
+| Command | Does |
+|---|---|
+| `show -in list.json -operators broker.json [-against current.json]` | prints entries, how many allow now, whether the signatures are enough (`valid` / `NOT VALID`), and the difference to the list in force |
+| `add -in current.json -out next.json -party P -measurement HEX -version V [-not-before T] [-not-after T]` | copy with the new entry, `seq` + 1, **no signatures** |
+| `expire -in ... -out ... -party P -measurement HEX -not-after T` | set (or move) valid-until of that measurement |
+| `revoke -in ... -out ... -party P -measurement HEX` | add a revocation (the entry it revokes stays as the record) |
+| `sign -in next.json -key operator.key -operator NAME [-against current.json]` | **prints what it signs** (and the difference to the list in force), then adds this operator's signature; run it by each operator in turn: the co-signature |
+| `new -seq N -out list.json -entry P,PCR0,NOT_BEFORE,NOT_AFTER[,VERSION[,STATUS]]` | a list from scratch (first list, break-glass) |
+| `keygen -key operator.key -pub operator.pub` | a new operator key (never overwrites) |
+
+Each operator reviews the printed difference, not the file: `sign ... -against current.json` prints `+` for an added entry, `~` for a changed window, `-` for an entry left out, and warns when `seq` is not higher. Key files must be mode 0600.
+
+### From a release to an entry
+1. The release (`release.md`) has a signed manifest. Check it first (`deploy/images/verify-release.sh`): the next step reads the digest from it.
+2. Compute the measurement from the released image and **the party's measured configuration** (peer pins, caller pins, admin keys: different for every deployment and every party):
+   `deploy/images/measure-release.py image --manifest release-vX.Y.Z.json --config party-A.json`
+   It pulls `mpc-party@sha256:...` **by digest**, takes `/usr/local/bin/mpc-party` and prints SHA-384 over the binary and the config, each preceded by its 8-byte length. The same formula as the simulated party computes at start and as `qv-attest-ca measure -binary mpc-party -config party-A.json` (a test pins one vector in the script and in Go). Anyone can do it, with nothing but docker and python.
+3. Two independent builders must print the same value: `deploy/images/build.sh repro` builds every binary twice from scratch and fails unless the SHA-256 of each binary **and the measurement of `mpc-party` over a fixed configuration** are equal (CI job `repro`, run on every change to the images). A different value means a build input moved: do not release.
+4. The manifest names the input in `partyMeasurement`: image digest, binary path, formula and the recipe above; its `pcr0` is `null` on purpose (per deployment).
+
+### Upgrade a party release without stopping signing
+Rule: **add the new, restart one at a time, then set valid-until on the old.** Tested by `TestTEESimRollingUpgradeKeepsSigning` (the `tee-sim` lane): signing works at every step.
+1. Compute the new measurement for A, B and C (above). Draft: `allowlist add -in current.json -out next.json -party A -measurement <new> -version vX.Y.Z` (the list holds every party, add one entry per party; one broker per party lists only its own). Sign with `min_operators` operators (`sign ... -against current.json`), put the file in place. The broker reloads within `reload_interval` (10 s) or on `SIGHUP`; check `/status` shows the new `allowlist_seq` and the entries `allowing`. Both builds are now allowed (overlap).
+2. Restart the parties **one at a time**, the one that is not the coordinator first (B, C, then A), and wait until the party is ready (`/readyz`, `qv_mpc_party_sealer_ready 1`) before the next. While one restarts the other two sign (2-of-3); never restart two at once.
+3. When all three run the new build and the release is accepted, set valid-until on the old measurement (`expire ... -not-after <time>`, e.g. in 7 days: that is also the rollback window). After that time the old build gets `allowlist:expired`.
+Mixed builds: with the three parties on two builds, **every build is allowed and signs**; the broker does not look at what the other parties run.
+
+**Wire compatibility is the operator's check, not a broker rule.** Parties do not negotiate a protocol version; Health shows each party's `Version` and the pinned cb-mpc commit, and nothing compares them. A mixed set signs only if the two builds speak the same MPC messages: same cb-mpc commit and no change of the party-to-party message format. The simulated test builds differ by one byte, so it proves the broker and sealer mechanics and **not** wire compatibility. Rule for a release: its notes say "compatible with vPREV: yes/no". If no, a rolling upgrade is not safe: use the cb-mpc upgrade procedure (a planned stop of the affected keysets), and still add the measurements first.
+
+**Sealed state written by the old build opens under the new one.** The broker's wrapping key is per party in its HSM token; a data key is released for (party, keyset, generation): `wrapAAD(party, keyset, generation)` in `internal/attest/broker/hsm.go` is the only binding, the measurement is only checked against the allowlist and is not part of the key or the blob. So no share is re-sealed on an upgrade (research/TEE.md decision: "the HSM key is not derived from the measurement"). The test shows it: each party restarts on the new build with the same data directory and becomes ready.
+
+### Revoke
+`revoke -in current.json -out next.json -party A -measurement <bad>`, sign, put in place. The broker answers the **next request** with `allowlist:revoked` (audit `refused`, metric `qv_attest_broker_refusals_total{rule="allowlist:revoked"}`).
+- A **running** party keeps its data keys in memory and keeps signing. **How long: until it restarts, without a bound.** The party attests once at start, there is no lease, no renewal and no periodic re-attestation (`research/TEE.md`: "release once, at start, not per signature"). A revocation that must stop a party now needs the operator to stop it too (stop the process or enclave; on Nitro terminate the instance), then it is refused at its next start.
+- **Decision: no lease now.** A bounded lease (the broker returns the key with an expiry, the party asks again before it ends and wipes its keys if refused) is the clean fix, but it changes the party's sealer (`internal/server`, not in this task's files), needs the party to stop serving safely in the middle of a signing round, and a broker outage would then stop signing within one lease. It is listed as backlog: broker `expires_at` in the release response, party renewal loop and wipe, a lease length in the broker config, the failure mode when the broker is down (keep a grace period). Until then the limit is stated here and in `docs/limits.md`.
+- What the revoked party's data keeps: nothing is deleted. Its sealed files and wrapped keys stay valid; a later allowed build opens them.
+
+### Rollback (downgrade) and a bad release
+- **Downgrade to an older build is allowed while its measurement is allowed** (its entry is `allowing`). Why: a rollout that goes wrong must be reversible without new signatures from every operator; the old entry stays during the valid-until window for exactly that. After valid-until, a downgrade needs a new signed list that moves it (`expire -not-after <later>`): a deliberate, signed, audited step by `min_operators` operators. The old build never gets a key without a list that says so. Tested: after valid-until the old build is refused, after the list moves it the party starts on it with the data written by the new build.
+- **A release found bad after rollout:** (1) revoke its measurement for every party, (2) restart each party **on the previous build** (its entry must be `allowing`: `expire` it later if its window ended), one at a time, (3) check `/status`. Sealed state is **not** lost or changed: it opens under the previous build too (same reason as above). If the bad build wrote bad state (a bug, not a key problem), restore that state from backup (`mpc-backup-restore.md`), not by the allowlist. A revoked measurement never comes back; the fixed release is a new build with a new measurement.
+- The data-directory rollback (an older copy of the files) is a different thing: see "What is sealed, and what a rollback can and cannot do".
+
+### Break-glass: the list is wrong and no party can start
+Examples: the only allowed measurements are wrong, valid-until passed on everything, a list with a too-high `seq`.
+1. A list is accepted if `min_operators` of the operators in the broker's config sign it and its `seq` is higher than the one in force. **No one else can write a list**: not the host, not a single operator, not the broker's admin. So the fix is a new list: `allowlist new -seq <higher than everything ever loaded> ...` (or `add`/`expire` on the last list), signed by `min_operators` operators from their own workstations (their keys are offline files; the tool needs no network), placed in the file the broker mounts; `SIGHUP` or wait `reload_interval`. Running parties are not affected; waiting parties start by themselves within their backoff (no restart).
+2. A `seq` that was set too high (a typo, 1000000) is not lowered; sign the next one higher.
+3. If fewer than `min_operators` keys are available (lost or compromised keys), the operator set must change: that is a **config change** of the broker (`operators` in `broker.json`: new public keys, a new `min_operators`) under change control, then a broker restart. The audit log floor still applies (the new list needs a higher `seq`). Whoever can edit that config file alone controls the broker (see "Limits"): it must be change-controlled and reviewed like a key ceremony. Keep the offline operator keys in at least `min_operators + 1` places.
+4. Never delete the audit log to lower the floor: it breaks the chain (`audit verify` fails) and the broker refuses to start on it.
+
+### Metrics, status and alerts
+Exported (`/metrics` on `health_listen`): `qv_attest_broker_allowlist_sequence` (the version in force), `qv_attest_broker_allowlist_signed_at_seconds`, `qv_attest_broker_allowlist_loaded_at_seconds`, `qv_attest_broker_allowlist_entries{state}` (allowing, outside_window, revoked), `qv_attest_broker_allowlist_entry{party,version,measurement,state}` (one series per entry), `qv_attest_broker_refusals_total{rule}`, `qv_attest_broker_events_total{event}` (`reload_ok`, `reload_refused`, `release_refused`...). Alert rules are written by the Metrics-B hand; the list handed over is in the TEE-T6 report.
+
+## Kubernetes: how the signed list reaches the pod
+The list is a file the broker reads: `allowlist_file` in `broker.json`. In a pod: a **ConfigMap whose name ends with a hash of its content** (`qv-attest-allowlist-<10 hex>`, immutable, as the other signed settings), mounted read-only at a directory (not `subPath`: a `subPath` mount never updates), the config's `allowlist_file` pointing into it. A new list is a new ConfigMap and a Deployment update that points to it. Because the broker is **one replica** with in-memory nonces, a rollout restarts it and parties wait (their backoff) for a moment. The broker also reloads on `SIGHUP` and by polling (`reload_interval`), so a kubelet-updated mount works without a restart, but the hashed immutable name is the audit trail. Mounts the chart must provide: the config (`broker.json`: `operators`, `parties`, `allowlist_file`, `audit_log`, `reload_interval`), the allowlist ConfigMap, the audit volume (writable, append-only; `/var/lib/qv/broker`), the TLS key and PIN file as Secrets. Probes: `health_listen` `/healthz`; `/status` and `/metrics` for the monitoring. The tool runs on the operators' workstations, not in the cluster; the image has the same binary (`qv-attest-broker allowlist ...`) for a one-off check Job: `show -operators`.
 
 ## Audit
 `audit_log` is JSON lines, one record per release/newkey attempt (time, party, measurement, nonce, keyset, generations, outcome, failed rule) and per allowlist load, fsynced before a key is returned; if the record cannot be written the release is refused. Each line holds the hash of the previous one: `qv-attest-broker audit verify -file audit.log`. The chain detects edits and removals inside the file, not a cut tail: make the file append-only at the filesystem level (`chattr +a`, or a volume only the broker appends to) and ship it off the host. It holds no key, PIN or evidence.
-Metrics (`/metrics`): `qv_attest_broker_events_total{event=...}` (`release_ok`, `release_refused`, `rate_limited`, `reload_refused`...). Alert on refusals and on `reload_refused`.
+Metrics: see "Metrics, status and alerts" above. Alert on refusals and on `reload_refused`.
 
 ## Rate limit
 Per party, challenge and key calls together: `rate_per_minute` (600) and `rate_burst` (100). A party that restarts needs one challenge and one release per keyset (2N+2 calls for N keysets); at 200 keysets the limit adds about 34 s to a start (`docs/measurements/tee-sim.md`). A batch release call is a possible later change.

@@ -131,10 +131,14 @@ m = {
     # What a verifier must expect on every image (cosign verify): exactly this certificate identity and issuer. Empty in a dry run (nothing is signed).
     "signer": {"identity": "$IDENTITY", "issuer": "$ISSUER" if "$PUBLISH" == "1" else "", "sbom": "BuildKit SBOM (SPDX) and SLSA provenance attestations inside each image index"},
     "images": images,
-    # The input of the attestation allowlist (docs/runbooks/tee-broker.md). The TEE measurement (PCR0) is computed from the enclave image (EIF) built from
-    # the party image's DIGEST, not from the image: qv-attest-ca measure (PR #115) is not in main, so nothing is computed here. The consumer names the digest.
-    "partyMeasurement": {"image": "mpc-party", "digest": images.get("mpc-party", {}).get("digest"), "pcr0": None,
-                         "status": "not computed at build time: build the enclave image from this digest and run qv-attest-ca measure (see docs/runbooks/release.md)"},
+    # The input of the attestation allowlist (docs/runbooks/tee-broker.md). SIMULATED enclave: the measurement (PCR0) is SHA-384 over the party binary of this image
+    # and the party's measured configuration (peer pins, caller pins, admin keys: different for every deployment), so it cannot be a build-time value. What IS
+    # fixed here is its input, the image DIGEST, and the recipe: anyone computes the value with deploy/images/measure-release.py (it pulls the image by this digest).
+    # Real Nitro (T7): PCR0 of the enclave image built from this digest, with the AWS tooling.
+    "partyMeasurement": {"image": "mpc-party", "digest": images.get("mpc-party", {}).get("digest"), "binary": "/usr/local/bin/mpc-party", "pcr0": None,
+                         "formula": "sha384(len8(binary) || binary || len8(config) || config), simulated enclave",
+                         "recipe": "deploy/images/measure-release.py image --manifest <this file> --config <the party's measured config file>",
+                         "status": "per deployment: the measured configuration is part of the input; two independent builds give the same binary, so the same measurement (checked by build.sh repro)"},
 }
 json.dump(m, open(out, "w"), indent=2, sort_keys=True); open(out, "a").write("\n")
 PY

@@ -146,3 +146,23 @@ func VerifyAudit(path string) (int, error) {
 }
 
 func hexs(b []byte) string { return strings.ToLower(hex.EncodeToString(b)) }
+
+// MaxLoadedSeq is the highest allowlist sequence this log records as loaded (0: none). The broker uses it as the floor for the list it starts
+// with, so a mounted file replaced by an older (once valid) list is refused at a restart too. The floor lives in the audit log because that
+// file is already append-only, hash-chained and shipped off the host; a log that was cut or replaced loses the floor (see the runbook).
+func MaxLoadedSeq(path string) (int64, error) {
+	recs, err := ReadAudit(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var max int64
+	for _, r := range recs {
+		if r.Event == "allowlist_load" && r.Outcome == "loaded" && r.Seq > max {
+			max = r.Seq
+		}
+	}
+	return max, nil
+}

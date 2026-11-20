@@ -41,11 +41,13 @@ type Server struct {
 	log      *log.Logger
 
 	list     atomic.Pointer[attest.SignedAllowlist]
+	loadedAt atomic.Int64 // unix seconds when the list in force was loaded
 	reloadMu sync.Mutex
 	lastHash [32]byte
 
 	cmu      sync.Mutex
 	counters map[string]int
+	rules    map[string]int // refusals by rule code (bounded set: verify:*, allowlist:*, nonce:*, ...)
 }
 
 // Open builds a broker from its config, or fails. It refuses to start without trust roots, without a valid signed allowlist, with an
@@ -88,7 +90,7 @@ func Open(cfg Config, opt Options) (*Server, error) {
 // newServer is Open after the I/O of roots and token; the allowlist and the audit log are loaded here.
 func newServer(cfg Config, set *settings, ops *attest.Operators, v attest.Verifier, keys KeyWrapper, opt Options) (*Server, error) {
 	s := &Server{cfg: cfg, set: set, ops: ops, verifier: v, keys: keys, nonces: newNonceStore(set.nonceTTL), limit: newLimiter(set.rate, set.burst),
-		now: opt.Now, log: opt.Log, counters: map[string]int{}}
+		now: opt.Now, log: opt.Log, counters: map[string]int{}, rules: map[string]int{}}
 	if s.now == nil {
 		s.now = time.Now
 	}
@@ -99,11 +101,20 @@ func newServer(cfg Config, set *settings, ops *attest.Operators, v attest.Verifi
 	if s.audit, err = OpenAudit(cfg.AuditLog); err != nil {
 		return nil, err
 	}
+	floor, err := MaxLoadedSeq(cfg.AuditLog)
+	if err != nil {
+		return nil, fmt.Errorf("broker: audit log: %w", err)
+	}
 	l, err := attest.LoadSignedAllowlist(cfg.AllowlistFile, ops)
 	if err != nil {
 		return nil, fmt.Errorf("broker: refusing to start: %w", err)
 	}
+	if l.Seq < floor { // an old list, once valid, put back while the broker was down
+		_ = s.audit.Write(Record{Event: "allowlist_load", Outcome: "refused", Seq: floor, Detail: fmt.Sprintf("at start: sequence %d is below %d, the highest this broker loaded", l.Seq, floor)}, s.now())
+		return nil, fmt.Errorf("broker: refusing to start: allowlist sequence %d is older than %d, the highest this broker has loaded (a replayed list?)", l.Seq, floor)
+	}
 	s.list.Store(l)
+	s.loadedAt.Store(s.now().Unix())
 	s.lastHash = fileHash(cfg.AllowlistFile)
 	if err := s.audit.Write(Record{Event: "allowlist_load", Outcome: "loaded", Seq: l.Seq, Detail: fmt.Sprintf("%d entries, at start", len(l.Entries))}, s.now()); err != nil {
 		return nil, err
@@ -141,6 +152,7 @@ func (s *Server) Reload() error {
 		return err
 	}
 	s.list.Store(l)
+	s.loadedAt.Store(s.now().Unix())
 	s.count("reload_ok")
 	s.log.Printf("allowlist reloaded: sequence %d, %d entries", l.Seq, len(l.Entries))
 	return s.audit.Write(Record{Event: "allowlist_load", Outcome: "loaded", Seq: l.Seq, Detail: fmt.Sprintf("%d entries", len(l.Entries))}, s.now())
@@ -168,6 +180,67 @@ func (s *Server) Sequence() int64 { return s.list.Load().Seq }
 
 func (s *Server) count(k string) { s.cmu.Lock(); s.counters[k]++; s.cmu.Unlock() }
 
+func (s *Server) countRule(code string) { s.cmu.Lock(); s.rules[code]++; s.cmu.Unlock() }
+
+// Status is what the broker says about the allowlist in force (GET /status on the health listener). No key, no evidence.
+type Status struct {
+	AllowlistSeq   int64          `json:"allowlist_seq"`
+	SignedAt       int64          `json:"signed_at"`
+	LoadedAt       int64          `json:"loaded_at"`
+	Entries        int            `json:"entries"`
+	Allowing       int            `json:"allowing_now"`
+	OutsideWindow  int            `json:"outside_window"`
+	Revoked        int            `json:"revoked"`
+	ReloadRefusals int            `json:"reload_refusals"`
+	RefusalsByRule map[string]int `json:"refusals_by_rule"`
+	Simulation     bool           `json:"simulation_build"`
+	EntriesInForce []StatusEntry  `json:"entries_in_force"`
+}
+
+// StatusEntry is one entry of the list in force.
+type StatusEntry struct {
+	Party       string `json:"party"`
+	Measurement string `json:"measurement"`
+	Version     string `json:"version,omitempty"`
+	State       string `json:"state"` // allowing, revoked, not_yet_valid, expired
+	NotBefore   int64  `json:"not_before"`
+	NotAfter    int64  `json:"not_after,omitempty"`
+}
+
+func entryState(e attest.AllowEntry, now time.Time) string {
+	switch {
+	case e.Revoked():
+		return "revoked"
+	case now.Before(e.NotBefore):
+		return "not_yet_valid"
+	case !e.NotAfter.IsZero() && now.After(e.NotAfter):
+		return "expired"
+	}
+	return "allowing"
+}
+
+// Status reports the list in force and the refusal counters.
+func (s *Server) Status() Status {
+	l, now := s.list.Load(), s.now()
+	a, o, r := l.Counts(now)
+	st := Status{AllowlistSeq: l.Seq, SignedAt: l.SignedAt, LoadedAt: s.loadedAt.Load(), Entries: len(l.Entries), Allowing: a, OutsideWindow: o, Revoked: r,
+		RefusalsByRule: map[string]int{}, Simulation: Simulation}
+	for _, e := range l.Entries {
+		se := StatusEntry{Party: e.Party, Measurement: e.Measurement, Version: e.Version, State: entryState(e, now), NotBefore: e.NotBefore.Unix()}
+		if !e.NotAfter.IsZero() {
+			se.NotAfter = e.NotAfter.Unix()
+		}
+		st.EntriesInForce = append(st.EntriesInForce, se)
+	}
+	s.cmu.Lock()
+	defer s.cmu.Unlock()
+	st.ReloadRefusals = s.counters["reload_refused"]
+	for k, v := range s.rules {
+		st.RefusalsByRule[k] = v
+	}
+	return st
+}
+
 // Handler is the mutual-TLS API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -189,13 +262,29 @@ func (s *Server) HealthHandler() http.Handler {
 		io.WriteString(w, "ok\n")
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		st := s.Status() // takes cmu itself: before the lock below
 		s.cmu.Lock()
 		defer s.cmu.Unlock()
 		for k, v := range s.counters {
 			fmt.Fprintf(w, "qv_attest_broker_events_total{event=%q} %d\n", k, v)
 		}
-		fmt.Fprintf(w, "qv_attest_broker_allowlist_sequence %d\n", s.list.Load().Seq)
+		fmt.Fprintf(w, "qv_attest_broker_allowlist_sequence %d\n", st.AllowlistSeq)
+		fmt.Fprintf(w, "qv_attest_broker_allowlist_signed_at_seconds %d\n", st.SignedAt)
+		fmt.Fprintf(w, "qv_attest_broker_allowlist_loaded_at_seconds %d\n", st.LoadedAt)
+		for _, c := range []struct {
+			state string
+			n     int
+		}{{"allowing", st.Allowing}, {"outside_window", st.OutsideWindow}, {"revoked", st.Revoked}} {
+			fmt.Fprintf(w, "qv_attest_broker_allowlist_entries{state=%q} %d\n", c.state, c.n)
+		}
+		for _, e := range st.EntriesInForce { // one series per entry: which release is allowed for which party, and in what state
+			fmt.Fprintf(w, "qv_attest_broker_allowlist_entry{party=%q,version=%q,measurement=%q,state=%q} 1\n", e.Party, e.Version, shortHex(e.Measurement), e.State)
+		}
+		for k, v := range s.rules {
+			fmt.Fprintf(w, "qv_attest_broker_refusals_total{rule=%q} %d\n", k, v)
+		}
 	})
+	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) { reply(w, http.StatusOK, s.Status()) })
 	return mux
 }
 
@@ -290,6 +379,7 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request, purpose stri
 		if ref != nil {
 			rec.Rule, rec.Detail = ref.code, ref.detail
 			s.count(event + "_refused")
+			s.countRule(ref.code)
 			if err := s.audit.Write(rec, now); err != nil {
 				s.log.Printf("audit write failed: %v", err)
 			}
@@ -375,4 +465,12 @@ func (s *Server) release(rec *Record, req attest.ReleaseRequest, pin [32]byte, p
 		out = append(out, attest.ReleasedKey{Generation: g, Blob: blob, Sealed: sealed})
 	}
 	return out, nil
+}
+
+// shortHex is the first 12 hex characters: enough to tell measurements apart in a metric label.
+func shortHex(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }

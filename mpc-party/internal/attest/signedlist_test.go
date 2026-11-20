@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -121,5 +122,51 @@ func TestMalformedEntriesRefuseTheList(t *testing.T) {
 	l := SignAllowlist(privs[1], names[1], SignAllowlist(privs[0], names[0], SignedAllowlist{Seq: 0}))
 	if _, err := ops.Verify(l); err == nil {
 		t.Fatal("sequence 0 verified")
+	}
+}
+
+// The signature covers the release version, the status and the end date: changing any of them after signing breaks it, and an entry without an
+// end date survives a JSON round trip as one without an end date.
+func TestSignedAllowlistCoversVersionStatusAndEnd(t *testing.T) {
+	ops, privs, names := testOps(t, 2, 2)
+	l := sampleList()
+	l.Entries[0].NotAfter = time.Time{}
+	l.Entries[0].Version = "v1.0.0"
+	l = SignAllowlist(privs[1], names[1], SignAllowlist(privs[0], names[0], l))
+	if _, err := ops.Verify(l); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(l)
+	if strings.Contains(string(b), "not_after") {
+		t.Fatalf("a list without an end writes not_after: %s", b)
+	}
+	l2, err := ParseSignedAllowlist(b)
+	if err != nil || !l2.Entries[0].NotAfter.IsZero() {
+		t.Fatalf("round trip: %v %+v", err, l2.Entries)
+	}
+	if _, err := ops.Verify(l2); err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	for name, mod := range map[string]func(*SignedAllowlist){
+		"version":     func(x *SignedAllowlist) { x.Entries[0].Version = "v9.9.9" },
+		"status":      func(x *SignedAllowlist) { x.Entries[0].Status = StatusRevoked },
+		"end date":    func(x *SignedAllowlist) { x.Entries[0].NotAfter = x.Entries[0].NotBefore.Add(time.Hour) },
+		"measurement": func(x *SignedAllowlist) { x.Entries[0].Measurement = "ee" },
+	} {
+		x, _ := ParseSignedAllowlist(b)
+		mod(&x)
+		if _, err := ops.Verify(x); err == nil {
+			t.Errorf("a changed %s still verifies", name)
+		}
+	}
+	// "" and "active" are the same status
+	x, _ := ParseSignedAllowlist(b)
+	x.Entries[0].Status = StatusActive
+	if _, err := ops.Verify(x); err != nil {
+		t.Errorf("explicit active: %v", err)
+	}
+	// a list signed under the v1 domain does not verify (the message is domain tagged)
+	if !strings.HasPrefix(string(AllowlistMessage(l)), "qv-attest-allowlist-v2\n") {
+		t.Error("message domain tag")
 	}
 }

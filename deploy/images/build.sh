@@ -27,6 +27,11 @@ if [ "${1:-}" = repro ]; then
   (cd "$out/1" && sha256sum * | sort -k2) >"$out/h1"; (cd "$out/2" && sha256sum * | sort -k2) >"$out/h2"
   cat "$out/h1"
   if cmp -s "$out/h1" "$out/h2"; then echo "REPRODUCIBLE: two builds, $(wc -l <"$out/h1" | tr -d ' ') binaries, identical SHA-256"; else echo "NOT REPRODUCIBLE:"; diff "$out/h1" "$out/h2"; exit 1; fi
+  # The measurement an allowlist entry is made from (SIMULATED enclave: SHA-384 over the party binary and a fixed measured configuration) must be equal across
+  # the two builders. Checked on the binaries themselves, so it is also checked when the file hashes differ for a reason that would be hidden by the image.
+  python3 deploy/images/measure-release.py selftest
+  printf '{"role":"A","note":"fixed configuration of the reproducibility check"}' >"$out/measured-config.json"
+  python3 deploy/images/measure-release.py same --binary "$out/1/mpc-party" --binary "$out/2/mpc-party" --config "$out/measured-config.json"
   exit 0
 fi
 

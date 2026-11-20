@@ -365,3 +365,103 @@ func plainPartyRefusesAttested(t *testing.T, cfgPath string) {
 		t.Fatalf("a production party with sealer.type attested did not refuse: %v\n%s", err, out)
 	}
 }
+
+// ROLLING UPGRADE (SIMULATED enclave; docs/runbooks/tee-broker.md, "Upgrade a party release"). A new release is a new measurement: here the
+// party binary with one more byte (it runs the same code; a real release differs more, see the runbook on wire compatibility). The operators add
+// the new measurement for every party (overlap), then the parties are restarted one at a time on the new build. Every step signs: with one
+// party down the other two sign 2-of-3, and with the three on mixed builds all three are allowed. A party's data directory, written under the old
+// build, opens under the new one: the broker releases the key by party, keyset and generation, not by measurement. At the end the old
+// measurement gets a valid-until: the old build is refused, the new one is served. Then the rollback and the bad release.
+func TestTEESimRollingUpgradeKeepsSigning(t *testing.T) {
+	requireTEE(t)
+	s, _ := funded(t, opts{}, "c-tee6", 40)
+	mpc := s.mpc
+	tee := mpc.TEE()
+	roles := []string{"A", "B", "C"}
+	s.pay(1, "c-tee6", "up-before")
+
+	// the new release: another file, another measurement per party (the configs are unchanged)
+	raw, err := os.ReadFile(mpcBin.MPCParty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newBin := filepath.Join(t.TempDir(), "mpc-party") // the harness's environment is chosen by the base name
+	if err := os.WriteFile(newBin, append(raw, 0), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldM, newM := map[string]string{}, map[string]string{}
+	for _, r := range roles {
+		oldM[r] = tee.MeasurementOf(r)
+		newM[r] = tee.Measure(newBin, mpc.ConfigPath(r))
+		if oldM[r] == newM[r] {
+			t.Fatal("the new build has the old measurement")
+		}
+	}
+
+	// before the new measurement is on the list, the new build is refused (and nothing is released to it)
+	refused := tee.AuditLines("B", refusedOn, `"rule":"allowlist:measurement_not_allowed"`)
+	tee.RestartPartyWith("B", newBin, "")
+	s.waitFor(60*time.Second, "broker B to refuse the unlisted release", func() bool {
+		return tee.AuditLines("B", refusedOn, `"rule":"allowlist:measurement_not_allowed"`) > refused
+	})
+	s.teeWaitNotServing("B")
+	s.pay(1, "c-tee6", "up-unlisted") // A and C sign
+	tee.RestartPartyWith("B", "", "")
+	mpc.WaitReady(120 * time.Second)
+
+	// step 1: add the new measurement (overlap). The operator sees the difference before signing.
+	diff := tee.AllowRelease(newM, "v2.0.0")
+	if !strings.Contains(diff, "+ A "+newM["A"]) || !strings.Contains(diff, `version "v2.0.0"`) {
+		t.Fatalf("the tool did not show the added entry before signing:\n%s", diff)
+	}
+	s.pay(1, "c-tee6", "up-overlap") // nothing changed for the running parties
+
+	// step 2: one party at a time. While it restarts, the other two sign; when it is back, all three sign on mixed builds.
+	for i, r := range roles {
+		rel := tee.AuditLines(r, releaseOK, releasedOK, `"measurement":"`+newM[r]+`"`)
+		tee.RestartPartyWith(r, newBin, "")
+		s.pay(1, "c-tee6", fmt.Sprintf("up-%s-restarting", r)) // 2-of-3: the party that restarts may still be starting
+		mpc.WaitReady(120 * time.Second)                       // reconciled and serving: its sealed state opened under the new build
+		if tee.AuditLines(r, releaseOK, releasedOK, `"measurement":"`+newM[r]+`"`) <= rel {
+			t.Fatalf("party %s is ready but the broker never released its keys to the new measurement", r)
+		}
+		s.pay(2, "c-tee6", fmt.Sprintf("up-%s-new-%d", r, i)) // mixed builds: i+1 parties on the new one
+	}
+
+	// step 3: valid-until on the old measurement. The old build is refused from then on; the new one stays.
+	tee.SetValidUntil(oldM, time.Now().Add(-time.Minute))
+	refused = tee.AuditLines("C", refusedOn, `"rule":"allowlist:expired"`)
+	tee.RestartPartyWith("C", "", "") // the old build
+	s.waitFor(60*time.Second, "broker C to refuse the expired old build", func() bool { return tee.AuditLines("C", refusedOn, `"rule":"allowlist:expired"`) > refused })
+	s.teeWaitNotServing("C")
+	s.pay(1, "c-tee6", "up-old-refused")
+	tee.RestartPartyWith("C", newBin, "")
+	mpc.WaitReady(120 * time.Second)
+	s.pay(1, "c-tee6", "up-done")
+
+	// rollback inside the window: a downgrade needs the old measurement on the list again (the operators move valid-until), nothing else.
+	tee.SetValidUntil(oldM, time.Now().Add(time.Hour))
+	tee.RestartPartyWith("B", "", "")
+	mpc.WaitReady(120 * time.Second)
+	s.pay(2, "c-tee6", "up-rollback") // B on the old build with data written by the new one: opens, signs
+
+	// a bad release: the new measurement is revoked for party A. The running A keeps its keys (they are in memory); at its restart it is refused with
+	// the reason "revoked"; the data directory is untouched; the others sign. The old build comes back for A.
+	tee.RevokeRelease(map[string]string{"A": newM["A"]})
+	s.pay(1, "c-tee6", "up-revoked-running")
+	if !mpc.A.Running() || notServing(s, "A") {
+		t.Fatal("revoking stopped the running party; its keys are in memory until restart (documented limit)")
+	}
+	refused = tee.AuditLines("A", refusedOn, `"rule":"allowlist:revoked"`)
+	tee.RestartPartyWith("A", newBin, "")
+	s.waitFor(60*time.Second, "broker A to refuse the revoked release", func() bool { return tee.AuditLines("A", refusedOn, `"rule":"allowlist:revoked"`) > refused })
+	s.teeWaitNotServing("A")
+	s.pay(2, "c-tee6", "up-revoked-restart") // B and C
+	tee.RestartPartyWith("A", "", "")
+	mpc.WaitReady(120 * time.Second)
+	s.pay(1, "c-tee6", "up-after-revoke")
+	if f, bad := dirHasPrivateKey(t, mpc.DataDir("A")); bad {
+		t.Fatalf("a private key in the clear after the upgrade: %s", f)
+	}
+	s.finish()
+}
