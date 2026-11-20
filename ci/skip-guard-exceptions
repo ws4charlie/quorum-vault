@@ -1,0 +1,10 @@
+# <file><TAB><needle or *><TAB><reason>. A reviewed claim per line: this file reads nothing the allowlist covers (ci/skip-guard.sh explains the search). Stale lines fail the guard.
+.github/workflows/helm.yml	*	its own workflow with its own paths filter, not a job of ci.yml; it runs ci/helm and lists deploy/helm and deploy/images/README.md on purpose
+Makefile	*	the helm-check target (ci/helm/check.sh); ci.yml must not call it: the guard fails when ci.yml names helm-check
+docs/images/build.py	*	draws docs/images by hand (python3 build.py); no job runs it
+cmd/qv-core/tls_test.go	*	asserts that an error message names docs/runbooks/certificates.md: a string compare, no file is opened
+internal/pki/pki_test.go	*	asserts that an error message names docs/runbooks/certificates.md: a string compare, no file is opened
+internal/pki/services_test.go	*	asserts that an error message names docs/runbooks/certificates.md: a string compare, no file is opened
+internal/pki/catalog_chart_test.go	*	reads deploy/helm/qv-certs/catalog.json: that chart is deliberately NOT on the allowlist (this reader is why)
+internal/pki/chart.go	*	go:generate line and comments for deploy/helm/qv-certs/catalog.json: the chart that is not on the allowlist
+mpc-party/internal/cbmpc/measure_test.go	.md	r.md() is a method that formats a markdown table for the log; no file is opened

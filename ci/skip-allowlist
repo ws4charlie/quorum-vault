@@ -1,0 +1,23 @@
+# The only files whose change may skip the heavy jobs of .github/workflows/ci.yml (see ci/changes.sh). One rule per line: <class> <bash glob>.
+# `*` matches any characters, also `/`. A changed file that matches no line here means: run everything.
+#
+# Every line needs evidence that NO job of ci.yml reads, compiles, embeds or hashes the files it matches (the table is in CONTRIBUTING.md; the
+# guard ci/skip-guard.sh greps for readers on every pull request and fails when one appears). Adding a line is a review decision: show the evidence.
+#
+# docs: the READMEs of the root and the documentation tree. No Go test, script, Makefile target, compose file or Dockerfile used by ci.yml opens them.
+#       Only .md and .png under docs/ (docs/images/build.py is a script, so it is not listed). deploy/images/README.md is NOT here: ci/helm reads it.
+docs README.md
+docs README.zh-CN.md
+docs CONTRIBUTING.md
+docs DESIGN_SCALE.md
+docs docs/*.md
+docs docs/*.png
+# chart: three Helm charts and the test trees of the charts. ci.yml never runs helm; ci/helm is a separate Go module (not in `go test ./...` of the root
+# module) that only .github/workflows/helm.yml and `make helm-check` run, and ci/kind is the same kind of tree.
+# deploy/helm/qv-certs is NOT listed: its catalog.json is read by a test of the root module (internal/pki/catalog_chart_test.go, the `test` job).
+# Not a glob over deploy/helm/*: a new chart does not skip anything until someone checks it and adds it here.
+chart deploy/helm/qv-business/*
+chart deploy/helm/qv-party/*
+chart deploy/helm/qv-signing-core/*
+chart ci/helm/*
+chart ci/kind/*
