@@ -23,6 +23,7 @@ import (
 //	freeze/<id>.json               yes      an unreadable or forged record is treated as frozen (fail closed)
 //	jobs/<hash>.json               yes      a forged record would be returned as the signature of a job
 //	keys/<id>.json                 yes      the public key a sign is checked against
+//	admin-seen.json                yes      the admin replay memory (admin.go): a deleted or rolled-back copy is covered by the start-time rule, a forged one only blocks admin calls
 //	local.key.json                 no       only the wrapped local key: useless without the broker's HSM and an allowlisted measurement
 //	backups/<id>.json              no       a public note of the last verified backup (shown by Health); a forged one misreports and signs nothing
 //	.lock                          no       the data directory lock
