@@ -22,7 +22,7 @@ phase_secrets() {
     fi
   done
   # The one authority per zone, copied into every namespace that issues under it (qv-certs issuers.ca.existing). The business authority's key also goes to the signing
-  # namespaces, because the link certificates (gateway-link, cosigner-link) are signed by it: development only, the README says so.
+  # namespaces, because the link certificates (gateway-link, cosigner-link-b, cosigner-link-c) are signed by it: development only, the README says so.
   kcreate_tls() { k -n "$1" create secret tls "$2" --cert="$S/ca-$3.crt" --key="$S/ca-$3.key" --dry-run=client -o yaml | k apply -f - >/dev/null; }
   kcreate_tls "$NS_BIZ" qv-business-ca business
   for n in $NS_SIGN $NS_B $NS_C; do kcreate_tls "$n" qv-signing-ca signing; kcreate_tls "$n" qv-business-ca business; done

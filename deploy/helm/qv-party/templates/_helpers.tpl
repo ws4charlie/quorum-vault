@@ -73,15 +73,27 @@ seccompProfile:
   type: RuntimeDefault
 {{- end -}}
 
-{{/* A Secret volume with group-readable files (0440 = 288 decimal; fsGroup makes them readable by the image uid; the PIN file rule accepts 0440, no world bit). */}}
+{{/* A Secret volume with group-readable files (0440 = 288 decimal; fsGroup makes them readable by the image uid; the PIN file rule accepts 0440, no world bit). With `trust` (the name of a trust-bundle ConfigMap of qv-certs, `qv-trust-<zone>-<hash>`) the CA file of the directory is that bundle and not the `ca.crt` cert-manager put in the Secret; the Secret contributes only tls.crt and tls.key. */}}
 {{- define "qp.secretVolume" -}}
 - name: {{ .name }}
+{{- if .trust }}
+  projected:
+    defaultMode: 288
+    sources:
+      - secret:
+          name: {{ .secret }}
+          items: [{ key: tls.crt, path: tls.crt }, { key: tls.key, path: tls.key }]
+      - configMap:
+          name: {{ .trust }}
+          items: [{ key: ca.crt, path: ca.crt }]
+{{- else }}
   secret:
     secretName: {{ .secret }}
     defaultMode: 288
+{{- end }}
 {{- end -}}
 
-{{- define "qp.partySecret" -}}{{ default (printf "mpc-party-%s-tls" (include "qp.role" . | lower)) .Values.tls.party.secretName }}{{- end -}}
+{{- define "qp.partySecret" -}}{{ default (printf "qv-signing-mpc-party-%s-tls" (include "qp.role" . | lower)) .Values.tls.party.secretName }}{{- end -}}
 {{/* The cosigner's names are its own per role (catalog cosigner-b|c, cosigner-link-b|c; internal/pki/catalog.go): a certificate of the other cosigner is not accepted. */}}
 {{- define "qp.cosignerSecret" -}}{{ default (printf "qv-signing-cosigner-%s-tls" (include "qp.role" . | lower)) .Values.tls.cosigner.secretName }}{{- end -}}
 {{- define "qp.cosignerLinkSecret" -}}{{ default (printf "qv-cosigner-link-%s-tls" (include "qp.role" . | lower)) .Values.tls.cosignerLink.secretName }}{{- end -}}

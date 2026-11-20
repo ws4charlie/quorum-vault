@@ -56,7 +56,7 @@ spec:
             - { name: config, mountPath: /etc/qv/config, readOnly: true }
             - { name: signed, mountPath: /etc/qv/signed, readOnly: true }
       volumes:
-        {{- include "qvs.secretVolume" (dict "name" "tls" "secret" $.Values.tls.gateway.secretName) | nindent 8 }}
+        {{- include "qvs.secretVolume" (dict "name" "tls" "secret" $.Values.tls.gateway.secretName "trust" $.Values.tls.trust.signing) | nindent 8 }}
         - name: config
           configMap: { name: {{ include "qvs.signingConfigName" $ }} }
         - name: signed

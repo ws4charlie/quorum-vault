@@ -74,13 +74,13 @@ Referenced, not bundled: a CloudNativePG cluster in the **same namespace**, with
 
 ## The business side (the signing link)
 
-The gateway reads the job queue from the **business Postgres** (role `qv_gateway`) and publishes audit heads to the **business Kafka**, both with the **link certificate** `business/gateway-link` issued by the **business** CA (`tls.gatewayLink.secretName`, mounted at `/etc/qv/link-tls`). The signing certificate (`signing/gateway`, `tls.gateway.secretName`, `/etc/qv/tls`) is for the guard database and for the parties; the parties pin its public key.
+The gateway reads the job queue from the **business Postgres** (role `qv_gateway`) and publishes audit heads to the **business Kafka**, both with the **link certificate** `business/gateway-link` issued by the **business** CA (`tls.gatewayLink.secretName`, mounted at `/etc/qv/link-tls`). The signing certificate (`signing/gateway`, `tls.gateway.secretName`, `/etc/qv/tls`) is for the guard database. The parties' caller ports take the pinned client certificate `signing/gateway-party` (`tls.gatewayParty.secretName`, `/etc/qv/party-tls`); the parties pin its public key, which never rotates.
 
 `jobs.host`, `kafka.brokers` and `network.jobsDb.peers`, `network.kafka.peers` are the private endpoints of the business cluster: addresses (`ipBlock`), because a NetworkPolicy matches addresses, not names. The business chart's `network.signingLink.from` must list this cluster's side of those endpoints. Business and signing VPCs are not peered: the endpoint service is what connects them, outward from here. Nothing in the business cluster has a route into this one (a cloud network rule, tested from the business side; a NetworkPolicy cannot express it).
 
 ## Parties
 
-The gateway reaches the **caller port** of party A (this cluster), of party B, and, for the route monitor, of party C: `network.parties.{a,b,c}` (peers and port). B and C are private endpoint addresses. Their addresses and pins are in the signing config (`signers.*.coordinators`, `mpc_route.parties`); the gateway's client certificate and key paths in that file point at `/etc/qv/tls/tls.crt` and `tls.key`.
+The gateway reaches the **caller port** of party A (this cluster), of party B, and, for the route monitor, of party C: `network.parties.{a,b,c}` (peers and port). B and C are private endpoint addresses. Their addresses and pins are in the signing config (`signers.*.coordinators`, `mpc_route.parties`); the gateway's client certificate and key paths in that file point at `/etc/qv/party-tls/tls.crt` and `tls.key`.
 
 **What the party chart (D7) must provide** so that A accepts the gateway: pods labelled `app.kubernetes.io/name: qv-party` and `quorumvault.io/party: "A"` (the default of `network.parties.a.peers`; change it if the labels differ), and an ingress rule that admits pods labelled `app.kubernetes.io/component: gateway` and `quorumvault.io/zone: signing` on the caller port (the party chart takes this from `network.callerIngress.from`, which the operator sets; A's caller port is 7001 by default). This chart adds only the gateway's egress; the namespace default deny means A's ingress is A's chart's job. Both charts may render a default-deny policy: two identical policies are harmless.
 
@@ -138,7 +138,7 @@ The gateway opens no port: it writes `mpc.prom` (route and party health) and `mp
 |---|---|
 | The signing config (approvers, bounds, chains, signers, `mpc_route`, party addresses and pins) | `config.signing` (JSON, `--set-file`). **No secret in it**: the keys are public keys, the pins are certificate hashes, the addresses are addresses, the signers name a token label and a key id. An **immutable ConfigMap** named `<release>-config-<hash>`: a change is a new ConfigMap and a rollout, never an edit in place. The config repo's two-person rule is the control; the other checkers (cosigners B and C) hold their own copies in their own clusters |
 | Plain settings (DSNs without password, Kafka, probe address, metrics file, TLS file paths) | immutable ConfigMap `<release>-gateway-env-<hash>` |
-| Certificates and keys | Secret volumes from cert-manager (task D5), mode 0440 with `fsGroup` 65532: `tls.gateway`, `tls.gatewayLink` |
+| Certificates and keys | Secret volumes from cert-manager (task D5), mode 0440 with `fsGroup` 65532: `tls.gateway`, `tls.gatewayParty`, `tls.gatewayLink`. `tls.trust.signing` and `tls.trust.business` name the qv-certs trust bundles: set, they are the CA files of the signing and the link certificate volumes instead of cert-manager's `ca.crt` |
 | HSM PIN | a Secret that exists already (External Secrets); mounted as a file (`QV_HSM_PIN_FILE`), never an environment variable |
 
 The chart renders no Secret. The policy test refuses a Secret object, a PEM private key, a password in a URL, a secret-named value in a ConfigMap, and an inline secret in an environment variable.

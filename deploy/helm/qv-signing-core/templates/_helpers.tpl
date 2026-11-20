@@ -63,12 +63,24 @@ seccompProfile:
   type: RuntimeDefault
 {{- end -}}
 
-{{/* A Secret volume with group-readable files: mode 0440 (288 decimal) and the pod's fsGroup (the image uid's group) make them readable by the non-root user and by nobody else. */}}
+{{/* A Secret volume with group-readable files: mode 0440 (288 decimal) and the pod's fsGroup (the image uid's group) make them readable by the non-root user and by nobody else. With `trust` (the name of a trust-bundle ConfigMap of qv-certs, `qv-trust-<zone>-<hash>`) the CA file of the directory is that bundle and not the `ca.crt` cert-manager put in the Secret; the Secret contributes only tls.crt and tls.key. */}}
 {{- define "qvs.secretVolume" -}}
 - name: {{ .name }}
+{{- if .trust }}
+  projected:
+    defaultMode: 288
+    sources:
+      - secret:
+          name: {{ .secret }}
+          items: [{ key: tls.crt, path: tls.crt }, { key: tls.key, path: tls.key }]
+      - configMap:
+          name: {{ .trust }}
+          items: [{ key: ca.crt, path: ca.crt }]
+{{- else }}
   secret:
     secretName: {{ .secret }}
     defaultMode: 288
+{{- end }}
 {{- end -}}
 
 {{- define "qvs.tlsEnv" -}}
