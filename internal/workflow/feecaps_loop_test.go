@@ -135,7 +135,9 @@ func TestFeeCapsRefusalThatCannotBeRebuiltTakesTheOldPath(t *testing.T) {
 func TestFeeCapsRefusalThatNeverClearsIsParkedWithTheZonesReason(t *testing.T) {
 	feeCapsHoldForTest = 10 * time.Second
 	defer func() { feeCapsHoldForTest = 0 }()
-	calls, err := feeCapsRun(t, func(int) (bool, error) { return false, temporal.NewNonRetryableApplicationError("not enough available outputs", errNoOutputs, nil) })
+	calls, err := feeCapsRun(t, func(int) (bool, error) {
+		return false, temporal.NewNonRetryableApplicationError("not enough available outputs", errNoOutputs, nil)
+	})
 	_ = err
 	parked := ""
 	for _, c := range calls {
