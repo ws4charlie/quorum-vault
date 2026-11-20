@@ -270,6 +270,18 @@ func (d *Deriving) SignDigest(context.Context, [32]byte, signer.SignOptions) (si
 	return signer.Result{}, &Error{Kind: KindInternal, Message: "a deriving signer signs through At(path)"}
 }
 
+// WithKeyset returns a deriving signer for another keyset of the same party A and the same hardened path: the connection, certificate and pin are
+// shared with d (closing d closes them), only the keyset differs. It is how the gateway signs for a later generation of the Bitcoin deposit tree (the
+// keyset comes from an operator-signed record).
+func (d *Deriving) WithKeyset(keysetID string) (*Deriving, error) {
+	if keysetID == "" {
+		return nil, errors.New("keyset id is required")
+	}
+	cfg := d.cfg
+	cfg.KeysetID = keysetID
+	return &Deriving{cfg: cfg, cl: d.cl, by: map[string]*Signer{}, base: d.base}, nil
+}
+
 // At derives the key at path (idempotent at party A) and returns its signer.
 func (d *Deriving) At(ctx context.Context, path []uint32) (signer.Signer, error) {
 	key := fmt.Sprint(path)
