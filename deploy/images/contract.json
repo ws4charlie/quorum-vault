@@ -65,7 +65,28 @@
       "noTLSEnv": true,
       "flagValues": { "zone": ["business"] },
       "flagOnlyIn": { "enable-login": "enable-login" }
+    },
+    "qv-gateway": {
+      "zone": "signing",
+      "flags": ["config", "jobs-dsn", "guard-dsn", "brokers", "audit-source", "anchor-interval", "interval", "lease", "worker-id", "mpc-metrics-file", "health-listen", "tls-cert", "tls-key", "tls-ca", "tls-reload", "link-tls-cert", "link-tls-key", "link-tls-ca", "link-tls-reload"],
+      "env": ["QV_GATEWAY_JOBS_DSN", "QV_GATEWAY_GUARD_DSN", "QV_KAFKA_BROKERS", "QV_MPC_METRICS_FILE", "QV_HEALTH_LISTEN", "QV_LINK_TLS_CERT", "QV_LINK_TLS_KEY", "QV_LINK_TLS_CA", "QV_LINK_TLS_RELOAD", "QV_PKCS11_LIB", "QV_HSM_PIN", "SOFTHSM2_CONF", "QV_ENV"],
+      "requiredFlags": ["config"],
+      "requiredAny": [["jobs-dsn", "QV_GATEWAY_JOBS_DSN"], ["guard-dsn", "QV_GATEWAY_GUARD_DSN"], ["tls-cert", "QV_TLS_CERT"], ["link-tls-cert", "QV_LINK_TLS_CERT"]],
+      "pathFlags": ["config", "tls-cert", "tls-key", "tls-ca", "link-tls-cert", "link-tls-key", "link-tls-ca", "mpc-metrics-file"],
+      "pathEnv": ["QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA", "QV_LINK_TLS_CERT", "QV_LINK_TLS_KEY", "QV_LINK_TLS_CA", "QV_MPC_METRICS_FILE", "SOFTHSM2_CONF"],
+      "listen": { "flag": "health-listen", "env": "QV_HEALTH_LISTEN", "ports": 1 }
+    },
+    "qv-tools-signing": {
+      "zone": "signing",
+      "flags": ["config", "guard-dsn", "chain", "core-dsn", "out"],
+      "env": ["QV_GATEWAY_GUARD_DSN", "QV_CORE_DSN"],
+      "requiredFlags": ["config"],
+      "requiredAny": [["guard-dsn", "QV_GATEWAY_GUARD_DSN"]],
+      "pathFlags": ["config"],
+      "pathEnv": [],
+      "listen": { "ports": 0 },
+      "noTLSEnv": true
     }
   },
-  "externalImages": {}
+  "externalImages": { "alloy": { "note": "Grafana Alloy, the optional metrics sidecar of qv-signing-core (metrics.agent.enabled); not built here" } }
 }

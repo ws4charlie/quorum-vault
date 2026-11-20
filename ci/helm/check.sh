@@ -14,5 +14,6 @@ for v in values values-kind; do
   helm template qv "$chart" --namespace qv -f "$chart/$v.yaml" $dig > "$out/$v.yaml"
   kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" "$out/$v.yaml"
 done
+"$(dirname "$0")/check-signing-core.sh"
 echo "== policy and contract tests"
 (cd ci/helm && CI=1 go test -count=1 ./...)

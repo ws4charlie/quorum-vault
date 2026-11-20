@@ -1,0 +1,7 @@
+apiVersion: v2
+name: qv-signing-core
+description: QuorumVault signing-core cluster, gateway half - qv-gateway and its tooling Job. The guard database (CloudNativePG), the HSM and party A (chart qv-party) are referenced, not bundled.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"

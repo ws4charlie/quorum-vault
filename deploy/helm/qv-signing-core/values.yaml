@@ -1,0 +1,125 @@
+# qv-signing-core: production defaults. values-kind.yaml overrides what differs on a local cluster.
+# Runs in the signing-core cluster next to party A (chart qv-party). It opens NO port to anything outside the pod: the gateway dials out.
+# Values marked REQUIRED have no default: the chart refuses to render without them (the release pipeline or the config repo sets them).
+
+nameOverride: ""
+
+# Images by DIGEST (the policy test refuses a tag here). The all-zero digests are PLACEHOLDERS the chart refuses to render.
+imagePullPolicy: IfNotPresent
+imagePullSecrets: []
+images:
+  gateway: { repository: ghcr.io/ws4charlie/quorum-vault/qv-gateway,       digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  tools:   { repository: ghcr.io/ws4charlie/quorum-vault/qv-tools-signing, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  # only when metrics.agent.enabled: any image that runs Grafana Alloy (pin the digest)
+  agent:   { repository: docker.io/grafana/alloy,                           digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+runAsUser: 65532
+
+# QV_ENV. Production: leave empty (the binary then treats the run as production and refuses SoftHSM). Only values-kind.yaml sets `dev`.
+env: ""
+
+# --- What the gateway talks to (named here, made elsewhere; README "What the cluster must provide") ---
+# The guard database of THIS cluster (CloudNativePG, same namespace). The gateway owns its schema: role qv_gateway_guard owns the database.
+guard:
+  host: qv-guard-rw
+  port: 5432
+  name: qv_gateway_guard
+  role: qv_gateway_guard
+  sslmode: verify-full           # the server certificate's DNS names must include `host`
+# The business job queue (Postgres role qv_gateway) and the audit-heads topic, reached over the signing link with the business-issued link certificate.
+jobs:
+  host: REQUIRED                 # the private endpoint name of the business Postgres, e.g. qv-business-db-rw.business.internal
+  port: 5432
+  name: quorumvault
+  role: qv_gateway
+  sslmode: verify-full
+kafka:
+  brokers: REQUIRED              # the private endpoint name of the business Kafka, host:port[,host:port]
+  auditSource: gateway           # the name this chain of audit heads is published under (one per deployment)
+  anchorInterval: 1m
+
+# --- Certificates: Secrets made by cert-manager (task D5), each with tls.crt, tls.key, ca.crt. Referenced by name. ---
+tls:
+  reload: 1m
+  gateway:     { secretName: qv-gateway-tls }        # certificate name signing/gateway: the guard database login, the parties' caller ports (pinned there)
+  gatewayLink: { secretName: qv-gateway-link-tls }   # certificate name business/gateway-link (business CA): business Postgres and Kafka
+
+# --- The signing config (JSON, internal/gateway/config.example.json): approvers, bounds, chains, signers, mpc_route, party addresses and pins ---
+# Public keys, limits, addresses and pins only: no secret. The chart turns it into an IMMUTABLE ConfigMap whose name carries a hash of the content, so a change is
+# a new rollout and never an edit in place. REQUIRED: set it from the config repo (--set-file config.signing=signing-config.json).
+# Certificate and key paths inside it point at the mounted Secrets: /etc/qv/tls/tls.crt and /etc/qv/tls/tls.key (the parties pin the gateway's certificate).
+config:
+  signing: ""
+  signTimeoutSeconds: 30         # must equal the config's sign_timeout (a test compares them); terminationGracePeriodSeconds must exceed it by 30 s
+
+# --- HSM (only for signers whose backend is not `mpc`) ---
+hsm:
+  mode: pkcs11                   # none (every signer is mpc) | pkcs11 (production) | softhsm (kind only, needs env: dev)
+  pkcs11:
+    # The vendor's PKCS#11 module is NOT in the image (glibc image, dlopen). It comes from a volume mounted read-only at <mountPath>/lib; the image task provides it
+    # (README "HSM"). AWS CloudHSM client SDK 5: libcloudhsm_pkcs11.so. `volume` is a Kubernetes volume source, e.g. {persistentVolumeClaim: {claimName: qv-cloudhsm-module,
+    # readOnly: true}}, or {image: {reference: <module image by digest>, pullPolicy: IfNotPresent}} (Kubernetes 1.33+).
+    module: /opt/cloudhsm/lib/libcloudhsm_pkcs11.so
+    mountPath: /opt/cloudhsm
+    volume: {}                   # REQUIRED when mode is pkcs11
+    # Public client configuration, mounted at <mountPath>/etc as files (CloudHSM: cloudhsm-pkcs11.json with the cluster's address, customerCA.crt = the cluster's CA). No secret.
+    clientConfig: {}
+  # The crypto-user PIN: a Secret that already exists (External Secrets from the account's secret store). The gateway reads it ONLY from the environment variable QV_HSM_PIN
+  # (cmd/qv-gateway/main.go), so it is injected from the Secret (secretKeyRef), never written into the chart. A file would be better: README "HSM", Known limits.
+  pin: { secretName: qv-gateway-hsm-pin, key: pin, soKey: so-pin }
+  softhsm: { size: 64Mi, tokenLabel: qv-hsm }   # kind: a PVC for the token files and an init Job that makes the token (the PIN Secret comes from the kind setup)
+
+# --- Workload ---
+gateway:
+  replicas: 2                    # safe: claims use SKIP LOCKED plus a lease, the guard serialises per chain with advisory locks (README "Replicas")
+  strategy: { type: RollingUpdate, maxSurge: 1, maxUnavailable: 0 }
+  resources: { requests: { cpu: "1", memory: 1Gi }, limits: { cpu: "2", memory: 2Gi } }
+  healthPort: 9100               # plain http /livez and /readyz, on the pod address, for the kubelet only
+  terminationGracePeriodSeconds: 90   # >= sign_timeout + 30 s
+  startupFailureThreshold: 30    # x 5 s: the guard schema is applied at start
+  lease: ""                      # -lease; empty = the binary's default (2m)
+podDisruptionBudget: { enabled: true }   # minAvailable 1 (only when replicas > 1)
+topologySpread: { enabled: true }
+serviceAccount: { annotations: {} }      # the token is never mounted
+
+# --- Metrics. The gateway writes the Prometheus text format to a file in the pod (loopback-only: it opens no port). Signing clusters take no inbound scrape. ---
+metrics:
+  agent:
+    enabled: false               # a sidecar that reads the file inside the pod and remote-writes OUTWARD (Grafana Alloy). Off by default.
+    remoteWrite:
+      url: ""                    # https://... (a private endpoint of the central monitoring)
+      tokenSecret: ""            # a Secret with a bearer token (key `token`); empty = none (mutual TLS or network identity at the endpoint)
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 250m, memory: 192Mi } }
+
+# --- Signed settings: an operator-run Job, OFF by default (README "Signed settings") ---
+# Runs ONE of qv-route, qv-fee-caps, qv-approvers, qv-keysets with `show` or `apply` and the signed change files from a ConfigMap the operator created. No key is mounted:
+# `sign` happens on the operators' machines. The Job logs in to the guard database with the gateway's certificate (role qv_gateway_guard).
+signedSettings:
+  job:
+    enabled: false
+    tool: route                  # route | fee-caps | approvers | keysets
+    action: apply                # show | apply
+    revision: "1"                # the Job name carries it: a new change is a new revision (Jobs are immutable)
+    configMap: ""                # REQUIRED when enabled: a ConfigMap holding the signed change files, created with kubectl create configmap --from-file
+    files: []                    # the file names in that ConfigMap, passed to the tool in this order (apply)
+    extraArgs: []                # e.g. ["-chain", "btc-main"] for fee-caps
+    activeDeadlineSeconds: 300
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 256Mi } }
+
+# --- Network: default deny; every allow is named. NO ingress from outside the pod, none from outside the cluster. ---
+network:
+  # Rules are rendered only for peers that are named. A peer list that is empty where one is required fails the render (an empty `to` would mean "everywhere").
+  dns: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } } }]
+  guardDb:
+    peers: [{ podSelector: { matchLabels: { cnpg.io/cluster: qv-guard } } }]   # the CloudNativePG pods of the guard database
+    port: 5432
+  # Private-endpoint addresses (ipBlock) of the business Postgres and Kafka: the signing link. NetworkPolicy matches addresses, not names.
+  jobsDb: { peers: [], port: 5432 }                # REQUIRED
+  kafka:  { peers: [], port: 9092 }                # REQUIRED
+  # The parties' caller ports. A: this cluster (chart qv-party). B and C: private endpoints. C is optional (the route monitor probes it).
+  parties:
+    a: { peers: [{ podSelector: { matchLabels: { app.kubernetes.io/name: qv-party, quorumvault.io/party: a } } }], port: 7001 }
+    b: { peers: [], port: 7002 }                   # REQUIRED
+    c: { peers: [], port: 7003 }
+  metricsRemoteWrite: { peers: [], ports: [443] }  # REQUIRED when metrics.agent.enabled
+  # Let the guard database's own pods accept the gateway (the default deny covers the namespace). The CloudNativePG chart brings its own rules for replication and the operator.
+  dependencyPolicies: { enabled: true }
