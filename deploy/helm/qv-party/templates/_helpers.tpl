@@ -81,7 +81,7 @@ seccompProfile:
     defaultMode: 288
 {{- end -}}
 
-{{- define "qp.partySecret" -}}{{ default (printf "mpc-party-%s-tls" (include "qp.role" . | lower)) .Values.tls.party.secretName }}{{- end -}}
+{{- define "qp.partySecret" -}}{{ default (printf "qv-signing-mpc-party-%s-tls" (include "qp.role" . | lower)) .Values.tls.party.secretName }}{{- end -}}
 {{- define "qp.token" -}}{{ default (get (dict "A" "qv-party-1" "B" "qv-party-2" "C" "qv-party-3") (include "qp.role" .)) .Values.hsm.token }}{{- end -}}
 
 {{/* Probes: the health listener of the container (plain http, GET /livez and /readyz). Ready never depends on the other parties. */}}

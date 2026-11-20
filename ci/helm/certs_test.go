@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -619,4 +620,33 @@ func TestCertsExistingCAMakesNoAuthority(t *testing.T) {
 			t.Errorf("issuer %s is not a Vault issuer", o.Metadata.Name)
 		}
 	}
+}
+
+// The party and signing-core charts name their certificate Secrets by default; every name ending in -tls must be one qv-certs makes in the cluster that holds the chart
+// (found by the kind lane: the party chart asked for `mpc-party-c-tls`, qv-certs makes `qv-signing-mpc-party-c-tls`, and no pod started).
+func TestCertsSecretNamesMatchThePartyAndSigningCoreCharts(t *testing.T) {
+	re := regexp.MustCompile(`(?m)secretName: "?([a-z0-9-]+-tls)"?`)
+	check := func(what, text, cluster string) {
+		made := map[string]bool{}
+		for _, o := range leafCerts(mustRender(t, "values.yaml", "--set", "cluster="+cluster)) {
+			made[certSpecOf(o).SecretName] = true
+		}
+		found := re.FindAllStringSubmatch(text, -1)
+		if len(found) < 1 {
+			t.Fatalf("%s: found only %d certificate Secret names", what, len(found))
+		}
+		for _, m := range found {
+			if !made[m[1]] {
+				t.Errorf("%s asks for Secret %q, which qv-certs does not make in cluster %s", what, m[1], cluster)
+			}
+		}
+	}
+	for role, cluster := range map[string]string{"A": "signing-core", "B": "party-b", "C": "party-c"} {
+		text, err := partyRender(true, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check("qv-party "+role, text, cluster)
+	}
+	check("qv-signing-core", scText(t, true), "signing-core")
 }

@@ -68,10 +68,10 @@ hsm:
 # --- Certificates: Secrets made by cert-manager (task D5), each with tls.crt, tls.key, ca.crt. Referenced by name. ---
 tls:
   reload: 1m
-  party:         { secretName: "" }     # empty = mpc-party-<role>-tls (catalog name mpc-party-a|b|c; pinned by the other parties, long-lived)
-  cosigner:      { secretName: qv-cosigner-tls }          # signing identity of the cosigner (guard database client)
+  party:         { secretName: "" }     # empty = qv-signing-mpc-party-<role>-tls (catalog name mpc-party-a|b|c; pinned by the other parties, long-lived)
+  cosigner:      { secretName: qv-signing-cosigner-tls }          # signing identity of the cosigner (guard database client)
   cosignerLink:  { secretName: qv-cosigner-link-tls }     # business-CA link certificate, publishes audit heads
-  cosignerSocket: { secretName: qv-cosigner-socket-tls }  # the certificate the cosigner presents to its party on the socket (pinned by the party)
+  cosignerSocket: { secretName: qv-signing-cosigner-socket-tls }  # the certificate the cosigner presents to its party on the socket (pinned by the party)
 
 # --- The cosigner (roles B and C only; ignored for A) ---
 cosigner:

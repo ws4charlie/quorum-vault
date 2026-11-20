@@ -84,3 +84,18 @@ spec:
     - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } } }]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
 Y
+
+for ns in qv-signing qv-party-b qv-party-c; do cat <<Y
+---
+# the guard database takes its own namespace's gateway and party pods on 5432 (the signing-core chart renders the same for the gateway; the party chart renders egress only)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: kind-guard-db-in, namespace: $ns }
+spec:
+  podSelector: { matchLabels: { cnpg.io/cluster: qv-guard } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchExpressions: [{ key: app.kubernetes.io/name, operator: In, values: [qv-party, qv-signing-core, qv-gateway] }] } }]
+      ports: [{ port: 5432, protocol: TCP }]
+Y
+done

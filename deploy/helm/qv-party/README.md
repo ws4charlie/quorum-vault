@@ -35,7 +35,7 @@ make helm-check                                                                 
 | `peers.a/b/c.pins`, `peers.b/c.address` | the other parties' certificate pins (SHA-256 of the public key) and, for A and B, where their peer ports are reached. A: `b` and `c`. B: `a` and `c`. C: `a` and `b` (pins only) |
 | `hsm.module.path`, `hsm.module.volume`, `hsm.pinSecret`, `hsm.token` | production HSM, see below |
 | `cosigner.*` (B, C) | `config` (the cosigner's own signing-zone config, public data), `socketPins` (the cosigner's socket certificate, which the party checks), `partyPins` (this party's certificate, which the cosigner checks), `database`, `kafka` |
-| `tls.*` | names of the certificate Secrets (made by cert-manager, task D5): `mpc-party-<role>-tls`, `qv-cosigner-tls`, `qv-cosigner-link-tls`, `qv-cosigner-socket-tls`, each with `tls.crt`, `tls.key`, `ca.crt` |
+| `tls.*` | names of the certificate Secrets (made by cert-manager, task D5): `qv-signing-mpc-party-<role>-tls`, `qv-signing-cosigner-tls`, `qv-cosigner-link-tls`, `qv-signing-cosigner-socket-tls`, each with `tls.crt`, `tls.key`, `ca.crt` |
 | `network.*`, `service.*` | the private endpoints and addresses, see "Network" |
 
 The party config (`party.json`) and the cosigner's config are rendered into **immutable ConfigMaps whose names carry a hash of the content**: a change is a new ConfigMap and a rollout, never an edit in place. They hold public keys, pins, addresses and limits only. The policy test refuses a secret-looking field, a PEM block or any Secret object in the output.
