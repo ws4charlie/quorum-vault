@@ -44,6 +44,9 @@ issuers:
   # kind and CI (mode: ca). The authorities are made by cert-manager when the release is installed, never kept in the repository.
   ca:
     duration: 87600h
+    # false: this release makes the authority (bootstrap issuer + CA Certificate), the single-namespace kind install. true: the Secret `qv-<zone>-ca` already exists in
+    # this namespace (made once, outside the chart, and copied into every namespace of the kind cluster), so every namespace issues under the SAME authority. Never in production.
+    existing: false
     linkSecretName: qv-business-ca  # a signing cluster in mode ca needs the business CA Secret to issue its link certificates: development only
   # cert-manager's own service account, which asks Kubernetes for a token of the Vault service account (needed for auth through `serviceAccountName`)
   certManager: { serviceAccount: cert-manager, namespace: cert-manager }
