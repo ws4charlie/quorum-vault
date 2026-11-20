@@ -164,12 +164,13 @@ prometheus.remote_write "out" {
       ca_file   = "/etc/qv/remote-write/ca.crt"
     }
   }
-  {{- with $a.externalLabels }}
   external_labels = {
-    {{- range $k, $v := . }}
+    {{- range $k, $v := $a.externalLabels }}
+    {{- if ne $k "qv_cluster" }}
     {{ $k }} = {{ $v | quote }},
     {{- end }}
+    {{- end }}
+    qv_cluster = {{ include "qvs.req" (dict "k" "metrics.agent.cluster" "v" $a.cluster) | quote }},
   }
-  {{- end }}
 }
 {{- end -}}

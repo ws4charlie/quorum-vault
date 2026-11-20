@@ -100,7 +100,8 @@ metrics:
     remoteWrite:
       url: ""                           # https://... (a private endpoint of the central monitoring); REQUIRED when enabled
       tlsSecret: ""                     # REQUIRED when enabled: a Secret (cert-manager) with tls.crt, tls.key, ca.crt: the client certificate the endpoint checks, and the CA of the endpoint
-    externalLabels: {}                  # added to every series, e.g. { qv_cluster: party-b }
+    cluster: ""                         # REQUIRED when enabled: this cluster's name, sent on every series as qv_cluster (with party = role, set by the chart: they tell B's series from C's)
+    externalLabels: {}                  # more labels on every series; the keys party and qv_cluster are ignored (the chart sets them)
     resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 250m, memory: 192Mi } }
 
 # --- Workload ---

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func monSigningRenders(t *testing.T, agent bool) []monRender {
 		}
 		if agent {
 			args = append(args, "--set", "metrics.agent.enabled=true", "--set", "metrics.agent.remoteWrite.url="+monAgentURL, "--set", "metrics.agent.remoteWrite.tlsSecret=qv-remote-write-tls",
-				"--set", "metrics.agent.externalLabels.qv_cluster=signing-core")
+				"--set", "metrics.agent.cluster=signing-core")
 		}
 		out = append(out, monRender{"signing-core/" + kn + agentSuffix(agent), monHelm(t, "../../deploy/helm/qv-signing-core", args...)})
 		// parties
@@ -105,7 +106,7 @@ func monSigningRenders(t *testing.T, agent bool) []monRender {
 			}
 			if agent {
 				args = append(args, "--set", "metrics.agent.enabled=true", "--set", "metrics.agent.remoteWrite.url="+monAgentURL, "--set", "metrics.agent.remoteWrite.tlsSecret=qv-remote-write-tls",
-					"--set", "network.metricsRemoteWrite.to[0].ipBlock.cidr=10.9.0.0/28", "--set", "metrics.agent.externalLabels.qv_cluster=party-"+strings.ToLower(role))
+					"--set", "network.metricsRemoteWrite.to[0].ipBlock.cidr=10.9.0.0/28", "--set", "metrics.agent.cluster=party-"+strings.ToLower(role))
 			}
 			out = append(out, monRender{"party-" + role + "/" + kn + agentSuffix(agent), monHelm(t, "../../deploy/helm/qv-party", args...)})
 		}
@@ -489,7 +490,7 @@ func egressRuleCount(objs []Obj) int {
 
 // Switching the agent on without its settings is refused: no empty peer list (which would mean "everywhere"), no missing certificate.
 func TestAgentWithoutSettingsIsRefused(t *testing.T) {
-	base := []string{"--set", "role=B", "-f", "ci-party-values.yaml", "-f", "ci-party-digests.yaml", "--set", "metrics.agent.enabled=true"}
+	base := []string{"--set", "role=B", "-f", "ci-party-values.yaml", "-f", "ci-party-digests.yaml", "--set", "metrics.agent.enabled=true", "--set", "metrics.agent.cluster=party-b"}
 	cases := []struct {
 		name string
 		more []string
@@ -497,6 +498,7 @@ func TestAgentWithoutSettingsIsRefused(t *testing.T) {
 	}{
 		{"no endpoint peers", []string{"--set", "metrics.agent.remoteWrite.url=" + monAgentURL, "--set", "metrics.agent.remoteWrite.tlsSecret=s"}, "network.metricsRemoteWrite.to is required"},
 		{"no certificate", []string{"--set", "metrics.agent.remoteWrite.url=" + monAgentURL, "--set", "network.metricsRemoteWrite.to[0].ipBlock.cidr=10.9.0.0/28"}, "tlsSecret is required"},
+		{"no cluster name", []string{"--set", "metrics.agent.cluster=", "--set", "metrics.agent.remoteWrite.url=" + monAgentURL, "--set", "metrics.agent.remoteWrite.tlsSecret=s", "--set", "network.metricsRemoteWrite.to[0].ipBlock.cidr=10.9.0.0/28"}, "metrics.agent.cluster is required"},
 		{"no url", []string{"--set", "metrics.agent.remoteWrite.tlsSecret=s", "--set", "network.metricsRemoteWrite.to[0].ipBlock.cidr=10.9.0.0/28"}, "remoteWrite.url is required"},
 	}
 	for _, c := range cases {
@@ -506,8 +508,11 @@ func TestAgentWithoutSettingsIsRefused(t *testing.T) {
 			}
 		})
 	}
-	if msg := monHelmFails(t, "../../deploy/helm/qv-signing-core", "-f", scCI, "--set", "metrics.agent.enabled=true", "--set", "metrics.agent.remoteWrite.url="+monAgentURL); !strings.Contains(msg, "tlsSecret is required") {
+	if msg := monHelmFails(t, "../../deploy/helm/qv-signing-core", "-f", scCI, "--set", "metrics.agent.enabled=true", "--set", "metrics.agent.cluster=signing-core", "--set", "metrics.agent.remoteWrite.url="+monAgentURL); !strings.Contains(msg, "tlsSecret is required") {
 		t.Errorf("signing-core without a certificate: %s", msg)
+	}
+	if msg := monHelmFails(t, "../../deploy/helm/qv-signing-core", "-f", scCI, "--set", "metrics.agent.enabled=true", "--set", "metrics.agent.remoteWrite.url="+monAgentURL, "--set", "metrics.agent.remoteWrite.tlsSecret=s"); !strings.Contains(msg, "metrics.agent.cluster is required") {
+		t.Errorf("signing-core without a cluster name: %s", msg)
 	}
 }
 
@@ -894,5 +899,107 @@ func TestMonitoringCheckStopsOnFailedValidation(t *testing.T) {
 	}
 	if out, err := run(0); err != nil {
 		t.Fatalf("with a passing kubeconform the script failed: %v\n%s", err, out)
+	}
+}
+
+// ---- identity of the series an agent sends ----
+
+var extLabelsRe = regexp.MustCompile(`(?s)external_labels\s*=\s*\{(.*?)\}`)
+var extPairRe = regexp.MustCompile(`(\w+)\s*=\s*"([^"]*)"`)
+
+// agentLabels is the external label set of the agent configuration in a render.
+func agentLabels(t *testing.T, name string, objs []Obj) map[string]string {
+	t.Helper()
+	for _, o := range objs {
+		if o.Kind != "ConfigMap" {
+			continue
+		}
+		cfg, ok := o.Data["config.alloy"].(string)
+		if !ok {
+			continue
+		}
+		m := extLabelsRe.FindStringSubmatch(cfg)
+		if m == nil {
+			t.Fatalf("%s: the agent has no external_labels", name)
+		}
+		out := map[string]string{}
+		for _, p := range extPairRe.FindAllStringSubmatch(m[1], -1) {
+			out[p[1]] = p[2]
+		}
+		return out
+	}
+	t.Fatalf("%s: no agent config", name)
+	return nil
+}
+
+// Every series an agent sends says which party and which cluster it came from: B's cosigner and C's must differ (same metric names, same zone), and the label the Alertmanager example routes on is the
+// one the agents set.
+func TestAgentSeriesCarryPartyAndCluster(t *testing.T) {
+	got := map[string]map[string]string{}
+	for _, r := range monSigningRenders(t, true) {
+		if !strings.Contains(r.name, "production") {
+			continue
+		}
+		l := agentLabels(t, r.name, r.objs)
+		got[strings.SplitN(r.name, "/", 2)[0]] = l
+		if l["qv_cluster"] == "" {
+			t.Errorf("%s: no qv_cluster label: %v", r.name, l)
+		}
+		if strings.HasPrefix(r.name, "party-") {
+			if want := strings.TrimPrefix(strings.SplitN(r.name, "/", 2)[0], "party-"); l["party"] != want {
+				t.Errorf("%s: party label %q, want %q", r.name, l["party"], want)
+			}
+		} else if _, has := l["party"]; has {
+			t.Errorf("%s: the gateway is no party: %v", r.name, l)
+		}
+	}
+	for _, k := range []string{"signing-core", "party-A", "party-B", "party-C"} {
+		if got[k] == nil {
+			t.Fatalf("no labels for %s (have %v)", k, got)
+		}
+	}
+	for _, p := range [][2]string{{"party-B", "party-C"}, {"party-A", "party-B"}, {"party-B", "signing-core"}} {
+		a, b := got[p[0]], got[p[1]]
+		if a["party"] == b["party"] && a["qv_cluster"] == b["qv_cluster"] {
+			t.Errorf("%s and %s cannot be told apart: %v %v", p[0], p[1], a, b)
+		}
+	}
+	// the user cannot overwrite the identity with externalLabels
+	objs := monHelm(t, "../../deploy/helm/qv-party", "--set", "role=B", "-f", "ci-party-values.yaml", "-f", "ci-party-digests.yaml", "--set", "metrics.agent.enabled=true",
+		"--set", "metrics.agent.remoteWrite.url="+monAgentURL, "--set", "metrics.agent.remoteWrite.tlsSecret=s", "--set", "metrics.agent.cluster=party-b",
+		"--set", "network.metricsRemoteWrite.to[0].ipBlock.cidr=10.9.0.0/28", "--set", "metrics.agent.externalLabels.party=C", "--set", "metrics.agent.externalLabels.site=berlin")
+	l := agentLabels(t, "override", objs)
+	if l["party"] != "B" || l["site"] != "berlin" {
+		t.Errorf("externalLabels overrode the identity or was dropped: %v", l)
+	}
+	// the Alertmanager example routes on exactly these party values
+	am := monHelm(t, monDir, "--set", "clusterKind=central", "--set", "alertmanager.enabled=true")
+	routed := map[string]bool{}
+	for _, o := range am {
+		if o.Kind != "AlertmanagerConfig" {
+			continue
+		}
+		var s struct {
+			Route struct {
+				Routes []struct {
+					Matchers []struct{ Name, Value string } `yaml:"matchers"`
+				} `yaml:"routes"`
+			} `yaml:"route"`
+		}
+		if err := o.Spec.Decode(&s); err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range s.Route.Routes {
+			for _, m := range r.Matchers {
+				if m.Name == "party" {
+					routed[m.Value] = true
+				}
+			}
+		}
+	}
+	for _, p := range []string{"A", "B", "C"} {
+		if !routed[p] || got["party-"+p]["party"] != p {
+			t.Errorf("party %s: routed=%v, agent label=%q", p, routed[p], got["party-"+p]["party"])
+		}
 	}
 }

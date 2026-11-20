@@ -105,6 +105,7 @@ imagePullSecrets: {{ toJson . }}
 {{- if eq .Values.sealer.type "attested" }}{{ fail "sealer.type attested is an extension point of the TEE tasks: not built in this chart yet" }}{{ end -}}
 {{- if .Values.attestBroker.enabled }}{{ fail "attestBroker.enabled is an extension point of the TEE tasks: not built in this chart yet" }}{{ end -}}
 {{- if and .Values.metrics.agent.enabled (not .Values.network.metricsRemoteWrite.to) }}{{ fail "network.metricsRemoteWrite.to is required when metrics.agent.enabled: the monitoring endpoint (an empty list would mean no rule at all)" }}{{ end -}}
+{{- if and .Values.metrics.agent.enabled (not .Values.metrics.agent.cluster) }}{{ fail "metrics.agent.cluster is required when metrics.agent.enabled: the cluster name sent as the label qv_cluster (the party label comes from role)" }}{{ end -}}
 {{- if and .Values.metrics.agent.enabled (not .Values.metrics.agent.remoteWrite.tlsSecret) }}{{ fail "metrics.agent.remoteWrite.tlsSecret is required when metrics.agent.enabled: the client certificate Secret" }}{{ end -}}
 {{- if and (eq .Values.sealer.type "pkcs11") (not .Values.hsm.softhsm.enabled) (not .Values.hsm.module.path) }}{{ fail "hsm.module.path is required for sealer.type pkcs11 (the vendor's PKCS#11 module; the image has none)" }}{{ end -}}
 {{- if and (eq .Values.sealer.type "pkcs11") (not .Values.hsm.softhsm.enabled) (not .Values.hsm.module.volume) }}{{ fail "hsm.module.volume is required for sealer.type pkcs11: the volume that holds the vendor's PKCS#11 module" }}{{ end -}}
@@ -136,13 +137,16 @@ prometheus.remote_write "out" {
       ca_file   = "/etc/qv/remote-write/ca.crt"
     }
   }
-  {{- with $a.externalLabels }}
+  {{- /* Identity on every series: the party (from role, so B's cosigner and C's differ) and the cluster. They win over externalLabels; an existing party label on a series is kept by the agent and equals the role. */}}
   external_labels = {
-    {{- range $k, $v := . }}
+    {{- range $k, $v := $a.externalLabels }}
+    {{- if and (ne $k "party") (ne $k "qv_cluster") }}
     {{ $k }} = {{ $v | quote }},
     {{- end }}
+    {{- end }}
+    party      = {{ $role | quote }},
+    qv_cluster = {{ required "metrics.agent.cluster is required when metrics.agent.enabled: the name of this cluster, sent as the label qv_cluster" $a.cluster | quote }},
   }
-  {{- end }}
 }
 {{- end -}}
 

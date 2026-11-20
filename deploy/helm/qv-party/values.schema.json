@@ -732,6 +732,9 @@
                 }
               }
             },
+            "cluster": {
+              "type": "string"
+            },
             "externalLabels": {
               "type": "object",
               "additionalProperties": {

@@ -20,9 +20,9 @@ echo "== qv-business with metrics on: template, kubeconform"
 helm template qv deploy/helm/qv-business --namespace qv -f deploy/helm/qv-business/values.yaml -f ci/helm/ci-digests.yaml --set metrics.enabled=true > "$out/business-metrics.yaml"
 validate "$out/business-metrics.yaml"
 echo "== qv-signing-core and qv-party with the agent on: template, kubeconform"
-helm template qv deploy/helm/qv-signing-core --namespace qv -f ci/helm/signing-core-ci.yaml --set metrics.agent.enabled=true --set metrics.agent.remoteWrite.url=https://metrics.example.invalid/api/v1/write --set metrics.agent.remoteWrite.tlsSecret=qv-remote-write-tls > "$out/sc-agent.yaml"
+helm template qv deploy/helm/qv-signing-core --namespace qv -f ci/helm/signing-core-ci.yaml --set metrics.agent.enabled=true --set metrics.agent.remoteWrite.url=https://metrics.example.invalid/api/v1/write --set metrics.agent.remoteWrite.tlsSecret=qv-remote-write-tls --set metrics.agent.cluster=signing-core > "$out/sc-agent.yaml"
 validate "$out/sc-agent.yaml"
 for role in A B C; do
-  helm template "qv-party-$(echo $role | tr A-Z a-z)" deploy/helm/qv-party --namespace qv --set role=$role -f ci/helm/ci-party-values.yaml -f ci/helm/ci-party-digests.yaml --set metrics.agent.enabled=true --set metrics.agent.remoteWrite.url=https://metrics.example.invalid/api/v1/write --set metrics.agent.remoteWrite.tlsSecret=qv-remote-write-tls --set 'network.metricsRemoteWrite.to[0].ipBlock.cidr=10.9.0.0/28' > "$out/party-$role-agent.yaml"
+  helm template "qv-party-$(echo $role | tr A-Z a-z)" deploy/helm/qv-party --namespace qv --set role=$role -f ci/helm/ci-party-values.yaml -f ci/helm/ci-party-digests.yaml --set metrics.agent.enabled=true --set metrics.agent.remoteWrite.url=https://metrics.example.invalid/api/v1/write --set metrics.agent.remoteWrite.tlsSecret=qv-remote-write-tls --set metrics.agent.cluster="party-$(echo $role | tr A-Z a-z)" --set 'network.metricsRemoteWrite.to[0].ipBlock.cidr=10.9.0.0/28' > "$out/party-$role-agent.yaml"
   validate "$out/party-$role-agent.yaml"
 done
