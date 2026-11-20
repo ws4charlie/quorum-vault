@@ -37,6 +37,7 @@ func migrateMain(args []string) {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+	server.RunningConfigPath = *to // the party will run with the NEW config: that is the image the attester measures
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	rep, err := server.MigrateSeal(ctx, fc, tc, server.MigrateOptions{})
