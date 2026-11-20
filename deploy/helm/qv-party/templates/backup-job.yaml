@@ -1,0 +1,90 @@
+{{- if .Values.backup.job.enabled }}
+{{- include "qp.guards" . -}}
+{{- $v := .Values -}}
+{{- $soft := $v.hsm.softhsm.enabled -}}
+{{- if not $v.backup.job.keysetId }}{{ fail "backup.job.keysetId is required" }}{{ end -}}
+{{- if not $v.backup.job.outputFile }}{{ fail "backup.job.outputFile is required" }}{{ end -}}
+{{- if not $v.backup.outputClaim }}{{ fail "backup.outputClaim is required: the volume the backup file is written to" }}{{ end -}}
+{{- if not $v.backup.job.recoveryPublicConfigMap }}{{ fail "backup.job.recoveryPublicConfigMap is required: the ConfigMap that holds recovery.public" }}{{ end -}}
+{{- /*
+  mpc-party backup export, once, against the party's data volume. The volume can be mounted by ONE pod (ReadWriteOncePod): the party pod must be stopped first (README, "Backup and restore").
+  It unseals through the party's HSM, writes the PVE-encrypted file, verifies it and records the verified generation. Only the recovery PUBLIC key is used; no admin key is stored here.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" (printf "backup-%s" $v.backup.job.name)) }}
+  labels: {{- include "qp.jobLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {{- include "qp.jobLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "qp.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext: {{- include "qp.podSecurityContext" . | nindent 8 }}
+      {{- include "qp.pullSecrets" . | nindent 6 }}
+      {{- with $v.scheduling.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.scheduling.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: backup-export
+          image: {{ include "qp.image" (dict "ctx" . "k" "party") | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          args:
+            - backup
+            - export
+            - -config
+            - /etc/qv/config/party.json
+            - -keyset
+            - {{ $v.backup.job.keysetId | quote }}
+            - -recovery-public
+            - /etc/qv/recovery/recovery.public
+            - -out
+            - {{ printf "/var/lib/qv/backup/%s" $v.backup.job.outputFile | quote }}
+          {{- if $soft }}
+          env:
+            - { name: QV_ENV, value: dev }
+            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }
+          {{- end }}
+          resources: {{- toYaml $v.party.resources | nindent 12 }}
+          securityContext: {{- include "qp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: config, mountPath: /etc/qv/config, readOnly: true }
+            - { name: recovery, mountPath: /etc/qv/recovery, readOnly: true }
+            - { name: data, mountPath: /var/lib/qv/party }
+            - { name: backup-out, mountPath: /var/lib/qv/backup }
+            - { name: hsm-pin, mountPath: /etc/qv/hsm-pin, readOnly: true }
+            {{- if $soft }}
+            - { name: softhsm-conf, mountPath: /etc/qv/softhsm, readOnly: true }
+            {{- else }}
+            - { name: hsm-module, mountPath: /etc/qv/hsm, readOnly: true }
+            {{- end }}
+      volumes:
+        - name: config
+          configMap: { name: {{ include "qp.partyConfigName" . }}, defaultMode: 288 }
+        - name: recovery
+          configMap: { name: {{ $v.backup.job.recoveryPublicConfigMap | quote }} }
+        - name: data
+          persistentVolumeClaim: { claimName: {{ printf "data-%s-0" (include "qp.fullname" .) | quote }} }
+        - name: backup-out
+          persistentVolumeClaim: { claimName: {{ $v.backup.outputClaim | quote }} }
+        {{- include "qp.secretVolume" (dict "name" "hsm-pin" "secret" $v.hsm.pinSecret) | nindent 8 }}
+        {{- if $soft }}
+        - name: softhsm-conf
+          configMap: { name: {{ include "qp.softhsmConfigName" . }} }
+        {{- else }}
+        - name: hsm-module
+          {{- toYaml $v.hsm.module.volume | nindent 10 }}
+        {{- end }}
+{{- end }}
