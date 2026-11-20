@@ -1,0 +1,50 @@
+{
+  "_comment": "PLACEHOLDER business-zone config for a Bitcoin chain. Every key and address is a dummy (the same placeholders as internal/gateway/config.example.json: the hot addresses derive from its account_xpub). The fee caps here (max_tx_fee_sats, max_fee_rate, max_inputs) must EQUAL the signing zone's, and fee_caps_change.approvers must be the zone's enabled approvers with the same names, keys and identities: the zone's section has the bounds no signature can lift (docs/runbooks/btc-fee-caps.md). A test (TestShippedConfigsAgreeOnBitcoinFeeCaps) keeps the two files in step.",
+  "entity": "qv-us",
+  "chain": {
+    "family": "btc",
+    "name": "btc-example",
+    "btc": {
+      "network": "regtest",
+      "rpc_url": "http://127.0.0.1:18443",
+      "rpc_user": "PLACEHOLDER-rpc-user",
+      "rpc_password": "PLACEHOLDER-rpc-password",
+      "confirmations": 6,
+      "account_xpub": "tpubDCUJWjpCfXoCzDwWiHRwsALSWYSMXvHHzQ3q4CoiVgWAHcrvL2C89PUs1wC2QddbaDEvLNaL5PFVFdYm5oBf7DXZWoFK8X4PLXAUA8L9zsV",
+      "hot_shards": [
+        { "address": "bcrt1q6rg3k5k4g5xm3ghxkj94eflf2fckh5uch9wxdk", "path": [1, 0] }
+      ],
+      "max_tx_fee_sats": 150000,
+      "max_fee_rate": 100,
+      "max_inputs": 20,
+      "fee_caps_change": {
+        "min_approvers": 2,
+        "max_change_age": "10m",
+        "approvers": {
+          "alice": { "key": "0000000000000000000000000000000000000000000000000000000000000001", "identity": "alice" },
+          "bob":   { "key": "0000000000000000000000000000000000000000000000000000000000000002", "identity": "bob" },
+          "auto":  { "key": "0000000000000000000000000000000000000000000000000000000000000003", "identity": "auto" }
+        }
+      }
+    },
+    "assets": {
+      "BTC": { "decimals": 8, "min_deposit": "1000" }
+    }
+  },
+  "sweep": { "min_sweep_wei": "100000", "plan_interval": "5s" },
+  "withdrawal": {
+    "approval_window": "1h",
+    "approval_timeout": "55m",
+    "sign_timeout": "30s",
+    "stuck_after": "10m",
+    "hot_wait": "30m",
+    "tiers": {
+      "BTC": [ { "min_amount": "0", "approvals": 1, "auto": true }, { "min_amount": "50000000", "approvals": 2 } ]
+    }
+  },
+  "scan": { "interval": "5s", "start_height": 0 },
+  "cold": {
+    "addresses": { "omnibus/native": "bcrt1qgn33jvqejtek6shugcz27eq322m2g95uxj6943" },
+    "plan_interval": "5s"
+  }
+}

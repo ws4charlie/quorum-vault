@@ -83,6 +83,7 @@ func (s *system) setupWithdrawals(o opts) {
 		t.Fatal(err)
 	}
 
+	s.feeCapsCore(o)
 	sweepsPerHour := 100000
 	if o.gwSweepsPerHour > 0 {
 		sweepsPerHour = o.gwSweepsPerHour
@@ -128,6 +129,7 @@ func (s *system) setupWithdrawals(o opts) {
 				HotShards: map[string]gateway.HotShardFile{s.part: {Address: s.hotAddr, Path: []uint32{1, 0}}}},
 			Assets: map[string]gateway.AssetFile{"BTC": asset}}},
 	}
+	s.feeCapsZone(&gf, o)
 	s.gwFile = gf
 	s.gwPath = filepath.Join(s.dir, "gateway.json")
 	writeJSONFile(t, s.gwPath, gf)
@@ -137,6 +139,7 @@ func (s *system) setupWithdrawals(o opts) {
 	writeJSONFile(t, cosPath, cf)
 	_, s.gwGuard = gatewaytest.NewGuardDB(t)
 	_, cosGuard := gatewaytest.NewGuardDB(t)
+	s.cosGuard = cosGuard
 	s.mpc.StartCosigner(cosPath, cosGuard, s.gwGuard)
 }
 
