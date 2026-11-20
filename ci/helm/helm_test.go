@@ -278,3 +278,32 @@ func TestProbesUseTheHealthListener(t *testing.T) {
 		}
 	}
 }
+
+// The migration job is a pre-install hook: on a first install nothing else of the chart exists yet. So every network rule it needs must be a hook too, on BOTH sides:
+// its own egress, and the ingress of the database pods it connects to. Without the second, a database that is already isolated (default deny, or any operator policy)
+// refuses the job and the first install hangs (found by the kind lane).
+func TestMigrationHookHasBothNetworkRules(t *testing.T) {
+	for _, vf := range valuesFiles {
+		var egress, ingress bool
+		for _, o := range render(t, vf.file) {
+			if o.Kind != "NetworkPolicy" || !strings.Contains(o.Raw, "helm.sh/hook: pre-install") {
+				continue
+			}
+			if strings.HasSuffix(o.Metadata.Name, "-migrate-egress") {
+				egress = true
+			}
+			if strings.HasSuffix(o.Metadata.Name, "-migrate-postgres-in") && strings.Contains(o.Raw, "component: migrate") && strings.Contains(o.Raw, "port: 5432") {
+				ingress = true
+			}
+		}
+		if !egress || !ingress {
+			t.Errorf("%s: hook policies: migrate egress %v, postgres ingress for the job %v", vf.file, egress, ingress)
+		}
+	}
+	// the rule is part of the dependency policies: with them off, the chart renders none of them
+	for _, o := range render(t, "values-kind.yaml", "--set", "network.dependencyPolicies.enabled=false") {
+		if strings.HasSuffix(o.Metadata.Name, "-migrate-postgres-in") {
+			t.Errorf("dependencyPolicies off still renders %s", o.Metadata.Name)
+		}
+	}
+}

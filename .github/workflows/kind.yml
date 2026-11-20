@@ -1,0 +1,43 @@
+name: kind lane
+# Separate from ci.yml (design decision D10: a lane is added, the compose groups are not replaced). Install-to-ready and the smoke cases run on every change to what they test.
+on:
+  pull_request:
+    paths: ["deploy/**", "ci/kind/**", ".github/workflows/kind.yml"]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: kind-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: kind and helm
+        run: |
+          curl -sSLo kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 && chmod +x kind && sudo mv kind /usr/local/bin/
+          helm version
+      - name: up
+        run: /usr/bin/time -v make kind-up 2>&1 | tee /tmp/up.log | tail -40
+      - name: memory and time
+        if: always()
+        run: |
+          grep -E "Elapsed|Maximum resident" /tmp/up.log || true
+          docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | grep kind || true
+      - name: smoke
+        run: make kind-smoke
+      - name: logs on failure
+        if: failure()
+        run: |
+          export KUBECONFIG="$(ls ci/kind/.work/*/kubeconfig | head -1)"
+          kubectl get pods -A || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -40 || true
+      - name: down
+        if: always()
+        run: make kind-down

@@ -15,9 +15,9 @@ docker info >/dev/null 2>&1 || { echo "FATAL: docker is not running" >&2; exit 1
 phase_images() {
   log "images: dependencies by digest, services from this checkout"
   pull_pinned
-  for t in $LOCAL_IMAGES; do
-    docker image inspect "qv-image/$t:local" >/dev/null 2>&1 || { log "building $t"; deploy/images/build.sh "$t"; }
-  done
+  # always built: the docker layer cache makes an unchanged image a no-op, and a stale image against a newer chart fails in confusing ways (a flag the chart passes and the old binary lacks).
+  # QV_KIND_SKIP_BUILD=1 keeps what is there.
+  if [ "${QV_KIND_SKIP_BUILD:-}" != 1 ]; then log "building the service images"; deploy/images/build.sh $LOCAL_IMAGES >&2; fi
 }
 
 phase_cluster() {
