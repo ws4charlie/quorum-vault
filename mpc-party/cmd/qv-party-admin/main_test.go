@@ -105,7 +105,7 @@ func TestCompareFindsEveryDisagreement(t *testing.T) {
 		return &pb.KeysetStatus{KeysetId: "k", Generation: gen, Resolved: true, Frozen: frozen, PublicKey: []byte(pub)}
 	}
 	h := func(k ...*pb.KeysetStatus) *pb.HealthResponse { return &pb.HealthResponse{Keysets: k} }
-	if bad := compare([]view{{name: "A", health: h(ks(2, false, "p"))}, {name: "B", health: h(ks(2, false, "p"))}}, ""); len(bad) != 0 {
+	if bad := compare([]view{{name: "A", health: h(ks(2, false, "p"))}, {name: "B", health: h(ks(2, false, "p"))}}, "", false); len(bad) != 0 {
 		t.Fatalf("agreeing parties: %v", bad)
 	}
 	for name, vs := range map[string][]view{
@@ -115,8 +115,42 @@ func TestCompareFindsEveryDisagreement(t *testing.T) {
 		"missing":    {{name: "A", health: h(ks(2, false, "p"))}, {name: "B", health: h()}},
 		"down":       {{name: "A", health: h(ks(2, false, "p"))}, {name: "B", err: os.ErrDeadlineExceeded}},
 	} {
-		if bad := compare(vs, ""); len(bad) == 0 {
+		if bad := compare(vs, "", false); len(bad) == 0 {
 			t.Errorf("%s: no disagreement found", name)
 		}
+	}
+}
+
+func TestCompareOnlyTheTargetKeysetAndUnfreezeIgnoresTheFlag(t *testing.T) {
+	mk := func(id string, gen uint64, frozen bool) *pb.KeysetStatus {
+		return &pb.KeysetStatus{KeysetId: id, Generation: gen, Resolved: true, Frozen: frozen, PublicKey: []byte("p")}
+	}
+	h := func(k ...*pb.KeysetStatus) *pb.HealthResponse { return &pb.HealthResponse{Keysets: k} }
+	// "bad" is in disagreement (generations differ, one unresolved); "good" is healthy
+	vs := []view{
+		{name: "A", health: h(mk("good", 3, false), mk("bad", 2, false))},
+		{name: "B", health: h(mk("good", 3, false), &pb.KeysetStatus{KeysetId: "bad", Generation: 1, PublicKey: []byte("p")})},
+	}
+	if bad := compare(vs, "good", false); len(bad) != 0 {
+		t.Fatalf("an unrelated keyset blocks the healthy one: %v", bad)
+	}
+	if bad := compare(vs, "fresh", false); len(bad) != 0 {
+		t.Fatalf("an unrelated keyset blocks a keyset that does not exist yet: %v", bad)
+	}
+	if bad := compare(vs, "bad", false); len(bad) == 0 {
+		t.Fatal("the keyset's own disagreement was not found")
+	}
+	// one party frozen, the others not: unfreeze goes on, a refresh does not
+	fz := []view{{name: "A", health: h(mk("k", 2, true))}, {name: "B", health: h(mk("k", 2, false))}, {name: "C", health: h(mk("k", 2, false))}}
+	if bad := compare(fz, "k", true); len(bad) != 0 {
+		t.Fatalf("unfreeze refused for partly frozen parties: %v", bad)
+	}
+	if bad := compare(fz, "k", false); len(bad) == 0 {
+		t.Fatal("a partly frozen keyset passes for other operations")
+	}
+	// generation still has to agree on unfreeze
+	fz[1] = view{name: "B", health: h(mk("k", 1, false))}
+	if bad := compare(fz, "k", true); len(bad) == 0 {
+		t.Fatal("unfreeze ignores a generation mismatch")
 	}
 }

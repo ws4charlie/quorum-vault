@@ -215,7 +215,9 @@ func keysetMap(h *pb.HealthResponse) map[string]*pb.KeysetStatus {
 }
 
 // compare lists every way the parties disagree about one keyset (only keysets named in want, or all when want is empty), and every party that did not answer.
-func compare(vs []view, want string) []string {
+// ignoreFrozen: an unfreeze starts from parties that disagree about the frozen flag (freeze notices are best effort and the parties' own Unfreeze
+// handles members that are not frozen); generation and public key must still agree.
+func compare(vs []view, want string, ignoreFrozen bool) []string {
 	var bad []string
 	ids := map[string]bool{}
 	for _, v := range vs {
@@ -264,7 +266,7 @@ func compare(vs []view, want string) []string {
 			if k.Generation != ref.Generation {
 				bad = append(bad, fmt.Sprintf("keyset %s: party %s is at generation %d, party %s at %d", id, v.name, k.Generation, refName, ref.Generation))
 			}
-			if k.Frozen != ref.Frozen {
+			if !ignoreFrozen && k.Frozen != ref.Frozen {
 				bad = append(bad, fmt.Sprintf("keyset %s: frozen on party %s=%v but on party %s=%v", id, v.name, k.Frozen, refName, ref.Frozen))
 			}
 			if k.Scheme != ref.Scheme {
@@ -361,10 +363,27 @@ func statusCmd(args []string, out io.Writer) error {
 	defer closeAll(cs)
 	vs := healthOf(context.Background(), cs)
 	printStatus(out, vs, *keyset)
-	if bad := compare(vs, ""); len(bad) > 0 && (*keyset == "" || anyMentions(bad, *keyset) || anyUnanswered(vs)) {
+	bad := compare(vs, *keyset, false)
+	if *keyset != "" { // unrelated disagreements are a warning, not a failure
+		for _, w := range compare(vs, "", false) {
+			if !contains(bad, w) {
+				fmt.Fprintln(out, "WARNING (another keyset):", w)
+			}
+		}
+	}
+	if len(bad) > 0 {
 		return disagree(bad)
 	}
 	return nil
+}
+
+func contains(l []string, x string) bool {
+	for _, e := range l {
+		if e == x {
+			return true
+		}
+	}
+	return false
 }
 
 func anyMentions(bad []string, id string) bool {
@@ -440,28 +459,39 @@ func sendCmd(op string, args []string, out, errw io.Writer) error {
 
 	// before: every named party answers, and they agree
 	before := healthOf(ctx, cs)
-	if bad := compare(before, ""); len(bad) > 0 {
-		printStatus(out, before, f.Keyset)
-		return disagree(bad)
-	}
-	st := keysetMap(before[0].health)[f.Keyset]
-	switch op {
-	case admin.OpDKG:
-		if st != nil {
-			return fmt.Errorf("keyset %s already exists (generation %d) on the parties: a DKG would not make a new one", f.Keyset, st.Generation)
+	// only the keyset this call is about matters: another keyset's trouble does not block it (status shows it as a warning)
+	if op == admin.OpDKG {
+		for _, v := range before {
+			if v.err != nil {
+				printStatus(out, before, f.Keyset)
+				return disagree(compare(before, f.Keyset, false))
+			}
 		}
-	case admin.OpRefresh:
+		for _, v := range before {
+			if st := keysetMap(v.health)[f.Keyset]; st != nil {
+				return fmt.Errorf("keyset %s already exists (generation %d) on party %s: a DKG would not make a new one", f.Keyset, st.Generation, v.name)
+			}
+		}
+	} else {
+		if bad := compare(before, f.Keyset, op == admin.OpUnfreeze); len(bad) > 0 {
+			printStatus(out, before, f.Keyset)
+			return disagree(bad)
+		}
+		var st *pb.KeysetStatus
+		frozen := false
+		for _, v := range before {
+			if k := keysetMap(v.health)[f.Keyset]; k != nil {
+				st = k
+				frozen = frozen || k.Frozen
+			}
+		}
 		if st == nil {
 			return fmt.Errorf("keyset %s does not exist on the parties", f.Keyset)
 		}
-		if st.Frozen {
+		if op == admin.OpRefresh && frozen {
 			return fmt.Errorf("keyset %s is frozen: find out why, then unfreeze it, before a refresh", f.Keyset)
 		}
-	case admin.OpUnfreeze:
-		if st == nil {
-			return fmt.Errorf("keyset %s does not exist on the parties", f.Keyset)
-		}
-		if !st.Frozen {
+		if op == admin.OpUnfreeze && !frozen {
 			return fmt.Errorf("keyset %s is not frozen", f.Keyset)
 		}
 	}
@@ -494,7 +524,7 @@ func sendCmd(op string, args []string, out, errw io.Writer) error {
 	if callErr != nil {
 		return fmt.Errorf("%s of keyset %s through party %s: %w\n(the status above is what the parties report now; the authorisation may be used up: sign a new one before trying again)", op, f.Keyset, cs[0].name, callErr)
 	}
-	if bad := compare(after, f.Keyset); len(bad) > 0 {
+	if bad := compare(after, f.Keyset, false); len(bad) > 0 {
 		return disagree(bad)
 	}
 	k := keysetMap(after[0].health)[f.Keyset]
