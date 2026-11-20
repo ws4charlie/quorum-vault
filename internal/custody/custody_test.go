@@ -1,8 +1,8 @@
 package custody
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"math/big"
 	"os"
@@ -441,19 +441,46 @@ func TestShippedConfigsAgreeOnBitcoinFeeCaps(t *testing.T) {
 	if n == 0 {
 		t.Fatal("the gateway example has no Bitcoin chain to check")
 	}
-	// A core example that sets its own Bitcoin caps must set the same ones (the current one is not a Bitcoin chain, so it takes the defaults).
-	b, err := os.ReadFile("config.example.json")
+	// The core's Bitcoin example sets the caps itself and must set the same ones as the zone's, and the same signed-change rules: the approvers
+	// are the zone's enabled Ed25519 approvers (name, key, identity), min_approvers is not below the zone's.
+	// Both files must also load: the start-up checks run on them (the zone checks its caps against its bounds there).
+	core, err := LoadConfig("config.example.btc.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f File
-	if err := json.Unmarshal(b, &f); err != nil {
-		t.Fatal(err)
-	}
-	if f.Chain.BTC != nil {
-		c := f.Chain.BTC
-		if (c.MaxTxFeeSats != 0 && c.MaxTxFeeSats != maxTx) || (c.MaxFeeRate != 0 && c.MaxFeeRate != maxRate) || (c.MaxInputs != 0 && c.MaxInputs != maxInputs) {
-			t.Errorf("core example sets fee caps %d, %d, %d; the gateway example and the defaults use %d, %d, %d", c.MaxTxFeeSats, c.MaxFeeRate, c.MaxInputs, maxTx, maxRate, maxInputs)
+	for name, ch := range zone.Chains {
+		if ch.Family != gateway.FamilyBTC {
+			continue
+		}
+		if core.BTC.MaxTxFeeSats != ch.BTC.MaxTxFeeSats || core.BTC.MaxFeeRate != ch.BTC.MaxFeeRate || core.BTC.MaxInputs != ch.BTC.MaxInputs {
+			t.Errorf("core btc example caps %d, %d, %d; zone chain %q has %d, %d, %d: they must be equal", core.BTC.MaxTxFeeSats, core.BTC.MaxFeeRate, core.BTC.MaxInputs,
+				name, ch.BTC.MaxTxFeeSats, ch.BTC.MaxFeeRate, ch.BTC.MaxInputs)
+		}
+		if ch.BTC.FeeCaps == nil {
+			t.Errorf("zone example chain %q has no fee_caps_change: the feature is off for anyone who starts from the example", name)
+			continue
+		}
+		if core.BTC.FeeCaps == nil {
+			t.Fatal("core btc example has no fee_caps_change")
+		}
+		rules := zone.FeeCapsRules(name)
+		if rules == nil {
+			t.Fatalf("zone example chain %q accepts no fee-cap change", name)
+		}
+		if len(core.BTC.FeeCaps.Approvers) != len(rules.Approvers) {
+			t.Errorf("core fee_caps_change has %d approvers, the zone has %d enabled", len(core.BTC.FeeCaps.Approvers), len(rules.Approvers))
+		}
+		for n, za := range rules.Approvers {
+			ca, ok := core.BTC.FeeCaps.Approvers[n]
+			if !ok || !bytes.Equal(ca.Key, za.Key) || ca.Identity != za.Identity {
+				t.Errorf("approver %q of the zone is not the same in the core's fee_caps_change", n)
+			}
+		}
+		if core.BTC.FeeCaps.MinApprovers < ch.BTC.FeeCaps.MinApprovers {
+			t.Errorf("core min_approvers %d is below the zone's %d", core.BTC.FeeCaps.MinApprovers, ch.BTC.FeeCaps.MinApprovers)
+		}
+		if core.BTC.FeeCaps.MaxAge != ch.BTC.FeeCaps.MaxAge {
+			t.Errorf("core max_change_age %s, zone %s", core.BTC.FeeCaps.MaxAge, ch.BTC.FeeCaps.MaxAge)
 		}
 	}
 }
