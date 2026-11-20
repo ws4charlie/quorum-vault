@@ -65,24 +65,29 @@ func loadSeed(path string) (ed25519.PrivateKey, error) {
 	return ed25519.NewKeyFromSeed(seed), nil
 }
 
+// adminkey makes the lane's three admin seeds (FILE.0, FILE.1, FILE.2, if missing) and prints their public keys, one per line. The parties are configured with
+// all three and admin_threshold 2; dkg signs with two.
 func adminkey(args []string) error {
 	fs := flag.NewFlagSet("adminkey", flag.ExitOnError)
-	seedF := fs.String("seed", "", "seed file")
+	seedF := fs.String("seed", "", "seed file base name")
 	fs.Parse(args)
-	if _, err := os.Stat(*seedF); os.IsNotExist(err) {
-		seed := make([]byte, ed25519.SeedSize)
-		if _, err := rand.Read(seed); err != nil {
+	for i := range 3 {
+		p := fmt.Sprintf("%s.%d", *seedF, i)
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			seed := make([]byte, ed25519.SeedSize)
+			if _, err := rand.Read(seed); err != nil {
+				return err
+			}
+			if err := os.WriteFile(p, []byte(hex.EncodeToString(seed)+"\n"), 0o600); err != nil {
+				return err
+			}
+		}
+		k, err := loadSeed(p)
+		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(*seedF, []byte(hex.EncodeToString(seed)+"\n"), 0o600); err != nil {
-			return err
-		}
+		fmt.Println(hex.EncodeToString(k.Public().(ed25519.PublicKey)))
 	}
-	k, err := loadSeed(*seedF)
-	if err != nil {
-		return err
-	}
-	fmt.Println(hex.EncodeToString(k.Public().(ed25519.PublicKey)))
 	return nil
 }
 
@@ -123,11 +128,15 @@ func dkg(args []string) error {
 		return err
 	}
 	defer closeFn()
-	adm, err := loadSeed(*seedF)
-	if err != nil {
-		return err
+	var adms []ed25519.PrivateKey
+	for i := range 2 { // two of the three admins sign
+		k, err := loadSeed(fmt.Sprintf("%s.%d", *seedF, i))
+		if err != nil {
+			return err
+		}
+		adms = append(adms, k)
 	}
-	req := &pb.DKGRequest{KeysetId: *id, Admin: admin.Sign(adm, "dkg", *id, time.Now())}
+	req := &pb.DKGRequest{KeysetId: *id}
 	switch *scheme {
 	case "ecdsa-2of3":
 		req.Scheme = pb.Scheme_SCHEME_ECDSA_2OF3
@@ -135,6 +144,10 @@ func dkg(args []string) error {
 		req.Curve = pb.Curve_CURVE_SECP256K1
 	default:
 		return fmt.Errorf("-scheme %q", *scheme)
+	}
+	now := time.Now()
+	if req.Admin, err = admin.Authorize("dkg", req, "", now, now.Add(10*time.Minute), adms...); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
