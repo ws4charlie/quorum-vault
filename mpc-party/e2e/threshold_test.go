@@ -128,22 +128,37 @@ func (cl *cluster3) restart(t *testing.T, role string, env ...string) {
 	cl.start(t, role, env...)
 }
 
+// waitReady waits for the real condition: every party process is alive and answers Health on its caller port, A reaches B and C,
+// and B reaches C. A party that exited fails the wait at once with its stderr (a start that cannot succeed is not worth 20 s).
 func (cl *cluster3) waitReady(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		ctx, cancel := context5(2 * time.Second)
-		h, err := cl.client["A"].Health(ctx, &pb.HealthRequest{})
-		cancel()
-		if err == nil && len(h.Peers) == 2 && h.Peers[0].Reachable && h.Peers[1].Reachable {
-			hb, err := cl.client["B"].Health(ctx5(t, 2*time.Second), &pb.HealthRequest{})
-			if err == nil && hb.PeerReachable {
-				return
+		for role, p := range cl.procs {
+			if p.exited() {
+				t.Fatalf("party %s exited before it was ready.\nA: %s\nB: %s\nC: %s", role, cl.procs["A"].stderr, cl.procs["B"].stderr, cl.procs["C"].stderr)
 			}
+		}
+		if cl.readyOnce() {
+			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("parties not ready.\nA: %s\nB: %s\nC: %s", cl.procs["A"].stderr, cl.procs["B"].stderr, cl.procs["C"].stderr)
+}
+
+func (cl *cluster3) readyOnce() bool {
+	health := func(role string) *pb.HealthResponse {
+		ctx, cancel := context5(2 * time.Second)
+		defer cancel()
+		h, err := cl.client[role].Health(ctx, &pb.HealthRequest{})
+		if err != nil {
+			return nil
+		}
+		return h
+	}
+	ha, hb, hc := health("A"), health("B"), health("C")
+	return ha != nil && hb != nil && hc != nil && len(ha.Peers) == 2 && ha.Peers[0].Reachable && ha.Peers[1].Reachable && hb.PeerReachable
 }
 
 func (cl *cluster3) sc() pb.Scheme {
