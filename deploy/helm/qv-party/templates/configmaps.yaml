@@ -51,9 +51,9 @@
 {{ $c | toPrettyJson }}
 {{- end -}}
 
-{{- define "qp.partyConfigName" -}}{{ printf "%s-config-%s" (include "qp.fullname" .) (include "qp.partyConfig" . | sha256sum | trunc 10) | trunc 63 }}{{- end -}}
-{{- define "qp.cosignerConfigName" -}}{{ printf "%s-cosigner-config-%s" (include "qp.fullname" .) (toPrettyJson .Values.cosigner.config | sha256sum | trunc 10) | trunc 63 }}{{- end -}}
-{{- define "qp.softhsmConfigName" -}}{{ printf "%s-softhsm-%s" (include "qp.fullname" .) (include "qp.softhsmConf" . | sha256sum | trunc 10) | trunc 63 }}{{- end -}}
+{{- define "qp.partyConfigName" -}}{{ printf "%s-%s" (printf "%s-config" (include "qp.fullname" .) | trunc 52 | trimSuffix "-") (include "qp.partyConfig" . | sha256sum | trunc 10) }}{{- end -}}
+{{- define "qp.cosignerConfigName" -}}{{ printf "%s-%s" (printf "%s-cosigner-config" (include "qp.fullname" .) | trunc 52 | trimSuffix "-") (toPrettyJson .Values.cosigner.config | sha256sum | trunc 10) }}{{- end -}}
+{{- define "qp.softhsmConfigName" -}}{{ printf "%s-%s" (printf "%s-softhsm" (include "qp.fullname" .) | trunc 52 | trimSuffix "-") (include "qp.softhsmConf" . | sha256sum | trunc 10) }}{{- end -}}
 {{- define "qp.softhsmConf" -}}
 directories.tokendir = /var/lib/qv/party/softhsm/tokens
 objectstore.backend = file
