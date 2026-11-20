@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
@@ -46,9 +47,20 @@ func RegisterNamespace(ctx context.Context, addr, namespace string, conn ...clie
 	return nil
 }
 
-// NewWorker registers every workflow and the activities on a worker.
+// DefaultStopTimeout is how long a stopping worker lets running activities finish. The normal activities take seconds (the build
+// and sign-wait activities are bounded by 30 s and one 20 s slice); a planning pass has a two-minute limit but ends in seconds.
+// 40 s covers them all and leaves 20 s of the chart's 60 s grace period for the exit. See deploy/images/README.md.
+const DefaultStopTimeout = 40 * time.Second
+
+// NewWorker registers every workflow and the activities on a worker. On Stop the worker polls no more, waits up to d.StopTimeout
+// (DefaultStopTimeout when zero) for running activities, then cancels their context. Long waits end earlier: they watch the stop
+// channel (see stopping).
 func NewWorker(c client.Client, d Deps) worker.Worker {
-	w := worker.New(c, d.queue(), worker.Options{})
+	st := d.StopTimeout
+	if st <= 0 {
+		st = DefaultStopTimeout
+	}
+	w := worker.New(c, d.queue(), worker.Options{WorkerStopTimeout: st})
 	w.RegisterWorkflow(ScanWorkflow)
 	w.RegisterWorkflow(SweepPlannerWorkflow)
 	w.RegisterWorkflow(WithdrawalReconcilerWorkflow)

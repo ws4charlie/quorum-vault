@@ -1,0 +1,129 @@
+{{- $name := include "qvs.fullname" (dict "ctx" . "c" "gateway") }}
+{{- $pin := ne .Values.hsm.mode "none" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels: {{- include "qvs.labels" (dict "ctx" . "c" "gateway") | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels: {{- include "qvs.labels" (dict "ctx" . "c" "gateway") | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  strategy:
+    type: {{ .Values.gateway.strategy.type }}
+    {{- if eq .Values.gateway.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxSurge: {{ .Values.gateway.strategy.maxSurge }}
+      maxUnavailable: {{ .Values.gateway.strategy.maxUnavailable }}
+    {{- end }}
+  selector:
+    matchLabels: {{- include "qvs.selector" (dict "ctx" . "c" "gateway") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "qvs.labels" (dict "ctx" . "c" "gateway") | nindent 8 }}
+      annotations:
+        kubectl.kubernetes.io/default-container: gateway
+    spec:
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds }}
+      securityContext: {{- include "qvs.podSecurityContext" . | nindent 8 }}
+      {{- include "qvs.pullSecrets" . | nindent 6 }}
+      {{- include "qvs.spread" (dict "ctx" . "c" "gateway") | nindent 6 }}
+      containers:
+        - name: gateway
+          image: {{ include "qvs.image" (dict "ctx" . "k" "gateway") | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          args:
+            - -config
+            - /etc/qv/config/config.json
+            - -audit-source
+            - {{ .Values.kafka.auditSource | quote }}
+            - -anchor-interval
+            - {{ .Values.kafka.anchorInterval | quote }}
+            {{- with .Values.gateway.lease }}
+            - -lease
+            - {{ . | quote }}
+            {{- end }}
+          envFrom:
+            - configMapRef: { name: {{ include "qvs.cmName" (dict "ctx" . "c" "gateway-env" "data" (include "qvs.gatewayEnv" .)) }} }
+          {{- if $pin }}
+          env:
+            - name: QV_HSM_PIN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.hsm.pin.secretName | quote }}, key: {{ .Values.hsm.pin.key | quote }} }
+          {{- end }}
+          ports:
+            - { name: health, containerPort: {{ .Values.gateway.healthPort }}, protocol: TCP }
+          startupProbe: { httpGet: { path: /readyz, port: health }, periodSeconds: 5, failureThreshold: {{ .Values.gateway.startupFailureThreshold }} }
+          readinessProbe: { httpGet: { path: /readyz, port: health }, periodSeconds: 10, failureThreshold: 3 }
+          livenessProbe: { httpGet: { path: /livez, port: health }, periodSeconds: 20, failureThreshold: 3 }
+          resources: {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext: {{- include "qvs.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/qv/tls, readOnly: true }
+            - { name: link-tls, mountPath: /etc/qv/link-tls, readOnly: true }
+            - { name: config, mountPath: /etc/qv/config, readOnly: true }
+            - { name: metrics, mountPath: /var/lib/qv/metrics }
+            {{- if eq .Values.hsm.mode "pkcs11" }}
+            - { name: hsm-module, mountPath: {{ .Values.hsm.pkcs11.mountPath }}/lib, readOnly: true }
+            {{- if .Values.hsm.pkcs11.clientConfig }}
+            - { name: hsm-client, mountPath: {{ .Values.hsm.pkcs11.mountPath }}/etc, readOnly: true }
+            {{- end }}
+            {{- else if eq .Values.hsm.mode "softhsm" }}
+            - { name: softhsm, mountPath: /run/qv/softhsm }
+            {{- end }}
+        {{- if .Values.metrics.agent.enabled }}
+        - name: metrics-agent
+          image: {{ include "qvs.image" (dict "ctx" . "k" "agent") | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          args: ["run", "/etc/alloy/config.alloy", "--server.http.listen-addr=127.0.0.1:12345", "--storage.path=/var/lib/alloy", "--disable-reporting"]
+          resources: {{- toYaml .Values.metrics.agent.resources | nindent 12 }}
+          securityContext: {{- include "qvs.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: metrics, mountPath: /var/lib/qv/metrics, readOnly: true }
+            - { name: agent-config, mountPath: /etc/alloy, readOnly: true }
+            - { name: agent-data, mountPath: /var/lib/alloy }
+            {{- if .Values.metrics.agent.remoteWrite.tokenSecret }}
+            - { name: remote-write, mountPath: /etc/qv/remote-write, readOnly: true }
+            {{- end }}
+        {{- end }}
+      volumes:
+        {{- include "qvs.secretVolume" (dict "name" "tls" "secret" .Values.tls.gateway.secretName) | nindent 8 }}
+        {{- include "qvs.secretVolume" (dict "name" "link-tls" "secret" .Values.tls.gatewayLink.secretName) | nindent 8 }}
+        - name: config
+          configMap: { name: {{ include "qvs.signingConfigName" . }} }
+        - name: metrics
+          emptyDir: { sizeLimit: 16Mi }
+        {{- if eq .Values.hsm.mode "pkcs11" }}
+        - name: hsm-module
+          {{- toYaml .Values.hsm.pkcs11.volume | nindent 10 }}
+        {{- if .Values.hsm.pkcs11.clientConfig }}
+        - name: hsm-client
+          configMap: { name: {{ include "qvs.cmName" (dict "ctx" . "c" "hsm-client" "data" (toJson .Values.hsm.pkcs11.clientConfig)) }} }
+        {{- end }}
+        {{- else if eq .Values.hsm.mode "softhsm" }}
+        - name: softhsm
+          persistentVolumeClaim: { claimName: {{ include "qvs.fullname" (dict "ctx" . "c" "softhsm") }} }
+        {{- end }}
+        {{- if .Values.metrics.agent.enabled }}
+        - name: agent-config
+          configMap: { name: {{ include "qvs.cmName" (dict "ctx" . "c" "agent" "data" (include "qvs.agentConfig" .)) }} }
+        - name: agent-data
+          emptyDir: { sizeLimit: 64Mi }
+        {{- with .Values.metrics.agent.remoteWrite.tokenSecret }}
+        - name: remote-write
+          secret: { secretName: {{ . | quote }}, defaultMode: 288 }
+        {{- end }}
+        {{- end }}
