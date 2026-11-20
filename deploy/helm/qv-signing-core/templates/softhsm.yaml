@@ -1,0 +1,67 @@
+{{- if eq .Values.hsm.mode "softhsm" }}
+{{- /* KIND ONLY (hsm.mode softhsm needs env: dev). A volume for the token files, and a hook Job that makes the token. Never rendered with the production values. */}}
+{{- $name := include "qvs.fullname" (dict "ctx" . "c" "softhsm") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels: {{- include "qvs.labels" (dict "ctx" . "c" "softhsm") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install
+    helm.sh/hook-weight: "-20"
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: {{ .Values.hsm.softhsm.size }} } }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}-init
+  labels: {{- include "qvs.labels" (dict "ctx" . "c" "softhsm") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels: {{- include "qvs.labels" (dict "ctx" . "c" "softhsm") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext: {{- include "qvs.podSecurityContext" . | nindent 8 }}
+      {{- include "qvs.pullSecrets" . | nindent 6 }}
+      containers:
+        - name: softhsm-init
+          image: {{ include "qvs.image" (dict "ctx" . "k" "gateway") | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              d=/run/qv/softhsm
+              mkdir -p "$d/tokens"
+              printf 'directories.tokendir = %s/tokens\nobjectstore.backend = file\n' "$d" > "$d/softhsm2.conf"
+              export SOFTHSM2_CONF="$d/softhsm2.conf"
+              if softhsm2-util --show-slots | grep -q "Label: *$SLOT_LABEL"; then echo "token $SLOT_LABEL exists"; exit 0; fi
+              softhsm2-util --init-token --free --label "$SLOT_LABEL" --so-pin "$SO_PIN" --pin "$USER_PIN"
+          env:
+            - { name: SLOT_LABEL, value: {{ .Values.hsm.softhsm.tokenLabel | quote }} }
+            - name: SO_PIN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.hsm.pin.secretName | quote }}, key: {{ .Values.hsm.pin.soKey | quote }} }
+            - name: USER_PIN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.hsm.pin.secretName | quote }}, key: {{ .Values.hsm.pin.key | quote }} }
+          resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 128Mi } }
+          securityContext: {{- include "qvs.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: softhsm, mountPath: /run/qv/softhsm }
+      volumes:
+        - name: softhsm
+          persistentVolumeClaim: { claimName: {{ $name }} }
+{{- end }}
