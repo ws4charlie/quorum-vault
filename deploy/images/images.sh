@@ -20,6 +20,9 @@ QV_BUSINESS_BINS="qv-core qv-worker qv-relay qv-anchor-archiver qv-migrate qv-ap
 QV_SIGNING_BINS="qv-gateway qv-cosigner mpc-party qv-attest-broker qv-route qv-fee-caps qv-approvers qv-btc-xpub qv-keysets qv-party-admin"
 QV_IMAGE_PREFIX="${QV_IMAGE_PREFIX:-qv-image/}"
 QV_IMAGE_TAG="${QV_IMAGE_TAG:-local}"
+# The release set: the production images only. The -dev variants (SoftHSM2) are never published, under any name: publish.sh, release-gate.sh and
+# ci/helm (TestReleaseSetHasNoDev) refuse a -dev or tee-sim name here. qv_all_images (below) is for local builds and checks.
+qv_release_images() { printf '%s\n' $QV_IMAGES | grep .; }
 qv_all_images() { { printf '%s\n' $QV_IMAGES; printf '%s\n' $QV_DEV_IMAGES; } | grep .; }
 # The one business binary a signing image may hold: qv-migrate is a schema tool run as a Job in each signing cluster (-zone signing); the business
 # migrations embedded in it are public SQL and give no access. image:binary pairs.

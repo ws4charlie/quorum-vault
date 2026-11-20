@@ -68,6 +68,10 @@ make test-e2e-all
 
 第一条命令会编译一次 MPC 库，要几分钟。第二条会在本地链上跑 CI 跑的所有测试组，大约十分钟。开发环境的说明在 [CONTRIBUTING.md](CONTRIBUTING.md)，运维手册在 [docs/runbooks](docs/runbooks)，实测数字在 [docs/measurements](docs/measurements)。
 
+## 发布
+
+QuorumVault 以容器镜像发布，每个二进制一个镜像，公开在 `ghcr.io`。发布是手动的：在 `main` 上打版本标签，运行工作流，得到一份已签名的镜像摘要清单，Helm chart 直接使用它。步骤、检查和回滚见 [docs/runbooks/release.md](docs/runbooks/release.md)（英文）。
+
 ## 现状
 
 | 已验证 | 怎么验证的 |

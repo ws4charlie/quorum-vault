@@ -3,6 +3,7 @@
 #
 #   deploy/images/build.sh               every production image and the -dev variants (what `make images` runs)
 #   deploy/images/build.sh qv-core ...   only these targets
+#   QV_CHECK_SET=release deploy/images/build.sh   only the production images (the publish job)
 #   deploy/images/build.sh repro         builds every binary twice from scratch and compares their SHA-256 (the reproducibility check)
 #
 # Images are named ${QV_IMAGE_PREFIX:-qv-image/}<target>:${QV_IMAGE_TAG:-local}. SOURCE_DATE_EPOCH defaults to the commit time of HEAD: it fixes
@@ -29,7 +30,8 @@ if [ "${1:-}" = repro ]; then
   exit 0
 fi
 
-if [ $# -gt 0 ]; then targets=("$@"); else targets=($(qv_all_images | cut -d: -f1)); fi
+if [ $# -gt 0 ]; then targets=("$@"); elif [ "${QV_CHECK_SET:-}" = release ]; then targets=($(qv_release_images | cut -d: -f1))   # the publish job: production images only
+else targets=($(qv_all_images | cut -d: -f1)); fi
 for t in "${targets[@]}"; do
   echo "== $t" >&2
   docker buildx build "${COMMON[@]}" --target "$t" \
