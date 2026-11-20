@@ -131,7 +131,7 @@ rm -f "$tracked" "$allowed" "$corpus" "$godirs"
 files="$(mktemp)"; hits="$(mktemp)"; trap 'rm -f "$files" "$hits"' EXIT
 git ls-files -z | while IFS= read -r -d '' f; do
   skip=0
-  case "$f" in ci/changes.sh|ci/changes_test.sh|ci/classify.sh|ci/skip-allowlist|ci/skip-guard.sh|ci/skip-guard_test.sh|ci/skip-guard-exceptions|ci/skip-module-exceptions) skip=1 ;; esac
+  case "$f" in ci/changes.sh|ci/changes_test.sh|ci/classify.sh|ci/skip-allowlist|ci/skip-guard.sh|ci/skip-guard_test.sh|ci/skip-guard-exceptions|ci/skip-module-exceptions|ci/tracked-files.sh|ci/tracked-files_test.sh|ci/tracked-files-exceptions|ci/final.sh) skip=1 ;; esac
   for p in "${pats[@]}"; do
     # shellcheck disable=SC2254
     case "$f" in $p) skip=1 ;; esac
