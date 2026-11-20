@@ -1,0 +1,94 @@
+{{- $n := .Values.network }}
+{{- /* Peers that must be named: an empty list would render `to: []`, which means "everywhere". The render fails instead. */}}
+{{- range $k, $p := dict "network.jobsDb.peers" $n.jobsDb.peers "network.kafka.peers" $n.kafka.peers "network.guardDb.peers" $n.guardDb.peers "network.parties.a.peers" $n.parties.a.peers "network.parties.b.peers" $n.parties.b.peers }}
+{{- if not $p }}{{ fail (printf "%s is required: name the peers this gateway may reach (private endpoint addresses or pod selectors)" $k) }}{{ end }}
+{{- end }}
+{{- /* 1. Default deny, ingress and egress, for every pod of the namespace. Party A's own pods are covered too: the party chart adds the allows it needs. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default-deny
+  labels: {{- include "qvs.labels" (dict "ctx" . "c" "network") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+{{- /* 2. DNS for this release's pods. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-allow-dns
+  labels: {{- include "qvs.labels" (dict "ctx" . "c" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $n.dns | nindent 8 }}
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+{{- /* 3. The gateway dials out to: its guard database, the business job queue and Kafka (the signing link), the parties' caller ports, and (if enabled) the metrics endpoint. Nothing else. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qvs.fullname" (dict "ctx" . "c" "gateway") }}-egress
+  labels: {{- include "qvs.labels" (dict "ctx" . "c" "gateway") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "qvs.selector" (dict "ctx" . "c" "gateway") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $n.guardDb.peers | nindent 8 }}
+      ports: [{ port: {{ $n.guardDb.port }}, protocol: TCP }]
+    - to: {{- toYaml $n.jobsDb.peers | nindent 8 }}
+      ports: [{ port: {{ $n.jobsDb.port }}, protocol: TCP }]
+    - to: {{- toYaml $n.kafka.peers | nindent 8 }}
+      ports: [{ port: {{ $n.kafka.port }}, protocol: TCP }]
+    {{- range $p := list "a" "b" "c" }}
+    {{- with index $n.parties $p }}
+    {{- if .peers }}
+    - to: {{- toYaml .peers | nindent 8 }}
+      ports: [{ port: {{ .port }}, protocol: TCP }]
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- if $.Values.metrics.agent.enabled }}
+    {{- if not $n.metricsRemoteWrite.peers }}{{ fail "network.metricsRemoteWrite.peers is required when metrics.agent.enabled" }}{{ end }}
+    - to: {{- toYaml $n.metricsRemoteWrite.peers | nindent 8 }}
+      ports:
+        {{- range $n.metricsRemoteWrite.ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+    {{- end }}
+---
+{{- /* 4. The operator Job (signed settings) reaches the guard database and nothing else. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qvs.fullname" (dict "ctx" . "c" "tools") }}-egress
+  labels: {{- include "qvs.labels" (dict "ctx" . "c" "tools") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "qvs.selector" (dict "ctx" . "c" "tools") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $n.guardDb.peers | nindent 8 }}
+      ports: [{ port: {{ $n.guardDb.port }}, protocol: TCP }]
+{{- /* 5. NO ingress policy for the gateway: it listens on nothing a peer may use (the health port is for the kubelet, which the policy does not govern). */}}
+{{- if $n.dependencyPolicies.enabled }}
+---
+{{- /* 6. The guard database's pods accept this release's workloads (the gateway, the operator Job) on the database port. Same namespace only. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-guard-db-from-qv
+  labels: {{- include "qvs.labels" (dict "ctx" . "c" "guard-db") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- (index $n.guardDb.peers 0).podSelector.matchLabels | toYaml | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name | quote }} } } }]
+      ports: [{ port: {{ $n.guardDb.port }}, protocol: TCP }]
+{{- end }}

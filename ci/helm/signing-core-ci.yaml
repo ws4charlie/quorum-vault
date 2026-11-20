@@ -1,0 +1,34 @@
+# Test inputs for the qv-signing-core chart: made-up digests (production values hold placeholders the chart refuses), the values every release must set, and a small
+# public signing config (no secret). Used for both values files by check-signing-core.sh and the tests.
+images:
+  gateway: { digest: "sha256:6666666666666666666666666666666666666666666666666666666666666666" }
+  tools: { digest: "sha256:7777777777777777777777777777777777777777777777777777777777777777" }
+  agent: { digest: "sha256:8888888888888888888888888888888888888888888888888888888888888888" }
+jobs: { host: qv-business-db-rw.business.internal }
+kafka: { brokers: "redpanda.business.internal:9092" }
+hsm:
+  pkcs11:
+    volume: { persistentVolumeClaim: { claimName: qv-cloudhsm-module, readOnly: true } }
+    clientConfig:
+      cloudhsm-pkcs11.json: '{"clusters":[{"type":"hsm1","cluster":{"hsm_ca_file":"/opt/cloudhsm/etc/customerCA.crt","servers":[{"hostname":"10.0.1.10","port":2223}]}}]}'
+network:
+  jobsDb: { peers: [{ ipBlock: { cidr: 10.20.1.0/28 } }] }
+  kafka: { peers: [{ ipBlock: { cidr: 10.20.1.16/28 } }] }
+  parties:
+    b: { peers: [{ ipBlock: { cidr: 10.30.1.0/28 } }] }
+    c: { peers: [{ ipBlock: { cidr: 10.40.1.0/28 } }] }
+  metricsRemoteWrite: { peers: [{ ipBlock: { cidr: 10.50.1.0/28 } }] }
+config:
+  signing: |
+    {
+      "max_intent_age": "24h",
+      "sign_timeout": "30s",
+      "approvers": { "alice": { "public_key": "0000000000000000000000000000000000000000000000000000000000000001", "enabled": true } },
+      "signers": {
+        "hot-1": { "backend": "mpc", "scheme": "ecdsa-2of3", "keyset_id": "ks-1", "public_key": "04",
+          "coordinators": [
+            { "name": "A", "address": "party-a:7001", "cert_file": "/etc/qv/tls/tls.crt", "key_file": "/etc/qv/tls/tls.key", "server_pin": "00" },
+            { "name": "B", "address": "party-b.signing.internal:7002", "cert_file": "/etc/qv/tls/tls.crt", "key_file": "/etc/qv/tls/tls.key", "server_pin": "00" } ] }
+      },
+      "chains": {}
+    }
