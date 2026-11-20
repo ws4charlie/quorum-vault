@@ -415,7 +415,10 @@ func (c *cli) showOrApprove(ctx context.Context, id string) error {
 		return err
 	}
 	if flags&ctap.FlagUV == 0 {
-		fmt.Fprintln(c.env.Stderr, "WARNING: the key did not report user verification (no PIN or biometric). The signing zone will refuse this approval.")
+		return errors.New("not sent: the key did not report user verification (no PIN or biometric), and the signing zone would refuse this approval. Set a PIN on the key and try again")
+	}
+	if flags&ctap.FlagUP == 0 {
+		return errors.New("not sent: the key did not report that you were present (touch)")
 	}
 	b64 := base64.RawURLEncoding.EncodeToString
 	code, hdr, b, err := c.core(ctx, http.MethodPost, "/v2/withdrawals/"+url.PathEscape(id)+"/approvals", map[string]any{

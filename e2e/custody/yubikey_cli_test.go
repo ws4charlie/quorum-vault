@@ -3,6 +3,10 @@ package custody_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -17,6 +21,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/e2e/idp"
 	"github.com/ws4charlie/quorum-vault/internal/approvecli"
+	"github.com/ws4charlie/quorum-vault/internal/ctap"
 	"github.com/ws4charlie/quorum-vault/internal/ctap/ctaptest"
 	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
@@ -110,13 +115,15 @@ func TestApproverCLIWithASoftwareKey(t *testing.T) {
 		t.Fatalf("the key was asked %d times or %d approvals reached the core", key.Calls.Assert-asked, proxy.approvals.Load())
 	}
 
-	// 4a. A key that skips user verification: the CLI warns, the core stores it, the zone refuses it.
+	// 4a. The CLI refuses to send an assertion without user verification. The zone's own refusal is tested by sending such an assertion through this
+	// test's client, not through the CLI.
 	key.NoUV = true
 	code, out, errb = approve(w2, s.apiURL)
-	key.NoUV = false
-	if code != 0 || !strings.Contains(errb, "WARNING: the key did not report user verification") {
+	if code == 0 || !strings.Contains(errb, "did not report user verification") {
 		t.Fatalf("no UV: %d\n%s\n%s", code, out, errb)
 	}
+	s.postNoUVAssertion(key, entryFile, w2.ID, origin)
+	key.NoUV = false
 	if c, o := s.approve("carol", w2.ID); c != 200 {
 		t.Fatalf("carol: %d %v", c, o)
 	}
@@ -214,4 +221,33 @@ func browse(t *testing.T, link, user string) {
 		return
 	}
 	resp.Body.Close()
+}
+
+// postNoUVAssertion builds the assertion the CLI would (same client data) from a key that skips user verification and posts it to the core directly.
+func (s *system) postNoUVAssertion(key *ctaptest.Soft, entryFile, id, origin string) {
+	s.t.Helper()
+	eb, _ := os.ReadFile(entryFile)
+	var e struct {
+		CredentialID string `json:"credential_id"`
+		RPID         string `json:"rp_id"`
+	}
+	if err := json.Unmarshal(eb, &e); err != nil {
+		s.t.Fatal(err)
+	}
+	cred, _ := base64.RawURLEncoding.DecodeString(e.CredentialID)
+	code, in := s.call("GET", "/v2/withdrawals/"+id+"/intent", nil, nil)
+	if code != 200 {
+		s.t.Fatalf("intent: %d %v", code, in)
+	}
+	h, _ := hex.DecodeString(in["hash"].(string))
+	cd, _ := json.Marshal(map[string]any{"type": "webauthn.get", "challenge": base64.RawURLEncoding.EncodeToString(h), "origin": origin, "crossOrigin": false})
+	as, err := key.GetAssertion(context.Background(), ctap.AssertRequest{RPID: e.RPID, CredentialID: cred, ClientDataHash: sha256.Sum256(cd)})
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	b64 := base64.RawURLEncoding.EncodeToString
+	if c, o := s.call("POST", "/v2/withdrawals/"+id+"/approvals", map[string]string{"X-Actor": "bob"}, map[string]any{"actor": "bob",
+		"webauthn": map[string]string{"credential_id": b64(cred), "authenticator_data": b64(as.AuthData), "client_data_json": b64(cd), "signature": b64(as.Signature)}}); c != 200 {
+		s.t.Fatalf("post: %d %v", c, o)
+	}
 }

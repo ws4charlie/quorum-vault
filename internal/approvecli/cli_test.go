@@ -270,11 +270,12 @@ func TestApproveRefusals(t *testing.T) {
 	if r := run(t, s, jwt("bob"), hex.EncodeToString(h[:])[:8]+"\n", "approve", "w1", "-api", f.srv.URL, "-entry", file); r.code != 0 || s.Calls.Assert != 1 {
 		t.Fatalf("typed confirmation: %+v", r)
 	}
-	// A key that skips user verification: the CLI warns and sends; the zone is the one that refuses (e2e).
+	// A key that skips user verification: the CLI refuses to send. (The zone's own refusal is tested in e2e with a client that bypasses the CLI.)
 	noUV := ctaptest.New()
 	file2, _ := enrol(t, noUV, "carol")
 	noUV.NoUV = true
-	if r := run(t, noUV, jwt("carol"), "", "approve", "w1", "-api", f.srv.URL, "-entry", file2, "-yes"); r.code != 0 || !strings.Contains(r.err, "WARNING: the key did not report user verification") {
+	n := len(f.approvals)
+	if r := run(t, noUV, jwt("carol"), "", "approve", "w1", "-api", f.srv.URL, "-entry", file2, "-yes"); r.code == 0 || !strings.Contains(r.err, "did not report user verification") || len(f.approvals) != n {
 		t.Fatalf("no UV: %+v", r)
 	}
 	// The core asks for a fresher sign-in.

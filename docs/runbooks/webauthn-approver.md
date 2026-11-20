@@ -83,7 +83,7 @@ A browser writes the page's origin into `clientDataJSON`, and the key signs it; 
 
 1. `qv-approve show <withdrawal> -asset-decimals ETH=18`. Check the payee and amount against the request you received through **another channel** (a ticket, a call). The program cannot do that for you.
 2. `qv-approve approve <withdrawal> -entry entry.json -asset-decimals ETH=18`. The program refuses if the requester is you, if the hash or the withdrawal differs, or if you mistype the confirmation. Then PIN, then touch.
-3. `Approval accepted by the core` means only that the core stored it. If the zone refuses it (wrong origin, another credential, no user verification) the withdrawal turns `failed` with `gateway refused`; look at its status. If the key does not report user verification, the program warns and still sends it, so that the zone's refusal is the record.
+3. `Approval accepted by the core` means only that the core stored it. If the zone refuses it (wrong origin, another credential, no user verification) the withdrawal turns `failed` with `gateway refused`; look at its status. If the key does not report user verification, or touch, the program refuses to send (the zone would refuse it anyway); set a PIN on the key.
 4. `the core wants a fresher sign-in`: run the command again and sign in when asked.
 
 ### What it protects against, and what it does not
@@ -121,7 +121,7 @@ Needs: a YubiKey 5 with firmware 5.7.4 (or write what you have), `ykman` 5.x, th
 | 9 | **Wrong PIN once** (never three times in a row: the key counts retries; `ykman fido info` shows how many are left) | The tool reports a wrong PIN; nothing sent | |
 | 10 | **No origin match:** `approve ... -origin https://other.example.com` on a new withdrawal; the Ed25519 approver also approves | The core accepts, the zone refuses: `failed`, `gateway refused`; nothing paid | |
 | 11 | **Lying core (optional):** run a local proxy in front of the core that changes the `hash` of the intent response; point `-api` at it | `REFUSED ... Nothing was signed`; the key is not touched | |
-| 12 | **No PIN set:** reset the FIDO application of a **spare** key (`ykman fido reset`, erases its credentials) and run `enrol` | Enrol fails or says the key did not verify the user; no entry is printed | |
+| 12 | **No PIN set:** reset the FIDO application of a **spare** key (`ykman fido reset`, erases its credentials) and run `enrol` | Enrol fails or says the key did not verify the user; no entry is printed. (An `approve` that reports no user verification is refused by the program: `not sent`) | |
 | 13 | **Spare key:** give a second YubiKey its own login and name (for example `bob-spare`), run `enrol -identity bob` with that login, have the operators sign it. Request a withdrawal that needs two people; approve with the first key (as `bob`) and the second key (as `bob-spare`) | The zone counts one person for both keys: the withdrawal does **not** proceed on those two approvals; it proceeds when a third person approves | |
 | 14 | **Revoke:** the operators revoke `bob`; try `approve` on a new withdrawal with the first key | The core accepts it, the zone ignores it; the withdrawal does not proceed on it | |
 
