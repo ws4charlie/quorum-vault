@@ -37,7 +37,19 @@ deploy/images/check-secrets.sh      # no secret-looking file in any layer, no ot
 deploy/images/build.sh repro        # builds every binary twice from scratch and compares SHA-256
 ```
 
-The first build compiles cb-mpc (several minutes). CI ([`images.yml`](../../.github/workflows/images.yml)) runs the same three checks on pull requests that touch image inputs. Publishing and signing (`publish.sh`: push by digest, SBOM, provenance, cosign keyless) exist only behind the manual `workflow_dispatch` input `publish`, default off.
+The first build compiles cb-mpc (several minutes). CI ([`images.yml`](../../.github/workflows/images.yml)) runs the same three checks on pull requests that touch image inputs. A release (manual; version tag on `main`, green CI) is described in [`docs/runbooks/release.md`](../../docs/runbooks/release.md) and summarised in "Releases" below.
+
+## Releases
+
+Only the production images are released (`qv_release_images` in `images.sh`); the `-dev` images are never published. The `images.yml` workflow has three release jobs:
+
+| Job | When | What |
+|---|---|---|
+| `dry-run` | every pull request, and a manual run with `publish=false` | builds the release images, runs `smoke.sh` and `check-secrets.sh`, computes the digests, writes a manifest with `"dryRun": true`; read-only token, no login, no push, no signature |
+| `gate` | manual run with `publish=true` | `release-gate.sh`: a tag `vMAJOR.MINOR.PATCH[-rc.N]`, whose commit is on `main` and has a successful `ci` push run |
+| `publish` | after `gate`, `build` and `repro` | the same build and checks, then `publish.sh` with `PUBLISH=1`: push by digest with SBOM and provenance, cosign keyless signature, signed `release-<version>.json`; then a re-check of the pushed images (`check-secrets.sh`, `verify-release.sh`) |
+
+Scripts: `publish.sh` (build, push, sign, manifest; dry run unless `PUBLISH=1`), `release-gate.sh`, `verify-release.sh` (a manifest against the registry), `manifest-values.py` (a manifest into the `images:` values of `qv-business`, `qv-party` and `qv-signing-core`; `ci/helm/release_values_test.go` renders them with each chart). Images carry the labels `org.opencontainers.image.source`, `.revision` and `.version`. `QV_CHECK_SET=release` makes `build.sh`, `smoke.sh` and `check-secrets.sh` handle the production images only.
 
 ## Reproducibility
 

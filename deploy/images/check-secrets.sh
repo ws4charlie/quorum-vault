@@ -3,6 +3,7 @@
 # a non-root user. The repository is public: no key, PIN, certificate or .env value may ever be in an image.
 #
 #   deploy/images/check-secrets.sh [image ...]     default: every image of images.sh, as ${QV_IMAGE_PREFIX}<name>:${QV_IMAGE_TAG}
+#   QV_CHECK_SET=release deploy/images/check-secrets.sh    only the production images (what the publish job checks before it pushes)
 #
 # It reads the file names of every layer (docker save), not only the final filesystem: a file added in one layer and deleted in the next is still
 # in the image. The patterns are deliberately wide; a false positive is fixed by not shipping that file, never by editing the list.
@@ -15,9 +16,12 @@ SECRET_RE='(^|/)(\.env(\..*)?|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.netrc|\.npmrc
 # the one exception: the system CA bundle of the base image is public trust data, not a secret
 ALLOW_RE='^(etc/ssl/certs/|usr/share/ca-certificates/|etc/ca-certificates|usr/lib/ssl/)'
 fail=0
-if [ $# -gt 0 ]; then images=("$@"); else images=(); while IFS=: read -r n _ _; do images+=("${QV_IMAGE_PREFIX}${n}:${QV_IMAGE_TAG}"); done < <(qv_all_images); fi
+if [ $# -gt 0 ]; then images=("$@"); else
+  images=(); list=qv_all_images; [ "${QV_CHECK_SET:-}" = release ] && list=qv_release_images
+  while IFS=: read -r n _ _; do images+=("${QV_IMAGE_PREFIX}${n}:${QV_IMAGE_TAG}"); done < <($list)
+fi
 for img in "${images[@]}"; do
-  name="${img##*/}"; name="${name%%:*}"
+  name="${img##*/}"; name="${name%%[:@]*}"   # name:tag or name@sha256:digest
   zone="$(qv_all_images | awk -F: -v n="$name" '$1==n{print $2}')"
   tmp="$(mktemp -d)"
   docker save "$img" -o "$tmp/i.tar"
