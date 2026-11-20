@@ -96,7 +96,7 @@ A browser writes the page's origin into `clientDataJSON`, and the key signs it; 
 | A key with no PIN, or a PIN never entered | Enrol refuses; an assertion without the user-verification flag is refused by the zone |
 | A stolen key | The thief needs the PIN (a few wrong tries lock the key); revoke the approver ([Approvers](approvers.md)) |
 
-**No YubiKey has a display.** FIDO has no way to show transaction data on the key. What the separate machine buys is a smaller thing to trust: no browser engine, no page, a few thousand lines of Go, and the libfido2 tools. Keep that machine minimal, patched, and used for nothing else; deploy the binary from the release you reviewed; the machine and the program are as sensitive as the key. Closing the gap needs a device that shows the job itself ([Limits](../limits.md)).
+**No YubiKey has a display.** FIDO has no way to show transaction data on the key. What the separate machine buys is a smaller thing to trust: no browser engine, no page, a small amount of Go, and the libfido2 tools. Keep that machine minimal, patched, and used for nothing else; deploy the binary from the release you reviewed; the machine and the program are as sensitive as the key. Closing the gap needs a device that shows the job itself ([Limits](../limits.md)).
 
 On Kubernetes nothing runs there: `qv-approve` runs on the approver's own machine, outside every cluster. It needs outbound access to the core API and the identity provider only, keeps no state (the token lives in memory; the entry file is public), and opens no inbound port except a loopback port during sign-in.
 
