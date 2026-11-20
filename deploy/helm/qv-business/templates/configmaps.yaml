@@ -29,6 +29,7 @@ data:
   QV_APPROVAL_ORIGINS: {{ include "qv.approvalOrigin" . | quote }}
   {{- end }}
   {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
+  {{- include "qv.healthEnv" .Values.core.probes | nindent 2 }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -42,6 +43,7 @@ data:
   QV_AUTO_APPROVER_KEY_FILE: /etc/qv/approver/{{ .Values.custody.autoApprover.key }}
   {{- end }}
   {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
+  {{- include "qv.healthEnv" .Values.worker.probes | nindent 2 }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -52,6 +54,7 @@ data:
   DATABASE_URL: {{ include "qv.dsn" (dict "ctx" . "role" "qv_relay" "dir" "/etc/qv/tls") | quote }}
   QV_KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
   {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
+  {{- include "qv.healthEnv" .Values.relay.probes | nindent 2 }}
 {{- if .Values.archiver.enabled }}
 ---
 apiVersion: v1
@@ -76,6 +79,7 @@ data:
   QV_ARCHIVE_TLS_CA: /etc/qv/archive-tls/ca.crt
   {{- end }}
   {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
+  {{- include "qv.healthEnv" .Values.archiver.probes | nindent 2 }}
 {{- end }}
 {{- if .Values.approval.enabled }}
 ---

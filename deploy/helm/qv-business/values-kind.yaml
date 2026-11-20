@@ -9,7 +9,7 @@ images:
   migrate:  { digest: "", tag: local, repository: qv-image/qv-migrate }
   approval: { digest: "", tag: local, repository: qv-image/qv-approval-web }
 database: { host: qv-business-db-rw }
-oidc: { issuer: https://keycloak:8443/realms/qv, caSecret: qv-oidc-ca }
+oidc: { issuer: https://keycloak:8443/realms/quorumvault, caSecret: qv-oidc-ca }
 archive:
   endpoint: https://seaweedfs:8333
   bucket: qv-audit
@@ -17,7 +17,7 @@ archive:
   pathStyle: true
   retention: 24h
   credentialsSecret: qv-archive-credentials
-  tls: { secretName: qv-archiver-archive-tls }
+  tls: { secretName: qv-archiver-tls }
 core:
   replicas: 1
   resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: "1", memory: 512Mi } }
@@ -41,7 +41,7 @@ ingress:
 network:
   # kind runs one cluster: every dependency is a pod of the same namespace, the IdP, chain and archive stubs too.
   idp:     { peers: [{ podSelector: { matchLabels: { app: keycloak } } }], ports: [8443] }
-  chain:   { peers: [{ podSelector: { matchLabels: { app: chain-stub } } }], ports: [8545, 8332, 8899] }
+  chain:   { peers: [{ podSelector: { matchLabels: { app: chain-stub } } }], ports: [8545, 18443, 8899] }
   archive: { peers: [{ podSelector: { matchLabels: { app: seaweedfs } } }], ports: [8333] }
   # the signing "cluster" is another namespace in kind
   signingLink: { from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv-signing } } }] }

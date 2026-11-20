@@ -26,7 +26,7 @@
     "probes": {
       "type": "object",
       "required": ["mode"],
-      "properties": { "mode": { "enum": ["tcp", "http", "none"] } }
+      "properties": { "mode": { "enum": ["tcp", "health", "none"] }, "healthPort": { "type": "integer", "minimum": 1, "maximum": 65535 } }
     }
   },
   "required": ["images", "database", "temporal", "kafka", "tls", "custody", "core", "worker", "relay", "archiver", "migration", "network"],

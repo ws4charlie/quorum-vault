@@ -1,0 +1,47 @@
+# The dev identity provider: Keycloak with the dev realm (deploy/keycloak), https only with a business-authority certificate, issuer https://keycloak:8443/realms/quorumvault.
+# Passwords are generated per cluster into the Secret keycloak-env (up.sh); nothing is in the repository.
+apiVersion: v1
+kind: Service
+metadata: { name: keycloak, namespace: qv }
+spec:
+  selector: { app: keycloak }
+  ports: [{ name: https, port: 8443, targetPort: 8443 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: keycloak, namespace: qv }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: keycloak } }
+  template:
+    metadata: { labels: { app: keycloak } }
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.4.7
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "exec /opt/keycloak/bin/kc.sh start-dev --import-realm"]
+          envFrom: [{ secretRef: { name: keycloak-env } }]
+          env:
+            - { name: KC_BOOTSTRAP_ADMIN_USERNAME, value: admin }
+            - { name: KC_HOSTNAME, value: "https://keycloak:8443" }
+            - { name: KC_HTTP_ENABLED, value: "false" }
+            - { name: KC_HTTPS_CERTIFICATE_FILE, value: /pki/tls.crt }
+            - { name: KC_HTTPS_CERTIFICATE_KEY_FILE, value: /pki/tls.key }
+            - { name: KC_HTTP_MANAGEMENT_SCHEME, value: http }
+            - { name: KC_HEALTH_ENABLED, value: "true" }
+            - { name: JAVA_OPTS_KC_HEAP, value: "-Xms256m -Xmx640m" }
+          ports: [{ containerPort: 8443 }]
+          readinessProbe:
+            exec: { command: ["/bin/sh", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"] }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          resources: { requests: { cpu: 200m, memory: 768Mi }, limits: { memory: 1280Mi } }
+          volumeMounts:
+            - { name: realm, mountPath: /opt/keycloak/data/import/quorumvault-realm.json, subPath: quorumvault-realm.json, readOnly: true }
+            - { name: pki, mountPath: /pki, readOnly: true }
+      volumes:
+        - { name: realm, configMap: { name: keycloak-realm } }
+        - { name: pki, secret: { secretName: qv-keycloak-tls } }

@@ -45,6 +45,7 @@ spec:
     secretName: {{ $root.Values.issuers.ca.linkSecretName }}
 {{- else }}
 {{- $zone := trimPrefix "qv-" $iss }}
+{{- if not $root.Values.issuers.ca.existing }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Issuer
@@ -74,6 +75,7 @@ spec:
     group: cert-manager.io
     kind: Issuer
     name: qv-{{ $zone }}-bootstrap
+{{- end }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Issuer
