@@ -27,19 +27,26 @@ jobs:
       - name: up
         shell: bash
         run: /usr/bin/time -v make kind-up 2>&1 | tee /tmp/up.log | tail -40
-      - name: memory and time
+      - name: memory and time (after up)
         if: always()
         run: |
           grep -E "Elapsed|Maximum resident" /tmp/up.log || true
           docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | grep kind || true
       - name: smoke
-        run: make kind-smoke
+        shell: bash
+        run: /usr/bin/time -v make kind-smoke 2>&1 | tee /tmp/smoke.log | tail -80
+      - name: memory and time (after smoke)
+        if: always()
+        run: |
+          grep -E "Elapsed" /tmp/smoke.log || true
+          docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | grep kind || true
       - name: logs on failure
         if: failure()
         run: |
           export KUBECONFIG="$(ls ci/kind/.work/*/kubeconfig | head -1)"
           kubectl get pods -A || true
           kubectl get events -A --sort-by=.lastTimestamp | tail -40 || true
+          for t in "qv-signing deploy/qv-signing-core-gateway" "qv deploy/qv-business-worker" "qv deploy/qv-business-core"; do set -- $t; echo "== $2"; kubectl -n "$1" logs "$2" --tail=40 || true; done
       - name: down
         if: always()
         run: make kind-down

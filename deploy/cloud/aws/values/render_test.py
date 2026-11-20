@@ -58,7 +58,7 @@ def helm(release, chart, ns, files, sets=()):
         if r.returncode: sys.exit(f"helm template {release} failed:\n{r.stderr}")
         return [d for d in yaml.safe_load_all(r.stdout) if d]
 
-def policies(docs): return [d for d in docs if d.get("kind") == "NetworkPolicy"]
+def policies(objs): return [d for d in objs if d.get("kind") == "NetworkPolicy"]
 
 def cidr_list(peers): return [p["ipBlock"]["cidr"] for p in peers or [] if "ipBlock" in p]
 

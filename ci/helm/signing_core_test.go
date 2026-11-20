@@ -434,7 +434,7 @@ func TestSigningCoreProductionShape(t *testing.T) {
 		for _, m := range gw.VolumeMounts {
 			mounted[m.MountPath] = m.ReadOnly
 		}
-		for _, p := range []string{"/opt/cloudhsm/lib", "/opt/cloudhsm/etc", "/etc/qv/hsm-pin", "/etc/qv/tls", "/etc/qv/link-tls", "/etc/qv/config"} {
+		for _, p := range []string{"/opt/cloudhsm/lib", "/opt/cloudhsm/etc", "/etc/qv/hsm-pin", "/etc/qv/tls", "/etc/qv/party-tls", "/etc/qv/link-tls", "/etc/qv/config"} {
 			if ro, ok := mounted[p]; !ok || !ro {
 				t.Errorf("%s is not mounted read-only", p)
 			}
