@@ -6,6 +6,7 @@
 !cmd
 !internal
 !migrations
+!web/approval
 !deploy/postgres/*.go
 !deploy/postgres/signing_roles.sql
 !mpc-party/go.mod
