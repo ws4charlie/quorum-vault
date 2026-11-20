@@ -25,6 +25,13 @@ import (
 // number of accounts created; zero means the pool was complete. Repeating it after a crash is safe: the job is the idempotency key, and an
 // account that exists is not created twice.
 func (s *Service) SetupNonces(ctx context.Context, shard int, approver string, key ed25519.PrivateKey, wait time.Duration) (int, error) {
+	return s.SetupNoncesGen(ctx, shard, 0, approver, key, wait)
+}
+
+// SetupNoncesGen is SetupNonces for generation gen of the shard (0: the active one). A key replacement creates the pool of the candidate before it is
+// activated, so the switch of signing finds the new generation's pool ready: the candidate's key signs this one kind of job (the zone's rule), paid from the
+// SOL the candidate address holds.
+func (s *Service) SetupNoncesGen(ctx context.Context, shard, gen int, approver string, key ed25519.PrivateKey, wait time.Duration) (int, error) {
 	ns, ok := s.Chain.(NonceSetup)
 	if !ok {
 		return 0, fmt.Errorf("%w: this chain has no nonce pool", ErrInvalid)
@@ -33,16 +40,34 @@ func (s *Service) SetupNonces(ctx context.Context, shard int, approver string, k
 		return 0, fmt.Errorf("%w: shard %d", ErrInvalid, shard)
 	}
 	part := s.Cfg.PartitionKey(s.Cfg.Native, shard).String()
-	u, amount, n, err := ns.BuildNonceSetup(ctx, part)
-	if err != nil || n == 0 {
-		return 0, err
-	}
+	var u chain.UnsignedTx
+	var amount *big.Int
+	var n int
+	var err error
 	hotAddr := ""
-	if h, ok := s.Chain.(interface {
-		HotAddress(string) (string, error)
+	if g, ok := s.Chain.(interface {
+		BuildNonceSetupGen(ctx context.Context, partitionID string, gen int) (chain.UnsignedTx, *big.Int, int, error)
+		HotKeyOfGeneration(ctx context.Context, partitionID string, gen int) ([32]byte, string, error)
 	}); ok {
-		if hotAddr, err = h.HotAddress(part); err != nil {
+		u, amount, n, err = g.BuildNonceSetupGen(ctx, part, gen)
+		if err != nil || n == 0 {
 			return 0, err
+		}
+		hk, _, err := g.HotKeyOfGeneration(ctx, part, gen)
+		if err != nil {
+			return 0, err
+		}
+		hotAddr = sol.Address(hk)
+	} else {
+		if u, amount, n, err = ns.BuildNonceSetup(ctx, part); err != nil || n == 0 {
+			return 0, err
+		}
+		if h, ok := s.Chain.(interface {
+			HotAddress(string) (string, error)
+		}); ok {
+			if hotAddr, err = h.HotAddress(part); err != nil {
+				return 0, err
+			}
 		}
 	}
 	sum := sha256.Sum256(u.Digest)

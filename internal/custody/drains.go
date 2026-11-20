@@ -86,6 +86,9 @@ func (s *Service) GetDrain(ctx context.Context, id string) (DrainMove, error) {
 
 // OpenDrains lists drain moves that are not finished and not parked.
 func (s *Service) OpenDrains(ctx context.Context) ([]DrainMove, error) {
+	if s.Cfg.Family == FamilySOL {
+		return nil, nil // a Solana drain is driven by the planner itself (drains_sol.go), not by a workflow per move
+	}
 	rows, err := s.Pool.Query(ctx, `SELECT `+drainCols+` FROM drain_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed')
 		AND COALESCE(failure_reason,'') NOT LIKE 'parked:%' ORDER BY created_at`, s.Cfg.Chain)
 	if err != nil {
@@ -140,6 +143,9 @@ func setDrainState(ctx context.Context, tx pgx.Tx, shard string, gen int, state,
 func (s *Service) PlanDrains(ctx context.Context, log *slog.Logger) ([]DrainMove, error) {
 	if s.Cfg.Family == FamilyBTC {
 		return s.planBTCDrains(ctx, log)
+	}
+	if s.Cfg.Family == FamilySOL {
+		return s.planSolDrains(ctx, log)
 	}
 	if s.Cfg.Family != FamilyEVM && s.Cfg.Family != "" {
 		return nil, nil

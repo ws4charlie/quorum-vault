@@ -44,6 +44,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/db"
+	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/domain"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
@@ -256,8 +257,15 @@ func (z *zoneDBs) Partition(shard string) (string, error) {
 			}
 		}
 	}
+	for _, cc := range z.cfg.Chains {
+		for p := range cc.SOL.HotShards {
+			if k, err := partition.Parse(p); err == nil && k.Tier == partition.TierHot && string(k.ShardID()) == shard {
+				parts = append(parts, p)
+			}
+		}
+	}
 	if len(parts) == 0 {
-		return "", fmt.Errorf("shard %s is not a hot shard of an EVM chain in this zone's config", shard)
+		return "", fmt.Errorf("shard %s is not a hot shard of an EVM or Solana chain in this zone's config", shard)
 	}
 	sort.Strings(parts)
 	return parts[0], nil
@@ -369,6 +377,9 @@ func addressOf(pubHex string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(raw) == 32 { // an Ed25519 key (a Solana hot shard): its address is the key in base58
+		return sol.Address([32]byte(raw)), nil
+	}
 	pub, err := crypto.UnmarshalPubkey(raw)
 	if err != nil {
 		return "", err
@@ -403,10 +414,24 @@ func (k *mpcKeys) dial(c gateway.MPCSignerFile) (pb.MpcPartyClient, func(), erro
 
 func (k *mpcKeys) coordinators() ([]gateway.MPCSignerFile, error) {
 	sf, ok := k.cfg.Signers[k.partition]
-	if !ok || sf.Scheme != "ecdsa-2of3" || len(sf.Coordinators) < 2 {
-		return nil, fmt.Errorf("partition %q has no ecdsa-2of3 signer with coordinators A and B in the zone config", k.partition)
+	if !ok || (sf.Scheme != "ecdsa-2of3" && sf.Scheme != "ed25519-2of3") || len(sf.Coordinators) < 2 {
+		return nil, fmt.Errorf("partition %q has no ecdsa-2of3 or ed25519-2of3 signer with coordinators A and B in the zone config", k.partition)
 	}
 	return sf.Coordinators, nil
+}
+
+// ed says whether the shard's key is an Ed25519 one (a Solana hot shard): its public key is the 32 bytes, in hex, and the address is their base58.
+func (k *mpcKeys) ed() bool { return k.cfg.Signers[k.partition].Scheme == "ed25519-2of3" }
+
+// pubHex is the hex form the plan and the zone record keep of a keyset's public key.
+func (k *mpcKeys) pubHex(c []byte) (string, error) {
+	if k.ed() {
+		if len(c) != 32 {
+			return "", fmt.Errorf("an Ed25519 public key is 32 bytes, the party gave %d", len(c))
+		}
+		return hex.EncodeToString(c), nil
+	}
+	return uncompressed(c)
 }
 
 // keyset finds the keyset on a party and returns its public key (uncompressed hex), or "" when it has none.
@@ -446,7 +471,7 @@ func (k *mpcKeys) New(ctx context.Context, p *Plan) (string, string, error) {
 	if st, err := keyset(ctx, a, id); err != nil {
 		return "", "", fmt.Errorf("party A: %w", err)
 	} else if st != nil {
-		pub, err := uncompressed(st.PublicKey)
+		pub, err := k.pubHex(st.PublicKey)
 		return id, pub, err
 	}
 	if k.adminAuth == "" {
@@ -476,16 +501,20 @@ func (k *mpcKeys) New(ctx context.Context, p *Plan) (string, string, error) {
 	}
 	x, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
-	r, err := a.DKG(x, &pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: &pb.AdminAuth{UnixSeconds: f.Unix, PublicKey: pub, Signature: sig}})
+	scheme := pb.Scheme_SCHEME_ECDSA_2OF3
+	if k.ed() {
+		scheme = pb.Scheme_SCHEME_ED25519_2OF3
+	}
+	r, err := a.DKG(x, &pb.DKGRequest{KeysetId: id, Scheme: scheme, Admin: &pb.AdminAuth{UnixSeconds: f.Unix, PublicKey: pub, Signature: sig}})
 	if err != nil {
 		// The DKG may have finished on the parties although the answer was lost: look again before reporting.
 		if st, e2 := keyset(ctx, a, id); e2 == nil && st != nil {
-			u, e3 := uncompressed(st.PublicKey)
+			u, e3 := k.pubHex(st.PublicKey)
 			return id, u, e3
 		}
 		return "", "", fmt.Errorf("DKG %s: %w", id, err)
 	}
-	u, err := uncompressed(r.RootPublicKey)
+	u, err := k.pubHex(r.RootPublicKey)
 	return id, u, err
 }
 
@@ -511,7 +540,7 @@ func (k *mpcKeys) Check(ctx context.Context, p *Plan) error {
 		if st.Frozen || !st.Resolved {
 			return fmt.Errorf("party %s: keyset %s is frozen=%v resolved=%v", c.Name, p.KeyRef, st.Frozen, st.Resolved)
 		}
-		u, err := uncompressed(st.PublicKey)
+		u, err := k.pubHex(st.PublicKey)
 		if err != nil || u != p.PublicKey {
 			return fmt.Errorf("party %s holds another public key for keyset %s", c.Name, p.KeyRef)
 		}

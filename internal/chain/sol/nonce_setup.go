@@ -31,9 +31,14 @@ func (r *RPC) LatestBlockhash(ctx context.Context, c string) ([32]byte, error) {
 // MissingNonces lists the pool accounts of the shard of partitionID that do not exist yet. An account that exists but is not a nonce account of
 // this shard is an error: something else sits at an address the pool needs.
 func (a *Adapter) MissingNonces(ctx context.Context, partitionID string) ([]int, error) {
-	hot, ok := a.cfg.hot[partitionID]
-	if !ok {
-		return nil, fmt.Errorf("sol: partition %q has no hot shard", partitionID)
+	return a.MissingNoncesGen(ctx, partitionID, 0)
+}
+
+// MissingNoncesGen is MissingNonces for generation gen of the shard (0: the active one). A candidate's pool is created before it is activated.
+func (a *Adapter) MissingNoncesGen(ctx context.Context, partitionID string, gen int) ([]int, error) {
+	hot, _, err := a.HotKeyOfGeneration(ctx, partitionID, gen)
+	if err != nil {
+		return nil, err
 	}
 	var missing []int
 	retired, err := a.retiredNonces(ctx)
@@ -61,8 +66,19 @@ func (a *Adapter) MissingNonces(ctx context.Context, partitionID string) ([]int,
 // BuildNonceSetup builds the creation of every missing pool account of the partition's shard (in one message). It returns the unsigned
 // transaction and the total rent the intent must name; nothing when no account is missing.
 func (a *Adapter) BuildNonceSetup(ctx context.Context, partitionID string) (u chain.UnsignedTx, amount *big.Int, count int, err error) {
-	hot := a.cfg.hot[partitionID]
-	missing, err := a.MissingNonces(ctx, partitionID)
+	return a.BuildNonceSetupGen(ctx, partitionID, 0)
+}
+
+// BuildNonceSetupGen is BuildNonceSetup for generation gen of the shard (0: the active one); the message is paid and signed by that generation's key.
+func (a *Adapter) BuildNonceSetupGen(ctx context.Context, partitionID string, gen int) (u chain.UnsignedTx, amount *big.Int, count int, err error) {
+	hot, _, err := a.HotKeyOfGeneration(ctx, partitionID, gen)
+	if err != nil {
+		return chain.UnsignedTx{}, nil, 0, err
+	}
+	if err := a.ensurePoolFor(ctx, a.pool, hot); err != nil {
+		return chain.UnsignedTx{}, nil, 0, err
+	}
+	missing, err := a.MissingNoncesGen(ctx, partitionID, gen)
 	if err != nil || len(missing) == 0 {
 		return chain.UnsignedTx{}, new(big.Int), 0, err
 	}

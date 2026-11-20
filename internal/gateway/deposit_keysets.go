@@ -226,7 +226,7 @@ func (d *Decider) btcGenRules(ctx context.Context, gt *GuardTx, kv *KeysetView, 
 //
 //	Solana hot shard   the fee payer of a job is a generation of the partition's shard; what its state allows:
 //	  active       everything a hot shard signs
-//	  candidate    only the creation of its own nonce pool (nonce-setup): the pool exists before the generation is switched on
+//	  candidate    nothing (its nonce pool is created once it is active, from the SOL the first drain gives it)
 //	  draining     a drain to its successor, the closing of its nonce accounts to itself (nonce-close), the cancel and the replacement of work it already signed
 //	  compromised  a drain to its successor, nothing else
 //	  retired      nothing
@@ -260,10 +260,7 @@ func (d *Decider) solGenRules(ctx context.Context, gt *GuardTx, kv *KeysetView, 
 	case partition.StateActive:
 		return nil
 	case partition.StateCandidate:
-		if i.Kind == sol.KindNonceSetup {
-			return nil
-		}
-		return reject(ReasonKeyset, "generation %d of %s is a candidate: it signs only the creation of its own nonce pool until it is activated", e.Generation, shard)
+		return reject(ReasonKeyset, "generation %d of %s is a candidate: it signs nothing until it is activated", e.Generation, shard)
 	case partition.StateDraining:
 		if i.Kind == "cancel" || i.Kind == sol.KindNonceClose || known {
 			return nil // finishing work already signed, or closing its own nonce accounts

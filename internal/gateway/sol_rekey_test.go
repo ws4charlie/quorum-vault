@@ -155,18 +155,14 @@ func TestSolHotStatesDecideWhatIsSigned(t *testing.T) {
 	g.sign(g.wdFrom("a0", old), g.s.hot)
 
 	g.candidate2()
-	// a candidate signs nothing but its own pool; a job that names it is refused whichever way it is built
+	// a candidate signs nothing, whichever kind of job names it
 	g.refuse(g.wdFrom("c1", new2), "candidate")
 	setup := signjob.Intent{Kind: sol.KindNonceSetup, ID: "setup-2", PartitionID: solPartSOL, Chain: solChain, Asset: "SOL", To: g.hot2.k.Address(), Amount: fmt.Sprint(uint64(2) * sol.DefaultNonceRent)}
-	mk := func(key [32]byte, n int) []byte {
-		var ixs []sol.Ix
-		for i := 0; i < n; i++ {
-			ixs = append(ixs, sol.CreateNonceIxs(key, i, sol.DefaultNonceRent)...)
-		}
-		return g.msg(key, false, ixs...)
+	var cr []sol.Ix
+	for i := 0; i < 2; i++ {
+		cr = append(cr, sol.CreateNonceIxs(new2, i, sol.DefaultNonceRent)...)
 	}
-	g.sign(g.job("setup-ok", setup, mk(new2, 2), "alice"), g.hot2)
-	g.refuse(g.job("setup-old", setup, mk(new2, 2), "alice"), "") // (same job again is a replay, so only the next lines judge states)
+	g.refuse(g.job("setup-cand", setup, g.msg(new2, false, cr...), "alice"), "candidate")
 	g.sign(g.wdFrom("a1", old), g.s.hot)                          // generation 1 is untouched by the candidate
 	bhA1 := g.s.bh
 
@@ -181,6 +177,7 @@ func TestSolHotStatesDecideWhatIsSigned(t *testing.T) {
 
 	// generation 2 signs what an active key signs, from its own signer; generation 1 only drains and closes
 	g.sign(g.wdFrom("b0", new2), g.hot2)
+	g.sign(g.job("setup-ok", setup, g.msg(new2, false, cr...), "alice"), g.hot2) // the new generation creates its own pool once active
 	g.refuse(g.wdFrom("a2", old), "draining")
 	sweep, sm := g.s.sweepIntent("s-old", 1000)
 	idx := g.s.depIdx
