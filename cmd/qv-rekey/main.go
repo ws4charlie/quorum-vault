@@ -4,7 +4,7 @@
 //	qv-rekey open       -shard S -mode mpc|hsm -reason TEXT   check the shard and write the plan
 //	qv-rekey dkg        [-admin-auth F]                      make the new key: mpc: a DKG on the parties (an operator's `qv-keysets party-auth` file); hsm: a key in the token
 //	qv-rekey candidate  [-change F]                          register the new generation in the zone (signed record) and the core
-//	qv-rekey drain-start -cap ASSET=N ... [-change F]         the old generation drains into the new one
+//	qv-rekey drain-start -cap ASSET=N ... [-compromised] [-change F]   the old generation drains into the new one (-compromised: marked compromised instead)
 //	qv-rekey activate   [-change F]                          the new generation is active; prints the cold ceremony to do
 //	qv-rekey caps       -cap ASSET=N ... [-change F]          raise (or reset) the drain caps of the old generation in the zone
 //	qv-rekey status                                           where every part stands, and the next step
@@ -81,6 +81,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	coreURL := fs.String("core", "", "the core's base URL, e.g. https://qv-core:8443")
 	coreCA := fs.String("core-ca", "", "PEM file of the CA that signed the core's certificate")
 	tokenFile := fs.String("token-file", "", "file with an admin's bearer token (a fresh login: the routes need step-up)")
+	compromised := fs.Bool("compromised", false, "drain-start: the emergency order, the old key is marked compromised (it signs only its drain, and is never retired)")
 	change := fs.String("change", "", "the signed, joined change file for this step")
 	shard := fs.String("shard", "", "open: the shard ID, entity/chain/pool/number")
 	mode := fs.String("mode", "", "open: mpc (2-of-3 keyset on the parties) or hsm (a key in the token)")
@@ -106,7 +107,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	defer closeZone()
-	env := &Env{Dir: *dir, Zone: zone, Out: out, Now: time.Now, ChangeFile: *change, Caps: caps}
+	env := &Env{Dir: *dir, Zone: zone, Out: out, Now: time.Now, ChangeFile: *change, Caps: caps, Compromised: *compromised}
 	var hdr []string
 	hdr = append(hdr, headers...)
 	env.Core = &httpCore{base: strings.TrimRight(*coreURL, "/"), tokenFile: *tokenFile, headers: hdr, caCert: *coreCA}

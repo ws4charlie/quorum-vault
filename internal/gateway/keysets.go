@@ -416,7 +416,11 @@ func capsOf(cc *ChainConfig, in map[string]string) (map[string]*big.Int, error) 
 
 // apply puts one change into the view, or says why it does not fit. The same rules hold when a change is applied and when the log is read back; a
 // change that breaks them is refused at the first and ignored at the second. A refused change leaves the view as it was.
-func (v *KeysetView) apply(cfg *Config, c KeysetChange) error {
+//
+// fresh is true when the change is being applied now and false when it is read back from the log. The sweep destination is checked only when fresh: after
+// a replacement the operators set the config's sweep_destination to the new generation's address (the runbook's manual edit), and the record that
+// registered that very address must keep holding.
+func (v *KeysetView) apply(cfg *Config, c KeysetChange, fresh bool) error {
 	if err := c.shape(); err != nil {
 		return err
 	}
@@ -467,7 +471,7 @@ func (v *KeysetView) apply(cfg *Config, c KeysetChange) error {
 			return fmt.Errorf("the next generation of %s is %d, not %d", c.Shard, top+1, c.Generation)
 		case next.addressUsed(cc.Name, addr.Hex()):
 			return fmt.Errorf("address %s is already a generation of a shard of %s", addr.Hex(), cc.Name)
-		case addr == cc.EVM.Factory || addr == cc.EVM.SweepDestination:
+		case addr == cc.EVM.Factory || (fresh && addr == cc.EVM.SweepDestination):
 			return fmt.Errorf("address %s is the factory or the sweep destination", addr.Hex())
 		}
 		for k, cold := range cc.EVM.ColdAddresses {
@@ -549,7 +553,7 @@ func (c *Config) foldKeysets(rows []KeysetChange) *KeysetView {
 			v.Ignored++
 			continue
 		}
-		if err := v.apply(c, r); err != nil {
+		if err := v.apply(c, r, false); err != nil {
 			v.Ignored++
 		}
 	}
@@ -637,7 +641,7 @@ func (g *Guard) ApplyKeysetChange(ctx context.Context, cfg *Config, c KeysetChan
 		return refuse(fmt.Errorf("sequence %d is not higher than the current %d", c.Seq, cur.Seq))
 	}
 	next := cur.clone()
-	if err := next.apply(cfg, c); err != nil {
+	if err := next.apply(cfg, c, true); err != nil {
 		return refuse(err)
 	}
 	sigs, _ := json.Marshal(c.Signatures)

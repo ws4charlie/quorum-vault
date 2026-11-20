@@ -151,7 +151,9 @@ type Env struct {
 	Caps []string
 	// FactoryDestination, if set, reads the factory's destination on chain (the status check of the cold ceremony).
 	FactoryDestination func(ctx context.Context) (string, error)
-	// SignedAt is the signing time used when printing commands (default now).
+	// Compromised makes drain-start the emergency step: the old generation is marked compromised (with its successor and caps in the same record)
+	// instead of draining. A compromised generation signs only its drain and is never retired.
+	Compromised bool
 }
 
 func (e *Env) printf(format string, a ...any) { fmt.Fprintf(e.Out, format, a...) }
@@ -499,8 +501,12 @@ func (e *Env) DrainStart(ctx context.Context) error {
 	if err != nil || len(caps) == 0 {
 		return errors.New("-cap ASSET=BASE_UNITS is required (the most all drains of that asset from the old key may move: the zone's bound, since it cannot read the chain)")
 	}
-	want := gateway.KeysetChange{Action: gateway.KeysetStartDraining, Shard: p.Shard, Generation: p.From, Successor: p.To, Caps: caps}
-	flags := fmt.Sprintf("-action start-draining -generation %d -successor %d", p.From, p.To)
+	action, post, route := gateway.KeysetStartDraining, partition.StateDraining, "drains"
+	if e.Compromised {
+		action, post, route = gateway.KeysetMarkCompromised, partition.StateCompromised, "compromises"
+	}
+	want := gateway.KeysetChange{Action: action, Shard: p.Shard, Generation: p.From, Successor: p.To, Caps: caps}
+	flags := fmt.Sprintf("-action %s -generation %d -successor %d", action, p.From, p.To)
 	for _, k := range sortedCaps(caps) {
 		flags += fmt.Sprintf(" -cap %s=%s", k, caps[k])
 	}
@@ -511,11 +517,14 @@ func (e *Env) DrainStart(ctx context.Context) error {
 	if c[p.To].State == "" && z[sortedNames(z)[0]].Gens[p.To].State == "" {
 		return errors.New("the new generation is not a candidate yet: run candidate first")
 	}
-	if err := e.zoneThenCore(ctx, p, StepDrainStart, p.From, partition.StateActive, partition.StateDraining, want, "drain-start", flags,
-		"drains", map[string]any{"shard_id": p.Shard, "generation": p.From, "successor": p.To}); err != nil {
+	if err := e.zoneThenCore(ctx, p, StepDrainStart, p.From, partition.StateActive, post, want, "drain-start", flags,
+		route, map[string]any{"shard_id": p.Shard, "generation": p.From, "successor": p.To}); err != nil {
 		return err
 	}
 	e.printf("the shard has no active key until activate: new work waits meanwhile, so run it now\nnext: activate\n")
+	if e.Compromised {
+		e.printf("generation %d is compromised: it signs only its drain, and is never retired (keep its shares for the investigation)\n", p.From)
+	}
 	return nil
 }
 
@@ -618,6 +627,9 @@ func (e *Env) Retire(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if c[p.From].State == partition.StateCompromised {
+		return fmt.Errorf("generation %d is compromised: a compromised generation is never retired (the zone refuses it); it stays in the watch list", p.From)
+	}
 	if stepState(z, c, p.From, partition.StateRetired) != "done" {
 		if k := c[p.From]; k.State != partition.StateRetired {
 			if k.State != partition.StateDraining && k.State != partition.StateCompromised {
@@ -679,6 +691,8 @@ func (e *Env) Status(ctx context.Context) error {
 		next = StepCandidate
 	case !done(p.From, partition.StateDraining):
 		next = StepDrainStart
+	case c[p.From].State == partition.StateCompromised && done(p.To, partition.StateActive):
+		next = "(nothing: the compromised generation is drained and stays in the watch list)"
 	case !done(p.To, partition.StateActive):
 		next = StepActivate
 	case !done(p.From, partition.StateRetired):

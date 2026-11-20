@@ -418,3 +418,24 @@ func TestSetDrainCapsOnlyWhereThereIsADrain(t *testing.T) {
 		t.Fatal("caps set on a retired generation")
 	}
 }
+
+// After the replacement the operators set the config's sweep_destination to the new generation's address. The record that registered that address must
+// still hold when the log is read back (the config changed under it), and a candidate with that address is still refused when it is registered now.
+func TestSweepDestinationMovedToTheNewGenerationKeepsTheLogValid(t *testing.T) {
+	g := newGenRig(t)
+	g.candidate2()
+	g.startDraining(testShardID, 1, 2)
+	g.step(testShardID, KeysetActivate, 2, nil)
+	g.cfg.Chains[testChain].EVM.SweepDestination = g.addr2 // the manual edit and restart
+	v := g.view(g.guard)
+	if v.Ignored != 0 || g.state(g.guard, testShardID, 2) != partition.StateActive {
+		t.Fatalf("the log did not survive the config edit: ignored %d, generation 2 %s", v.Ignored, g.state(g.guard, testShardID, 2))
+	}
+	g.sign2(g.from2(g.wd1("sd0", 100, 0)))
+	// A new candidate at the sweep destination is refused at registration.
+	g2 := newGenRig(t)
+	g2.cfg.Chains[testChain].EVM.SweepDestination = g2.addr2
+	if err := g2.applyKS(g2.guard, g2.ch(testShardID, KeysetRegisterCandidate, 2, func(c *KeysetChange) { c.Address = g2.addr2.Hex() })); err == nil {
+		t.Fatal("a candidate at the sweep destination was registered")
+	}
+}
