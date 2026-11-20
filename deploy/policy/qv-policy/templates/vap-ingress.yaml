@@ -16,7 +16,7 @@ spec:
       - apiGroups: ["gateway.networking.k8s.io"]
         apiVersions: ["*"]
         operations: [CREATE, UPDATE]
-        resources: [gateways, httproutes, grpcroutes, tcproutes, tlsroutes]
+        resources: [gateways, gatewayclasses, httproutes, grpcroutes, tcproutes, tlsroutes, udproutes, backendtlspolicies, referencegrants]
   validations:
     - reason: Forbidden
       message: "no Ingress or Gateway API route in a signing cluster"

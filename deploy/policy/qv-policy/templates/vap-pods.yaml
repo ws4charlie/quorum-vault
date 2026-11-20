@@ -59,9 +59,17 @@ spec:
       expression: |-
         variables.containers.all(c, !c.image.matches('/[^/@:]+-dev([@:]|$)'))
     - reason: Forbidden
-      message: "development switches are not allowed in a production cluster: QV_ENV dev or test, SoftHSM, QV_ALLOW_PLAINTEXT, QV_DEV_ACTOR_HEADER, QV_OIDC_TEST_JWKS"
+      message: "development switches are not allowed in a production cluster: a development variable, QV_ENV other than the production values (prodEnvValues), a valueFrom for QV_ENV or QV_PKCS11_LIB, SoftHSM"
       expression: |-
-        variables.containers.all(c, !has(c.env) || c.env.all(e, !(e.name in ['QV_ALLOW_PLAINTEXT', 'QV_DEV_ACTOR_HEADER', 'QV_OIDC_TEST_JWKS', 'SOFTHSM2_CONF']) && !(e.name == 'QV_ENV' && has(e.value) && e.value in ['dev', 'test']) && !(has(e.value) && e.value.lowerAscii().contains('softhsm'))))
+        variables.containers.all(c, !has(c.env) || c.env.all(e, !(e.name in {{ include "qvp.list" $v.devSwitches }}) && !(e.name in ['QV_ENV', 'QV_PKCS11_LIB'] && has(e.valueFrom)) && !(e.name == 'QV_ENV' && !((has(e.value) ? e.value : '').trim().lowerAscii() in {{ include "qvp.list" $v.prodEnvValues }})) && !(has(e.value) && e.value.lowerAscii().contains('softhsm'))))
+    - reason: Forbidden
+      message: "envFrom may only name a ConfigMap on the envFromConfigMaps allowlist, with no prefix and no Secret (a Secret or a prefix can set a development switch unseen)"
+      expression: |-
+        variables.containers.all(c, !has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef) && !(has(f.prefix) && f.prefix != '') && has(f.configMapRef) && {{ include "qvp.list" $v.envFromConfigMaps }}.exists(p, f.configMapRef.name.matches(p))))
+    - reason: Forbidden
+      message: "a development flag on the command line is not allowed in a production cluster"
+      expression: |-
+        variables.containers.all(c, (!has(c.command) || c.command.all(a, !a.matches({{ include "qvp.lit" (printf "^--?(%s)(=|$)" (join "|" $v.devFlags)) }}))) && (!has(c.args) || c.args.all(a, !a.matches({{ include "qvp.lit" (printf "^--?(%s)(=|$)" (join "|" $v.devFlags)) }}))))
     {{- end }}
     {{- if $sign }}
     - reason: Forbidden

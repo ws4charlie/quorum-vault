@@ -36,4 +36,4 @@ Design: `research/K8s-deployment.md` §10 "Who has kubectl". Rules in force: cha
 ## After use
 
 - Confirm the binding is gone: `kubectl get rolebinding -A | grep qv-break-glass` shows nothing.
-- If a share-holding pod (party) was entered, treat the party as possibly exposed only if the audit log shows a read of its files; follow `docs/runbooks/mpc-failures.md` if in doubt, and tell the other parties' operators.
+- If a share-holding pod (party) was entered, treat the party as **possibly exposed**. The API audit log records that an exec happened, not what was typed or read, so it cannot clear anyone. Only the recorded session (the cloud session recorder, step 3) can: review it with a second person. If the recording is missing, incomplete or unreadable, the question stays **unresolved, which means possibly exposed**. Then follow `docs/runbooks/mpc-failures.md` (key refresh or replacement) and tell the other parties' operators.

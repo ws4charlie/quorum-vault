@@ -40,6 +40,14 @@
       "type": "object", "additionalProperties": false,
       "properties": { "group": { "type": "string", "minLength": 1 }, "subjects": { "type": "array", "items": { "type": "object" } } }
     },
+    "prodEnvValues": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[a-z]*$" } },
+    "devSwitches": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "devFlags": { "type": "array", "items": { "type": "string", "pattern": "^[a-z0-9-]+$" } },
+    "envFromConfigMaps": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "loadBalancer": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "internalAnnotations": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["key", "value"], "properties": { "key": { "type": "string", "minLength": 1 }, "value": { "type": "string" } } } } }
+    },
     "readers": {
       "type": "object", "additionalProperties": false,
       "properties": { "groups": { "type": "array", "items": { "type": "string", "minLength": 1 } } }

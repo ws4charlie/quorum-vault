@@ -3,6 +3,8 @@ package qvpolicy
 // Structure checks that need no evaluator: what the chart refuses to render, the namespace labels, the Kyverno signature policy and the RBAC roles.
 
 import (
+	"os"
+	"regexp"
 	"os/exec"
 	"strings"
 	"testing"
@@ -185,4 +187,42 @@ func TestRBAC(t *testing.T) {
 		objs, _ := ParseDocs(out)
 		check(t, objs, 2)
 	})
+}
+
+// The README tells operators to adopt existing namespaces for Helm; the snippet must name the release and namespace of the install command, and the render must
+// carry the ownership label Helm checks for (managed-by) and keep the namespace on uninstall.
+func TestREADMEAdoptionStep(t *testing.T) {
+	b, err := os.ReadFile(policyDir + "/README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := string(b)
+	inst := regexp.MustCompile(`helm upgrade --install (\S+) \S+ -n (\S+)`).FindStringSubmatch(r)
+	if inst == nil {
+		t.Fatal("install command not found in the README")
+	}
+	rel, ns := inst[1], inst[2]
+	for _, want := range []string{
+		"app.kubernetes.io/managed-by=Helm",
+		"meta.helm.sh/release-name=" + rel,
+		"meta.helm.sh/release-namespace=" + ns,
+	} {
+		if !strings.Contains(r, want) {
+			t.Errorf("README adoption step lacks %q", want)
+		}
+	}
+	_ = rel
+	objs := render(t, policyDir, ns, base...)
+	found := false
+	for _, o := range objs {
+		if qstr(o, "kind") == "Namespace" {
+			found = true
+			if qstr(o, "metadata", "labels", "app.kubernetes.io/managed-by") != "Helm" || qstr(o, "metadata", "annotations", "helm.sh/resource-policy") != "keep" {
+				t.Errorf("namespace %s: managed-by Helm and resource-policy keep expected", qstr(o, "metadata", "name"))
+			}
+		}
+	}
+	if !found {
+		t.Error("no Namespace rendered")
+	}
 }

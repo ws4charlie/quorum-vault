@@ -151,8 +151,8 @@ func TestPartyPrivateLoadBalancerPasses(t *testing.T) {
 	_, _, _, pb, _ := inputs(false)
 	args := append(append([]string{}, pb.args...), "--set", "service.caller.type=LoadBalancer", "--set", "service.peer.type=LoadBalancer",
 		"--set", "service.caller.sourceRanges={10.0.0.0/8}", "--set", "service.peer.sourceRanges={10.0.0.0/8}",
-		"--set-json", `service.caller.annotations={"service.beta.kubernetes.io/aws-load-balancer-scheme":"internal"}`,
-		"--set-json", `service.peer.annotations={"service.beta.kubernetes.io/aws-load-balancer-scheme":"internal"}`)
+		"--set-json", `service.caller.annotations={"service.beta.kubernetes.io/aws-load-balancer-scheme":"internal","service.beta.kubernetes.io/aws-load-balancer-type":"external"}`,
+		"--set-json", `service.peer.annotations={"service.beta.kubernetes.io/aws-load-balancer-scheme":"internal","service.beta.kubernetes.io/aws-load-balancer-type":"external"}`)
 	pb.args = args
 	_, ps := policies(t, "party", "qv")
 	d, _ := admitAll(t, ps, pb, "v1.31")
@@ -232,6 +232,11 @@ func pod(t testing.TB, in input, kind string) Map {
 	return nil
 }
 
+const (
+	awsScheme = "service.beta.kubernetes.io/aws-load-balancer-scheme"
+	awsType   = "service.beta.kubernetes.io/aws-load-balancer-type"
+)
+
 func TestDeniedExamples(t *testing.T) {
 	_, sc, _, _, _ := inputs(false)
 	_, ps := policies(t, "signing-core", "qvs")
@@ -310,6 +315,27 @@ func TestDeniedExamples(t *testing.T) {
 			cont(s, 0)["env"] = []any{Map{"name": "QV_PKCS11_LIB", "value": "/usr/lib/softhsm/libsofthsm2.so"}}
 		}, "development switches"},
 		{"QV_ALLOW_PLAINTEXT", func(s Map) { cont(s, 0)["env"] = []any{Map{"name": "QV_ALLOW_PLAINTEXT", "value": "1"}} }, "development switches"},
+		{"QV_ENV mixed-case dev", func(s Map) { cont(s, 0)["env"] = []any{Map{"name": "QV_ENV", "value": " Dev "}} }, "development switches"},
+		{"QV_ENV TEST upper-case", func(s Map) { cont(s, 0)["env"] = []any{Map{"name": "QV_ENV", "value": "TEST"}} }, "development switches"},
+		{"QV_ENV unknown spelling", func(s Map) { cont(s, 0)["env"] = []any{Map{"name": "QV_ENV", "value": "develop"}} }, "development switches"},
+		{"QV_ENV from a Secret", func(s Map) {
+			cont(s, 0)["env"] = []any{Map{"name": "QV_ENV", "valueFrom": Map{"secretKeyRef": Map{"name": "s", "key": "k"}}}}
+		}, "development switches"},
+		{"QV_PKCS11_LIB from a ConfigMap", func(s Map) {
+			cont(s, 0)["env"] = []any{Map{"name": "QV_PKCS11_LIB", "valueFrom": Map{"configMapKeyRef": Map{"name": "x-0123456789", "key": "k"}}}}
+		}, "development switches"},
+		{"QV_DEV_ACTOR_HEADER", func(s Map) { cont(s, 0)["env"] = []any{Map{"name": "QV_DEV_ACTOR_HEADER", "value": "1"}} }, "development switches"},
+		{"QV_OIDC_TEST_JWKS", func(s Map) { cont(s, 0)["env"] = []any{Map{"name": "QV_OIDC_TEST_JWKS", "value": "/x"}} }, "development switches"},
+		{"QV_FAILPOINT", func(s Map) { cont(s, 0)["env"] = []any{Map{"name": "QV_FAILPOINT", "value": "a.b"}} }, "development switches"},
+		{"envFrom a Secret", func(s Map) { cont(s, 0)["envFrom"] = []any{Map{"secretRef": Map{"name": "s"}}} }, "envFrom may only name"},
+		{"envFrom with a prefix", func(s Map) {
+			cont(s, 0)["envFrom"] = []any{Map{"prefix": "QV_", "configMapRef": Map{"name": "gateway-env-0123456789"}}}
+		}, "envFrom may only name"},
+		{"envFrom a ConfigMap off the allowlist", func(s Map) {
+			cont(s, 0)["envFrom"] = []any{Map{"configMapRef": Map{"name": "evil-0123456789"}}}
+		}, "envFrom may only name"},
+		{"dev flag in args", func(s Map) { cont(s, 0)["args"] = []any{"-dev-actor-header"} }, "development flag"},
+		{"dev flag with value in command", func(s Map) { cont(s, 0)["command"] = []any{"/qv-core", "--oidc-test-jwks=/x"} }, "development flag"},
 		{"mutable ConfigMap volume", func(s Map) { volumes(s, Map{"name": "m", "configMap": Map{"name": "gateway-config"}}) }, "ConfigMaps whose name ends in a 10-character content hash"},
 		{"mutable ConfigMap envFrom", func(s Map) { cont(s, 0)["envFrom"] = []any{Map{"configMapRef": Map{"name": "gateway-env"}}} }, "ConfigMaps whose name ends in a 10-character content hash"},
 		{"mutable ConfigMap key ref", func(s Map) {
@@ -365,8 +391,27 @@ func TestDeniedExamples(t *testing.T) {
 	t.Run("service/LoadBalancer public annotation", func(t *testing.T) {
 		wantDenied(t, svc("LoadBalancer", Map{"quorumvault.io/endpoint": "public"}, nil), "private")
 	})
-	t.Run("service/LoadBalancer private", func(t *testing.T) {
-		wantAdmitted(t, svc("LoadBalancer", Map{"quorumvault.io/endpoint": "private"}, nil))
+	t.Run("service/LoadBalancer only our own annotation is not internal", func(t *testing.T) {
+		wantDenied(t, svc("LoadBalancer", Map{"quorumvault.io/endpoint": "private"}, nil), "internal-load-balancer annotations")
+	})
+	t.Run("service/LoadBalancer scheme internal without type external (in-tree provider ignores it)", func(t *testing.T) {
+		wantDenied(t, svc("LoadBalancer", Map{"quorumvault.io/endpoint": "private", awsScheme: "internal"}, nil), "internal-load-balancer annotations")
+	})
+	t.Run("service/LoadBalancer scheme internet-facing", func(t *testing.T) {
+		wantDenied(t, svc("LoadBalancer", Map{"quorumvault.io/endpoint": "private", awsScheme: "internet-facing", awsType: "external"}, nil), "internal-load-balancer annotations")
+	})
+	t.Run("service/LoadBalancer internal but not marked private", func(t *testing.T) {
+		wantDenied(t, svc("LoadBalancer", Map{awsScheme: "internal", awsType: "external"}, nil), "internal-load-balancer annotations")
+	})
+	t.Run("service/LoadBalancer internal", func(t *testing.T) {
+		wantAdmitted(t, svc("LoadBalancer", Map{"quorumvault.io/endpoint": "private", awsScheme: "internal", awsType: "external"}, nil))
+	})
+	t.Run("service/LoadBalancer refused when no cloud annotations are configured", func(t *testing.T) {
+		_, nps := policies(t, "signing-core", "qvs", "--set-json", "loadBalancer.internalAnnotations=[]")
+		ds, _ := nps.Admit(svc("LoadBalancer", Map{"quorumvault.io/endpoint": "private", awsScheme: "internal", awsType: "external"}, nil), enforced)
+		if len(ds) == 0 {
+			t.Errorf("with loadBalancer.internalAnnotations empty every LoadBalancer must be refused")
+		}
 	})
 	t.Run("service/ClusterIP", func(t *testing.T) { wantAdmitted(t, svc("ClusterIP", nil, nil)) })
 	t.Run("service/externalIPs", func(t *testing.T) {
@@ -376,9 +421,11 @@ func TestDeniedExamples(t *testing.T) {
 	// Ingress: refused in a signing cluster, admitted in the business cluster
 	ing := Request{Group: "networking.k8s.io", Resource: "ingresses", Operation: "CREATE", Object: Map{"kind": "Ingress", "metadata": Map{"name": "i"}}}
 	t.Run("ingress/signing cluster", func(t *testing.T) { wantDenied(t, ing, "no Ingress") })
-	t.Run("ingress/gateway api route", func(t *testing.T) {
-		wantDenied(t, Request{Group: "gateway.networking.k8s.io", Resource: "httproutes", Operation: "CREATE", Object: Map{"kind": "HTTPRoute", "metadata": Map{"name": "i"}}}, "no Ingress")
-	})
+	for _, r := range []string{"gateways", "gatewayclasses", "httproutes", "grpcroutes", "tcproutes", "tlsroutes", "udproutes", "backendtlspolicies", "referencegrants"} {
+		t.Run("ingress/gateway api "+r, func(t *testing.T) {
+			wantDenied(t, Request{Group: "gateway.networking.k8s.io", Resource: r, Operation: "CREATE", Object: Map{"metadata": Map{"name": "i"}}}, "no Ingress")
+		})
+	}
 	t.Run("ingress/business cluster", func(t *testing.T) {
 		_, bps := policies(t, "business", "qv")
 		if ds, _ := bps.Admit(ing, enforced); len(ds) != 0 {
@@ -410,6 +457,25 @@ func TestDeniedExamples(t *testing.T) {
 	})
 	t.Run("configmap/SoftHSM module path in a config", func(t *testing.T) {
 		wantDenied(t, cm("x-0123456789", true, Map{"party.json": `{"pkcs11":{"module":"/usr/lib/softhsm/libsofthsm2.so"}}`}, "CREATE", writer), "development switches")
+	})
+	t.Run("configmap/QV_ENV spelled Dev with spaces", func(t *testing.T) {
+		wantDenied(t, cm("x-0123456789", true, Map{"QV_ENV": " DEV\n"}, "CREATE", writer), "development switches")
+	})
+	t.Run("configmap/QV_ENV unknown spelling", func(t *testing.T) {
+		wantDenied(t, cm("x-0123456789", true, Map{"QV_ENV": "staging"}, "CREATE", writer), "development switches")
+	})
+	t.Run("configmap/QV_ENV production spellings admitted", func(t *testing.T) {
+		for _, v := range []string{"", "production", " Production ", "PROD"} {
+			wantAdmitted(t, cm("x-0123456789", true, Map{"QV_ENV": v}, "CREATE", writer))
+		}
+	})
+	t.Run("configmap/QV_FAILPOINT key", func(t *testing.T) {
+		wantDenied(t, cm("x-0123456789", true, Map{"QV_FAILPOINT": "a.b"}, "CREATE", writer), "development switches")
+	})
+	t.Run("pod/QV_ENV production spellings admitted", func(t *testing.T) {
+		for _, v := range []string{"", "Production", " prod "} {
+			wantAdmitted(t, podReq(mutate(func(s Map) { cont(s, 0)["env"] = []any{Map{"name": "QV_ENV", "value": v}} })))
+		}
 	})
 	t.Run("configmap/dev switch key", func(t *testing.T) {
 		wantDenied(t, cm("x-0123456789", true, Map{"QV_OIDC_TEST_JWKS": "{}"}, "CREATE", writer), "development switches")

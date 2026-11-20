@@ -1,3 +1,4 @@
+{{- $v := .Values -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -17,9 +18,9 @@ spec:
       expression: |-
         !has(object.spec.type) || object.spec.type != 'NodePort'
     - reason: Forbidden
-      message: "a LoadBalancer Service needs the annotation quorumvault.io/endpoint: private (a private endpoint, never a public load balancer)"
+      message: "a LoadBalancer Service needs quorumvault.io/endpoint: private AND the cloud's internal-load-balancer annotations from loadBalancer.internalAnnotations (empty = no LoadBalancer allowed)"
       expression: |-
-        !has(object.spec.type) || object.spec.type != 'LoadBalancer' || (has(object.metadata.annotations) && 'quorumvault.io/endpoint' in object.metadata.annotations && object.metadata.annotations['quorumvault.io/endpoint'] == 'private')
+        !has(object.spec.type) || object.spec.type != 'LoadBalancer' || {{ if $v.loadBalancer.internalAnnotations }}(has(object.metadata.annotations) && 'quorumvault.io/endpoint' in object.metadata.annotations && object.metadata.annotations['quorumvault.io/endpoint'] == 'private'{{ range $a := $v.loadBalancer.internalAnnotations }} && {{ include "qvp.lit" $a.key }} in object.metadata.annotations && object.metadata.annotations[{{ include "qvp.lit" $a.key }}] == {{ include "qvp.lit" $a.value }}{{ end }}){{ else }}false{{ end }}
     - reason: Forbidden
       message: "externalIPs are not allowed"
       expression: |-

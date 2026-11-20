@@ -50,3 +50,21 @@ breakGlass:
   subjects: []            # who gets the break-glass role in our namespaces. Empty = bound to nobody (the default; the chart renders no binding)
 readers:
   groups: ["qv:readers"]  # read-only access in our namespaces (no Secrets, no exec)
+
+# Development switches (production only). The binaries treat QV_ENV after trim + lower-case, and anything but dev/test as production; this chart is stricter: QV_ENV may be
+# absent or one of prodEnvValues, so a spelling the binary reads as "dev" can never slip through. devSwitches = every variable the binaries read that loosens a check
+# (QV_ALLOW_PLAINTEXT, QV_DEV_ACTOR_HEADER, QV_OIDC_TEST_JWKS, SOFTHSM2_CONF, QV_FAILPOINT): refused in any env, ConfigMap key or value source. devFlags = their command-line twins.
+prodEnvValues: ["", "production", "prod"]
+devSwitches: [QV_ALLOW_PLAINTEXT, QV_DEV_ACTOR_HEADER, QV_OIDC_TEST_JWKS, SOFTHSM2_CONF, QV_FAILPOINT]
+devFlags: [dev-actor-header, oidc-test-jwks]
+# envFrom may name only ConfigMaps whose name matches one of these (the env ConfigMaps the charts render: <release>-<component>-env, with a hash in signing clusters).
+# Their contents are checked by qv-configmaps. Secrets and prefixes are never allowed in envFrom.
+envFromConfigMaps: ['^[a-z0-9.-]+-env(-[0-9a-f]{10})?$']
+
+# LoadBalancer Services: refused unless they carry quorumvault.io/endpoint: private AND every annotation listed here (the cloud's "internal" switch). A list, so another
+# cloud replaces it whole instead of merging with the AWS default. AWS (Load Balancer Controller): type external makes it honour the scheme; without it the in-tree
+# provider ignores the scheme annotation and the load balancer is public. Empty list = no LoadBalancer allowed at all.
+loadBalancer:
+  internalAnnotations:
+    - { key: service.beta.kubernetes.io/aws-load-balancer-type, value: external }
+    - { key: service.beta.kubernetes.io/aws-load-balancer-scheme, value: internal }

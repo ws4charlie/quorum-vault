@@ -7,10 +7,10 @@ Rules the **cluster** enforces, installed once per cluster by that cluster's own
 | Kind | What | Engine |
 |---|---|---|
 | Namespaces | Pod Security `restricted` (enforce, audit, warn; version pinned), label `quorumvault.io/policy: enforced` | API server (built in) |
-| `qv-pods` | registry prefix, digest, no `-dev` image, no dev switch (`QV_ENV` dev or test, SoftHSM, `QV_ALLOW_PLAINTEXT`, `QV_DEV_ACTOR_HEADER`, `QV_OIDC_TEST_JWKS`), no hostNetwork/PID/IPC, hostPath, privileged, added capability, root, privilege escalation. Signing kinds also: only hash-named (immutable) ConfigMaps, no ServiceAccount token unless listed | ValidatingAdmissionPolicy |
-| `qv-services` | no NodePort; LoadBalancer only with `quorumvault.io/endpoint: private` (the annotation the party chart sets); no externalIPs | ValidatingAdmissionPolicy |
-| `qv-no-ingress` (signing kinds) | no Ingress, no Gateway API route | ValidatingAdmissionPolicy |
-| `qv-configmaps` | signing kinds: every ConfigMap `immutable: true`. Production: no dev switch or SoftHSM path in the data | ValidatingAdmissionPolicy |
+| `qv-pods` | registry prefix, digest, no `-dev` image, no dev switch (`QV_ENV` must be absent or one of `prodEnvValues` after trim and lower-casing, as the binaries read it; `devSwitches` such as `QV_ALLOW_PLAINTEXT`, `QV_DEV_ACTOR_HEADER`, `QV_OIDC_TEST_JWKS`, `SOFTHSM2_CONF`, `QV_FAILPOINT` refused; `valueFrom` refused for `QV_ENV` and `QV_PKCS11_LIB`; SoftHSM paths; `devFlags` on the command line), `envFrom` only from ConfigMaps on the `envFromConfigMaps` allowlist, never a Secret or a prefix, no hostNetwork/PID/IPC, hostPath, privileged, added capability, root, privilege escalation. Signing kinds also: only hash-named (immutable) ConfigMaps, no ServiceAccount token unless listed | ValidatingAdmissionPolicy |
+| `qv-services` | no NodePort; LoadBalancer only with `quorumvault.io/endpoint: private` **and** the cloud's internal-load-balancer annotations from `loadBalancer.internalAnnotations` (AWS default: type `external` + scheme `internal`; empty list = no LoadBalancer at all; replace the list for another cloud); no externalIPs | ValidatingAdmissionPolicy |
+| `qv-no-ingress` (signing kinds) | no Ingress, no Gateway API object (gateways, gatewayclasses, http/grpc/tcp/tls/udp routes, backendtlspolicies, referencegrants) | ValidatingAdmissionPolicy |
+| `qv-configmaps` | signing kinds: every ConfigMap `immutable: true`. Production: no dev switch, no QV_ENV outside `prodEnvValues`, no SoftHSM path in the data | ValidatingAdmissionPolicy |
 | `qv-configmap-writers` (production, signing kinds) | only the GitOps identity (`configWriters`) may create, change or delete a ConfigMap | ValidatingAdmissionPolicy |
 | `qv-no-exec` (signing kinds) | exec, attach, port-forward and ephemeral (debug) containers only for the `breakGlass.group` | ValidatingAdmissionPolicy |
 | `qv-verify-images` (production) | cosign signature of every image, by the publish job's identity | Kyverno, this one rule only |
@@ -49,6 +49,17 @@ helm upgrade --install qv-policy deploy/policy/qv-policy -n kube-system \
   --set registry=ghcr.io/<owner>/quorum-vault \
   --set 'configWriters.users={system:serviceaccount:flux-system:kustomize-controller}'
 ```
+
+**Namespaces that already exist.** Helm refuses to take over a Namespace it did not create ("exists and cannot be imported": it lacks Helm's ownership metadata). Adopt each one once, before the install (the release name and namespace must be the ones in the command above):
+
+```bash
+for ns in qvs; do
+  kubectl label namespace "$ns" app.kubernetes.io/managed-by=Helm --overwrite
+  kubectl annotate namespace "$ns" meta.helm.sh/release-name=qv-policy meta.helm.sh/release-namespace=kube-system --overwrite
+done
+```
+
+A namespace that does not exist yet needs nothing: the release creates it. `ci/helm/qvpolicy` checks that the rendered Namespaces are kept on uninstall and that this snippet names the release and namespace of the install command.
 
 Prerequisites: Kubernetes 1.30 or later (ValidatingAdmissionPolicy is GA); Kyverno 1.13 or later (admission controller only) in production; namespaces that already exist keep their workloads, Helm only adds the labels (`helm.sh/resource-policy: keep`: uninstall never deletes a namespace). The kind values (`values-kind.yaml`) are the whole difference for a local cluster: tags allowed, signatures off, registry `qv-image`, no writer list. Anything else the rules refuse in kind is a real finding.
 

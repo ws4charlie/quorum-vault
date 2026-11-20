@@ -28,9 +28,9 @@ spec:
     {{- end }}
     {{- if $prod }}
     - reason: Forbidden
-      message: "development switches are not allowed in a production cluster: QV_ENV dev or test, SoftHSM, QV_ALLOW_PLAINTEXT, QV_DEV_ACTOR_HEADER, QV_OIDC_TEST_JWKS"
+      message: "development switches are not allowed in a production cluster: a development variable, QV_ENV other than the production values, SoftHSM"
       expression: |-
-        !has(object.data) || object.data.all(k, !(k in ['QV_ALLOW_PLAINTEXT', 'QV_DEV_ACTOR_HEADER', 'QV_OIDC_TEST_JWKS', 'SOFTHSM2_CONF']) && !(k == 'QV_ENV' && object.data[k] in ['dev', 'test']) && !object.data[k].lowerAscii().contains('softhsm'))
+        !has(object.data) || object.data.all(k, !(k in {{ include "qvp.list" $v.devSwitches }}) && !(k == 'QV_ENV' && !(object.data[k].trim().lowerAscii() in {{ include "qvp.list" $v.prodEnvValues }})) && !object.data[k].lowerAscii().contains('softhsm'))
     {{- end }}
 ---
 {{ include "qvp.binding" (dict "ctx" . "name" "qv-configmaps") }}
