@@ -92,6 +92,15 @@ FROM src AS gobin-broker
 RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; cd mpc-party; \
     CGO_ENABLED=1 go build -ldflags "$LDFLAGS" -o /out/qv-attest-broker ./cmd/qv-attest-broker
 
+# gobin-teesim: the SIMULATED-enclave builds (-tags teesim: mock attester, test evidence root) of mpc-party, qv-attest-broker and qv-attest-ca (the test CA and `measure`). Only the
+# mpc-party-teesim and qv-attest-broker-teesim images below use them; never released (publish.sh refuses the names, smoke.sh's production probes do not see them).
+FROM src AS gobin-teesim
+COPY --from=cbmpc /src/mpc-party/.deps /src/mpc-party/.deps
+RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; cd mpc-party; \
+    CGO_ENABLED=1 go build -tags teesim -ldflags "$LDFLAGS" -o /out/mpc-party ./cmd/mpc-party; \
+    CGO_ENABLED=1 go build -tags teesim -ldflags "$LDFLAGS" -o /out/qv-attest-broker ./cmd/qv-attest-broker; \
+    CGO_ENABLED=1 go build -tags teesim -ldflags "$LDFLAGS" -o /out/qv-attest-ca ./internal/attest/cmd/qv-attest-ca
+
 # gobin-partyadmin: qv-party-admin (mpc-party's module), the operator's tool for the parties' admin calls: pure Go, no cgo, no cb-mpc. Lives in qv-tools-signing.
 FROM src AS gobin-partyadmin
 RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; cd mpc-party; \
@@ -203,4 +212,17 @@ ENTRYPOINT ["/usr/local/bin/mpc-party"]
 # The broker with SoftHSM2 for local clusters. Same binary as production (no -tags teesim: like mpc-party-dev, the -dev variant adds SoftHSM and nothing else).
 FROM dev-base AS qv-attest-broker-dev
 COPY --from=gobin-broker /out/qv-attest-broker /usr/local/bin/qv-attest-broker
+ENTRYPOINT ["/usr/local/bin/qv-attest-broker"]
+
+# ---------------------------------------------------------------------------------------------------------------------------------------------
+# tee-sim: the SIMULATED enclave (task Broker-chart, kind lane). The -dev base plus the teesim builds. NOT in images.sh's lists: build them by name
+# (deploy/images/build.sh mpc-party-teesim qv-attest-broker-teesim). They are never published, and a chart refuses them outside env dev or test.
+FROM dev-base AS mpc-party-teesim
+COPY --from=gobin-teesim /out/mpc-party /usr/local/bin/mpc-party
+# the test CA and `qv-attest-ca measure -binary /usr/local/bin/mpc-party -config FILE`: what an operator signs into the allowlist
+COPY --from=gobin-teesim /out/qv-attest-ca /usr/local/bin/qv-attest-ca
+ENTRYPOINT ["/usr/local/bin/mpc-party"]
+
+FROM dev-base AS qv-attest-broker-teesim
+COPY --from=gobin-teesim /out/qv-attest-broker /usr/local/bin/qv-attest-broker
 ENTRYPOINT ["/usr/local/bin/qv-attest-broker"]

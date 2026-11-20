@@ -51,7 +51,7 @@ spec:
             - { name: approver, mountPath: /etc/qv/approver, readOnly: true }
             {{- end }}
       volumes:
-        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.worker.secretName) | nindent 8 }}
+        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.worker.secretName "trust" .Values.tls.trust.business) | nindent 8 }}
         {{- include "qv.custodyVolume" (dict "ctx" .) | nindent 8 }}
         {{- if .Values.custody.autoApprover.enabled }}
         - name: approver

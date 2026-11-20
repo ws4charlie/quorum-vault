@@ -1,0 +1,37 @@
+{{- include "qab.guards" . -}}
+{{- /*
+  Plain configuration only: public keys, pins, paths, limits. No secret is rendered into a ConfigMap (the PIN, the TLS key and the HSM module are mounted files).
+  The names carry a hash of the content and the objects are immutable: a change is a new ConfigMap and a rollout of the pod, never an edit in place.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "qab.configName" . }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+immutable: true
+data:
+  broker.json: |
+    {{- include "qab.config" . | nindent 4 }}
+---
+{{/* The signed allowlist, exactly as the operators signed it. It is a file mounted at /etc/qv/allowlist/allowlist.json; the broker verifies the signatures itself. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "qab.allowlistName" . }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+immutable: true
+data:
+  allowlist.json: |
+    {{- .Values.allowlist.file | nindent 4 }}
+{{- if .Values.hsm.softhsm.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "qab.softhsmName" . }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+immutable: true
+data:
+  softhsm2.conf: |
+    {{- include "qab.softhsmConf" . | nindent 4 }}
+{{- end }}

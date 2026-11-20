@@ -31,7 +31,7 @@ Only operators change a state. Several of them sign each change, the zone writes
 | Switch | New payments move to the new key and the drain starts together | The old key is marked compromised at once; from then on it can only move its funds out |
 | Old key | Retired after it is empty | Never retired; it stays on the watch list |
 
-In an emergency the thief's own copy of the key is not affected. The time before the compromised mark is the loss window, which is why the [stolen hot key runbook](runbooks/stolen-hot-key.md) starts with freezing the factory.
+In an emergency the thief's own copy of the key is not affected, so the time before the compromised mark is the loss window. One signed record does the whole switch: it stops the old key's normal signing, lets it move funds only to its successor, carries the larger limits for that move, and tells the core to stop paying from it. A tool runs the steps and moves the most valuable assets first. What the thief moves before the move lands cannot be saved; the [stolen hot key runbook](runbooks/stolen-hot-key.md) says so and lists the steps, and a drill plays them.
 
 ## The old key is emptied by the system
 The core moves each token, then the coin itself, from the old key to the new one. No approver is needed: the operators' signatures that started the drain are the approval. The zone signs only a move to the named successor, within a total the operators set in the same record, and counts only the moves it actually signed. A refused move costs nothing, so a broken planner cannot use up the allowance. One tool walks the whole replacement but signs nothing itself ([runbook](runbooks/key-replacement.md)).

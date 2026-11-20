@@ -126,6 +126,10 @@ type ChainFile struct {
 	// DrainsPerHour limits drains (moves of everything a draining hot shard key holds to its successor, keysets.go) first signed in a rolling hour on
 	// this chain. Absent: 10; 0 refuses them all. A drain is also bounded by the caps of the signed start-draining record.
 	DrainsPerHour *int `json:"drains_per_hour,omitempty"`
+	// MaxDrainsPerSource bounds the number of drains signed from one source address in all, planned or emergency (absent or 0: 40). The signed cap counts
+	// only the value moved; every transaction also burns gas from the source, so many tiny drains could use up its native balance and strand its tokens.
+	// Each drain's fee is at most the zone's fee cap, so this count is the bound on the gas the drains can burn (keysets.go, "The gas of a drain").
+	MaxDrainsPerSource int `json:"max_drains_per_source,omitempty"`
 	// RebalancePerHour limits moves between hot shards; 0 refuses them all.
 	RebalancePerHour int `json:"rebalance_per_hour"`
 	// ConsolidationsPerHour limits how many consolidations of a Bitcoin shard are first signed in a rolling hour; 0 refuses them all. A consolidation
@@ -273,7 +277,18 @@ func (cf ChainFile) buildBTC(name string, enabledApprovers int) (*ChainConfig, e
 	return &ChainConfig{Name: name, Family: FamilyBTC, BTC: sc, Assets: map[string]AssetPolicy{btc.Native: pol},
 		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour,
 		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour, ConsolidationsPerHour: cf.ConsolidationsPerHour,
-		DrainsPerHour: drainsPerHour(cf)}, nil
+		DrainsPerHour: drainsPerHour(cf), MaxDrainsPerSource: cf.MaxDrainsPerSource}, nil
+}
+
+// DefaultMaxDrainsPerSource is the drains one source address may have signed in all: a move for each asset, a few repeats for what arrived meanwhile, and
+// room for retries after a reverted one (only signed drains count).
+const DefaultMaxDrainsPerSource = 40
+
+func (cc *ChainConfig) maxDrainsPerSource() int {
+	if cc.MaxDrainsPerSource > 0 {
+		return cc.MaxDrainsPerSource
+	}
+	return DefaultMaxDrainsPerSource
 }
 
 // drainsPerHour is the chain's limit on drains (default 10; zero: none allowed). A Bitcoin key replacement drains the hot shard of the old generation.
@@ -327,6 +342,8 @@ type ChainConfig struct {
 	ToColdPerHour  int
 	// DrainsPerHour limits drains first signed per rolling hour (default 10; zero: none allowed).
 	DrainsPerHour int
+	// MaxDrainsPerSource: drains signed from one source address in all; 0 means DefaultMaxDrainsPerSource.
+	MaxDrainsPerSource int
 	// WithdrawalsPerHour limits withdrawals first signed per rolling hour.
 	WithdrawalsPerHour int
 	// RebalancePerHour limits moves between hot shards (zero: none allowed).
@@ -579,7 +596,10 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	sort.Strings(want)
 	cc := &ChainConfig{Name: name, Family: family, EVM: ec, Assets: map[string]AssetPolicy{},
 		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour, ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour,
-		DrainsPerHour: 10}
+		DrainsPerHour: 10, MaxDrainsPerSource: cf.MaxDrainsPerSource}
+	if cf.MaxDrainsPerSource < 0 {
+		return nil, fmt.Errorf("gateway: config: chain %q: max_drains_per_source must be >= 0", name)
+	}
 	if cf.DrainsPerHour != nil {
 		if *cf.DrainsPerHour < 0 {
 			return nil, fmt.Errorf("gateway: config: chain %q: drains_per_hour must be >= 0", name)
