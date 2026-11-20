@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cluster", "duration", "renewBefore", "issuers", "trust"],
+  "definitions": {
+    "vault": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server", "path", "auth"],
+      "properties": {
+        "server": { "type": "string", "pattern": "^(https://.+)?$" },
+        "path": { "type": "string" },
+        "caBundle": { "type": "string" },
+        "namespace": { "type": "string" },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mountPath", "role", "serviceAccountName"],
+          "properties": {
+            "mountPath": { "type": "string" },
+            "role": { "type": "string" },
+            "serviceAccountName": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "interval": { "type": "string", "pattern": "^[0-9]+h$" }
+  },
+  "properties": {
+    "cluster": { "enum": ["", "business", "signing-core", "party-b", "party-c", "broker", "all"] },
+    "operatorCertificates": { "type": "boolean" },
+    "duration": { "type": "object", "additionalProperties": false, "required": ["default", "pinned"], "properties": { "default": { "$ref": "#/definitions/interval" }, "pinned": { "$ref": "#/definitions/interval" } } },
+    "renewBefore": { "type": "object", "additionalProperties": false, "required": ["default", "pinned"], "properties": { "default": { "$ref": "#/definitions/interval" }, "pinned": { "$ref": "#/definitions/interval" } } },
+    "extraDNSNames": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string", "minLength": 1 } } },
+    "issuers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "vault", "ca", "certManager"],
+      "properties": {
+        "mode": { "enum": ["vault", "ca"] },
+        "vault": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["business", "signing", "link"],
+          "properties": { "business": { "$ref": "#/definitions/vault" }, "signing": { "$ref": "#/definitions/vault" }, "link": { "$ref": "#/definitions/vault" } }
+        },
+        "ca": { "type": "object", "additionalProperties": false, "properties": { "duration": { "$ref": "#/definitions/interval" }, "linkSecretName": { "type": "string" } } },
+        "certManager": { "type": "object", "additionalProperties": false, "required": ["serviceAccount", "namespace"], "properties": { "serviceAccount": { "type": "string" }, "namespace": { "type": "string" } } }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "business": { "type": "string" }, "signing": { "type": "string" }, "allowEmpty": { "type": "boolean" } }
+    }
+  }
+}

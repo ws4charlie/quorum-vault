@@ -1,0 +1,7 @@
+apiVersion: v2
+name: qv-certs
+description: QuorumVault certificates on Kubernetes - the cert-manager Issuers, one Certificate per catalog identity of one cluster, and the per-zone trust bundles. Installed once per cluster; the list of identities is generated from internal/pki/catalog.go.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"

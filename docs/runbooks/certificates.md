@@ -35,6 +35,18 @@ Files land in `data/pki/<zone>/<service>/{tls.crt,tls.key,ca.crt}` (`QV_PKI_DIR`
 - Certificates for every service in `internal/pki/catalog.go`, with the URI SAN and the DNS names the clients dial, valid for days at most, renewed by an agent (Vault PKI, cert-manager, step-ca or similar) that rewrites the three files in place. Write the key before the certificate and replace files atomically (rename); a service that reloads a half-written pair keeps the old one and tries again.
 - Renew at about one third of the lifetime left. The alert `QVTLSCertExpiringSoon` fires under 4 hours.
 
+## On Kubernetes
+
+Chart `deploy/helm/qv-certs` (README there) makes the certificates; nothing else does.
+
+- **Who issues.** cert-manager, from a Vault or OpenBao PKI, one issuer per zone. The CA keys stay in Vault; no cluster holds one, and a signing cluster's Vault role can sign only that cluster's names. A cluster's workload gets a link certificate (`gateway-link`, `cosigner-link`) through a second issuer on the business PKI whose role signs those names and no others. kind and CI make a throwaway CA at install time instead.
+- **Which names.** The list is generated from `internal/pki/catalog.go` (`go generate ./internal/pki`); a test fails when the chart and the catalog differ. Each catalog entry says which cluster holds it; the Secret is `qv-<name>-tls` (business) or `qv-signing-<name>-tls` (signing). Operator identities (`admin`) are not made in clusters; an operator asks the issuer.
+- **Renewal.** cert-manager renews at one third of the lifetime left (72 h certificates, renewed 24 h ahead) with a new key each time. Services re-read the files every minute from the mounted Secret (a volume, never `subPath`), so nothing restarts. Trust comes from the ConfigMap `qv-trust-<zone>`, not from cert-manager's `ca.crt`; it changes only when an operator changes it (a CA roll: add the new CA to the bundle, wait, reissue, remove the old one).
+- **Pinned identities** (`mpc-party-a|b|c`, `gateway-party`, `cosigner-socket`, `attest-broker`, `attest-caller-a|b|c`) live one year, are renewed 45 days ahead, and keep their key (`rotationPolicy: Never`), so a renewal changes no pin. To change a pinned key on purpose (yearly, or a suspected leak): delete the Secret of that Certificate in its cluster; cert-manager makes a new key; print the new pin (see "Printing a pin") and follow the key-rotation steps there, adding the new pin on every peer before the presenting side restarts. On a leak, remove the old pin at once.
+- **Expiry alerts** are the ones above (`monitoring/tls-cert.rules.yml`, `QVTLSCertExpiringSoon`, `QVPinnedCertExpiringSoon`); a cert-manager `Certificate` that stays not Ready is a failed renewal: look at its `CertificateRequest` events.
+- **The migration Job** has its own name, `migrator`, mapped to the owner role like `admin` (`deploy/postgres/business.pg_ident.conf`), so the Job's Secret opens nothing else.
+- **Not yet separate.** Cosigners B and C still share the certificate names `cosigner` and `cosigner-link` (each cluster has its own key). One name each needs the Kafka ACL, the compose files, the Postgres map and the e2e harness changed together.
+
 ## Postgres
 
 Every database connection is TLS with a client certificate; there is no password and no plain connection. The DSN must say `sslmode=verify-full` (a service refuses anything weaker; the development switch above is the only exception). A service gives its certificate by the same three files, so the pool dials every new connection with the file as it is then.
