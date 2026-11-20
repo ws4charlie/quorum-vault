@@ -43,6 +43,7 @@
 | [工作流](docs/zh/workflows.md) | 保证每笔存款、归集、提现在崩溃后也能走完 |
 | [签名区](docs/zh/signing-zone.md) | 每笔付款签名前都要核对 |
 | [MPC 签名](docs/zh/mpc.md) | 把每把密钥拆到多台机器上，没有哪台能单独签名 |
+| [密钥更换](docs/zh/key-replacement.md) | 一把密钥不再可信时怎么办：新密钥接手，旧密钥被清空 |
 | [冷热钱包](docs/zh/tiers.md) | 少量放在线上，其余离线保管，并在两者之间调拨 |
 | [EVM](docs/zh/evm.md) · [Bitcoin](docs/zh/bitcoin.md) · [Solana](docs/zh/solana.md) | 每条链各自的特殊之处 |
 | [Bitcoin 发送](docs/zh/bitcoin-sending.md) | 一笔 Bitcoin 交易怎么上链：加价余量、替换、取消、子交易和批量 |

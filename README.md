@@ -43,6 +43,7 @@ Two rules carry the design:
 | [Workflows](docs/workflows.md) | Carries each deposit, sweep and withdrawal through a crash |
 | [Signing zone](docs/signing-zone.md) | Checks every payment before any key signs |
 | [MPC signing](docs/mpc.md) | Splits each key across machines so no one machine can sign |
+| [Key replacement](docs/key-replacement.md) | What happens when a key is no longer trusted: a new key takes over and the old one is emptied |
 | [Hot and cold](docs/tiers.md) | Keeps a little online, the rest offline, and moves money between them |
 | [EVM](docs/evm.md) · [Bitcoin](docs/bitcoin.md) · [Solana](docs/solana.md) | What is special about each chain |
 | [Bitcoin sends](docs/bitcoin-sending.md) | How a Bitcoin send gets confirmed: fee room, replacement, cancel, child and batches |
