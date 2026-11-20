@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"time"
@@ -556,9 +557,12 @@ func (s *Service) RebuildWithdrawalJob(ctx context.Context, id string) (bool, er
 		if err != nil {
 			return err
 		}
-		if st, reason, _ := groupStatus(jobs); st != signjob.StatusRejected || !IsFeeCapsRefusal(reason) {
+		st, reason, _ := groupStatus(jobs)
+		if st != signjob.StatusRejected || !IsFeeCapsRefusal(reason) {
 			return nil
 		}
+		feeCapsRefusals.Add(1)
+		slog.Error("ALERT btc fee caps: the zone's reason for refusing the withdrawal", "withdrawal", id, "reason", reason)
 		if err := un.UndoUnsent(ctx, tx, "withdrawal", id); err != nil {
 			return err
 		}

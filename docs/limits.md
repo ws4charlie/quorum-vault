@@ -24,7 +24,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **What you see is what you sign is only partly solved.** A security key signs a hash and has no screen. The approval page recomputes the hash and catches a lying core, but a replaced page can still show one payee and ask for a signature on another job. The terminal tool is the better choice for a large payment, since it prints every field on a separate machine, but no key has a display, so the person still trusts that machine ([runbook](runbooks/webauthn-approver.md)). Closing the gap needs a device that shows the job itself, which is not built.
 - **One key per approver name.** A person who wants a second key needs a second name.
 - **The approval end-to-end test runs with the HSM signer only.** The MPC mode does not run it.
-- **The core keeps its own copy of the approver keys for Bitcoin fee-cap changes.** A newly enrolled approver cannot sign a fee-cap change until the core's settings list them, and a revoked one must be removed there by hand ([runbook](runbooks/approvers.md)).
+- **Write access to the business database can stall withdrawals through fee-cap rows but cannot change what the zone signs.** The core follows its own fee-cap rows as a hint without checking signatures; the zone judges every payment by its own record and refuses the rest ([runbook](runbooks/btc-fee-caps.md)).
 - **The operators are a short list in the zone's settings.** They are the root of trust for approver changes, so changing the list means editing settings and restarting. Changes that no longer meet a raised rule are ignored.
 
 **Signing and parties**

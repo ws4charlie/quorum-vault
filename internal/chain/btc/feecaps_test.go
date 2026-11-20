@@ -307,3 +307,53 @@ func TestUndoUnsentAndRebuildUnderTheNewChange(t *testing.T) {
 		t.Fatal("a broadcast attempt was undone")
 	}
 }
+
+// A row forged in the core's database is a hint and nothing more: whatever caps it names, the zone signs only under ITS OWN record. (1) A forged row
+// with a sequence number the zone is not on: the payload carries it and the zone refuses with the fee-cap note. (2) A forged row with the sequence number
+// the zone IS on, and caps far above the zone's: the core builds under the forged caps, and the zone still refuses the fee because its own cap is lower.
+func TestForgedCoreRowNeverRaisesWhatTheZoneSigns(t *testing.T) {
+	e := newWEnvWith(t, func(c *Config) { c.FeeCaps = &FeeCapsConfig{} })
+	ctx := context.Background()
+	e.fund(2_000_000)
+	forge := func(seq int64) {
+		t.Helper()
+		if _, err := e.a.pool.Exec(ctx, `INSERT INTO btc_fee_cap_changes (chain, seq, max_tx_fee_sats, max_fee_rate, signed_at, signatures) VALUES ('btc-t', $1, 900000, 190, $2, '[{"actor":"mallory","signature":"00"}]')`, seq, time.Now().Unix()); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.a.refreshCaps(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got, s := e.a.FeeCapsNow(); s != seq || got.MaxFeeRate != 190 {
+			t.Fatalf("the core did not take the forged row (a hint it follows): %+v seq %d", got, s)
+		}
+	}
+	zone := func(caps FeeCaps, seq int64) *Verifier {
+		v, err := NewVerifier(SigningConfig{Chain: e.cfg.Chain, Network: "regtest", AccountXpub: e.cfg.AccountXpub,
+			HotShards:    map[string]HotShard{wPart: {Address: e.hot, Path: []uint32{1, 0}}},
+			MaxTxFeeSats: e.cfg.MaxTxFeeSats, MaxFeeRate: e.cfg.MaxFeeRate, MaxInputs: e.cfg.MaxInputs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		v.view = NewFeeCapsView(caps, nil, nil, nil)
+		v.view.live.Store(&feeCapsLive{FeeCaps: caps, Seq: seq})
+		return v
+	}
+	zoneCaps := FeeCaps{MaxTxFeeSats: e.cfg.MaxTxFeeSats, MaxFeeRate: e.cfg.MaxFeeRate}
+
+	forge(5)
+	u, err := e.build("w1", 40_000, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zone(zoneCaps, 0).Parse(u); err == nil || !strings.Contains(err.Error(), FeeCapsSeqNote) {
+		t.Fatalf("(1) the zone on another sequence signed under the forged row's caps: %v", err)
+	}
+	// (2) the zone is on the same sequence number but its cap is lower than what the core's forged row let it pay
+	if _, err := zone(FeeCaps{MaxTxFeeSats: 1, MaxFeeRate: 1}, 5).Parse(u); err == nil || !strings.Contains(err.Error(), "exceeds the cap") {
+		t.Fatalf("(2) the zone on the same sequence number signed a fee above its own cap: %v", err)
+	}
+	// and with its own caps and sequence agreeing, the zone accepts: the refusals above are about the zone's record, not about the payload
+	if _, err := zone(zoneCaps, 5).Parse(u); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+}

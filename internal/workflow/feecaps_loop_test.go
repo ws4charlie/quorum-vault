@@ -16,6 +16,9 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 )
 
+// feeCapsHoldForTest is the hold of the runs below (0: the production hour).
+var feeCapsHoldForTest time.Duration
+
 const feeCapsRefusal = "tx_mismatch: btc: transaction does not match intent: " + btc.FeeCapsSeqNote
 
 // feeCapsRun runs a withdrawal whose first send the zone refuses for another fee-cap change. rebuild is what each call of the RebuildWithdrawalJob
@@ -50,6 +53,7 @@ func feeCapsRun(t *testing.T, rebuild func(n int) (bool, error)) (calls []string
 		rebuiltOK = rebuiltOK || (ok && err == nil)
 		return ok, err
 	})
+	reg("Park", func(_ context.Context, o OwnerArg, reason string) error { rec("Park:" + reason); return nil })
 	reg("BroadcastJob", func(context.Context, OwnerArg, string) (string, error) { rec("Broadcast"); return "h1", nil })
 	reg("RecordBroadcast", func(context.Context, OwnerArg, string) error { rec("RecordBroadcast"); return nil })
 	reg("WaitNonce", func(context.Context, OwnerArg, time.Duration) (NonceResult, error) {
@@ -63,7 +67,7 @@ func feeCapsRun(t *testing.T, rebuild func(n int) (bool, error)) (calls []string
 		rec("NothingToFree")
 		return FreeResult{Free: true}, nil
 	})
-	env.ExecuteWorkflow(WithdrawalWorkflow, Input{ID: "w1", T: Timings{SignTimeout: time.Second, StuckAfter: time.Hour, MaxReplacements: 1, HotPoll: time.Second}})
+	env.ExecuteWorkflow(WithdrawalWorkflow, Input{ID: "w1", T: Timings{SignTimeout: time.Second, StuckAfter: time.Hour, MaxReplacements: 1, HotPoll: time.Second, FeeCapsHold: feeCapsHoldForTest}})
 	if !env.IsWorkflowCompleted() {
 		t.Fatal("workflow did not complete")
 	}
@@ -123,5 +127,26 @@ func TestFeeCapsRefusalThatCannotBeRebuiltTakesTheOldPath(t *testing.T) {
 		if count(calls, "Rebuild") != 1 || count(calls, "EnqueueCancel") != 1 || count(calls, "Void") != 1 || count(calls, "Settle") != 0 || strings.Contains(strings.Join(calls, ","), "Broadcast") {
 			t.Fatalf("%s: activities %v", name, calls)
 		}
+	}
+}
+
+// The zone keeps refusing for fee caps (a forged or stale row in the core): the withdrawal is rebuilt and waits, and after the hold it is PARKED with the zone's
+// reason, which is its visible state; nothing was signed, so nothing is voided and no cancel runs. It does not retry for ever.
+func TestFeeCapsRefusalThatNeverClearsIsParkedWithTheZonesReason(t *testing.T) {
+	feeCapsHoldForTest = 10 * time.Second
+	defer func() { feeCapsHoldForTest = 0 }()
+	calls, err := feeCapsRun(t, func(int) (bool, error) { return false, temporal.NewNonRetryableApplicationError("not enough available outputs", errNoOutputs, nil) })
+	_ = err
+	parked := ""
+	for _, c := range calls {
+		if strings.HasPrefix(c, "Park:") {
+			parked = c
+		}
+	}
+	if parked == "" || !strings.Contains(parked, "core and zone are on different fee-cap changes") {
+		t.Fatalf("not parked with the zone's reason (calls %v, err %v)", calls, err)
+	}
+	if count(calls, "Void") != 0 || count(calls, "EnqueueCancel") != 0 || count(calls, "Broadcast") != 0 {
+		t.Fatalf("parked, but also: %v", calls)
 	}
 }

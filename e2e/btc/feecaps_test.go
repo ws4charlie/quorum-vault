@@ -1,6 +1,7 @@
 package btce2e
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,6 +10,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 )
 
 // Signed fee-cap changes end to end (docs/runbooks/btc-fee-caps.md): approvers sign with `qv-fee-caps sign`, an operator applies with `qv-fee-caps apply` to the
@@ -109,7 +114,7 @@ func TestFeeCapsRaiseBumpsAStuckSendBeyondTheOldCap(t *testing.T) {
 	s.reconcileClean()
 }
 
-// The window: the zone has the change and the core does not (then the other way round). A withdrawal requested in between does not fail: it keeps its hold, one ALERT
+// The window: the zone has the change and the core does not. A withdrawal requested in between does not fail: it keeps its hold, one ALERT
 // is raised for it, and it goes out under the new caps as soon as the other side has the change. show says the databases differ, the divergence metric is 1, and it is 0
 // again after.
 func TestFeeCapsApplyWindowWaitsThenSendsUnderTheNewCaps(t *testing.T) {
@@ -140,7 +145,8 @@ func TestFeeCapsApplyWindowWaitsThenSendsUnderTheNewCaps(t *testing.T) {
 		st := s.getWd(w1.ID).Status
 		return st != "broadcast" && st != "confirmed" && st != "failed"
 	})
-	s.mustApply(coreOnly, files...)
+	// finish the apply: the zone databases already have the change (skipped), the core takes it (a command always names a zone database: the approvers in force come from there)
+	s.mustApply(everywhere, files...)
 	s.wantCaps(everywhere, 150_000, 60, 1)
 	if m = s.metrics(everywhere); m["qv_btc_fee_caps_diverged"] != 0 {
 		t.Fatalf("metrics after the window: %v", m)
@@ -155,30 +161,9 @@ func TestFeeCapsApplyWindowWaitsThenSendsUnderTheNewCaps(t *testing.T) {
 		t.Fatalf("received %d", got)
 	}
 
-	// 2. The core first (a command that names the core alone).
-	files = s.signedBy(150_000, 70, 2, "bob", "carol")
-	s.mustApply(coreOnly, files...)
-	s.wantCapsOf(map[string]capsRow{"core": {150_000, 70, 2}, "gateway": {150_000, 60, 1}, "cosigner-b": {150_000, 60, 1}})
-	if m = s.metrics(everywhere); m["qv_btc_fee_caps_diverged"] != 1 {
-		t.Fatalf("metrics during the second window: %v", m)
-	}
-	alerts := s.workerLogCount(workerAlert)
-	dest2 := s.node.fresh()
-	w2 := s.withdraw("ini", "w2", "c1", dest2, 10_000_000)
-	s.waitFor(90*time.Second, "the ALERT for the second waiting withdrawal", func() bool { return s.workerLogCount(workerAlert) > alerts })
-	s.holds(8*time.Second, "w2 waits", func() bool {
-		st := s.getWd(w2.ID).Status
-		return st != "broadcast" && st != "confirmed" && st != "failed"
-	})
-	s.mustApply(zoneOnly, files...)
-	s.wantCaps(everywhere, 150_000, 70, 2)
-	s.waitWd(w2.ID, "broadcast", 90*time.Second)
-	s.node.mine(2, "")
-	s.waitWd(w2.ID, "confirmed", 60*time.Second)
-	if n := s.workerLogCount(workerAlert) - alerts; n != 1 {
-		t.Fatalf("%d ALERTs for the second withdrawal, want one", n)
-	}
-	if got := s.received(dest2, 1); got != 10_000_000 {
+	// The other order, the core on a change the zone does not have, can no longer be made by the tool (it writes the core only after every zone database
+	// accepted the change); a row forged in the core's database makes it, see TestFeeCapsForgedCoreRowIsRefusedByTheZone.
+	if got := s.received(dest, 1); got != 10_000_000 {
 		t.Fatalf("received %d", got)
 	}
 	for _, p := range procs {
@@ -425,4 +410,43 @@ func TestFeeCapsEnrolledApproverCounts(t *testing.T) {
 	s.approv["dave"] = priv
 	s.mustApply(everywhere, s.signedBy(150_000, 60, 1, "alice", "dave")...)
 	s.wantCaps(everywhere, 150_000, 60, 1)
+}
+
+// A row forged in the core's database (no valid signature, caps far above the zone's) is a hint the core follows and the zone never does: the withdrawal built
+// under it is refused by the zone with the zone's reason in the worker's log, nothing is broadcast, and the withdrawal waits (and is parked after the hold,
+// TestFeeCapsRefusalThatNeverClearsIsParkedWithTheZonesReason). A real signed change with a higher sequence number, applied everywhere, ends the wait.
+func TestFeeCapsForgedCoreRowIsRefusedByTheZone(t *testing.T) {
+	s := feeCapsSystem(t, opts{stuckAfter: "10m", feeCaps: &feeCapsOpts{}})
+	s.fundHot(100_000_000)
+	s.deposit("c1", 30_000_000)
+	c, err := pgx.Connect(context.Background(), s.bizDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(context.Background(), `INSERT INTO btc_fee_cap_changes (chain, seq, max_tx_fee_sats, max_fee_rate, signed_at, signatures) VALUES ($1, 7, 900000, 190, $2, '[{"actor":"mallory","signature":"00"}]')`, s.chain, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	c.Close(context.Background())
+	rows, _ := s.showCaps(everywhere)
+	if rows["core"].seq != 7 || rows["gateway"].seq != 0 {
+		t.Fatalf("the core follows the forged row, the zone does not: %v", rows)
+	}
+	dest := s.node.fresh()
+	w := s.withdraw("ini", "w1", "c1", dest, 10_000_000)
+	s.waitFor(90*time.Second, "the zone's reason in the worker's log", func() bool { return s.workerLogCount("the zone's reason for refusing the withdrawal") >= 1 })
+	if s.workerLogCount(btc.FeeCapsSeqNote) < 1 {
+		t.Fatal("the worker's log does not carry the zone's refusal reason")
+	}
+	s.holds(6*time.Second, "the withdrawal is not sent under the forged caps", func() bool {
+		st := s.getWd(w.ID).Status
+		return st != "broadcast" && st != "confirmed" && st != "failed"
+	})
+	// the way out: one real change with a higher sequence number, to every database
+	s.mustApply(everywhere, s.signedBy(150_000, 60, 8, "alice", "bob")...)
+	s.waitWd(w.ID, "broadcast", 90*time.Second)
+	s.node.mine(2, "")
+	s.waitWd(w.ID, "confirmed", 60*time.Second)
+	if got := s.received(dest, 1); got != 10_000_000 {
+		t.Fatalf("received %d", got)
+	}
 }

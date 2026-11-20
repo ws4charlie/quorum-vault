@@ -36,6 +36,7 @@ type Timings struct {
 	ColdInterval     time.Duration // how often the cold planner looks at the hot wallets
 	RefillPoll       time.Duration // how often a refill workflow looks for the imported signed file
 	RefillStuckAfter time.Duration // a broadcast refill that has not confirmed after this raises an ALERT
+	FeeCapsHold      time.Duration // how long a withdrawal the zone refuses for fee caps is rebuilt and waits before it is parked for an operator; 0: one hour
 	// ActivityTimeout, when set, replaces the fixed activity timeouts below (20 s to run, 30 s for a build, 20 s in the queue, 8 s
 	// without a heartbeat): that is how long the engine waits before it notices an activity died with its worker. Zero keeps the
 	// production values. It exists so tests that kill the worker do not wait 20 to 30 seconds per crash.
@@ -657,7 +658,19 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 	}
 	// Refused only because the core and the zone are on different fee-cap changes (Bitcoin): nothing was signed, so the withdrawal waits and is built
 	// again under the caps in force now, until they agree. Never voided for this.
+	// The wait is bounded: after FeeCapsHold it is parked (visible in the withdrawal's status, an operator resumes it), not retried for ever.
+	hold := t.FeeCapsHold
+	if hold == 0 {
+		hold = time.Hour
+	}
+	holdUntil := workflow.Now(ctx).Add(hold)
 	for r.Kind == txRefused && custody.IsFeeCapsRefusal(r.Reason) {
+		if workflow.Now(ctx).After(holdUntil) {
+			if err := call(ctx, opts(ctx), nil, a.Park, o, "the zone has refused fee caps for "+hold.String()+": "+r.Reason+" (apply the same signed fee-cap change to the core and the zone, then clear this note; docs/runbooks/btc-fee-caps.md)"); err != nil {
+				return err
+			}
+			return nil
+		}
 		if err := workflow.Sleep(ctx, t.HotPoll); err != nil {
 			return err
 		}
