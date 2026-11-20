@@ -166,7 +166,7 @@ func TestApplyFeeCaps(t *testing.T) {
 func TestCoreBuildsUnderSignedFeeCaps(t *testing.T) {
 	k, now := newFCKeys(), time.Now()
 	e := newWEnvWith(t, func(c *Config) {
-		c.FeeCaps = &FeeCapsConfig{Approvers: k.ap, MinApprovers: 2}
+		c.FeeCaps = &FeeCapsConfig{} // the core keeps no approver list: it reads its rows by shape
 	})
 	ctx := context.Background()
 	e.fund(2_000_000)
@@ -224,7 +224,8 @@ func TestCoreBuildsUnderSignedFeeCaps(t *testing.T) {
 	if e.fee(orig) == 0 || e.fee(orig) >= uint64(atCap) {
 		t.Fatalf("the first attempt's fee changed: %d", e.fee(orig))
 	}
-	// A row inserted straight into the core's table does not move it.
+	// A row without any signature (malformed) inserted straight into the core's table does not move it. A well-formed forged row would: the core judges by shape
+	// and the zone is the rule, which refuses the sequence mismatch (TestVerifierRefusesAnotherFeeCapSequence).
 	if _, err := e.a.pool.Exec(ctx, `INSERT INTO btc_fee_cap_changes (chain, seq, max_tx_fee_sats, max_fee_rate, signed_at, signatures) VALUES ('btc-t', 9, 99999, 199, $1, '[]')`, now.Unix()); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +266,7 @@ func TestVerifierRefusesAnotherFeeCapSequence(t *testing.T) {
 // under change 1, with the same outputs and the new sequence number. A broadcast attempt cannot be undone.
 func TestUndoUnsentAndRebuildUnderTheNewChange(t *testing.T) {
 	k, now := newFCKeys(), time.Now()
-	e := newWEnvWith(t, func(c *Config) { c.FeeCaps = &FeeCapsConfig{Approvers: k.ap, MinApprovers: 2} })
+	e := newWEnvWith(t, func(c *Config) { c.FeeCaps = &FeeCapsConfig{} })
 	ctx := context.Background()
 	e.fund(1_000_000)
 	u0, err := e.build("w1", 40_000, true)

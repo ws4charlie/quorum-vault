@@ -29,8 +29,9 @@ type Entry struct {
 	IPs     []string
 	Usage   Usage
 	// Clusters are the Kubernetes clusters that hold this identity (deploy/helm/qv-certs renders one Certificate for it in each). Every entry names at
-	// least one. An entry in several clusters is the same NAME in each, with a key of its own per cluster: cosigners B and C share one name today
-	// (see the backlog note on the cosigner entries).
+	// least one. An entry in several clusters is the same NAME in each, with a key of its own per cluster (admin, signing-db, cosigner-socket).
+	// Cosigners B and C do NOT share a name: each has its own (cosigner-b, cosigner-c and their links), so a certificate of one is refused where the
+	// other's is expected.
 	Clusters []string
 	// Pinned marks an identity that peers pin by public key (docs/runbooks/certificates.md, "Printing a pin"): no CA vouches for it, so its Certificate
 	// must keep its key across renewals (cert-manager rotationPolicy Never) or every renewal would break the pin.
@@ -72,13 +73,14 @@ var Catalog = []Entry{
 	{Zone: ZoneBusiness, Service: "temporal", DNS: append([]string{"temporal"}, localNames...), IPs: localIPs, Usage: Server | Client, Clusters: biz},
 	{Zone: ZoneBusiness, Service: "keycloak", DNS: append([]string{"keycloak"}, localNames...), IPs: localIPs, Usage: Server, Clusters: biz},
 	{Zone: ZoneBusiness, Service: "seaweedfs", DNS: append([]string{"seaweedfs"}, localNames...), IPs: localIPs, Usage: Server, Clusters: biz},
-	// the links: issued by the business authority, held by signing-zone programs. The cosigner link is one name for cosigner B and cosigner C (backlog:
-	// one name each needs the Kafka ACL, the compose files and the e2e harness changed together, which is more than a catalog change).
+	// the links: issued by the business authority, held by signing-zone programs. Each cosigner has its own link name (the Kafka ACL names both).
 	{Zone: ZoneBusiness, Service: "gateway-link", Usage: Client, Clusters: signingCore},
-	{Zone: ZoneBusiness, Service: "cosigner-link", Usage: Client, Clusters: partyBC},
+	{Zone: ZoneBusiness, Service: "cosigner-link-b", Usage: Client, Clusters: []string{ClusterPartyB}},
+	{Zone: ZoneBusiness, Service: "cosigner-link-c", Usage: Client, Clusters: []string{ClusterPartyC}},
 	// signing zone
 	{Zone: ZoneSigning, Service: "gateway", Usage: Client, Clusters: signingCore},
-	{Zone: ZoneSigning, Service: "cosigner", Usage: Client, Clusters: partyBC},                                                                         // one name for cosigner B and C (see above)
+	{Zone: ZoneSigning, Service: "cosigner-b", Usage: Client, Clusters: []string{ClusterPartyB}},                                                       // the cosigner next to party B: guard database client; its own name
+	{Zone: ZoneSigning, Service: "cosigner-c", Usage: Client, Clusters: []string{ClusterPartyC}},                                                       // the cosigner next to party C
 	{Zone: ZoneSigning, Service: "signing-db", DNS: append([]string{"signing-db"}, localNames...), IPs: localIPs, Usage: Server, Clusters: allSigning}, // the Postgres of the guard databases: one per signing cluster
 	{Zone: ZoneSigning, Service: "admin", Usage: Client, Operator: true, Clusters: allSigning},
 	// the MPC parties: peers pin each other's public key (docs/mpc.md), so no CA vouches for these identities and a renewal must keep the key (Pinned).

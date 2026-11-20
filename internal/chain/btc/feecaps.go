@@ -21,8 +21,11 @@ import (
 
 // Signed fee caps. max_fee_rate and max_tx_fee_sats of a Bitcoin chain are set in configuration; the zone's approvers can change them, with
 // signatures, without a restart. One signed record is the truth for both sides: the signing zone reads it from its guard database, the core reads
-// the same record from its own database, and each checks the signatures itself against the approver public keys of its own configuration. A row
-// put into either database by anyone else is ignored.
+// the same record from its own database. The zone checks the signatures against the approvers IN FORCE (its configuration with the operator-signed
+// registry applied, gateway/approvers.go); that check is the rule. The core keeps no approver list: `qv-fee-caps apply` verifies a change against the
+// registry of the zone databases before it writes to any database, and the core reads its own rows by shape only (FeeCapsRules.StoreTrusted), so the
+// business zone is not a second authority on who may approve. A row forged in the core's database can stall the core's builds (the zone refuses a payload
+// built under another sequence number, FeeCapsSeqNote); it cannot raise what the zone lets through. A row put into a zone database by anyone else is ignored.
 //
 // Who may change them: min_approvers distinct approvers (counted by identity), over (chain, caps, seq, time). The sequence number must be higher
 // than the current one and the signing time within max_change_age of now when the change is applied. Static bounds in the zone's configuration
@@ -118,35 +121,9 @@ type FeeCapsApprover struct {
 	Identity string
 }
 
-// FeeCapsConfig is the core's side of signed changes: the approver keys it checks the signatures against (the same keys and people as the zone's
-// approvers), how many must sign, and how old a change may be when it is applied.
-type FeeCapsConfig struct {
-	Approvers    map[string]FeeCapsApprover
-	MinApprovers int           // default 1
-	MaxAge       time.Duration // default 10m
-}
-
-// rules turns the core's config into the rules it judges changes by (no bounds: those are the zone's).
-func (f *FeeCapsConfig) rules(chain string, maxInputs, maxPayments int) (*FeeCapsRules, error) {
-	r := &FeeCapsRules{Chain: chain, Approvers: f.Approvers, MinApprovers: f.MinApprovers, MaxAge: f.MaxAge, MaxInputs: maxInputs, MaxPayments: maxPayments}
-	if r.MinApprovers == 0 {
-		r.MinApprovers = 1
-	}
-	if r.MaxAge == 0 {
-		r.MaxAge = 10 * time.Minute
-	}
-	people := map[string]bool{}
-	for n, a := range f.Approvers {
-		if len(a.Key) != ed25519.PublicKeySize || a.Identity == "" {
-			return nil, fmt.Errorf("btc: config: fee_caps approver %q needs an ed25519 key and an identity", n)
-		}
-		people[a.Identity] = true
-	}
-	if r.MinApprovers < 1 || r.MinApprovers > len(people) || r.MaxAge < 0 {
-		return nil, fmt.Errorf("btc: config: fee_caps min_approvers %d: between 1 and the %d distinct approver identities", r.MinApprovers, len(people))
-	}
-	return r, nil
-}
+// FeeCapsConfig turns signed fee-cap changes on in the core. It holds no approver keys: the approvers in force are the zone's (see the top of this
+// file), so there is nothing here to fall behind a registry change.
+type FeeCapsConfig struct{}
 
 // FeeCapsRules is everything a side needs to judge a change: the approvers of its own configuration, how many must sign, how old a change may
 // be when applied, the zone's bounds (nil on the core) and the largest transaction the caps must carry (CheckFeeCaps).
@@ -158,6 +135,9 @@ type FeeCapsRules struct {
 	Bounds       *FeeCapsBounds
 	MaxInputs    int
 	MaxPayments  int
+	// StoreTrusted: rows already in the database are read by shape only (positive caps, a sequence number, well-formed signatures) and their signatures
+	// are not checked. It is how the core reads its own table; Verify (the check of a NEW change) is unaffected.
+	StoreTrusted bool
 }
 
 // Verify counts the distinct people whose signature over the change is valid and checks the change against the rules: it is for this chain, it
@@ -237,7 +217,16 @@ func CurrentFeeCaps(ctx context.Context, q Queryer, r FeeCapsRules, static FeeCa
 		}
 		c.Caps = FeeCaps{MaxTxFeeSats: uint64(tx), MaxFeeRate: uint64(rate)}
 		if json.Unmarshal(sigs, &c.Signatures) == nil {
-			if who, verr := r.Verify(c); verr == nil {
+			if r.StoreTrusted {
+				if c.Seq >= 1 && c.Caps.MaxTxFeeSats > 0 && c.Caps.MaxFeeRate > 0 && len(c.Signatures) > 0 {
+					var who []string
+					for _, sg := range c.Signatures {
+						who = append(who, sg.Actor)
+					}
+					sort.Strings(who)
+					return FeeCapsRecord{FeeCaps: c.Caps, Seq: c.Seq, Signers: who}, skipped, nil
+				}
+			} else if who, verr := r.Verify(c); verr == nil {
 				return FeeCapsRecord{FeeCaps: c.Caps, Seq: c.Seq, Signers: who}, skipped, nil
 			}
 		}

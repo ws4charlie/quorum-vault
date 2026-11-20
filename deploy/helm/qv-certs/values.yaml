@@ -35,7 +35,7 @@ issuers:
       caBundle: ""
       namespace: ""
       auth: { mountPath: /v1/auth/kubernetes, role: "", serviceAccountName: qv-certs-signing }
-    link:                     # signing clusters only: the BUSINESS authority, restricted to this cluster's link names (gateway-link, cosigner-link)
+    link:                     # signing clusters only: the BUSINESS authority, restricted to this cluster's link names (gateway-link; cosigner-link-b or cosigner-link-c)
       server: ""
       path: ""                # pki-business/sign/link-signing-core: allowed_uri_sans exactly the link names of the cluster
       caBundle: ""

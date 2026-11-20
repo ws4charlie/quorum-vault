@@ -96,8 +96,14 @@ func TestKafkaRefusesWhatItShould(t *testing.T) {
 		if err := produce(gw, "qv.withdrawals"); err == nil || !strings.Contains(err.Error(), "AUTHORIZATION") {
 			t.Fatalf("the gateway's link certificate published to the outbox topics: %v", err)
 		}
-		if err := produce(pkitest.ClientTLS(pki.ZoneBusiness, "cosigner-link", "", "kafka"), "qv.audit.heads"); err != nil {
-			t.Fatalf("the cosigner's link certificate could not publish a head: %v", err)
+		for _, who := range []string{"cosigner-link-b", "cosigner-link-c"} {
+			c := pkitest.ClientTLS(pki.ZoneBusiness, who, "", "kafka")
+			if err := produce(c, "qv.audit.heads"); err != nil {
+				t.Fatalf("%s could not publish a head: %v", who, err)
+			}
+			if err := produce(c, "qv.withdrawals"); err == nil || !strings.Contains(err.Error(), "AUTHORIZATION") {
+				t.Fatalf("%s published to the outbox topics: %v", who, err)
+			}
 		}
 	})
 	t.Run("the relay publishes outbox topics; the archiver only reads heads", func(t *testing.T) {
@@ -147,7 +153,7 @@ func TestTemporalRefusesWhatItShould(t *testing.T) {
 		}
 	})
 	t.Run("the right authority, a name that is not on the list", func(t *testing.T) {
-		for _, who := range []string{"relay", "archiver", "guardian", "gateway-link", "cosigner-link"} {
+		for _, who := range []string{"relay", "archiver", "guardian", "gateway-link", "cosigner-link-b", "cosigner-link-c"} {
 			err := list(pkitest.ClientTLS(pki.ZoneBusiness, who, "temporal", "temporal"))
 			if err == nil || strings.Contains(err.Error(), "not found") {
 				t.Errorf("%s (a business certificate not on the list) was served: %v", who, err)

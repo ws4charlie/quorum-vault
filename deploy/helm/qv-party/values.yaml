@@ -73,8 +73,8 @@ hsm:
 tls:
   reload: 1m
   party:         { secretName: "" }     # empty = mpc-party-<role>-tls (catalog name mpc-party-a|b|c; pinned by the other parties, long-lived)
-  cosigner:      { secretName: qv-cosigner-tls }          # signing identity of the cosigner (guard database client)
-  cosignerLink:  { secretName: qv-cosigner-link-tls }     # business-CA link certificate, publishes audit heads
+  cosigner:      { secretName: "" }                       # empty = qv-signing-cosigner-<role>-tls (catalog name cosigner-b|c: signing identity of the cosigner, guard database client)
+  cosignerLink:  { secretName: "" }                       # empty = qv-cosigner-link-<role>-tls (catalog name cosigner-link-b|c: business-CA link certificate, publishes audit heads)
   cosignerSocket: { secretName: qv-cosigner-socket-tls }  # the certificate the cosigner presents to its party on the socket (pinned by the party)
 
 # --- The cosigner (roles B and C only; ignored for A) ---
@@ -85,11 +85,11 @@ cosigner:
   partyPins: []                         # pins of this party's certificate: the cosigner answers nobody else (-party-pins)
   timeoutMs: 5000
   auditSource: ""                       # empty = cosigner-<role in lower case>
-  database:                             # the cosigner's OWN guard database (never the gateway's), certificate name `cosigner` maps to this role
+  database:                             # the cosigner's OWN guard database (never the gateway's), certificate name `cosigner-<role>` maps to this role
     host: qv-signing-db-rw
     port: 5432
-    name: qv_cosigner_guard
-    role: qv_cosigner_guard
+    name: ""                            # empty = qv_cosigner_<role in lower case>_guard
+    role: ""                            # empty = qv_cosigner_<role in lower case>_guard (B: qv_cosigner_b_guard, C: qv_cosigner_c_guard)
     sslmode: verify-full
   kafka: { brokers: "redpanda.business.example.invalid:9092" }  # the business Kafka, over the explicit link; PLACEHOLDER
   resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { cpu: "1", memory: 512Mi } }

@@ -67,16 +67,16 @@ func TestCatalogEntriesAreWellFormed(t *testing.T) {
 }
 
 // Zone and cluster must agree: a business-zone name outside the business cluster is a link (named -link, issued by the business authority), and the
-// business cluster holds no signing-zone name. Names in more than one cluster are only the ones the backlog note lists.
+// business cluster holds no signing-zone name. Names in more than one cluster are only the ones listed below; cosigners B and C each have a name of their own.
 func TestClustersFollowTheZones(t *testing.T) {
-	shared := map[string]bool{"cosigner": true, "cosigner-link": true, "cosigner-socket": true, "signing-db": true, "admin": true}
+	shared := map[string]bool{"cosigner-socket": true, "signing-db": true, "admin": true}
 	for _, e := range pki.Catalog {
 		id := pki.ID(e.Zone, e.Service)
 		for _, c := range e.Clusters {
 			switch {
 			case e.Zone == pki.ZoneSigning && c == pki.ClusterBusiness:
 				t.Errorf("%s: a signing-zone name in the business cluster", id)
-			case e.Zone == pki.ZoneBusiness && c != pki.ClusterBusiness && !strings.HasSuffix(e.Service, "-link"):
+			case e.Zone == pki.ZoneBusiness && c != pki.ClusterBusiness && !isLinkName(e.Service):
 				t.Errorf("%s: a business-zone name outside the business cluster must be a -link name", id)
 			}
 		}
@@ -149,4 +149,34 @@ func TestMigratorIsTheOwnerRoleInThePostgresMap(t *testing.T) {
 	if !found {
 		t.Error("business/migrator must be a client certificate made in the cluster")
 	}
+}
+
+// Cosigners B and C never share a name: each name lives in exactly one cluster, and the pair B/C are both present (limits.md used to list the shared name).
+func TestCosignersHaveOwnNames(t *testing.T) {
+	want := map[string]string{
+		pki.ID(pki.ZoneSigning, "cosigner-b"):       pki.ClusterPartyB,
+		pki.ID(pki.ZoneSigning, "cosigner-c"):       pki.ClusterPartyC,
+		pki.ID(pki.ZoneBusiness, "cosigner-link-b"): pki.ClusterPartyB,
+		pki.ID(pki.ZoneBusiness, "cosigner-link-c"): pki.ClusterPartyC,
+	}
+	for _, e := range pki.Catalog {
+		id := pki.ID(e.Zone, e.Service)
+		if e.Service == "cosigner" || e.Service == "cosigner-link" {
+			t.Errorf("%s: the shared cosigner name is gone", id)
+		}
+		if c, ok := want[id]; ok {
+			if len(e.Clusters) != 1 || e.Clusters[0] != c {
+				t.Errorf("%s must live in %s only, not %v", id, c, e.Clusters)
+			}
+			delete(want, id)
+		}
+	}
+	for id := range want {
+		t.Errorf("%s is missing from the catalog", id)
+	}
+}
+
+// A link name ends in -link, or in -link-b / -link-c for the two cosigners.
+func isLinkName(s string) bool {
+	return strings.HasSuffix(s, "-link") || strings.HasSuffix(s, "-link-b") || strings.HasSuffix(s, "-link-c")
 }

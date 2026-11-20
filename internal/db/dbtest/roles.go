@@ -24,8 +24,9 @@ const (
 	RoleRelay   = "qv_relay"
 	RoleArchive = "qv_archiver"
 
-	RoleGatewayGuard  = "qv_gateway_guard"
-	RoleCosignerGuard = "qv_cosigner_guard"
+	RoleGatewayGuard   = "qv_gateway_guard"
+	RoleCosignerBGuard = "qv_cosigner_b_guard"
+	RoleCosignerCGuard = "qv_cosigner_c_guard"
 )
 
 var loginMu sync.Mutex
@@ -116,6 +117,13 @@ func enableLoginOn(t testing.TB, pool *pgxpool.Pool, role string) {
 // already names qv_gateway). Other binaries and flags are left alone (operator tools such as qv-sol-nonces and `qv-relay verify` run as the owner).
 func RoleArgs(t testing.TB, binary string, args []string) []string {
 	t.Helper()
+	return RoleArgsFor(t, binary, "b", args)
+}
+
+// RoleArgsFor is RoleArgs for a qv-cosigner that is cosigner "b" or "c": the binary is the same, the role is the one of the certificate it is started with
+// (pkitest.CosignerEnv). Other binaries ignore cosigner.
+func RoleArgsFor(t testing.TB, binary, cosigner string, args []string) []string {
+	t.Helper()
 	name := filepath.Base(binary)
 	out := append([]string(nil), args...)
 	set := func(flag string, f func(string) string) {
@@ -135,7 +143,11 @@ func RoleArgs(t testing.TB, binary string, args []string) []string {
 	case name == "qv-gateway":
 		set("-guard-dsn", func(d string) string { return GuardDSN(t, d, RoleGatewayGuard) })
 	case name == "qv-cosigner":
-		set("-guard-dsn", func(d string) string { return GuardDSN(t, d, RoleCosignerGuard) })
+		role := RoleCosignerBGuard
+		if cosigner == "c" {
+			role = RoleCosignerCGuard
+		}
+		set("-guard-dsn", func(d string) string { return GuardDSN(t, d, role) })
 	}
 	return out
 }

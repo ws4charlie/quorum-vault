@@ -30,7 +30,6 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 **Signing and parties**
 - **One administrator key is enough for a party's admin calls.** Calls such as key setup, refresh and unfreeze are signed by one key in the party's list, and the signature covers the operation, the key and the time, not the setup parameters.
 - **Some rollbacks cannot be detected.** If both parties are restored to the same older generation, nothing notices. A party restored to older state of the same generation may sign a repeated job again. The broker cannot destroy the keys of old generations ([Enclaves](enclaves.md)).
-- **Cosigners B and C share one certificate name.** Their keys differ, but the name on the list is the same.
 - **A new key is not test-signed before it takes over.** The first real signature after activation is the first proof that it works ([Key replacement](key-replacement.md)).
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.

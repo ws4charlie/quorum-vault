@@ -37,6 +37,11 @@ func main() {
 
 func run(log *slog.Logger) error {
 	if len(os.Args) > 1 && os.Args[1] == "verify" {
+		// The heads of B's and C's chains are published under different names; a default would check one of them against the wrong anchors, so the
+		// name is required. Anchors published before the names were split carry "cosigner".
+		if !hasSourceFlag(os.Args[2:]) {
+			return fmt.Errorf("verify: -source is required: cosigner-b or cosigner-c (\"cosigner\" for heads published before the names were split)")
+		}
 		return auditchain.VerifyCommand(context.Background(), os.Args[2:], "cosigner", "QV_COSIGNER_GUARD_DSN", os.Stdout)
 	}
 	configPath := flag.String("config", "", "signing-zone config of party B's side (required)")
@@ -44,14 +49,14 @@ func run(log *slog.Logger) error {
 	otherDSN := flag.String("gateway-guard-dsn", os.Getenv("QV_GATEWAY_GUARD_DSN"), "the gateway's guard DSN, only to refuse sharing a database with it (optional)")
 	socket := flag.String("socket", "", "unix socket path to listen on (required)")
 	brokers := flag.String("brokers", os.Getenv("QV_KAFKA_BROKERS"), "Kafka brokers for publishing the head of this zone's audit chain on qv.audit.heads (optional; env QV_KAFKA_BROKERS)")
-	auditSource := flag.String("audit-source", "cosigner", "name this chain's heads are published under on qv.audit.heads (several deployments sharing one topic need distinct names)")
+	auditSource := flag.String("audit-source", "", "name this chain's heads are published under on qv.audit.heads; default: the cosigner's own certificate name (cosigner-b or cosigner-c), \"cosigner\" only with the plain-text development switch")
 	metricsListen := flag.String("metrics-listen", os.Getenv("QV_COSIGNER_METRICS_LISTEN"), "serve Prometheus metrics (certificate expiry) in plain http on a loopback address, e.g. 127.0.0.1:9104; off when empty (env QV_COSIGNER_METRICS_LISTEN)")
 	anchorEvery := flag.Duration("anchor-interval", time.Minute, "publish the audit chain head at least this often, and at once when it changes")
 	sockCert := flag.String("socket-cert", os.Getenv("QV_COSIGNER_SOCKET_CERT"), "certificate (PEM) the cosigner presents on the socket (env QV_COSIGNER_SOCKET_CERT)")
 	sockKey := flag.String("socket-key", os.Getenv("QV_COSIGNER_SOCKET_KEY"), "private key of -socket-cert (env QV_COSIGNER_SOCKET_KEY)")
 	partyPins := flag.String("party-pins", os.Getenv("QV_COSIGNER_PARTY_PINS"), "comma-separated pins (SHA-256 of the public key, SPKI) of the certificate(s) of the ONE party this cosigner serves: nobody else may ask (env QV_COSIGNER_PARTY_PINS)")
 	tlsFor := pki.Flags(flag.CommandLine, "")
-	// the audit heads go to the business Kafka: the explicit link, with a certificate the business authority issued (business/cosigner-link)
+	// the audit heads go to the business Kafka: the explicit link, with a certificate the business authority issued (business/cosigner-link-b or -c)
 	linkFor := pki.Flags(flag.CommandLine, "link-")
 	healthListen := health.Flag(flag.CommandLine)
 	flag.Parse()
@@ -89,6 +94,17 @@ func run(log *slog.Logger) error {
 	if lsrc != nil {
 		go lsrc.Run(ctx.Done())
 	}
+	role, err := cosignerIdentity(tsrc, lsrc)
+	if err != nil {
+		return err
+	}
+	if *auditSource == "" {
+		*auditSource = "cosigner"
+		if role != "" {
+			*auditSource = "cosigner-" + role
+		}
+	}
+	log = log.With("cosigner", *auditSource)
 	pool, err := db.NewPool(ctx, *guardDSN, tsrc, pki.Allow{pki.ID(pki.ZoneSigning, "signing-db")})
 	if err != nil {
 		return fmt.Errorf("open replay guard: %w", err)

@@ -40,6 +40,7 @@ type Source struct {
 	leaf     *x509.Certificate
 	pool     *x509.CertPool
 	ca       []*x509.Certificate
+	service  string // when set, every load must present exactly this service name (HoldName)
 	reloads  int
 	failures int
 	lastOK   time.Time
@@ -117,9 +118,15 @@ func (s *Source) load() error {
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
 		return fmt.Errorf("%s: TLS certificate %s is not signed by the CA in %s: %w", c.Name, c.CertFile, c.CAFile, err)
 	}
-	z, _, err := nameOf(leaf)
+	z, svc, err := nameOf(leaf)
 	if err != nil {
 		return fmt.Errorf("%s: TLS certificate %s: %w", c.Name, c.CertFile, err)
+	}
+	s.mu.RLock()
+	held := s.service
+	s.mu.RUnlock()
+	if held != "" && svc != held {
+		return fmt.Errorf("%s: TLS certificate %s is named %s but this process holds the name %s: another service's certificate is refused, also on a reload", c.Name, c.CertFile, ID(z, svc), ID(c.Zone, held))
 	}
 	if z != c.Zone {
 		return fmt.Errorf("%s: TLS certificate %s is named for the %s zone but this service is configured for %s", c.Name, c.CertFile, z, c.Zone)
@@ -159,8 +166,40 @@ func (s *Source) Run(done <-chan struct{}) {
 	}
 }
 
+// HoldName makes the source accept only certificates named exactly <zone>/<service> from now on, on every reload too, so a replaced file
+// cannot turn the process into another identity (cosigner B must never present C's certificate). It returns an error, and holds nothing,
+// when the certificate in use has another name. Call it once after NewSource; Rename sets the name shown in messages and metrics.
+func (s *Source) HoldName(service string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, svc, err := nameOf(s.leaf); err != nil || svc != service {
+		return fmt.Errorf("%s: the certificate is named %q, want %q", s.cfg.Name, svc, service)
+	}
+	s.service = service
+	return nil
+}
+
+// Rename sets the name used in messages and in the name label of the metrics (for a process that learns its role from its certificate).
+func (s *Source) Rename(name string) {
+	s.mu.Lock()
+	s.cfg.Name = name
+	s.mu.Unlock()
+}
+
+// Service is the service part of the certificate's name (for example "cosigner-b").
+func (s *Source) Service() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, svc, _ := nameOf(s.leaf)
+	return svc
+}
+
 // Name is the configured name.
-func (s *Source) Name() string { return s.cfg.Name }
+func (s *Source) Name() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.Name
+}
 
 // Zone is the configured zone.
 func (s *Source) Zone() string { return s.cfg.Zone }

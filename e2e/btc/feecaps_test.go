@@ -1,6 +1,9 @@
 package btce2e
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -295,15 +298,17 @@ func (s *system) revokeApprover(name string, seq int) {
 	}
 }
 
-// The approver registry (operator-signed revocations) decides who counts in the zone; the core still checks fee-cap changes against its own static list. An approver is
-// revoked, then a fee-cap change signed by that approver is tried:
-//   - the zone refuses it, and `qv-fee-caps apply` to all databases stops before writing anything (it checks each zone database with its own effective approver set);
-//   - applied to the core alone (the core knows only its static list) the core takes it and the zone does not: the databases differ, sends wait on the sequence mismatch;
-//   - revoking an approver whose signature carried the change in force makes the zone ignore that change (it falls back to the config's caps, sequence 0) while the core
-//     still has it: that is the same mismatch, and it ends with one new change signed by the approvers who are left, applied to all databases.
+// The approver registry (operator-signed revocations) decides who counts, and the core keeps no approver list of its own: `qv-fee-caps` reads the approvers in force
+// from the zone databases. An approver is revoked, then:
+//   - a change signed by that approver is refused at the pre-check with a message that names the approvers in force, to every database and to the core alone
+//     (the core alone is refused too: there is no zone to ask), and nothing is written anywhere;
+//   - revoking an approver whose signature carried the change in force makes the zone ignore that change (it falls back to the config's caps, sequence 0) while the
+//     core's row stays: the core reads its own rows by shape. That is a mismatch, shown by `show` and the metrics, and it ends with one new change signed by the
+//     approvers who are left, applied to all databases (sequence 3 here is higher than the core's 1);
+//   - the new set passes end to end.
 //
 // Nothing is voided and nothing is signed in the meantime.
-func TestFeeCapsRevokedApproverIsRefusedByTheZoneNotByTheCore(t *testing.T) {
+func TestFeeCapsRevokedApproverIsRefusedAtThePreCheck(t *testing.T) {
 	s := feeCapsSystem(t, opts{stuckAfter: "10m", feeCaps: &feeCapsOpts{operators: 3}})
 	procs := []*proc{s.core, s.worker, s.gateway}
 	s.fundHot(100_000_000)
@@ -344,16 +349,18 @@ func TestFeeCapsRevokedApproverIsRefusedByTheZoneNotByTheCore(t *testing.T) {
 	if rows := s.capRows(); rows[0] != 1 || rows[1] != 1 || rows[2] != 1 {
 		t.Fatalf("rows after the refused change: %v", rows)
 	}
-	// To the core alone: the core checks the static list, which still has bob, and takes it. The zone has not got it.
-	if out, err := s.applyCaps(coreOnly, bad...); err != nil || !strings.Contains(out, "applied: max_tx_fee_sats") {
+	// To the core alone: refused too. The core keeps no approver list and there is no zone database to ask, so nothing is applied.
+	if out, err := s.applyCaps(coreOnly, bad...); err == nil || !strings.Contains(out, "at least one zone database") {
 		t.Fatalf("the core alone: %v\n%s", err, out)
 	}
-	s.wantCapsOf(map[string]capsRow{"core": {150_000, 70, 2}, "gateway": {100_000, 50, 0}, "cosigner-b": {100_000, 50, 0}})
-	// The zone's own writer refuses it too (the guard checks with the effective set).
-	if out, err := s.applyCaps(zoneOnly, bad...); err == nil || !strings.Contains(out, "refused") {
-		t.Fatalf("the zone databases took a change signed by a revoked approver: %v\n%s", err, out)
+	// The pre-check names who is in force.
+	if out, err := s.applyCaps(zoneOnly, bad...); err == nil || !strings.Contains(out, "approvers in force there:") || strings.Contains(out, "bob,") {
+		t.Fatalf("the zone databases took a change signed by a revoked approver, or the message does not say who is in force: %v\n%s", err, out)
 	}
-	waits("the withdrawal still waits: the core is on sequence 2, the zone on 0")
+	if rows := s.capRows(); rows[0] != 1 || rows[1] != 1 || rows[2] != 1 {
+		t.Fatalf("rows after the refused changes: %v", rows)
+	}
+	waits("the withdrawal still waits: the core is on sequence 1, the zone on 0")
 
 	// The way out: the approvers who are left sign a new change; the zone takes it (3 is higher than its 0), the core too.
 	s.mustApply(everywhere, s.signedBy(150_000, 80, 3, "alice", "carol")...)
@@ -395,4 +402,27 @@ func TestFeeCapsApproversSignSecondsApart(t *testing.T) {
 		t.Fatalf("two signing times: %v\n%s", err, out)
 	}
 	s.wantCaps(everywhere, 150_000, 80, 1)
+}
+
+// An approver enrolled by a signed registry change counts at once: a fee-cap change signed by that new approver passes the pre-check and applies everywhere,
+// though the core's configuration never heard of the name (it has no approver list; the old static list refused this change early).
+func TestFeeCapsEnrolledApproverCounts(t *testing.T) {
+	s := feeCapsSystem(t, opts{feeCaps: &feeCapsOpts{operators: 3}})
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	var files []string
+	for _, op := range []string{"op1", "op2"} {
+		out := filepath.Join(s.dir, "enrol-dave-"+op+".json")
+		if o, err := s.tool("qv-approvers", "sign", "-operator", op, "-key", s.keyFile(op, s.ops[op]), "-seq", "1", "-action", "enrol", "-name", "dave",
+			"-public-key", hex.EncodeToString(pub), "-out", out); err != nil {
+			t.Fatalf("qv-approvers sign: %v\n%s", err, o)
+		}
+		files = append(files, out)
+	}
+	args := append([]string{"apply", "-config", s.gwPath}, s.dbArgs(zoneOnly)...)
+	if o, err := s.tool("qv-approvers", append(args, files...)...); err != nil {
+		t.Fatalf("qv-approvers apply: %v\n%s", err, o)
+	}
+	s.approv["dave"] = priv
+	s.mustApply(everywhere, s.signedBy(150_000, 60, 1, "alice", "dave")...)
+	s.wantCaps(everywhere, 150_000, 60, 1)
 }

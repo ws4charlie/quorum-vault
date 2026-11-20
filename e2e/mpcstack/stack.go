@@ -195,6 +195,14 @@ func NewProc(t testing.TB, name, logPath, bin string, env []string, args ...stri
 	return p
 }
 
+// NewCosignerProc is NewProc for qv-cosigner of role "b" or "c": it starts with that cosigner's own certificates (cosigner-b|c and its link) and
+// its own guard-database role, so the two cosigners are different identities on the guard database server and on Kafka.
+func NewCosignerProc(t testing.TB, name, logPath, bin, role string, args ...string) *Proc {
+	p := &Proc{Name: name, Log: logPath, bin: bin, args: dbtest.RoleArgsFor(t, bin, role, args), env: pkitest.CosignerEnv(role)}
+	t.Cleanup(func() { p.Stop() })
+	return p
+}
+
 // Start launches the process (again). The log file is appended to, so a restart keeps the earlier output.
 func (p *Proc) Start(t testing.TB) {
 	t.Helper()
@@ -609,7 +617,7 @@ func (s *Stack) GatewaySigner(sh Shard) gateway.SignerFile {
 func (s *Stack) StartCosigner(cfgPath, guardDSN, gatewayGuardDSN string) {
 	s.t.Helper()
 	crt, key := s.CertCosB.Write(s.t, s.Dir)
-	s.Cos = NewProc(s.t, "cosigner", filepath.Join(s.Dir, "cosigner.log"), s.Bin.Cosigner, nil,
+	s.Cos = NewCosignerProc(s.t, "cosigner", filepath.Join(s.Dir, "cosigner.log"), s.Bin.Cosigner, "b",
 		"-config", cfgPath, "-guard-dsn", guardDSN, "-gateway-guard-dsn", gatewayGuardDSN, "-socket", s.Sock,
 		"-socket-cert", crt, "-socket-key", key, "-party-pins", s.CertB.Pin)
 	s.StartCosignerAgain()

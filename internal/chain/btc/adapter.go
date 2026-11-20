@@ -92,12 +92,9 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 	}
 	static := FeeCaps{MaxTxFeeSats: v.MaxTxFeeSats, MaxFeeRate: v.MaxFeeRate}
 	if v.FeeCaps != nil {
-		rules, err := v.FeeCaps.rules(v.Chain, v.MaxInputs, max(1, v.MaxBatchOutputs))
-		if err != nil {
-			return nil, err
-		}
-		a.view = NewFeeCapsView(static, rules, pool, func(n int) {
-			slog.Error("ALERT btc fee caps: rows of the fee-cap table do not carry valid approver signatures and are ignored", "chain", v.Chain, "rows", n)
+		// the core keeps no approver list: it reads its own rows by shape, the zone judges the signatures (top of feecaps.go)
+		a.view = NewFeeCapsView(static, &FeeCapsRules{Chain: v.Chain, StoreTrusted: true}, pool, func(n int) {
+			slog.Error("ALERT btc fee caps: rows of the fee-cap table are malformed and are ignored", "chain", v.Chain, "rows", n)
 		})
 	} else {
 		a.view = NewFeeCapsView(static, nil, nil, nil)

@@ -108,8 +108,7 @@ func EnvFor(binary string) []string {
 	case "qv-anchor-archiver":
 		return Env(pki.ZoneBusiness, "archiver")
 	case "qv-cosigner":
-		c, k, a := Files(pki.ZoneBusiness, "cosigner-link")
-		return append(Env(pki.ZoneSigning, "cosigner"), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a)
+		return CosignerEnv("b") // cosigner C: the caller passes CosignerEnv("c") after this (a later value wins)
 	case "qv-gateway":
 		c, k, a := Files(pki.ZoneBusiness, "gateway-link")
 		return append(Env(pki.ZoneSigning, "gateway"), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a, "QV_ENV=test") // test: the e2e HSM is SoftHSM, which production refuses
@@ -117,6 +116,12 @@ func EnvFor(binary string) []string {
 		return []string{"QV_ENV=test"} // the e2e sealer token is SoftHSM, which production refuses
 	}
 	return nil
+}
+
+// CosignerEnv is the TLS environment of cosigner "b" or "c": its own signing certificate (cosigner-b|c) and its own link certificate (cosigner-link-b|c).
+func CosignerEnv(role string) []string {
+	c, k, a := Files(pki.ZoneBusiness, "cosigner-link-"+role)
+	return append(Env(pki.ZoneSigning, "cosigner-"+role), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a)
 }
 
 // AdminDSN returns base (a DSN of the server of zone, as DATABASE_URL or QV_SIGNING_DB_URL) with the admin certificate of that zone and that zone's CA.

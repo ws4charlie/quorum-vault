@@ -31,7 +31,7 @@ The roles are created `NOLOGIN` and without a password; the certificate is the o
 
 ## Signing zone
 
-The signing zone's Postgres has two roles, `qv_gateway_guard` and `qv_cosigner_guard`, made by `qv-migrate -zone signing` (`deploy/postgres/signing_roles.sql`). The gateway and the cosigner apply their schema at start, so each role owns its own guard database and may alter it. That right stops there: `CONNECT` is revoked from `PUBLIC` on every guard database and given to its own role, so neither can open the other's. Make a guard database like this:
+The signing zone's Postgres has three roles, `qv_gateway_guard`, `qv_cosigner_b_guard` and `qv_cosigner_c_guard`, made by `qv-migrate -zone signing` (`deploy/postgres/signing_roles.sql`). The gateway and the cosigner apply their schema at start, so each role owns its own guard database and may alter it. That right stops there: `CONNECT` is revoked from `PUBLIC` on every guard database and given to its own role, so none can open another's (cosigner C's certificate cannot open B's guard database, even on a server both use). Make a guard database like this:
 
 ```sql
 CREATE DATABASE qv_gateway_guard OWNER qv_gateway_guard;

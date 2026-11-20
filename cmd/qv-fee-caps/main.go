@@ -241,8 +241,7 @@ func withStores(cmd string, args []string) error {
 	if *chainName == "" {
 		return fmt.Errorf("-chain is required")
 	}
-	rules := cfg.FeeCapsRules(*chainName)
-	if rules == nil {
+	if cfg.FeeCapsRules(*chainName) == nil {
 		return fmt.Errorf("chain %q is not a Bitcoin chain with a fee_caps_change section", *chainName)
 	}
 	static := cfg.FeeCapsStatic(*chainName)
@@ -263,8 +262,8 @@ func withStores(cmd string, args []string) error {
 		var skipped int
 		var err error
 		if s.core {
-			// The core judges the record by its own approver list, which is the zone config's (same names and keys).
-			cur, skipped, err = btc.CurrentFeeCaps(ctx, s.pool, *rules, static)
+			// The core keeps no approver list: it reads its own rows by shape, as the core process does, so this is what the core builds under.
+			cur, skipped, err = btc.CurrentFeeCaps(ctx, s.pool, btc.FeeCapsRules{Chain: *chainName, StoreTrusted: true}, static)
 		} else {
 			// The zone judges it by its effective approver set (the config's with the signed enrolments and revocations), like the gateway does.
 			var g *gateway.Guard
@@ -318,19 +317,17 @@ func withStores(cmd string, args []string) error {
 	return os.Rename(tmp, *outFile)
 }
 
-// apply puts the change into every database. The zone's rules (approvers, bounds, age, the start-up rule) are checked first, once, so a refused
+// apply puts the change into every database. The zone's rules (the approvers in force, bounds, age, the start-up rule) are checked first, against every zone database, so a refused
 // change touches nothing; after that each database checks it again. A database that fails is reported and the others stay applied: run apply again
 // with the same files to finish, it skips the ones that have the change.
 func apply(ctx context.Context, cfg *gateway.Config, stores []store, c btc.FeeCapsChange) error {
-	rules := cfg.FeeCapsRules(c.Chain)
-	if rules == nil {
+	if cfg.FeeCapsRules(c.Chain) == nil {
 		return fmt.Errorf("chain %q is not a Bitcoin chain with a fee_caps_change section", c.Chain)
 	}
-	if _, err := rules.Verify(c); err != nil {
-		return fmt.Errorf("change refused: %w", err)
-	}
-	// Each zone database judges the change by its own effective approver set (an approver revoked with operator signatures no longer counts there). Check
-	// that first, for every one of them, so a change the zone would refuse is not applied to the core alone: the core only knows the configured list.
+	// The approvers in force are the zone's: its configuration with the operator-signed registry applied, read from each zone database. There is no other
+	// list: the core keeps none, and the configuration alone is only where the registry starts. Every zone database must accept the change before ANY
+	// database (the core included) is written; without a zone database there is nobody to ask, so nothing is applied.
+	var in *btc.FeeCapsRules
 	for _, s := range stores {
 		if s.core {
 			continue
@@ -343,10 +340,20 @@ func apply(ctx context.Context, cfg *gateway.Config, stores []store, c btc.FeeCa
 		if err != nil {
 			return fmt.Errorf("%s: %w", s.name, err)
 		}
-		if _, err := cfg.FeeCapsRulesFor(c.Chain, set.Approvers).Verify(c); err != nil {
-			return fmt.Errorf("change refused by %s, nothing was applied: %w", s.name, err)
+		r := cfg.FeeCapsRulesFor(c.Chain, set.Approvers)
+		if _, err := r.Verify(c); err != nil {
+			return fmt.Errorf("change refused by %s, nothing was applied (approvers in force there: %s): %w", s.name, strings.Join(set.Enabled(), ", "), err)
+		}
+		if in == nil {
+			in = r
 		}
 	}
+	if in == nil {
+		return fmt.Errorf("at least one zone database (-guard-dsn) is required: the approvers in force are read from the zone's registry, and the core keeps no list of its own")
+	}
+	// the core: the new change is verified with the approvers in force; its stored rows are read by shape
+	coreRules := *in
+	coreRules.StoreTrusted = true
 	static := cfg.FeeCapsStatic(c.Chain)
 	// The core goes first: a send already queued for the zone was built under the old change and the zone, still on it, signs it; only sends built
 	// after the core's change wait for the zone's, and the window ends when the last database has it.
@@ -355,7 +362,7 @@ func apply(ctx context.Context, cfg *gateway.Config, stores []store, c btc.FeeCa
 	for _, s := range stores {
 		var err error
 		if s.core {
-			err = btc.ApplyFeeCaps(ctx, s.pool, *rules, static, c, time.Now(), "core")
+			err = btc.ApplyFeeCaps(ctx, s.pool, coreRules, static, c, time.Now(), "core")
 		} else {
 			var g *gateway.Guard
 			if g, err = gateway.OpenGuard(ctx, s.pool); err == nil {

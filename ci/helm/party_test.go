@@ -534,6 +534,11 @@ func checkParty(objs []Obj, role string, kind bool) []string {
 		if secrets["party-tls"] == "" || secrets["cosigner-tls"] == "" || secrets["cosigner-socket-tls"] == "" || secrets["cosigner-link-tls"] == "" {
 			add("a role %s pod needs the party, cosigner, cosigner-socket and cosigner-link certificate Secrets", role)
 		}
+		// each cosigner has its own names (catalog cosigner-b|c, cosigner-link-b|c): the default Secrets are the role's, never the other's
+		r := strings.ToLower(role)
+		if secrets["cosigner-tls"] != "qv-signing-cosigner-"+r+"-tls" || secrets["cosigner-link-tls"] != "qv-cosigner-link-"+r+"-tls" {
+			add("role %s: cosigner Secrets are %q and %q, want qv-signing-cosigner-%s-tls and qv-cosigner-link-%s-tls", role, secrets["cosigner-tls"], secrets["cosigner-link-tls"], r, r)
+		}
 	} else {
 		for _, n := range []string{"cosigner-tls", "cosigner-link-tls", "cosigner-socket-tls", "cosigner-config"} {
 			if _, ok := mountsOrVolume(sts, n); ok {
