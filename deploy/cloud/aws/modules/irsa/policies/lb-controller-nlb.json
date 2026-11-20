@@ -1,0 +1,102 @@
+[
+  {
+    "Effect": "Allow",
+    "Action": [
+      "ec2:DescribeAccountAttributes",
+      "ec2:DescribeAddresses",
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeInternetGateways",
+      "ec2:DescribeVpcs",
+      "ec2:DescribeVpcPeeringConnections",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeInstances",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeTags",
+      "ec2:GetCoipPoolUsage",
+      "ec2:DescribeCoipPools",
+      "elasticloadbalancing:DescribeLoadBalancers",
+      "elasticloadbalancing:DescribeLoadBalancerAttributes",
+      "elasticloadbalancing:DescribeListeners",
+      "elasticloadbalancing:DescribeListenerAttributes",
+      "elasticloadbalancing:DescribeListenerCertificates",
+      "elasticloadbalancing:DescribeSSLPolicies",
+      "elasticloadbalancing:DescribeRules",
+      "elasticloadbalancing:DescribeTargetGroups",
+      "elasticloadbalancing:DescribeTargetGroupAttributes",
+      "elasticloadbalancing:DescribeTargetHealth",
+      "elasticloadbalancing:DescribeTags"
+    ],
+    "Resource": "*"
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
+      "iam:CreateServiceLinkedRole"
+    ],
+    "Resource": "*",
+    "Condition": {
+      "StringEquals": {
+        "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
+      }
+    }
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
+      "ec2:CreateSecurityGroup",
+      "ec2:CreateTags",
+      "ec2:DeleteTags",
+      "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:RevokeSecurityGroupIngress",
+      "ec2:DeleteSecurityGroup"
+    ],
+    "Resource": "*",
+    "Condition": {
+      "Null": {
+        "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+      }
+    }
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
+      "elasticloadbalancing:CreateLoadBalancer",
+      "elasticloadbalancing:CreateTargetGroup",
+      "elasticloadbalancing:CreateListener",
+      "elasticloadbalancing:DeleteListener",
+      "elasticloadbalancing:DeleteLoadBalancer",
+      "elasticloadbalancing:DeleteTargetGroup",
+      "elasticloadbalancing:ModifyLoadBalancerAttributes",
+      "elasticloadbalancing:ModifyTargetGroup",
+      "elasticloadbalancing:ModifyTargetGroupAttributes",
+      "elasticloadbalancing:ModifyListener",
+      "elasticloadbalancing:RegisterTargets",
+      "elasticloadbalancing:DeregisterTargets",
+      "elasticloadbalancing:SetSubnets",
+      "elasticloadbalancing:SetSecurityGroups",
+      "elasticloadbalancing:AddTags",
+      "elasticloadbalancing:RemoveTags"
+    ],
+    "Resource": "*",
+    "Condition": {
+      "Null": {
+        "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+      }
+    }
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
+      "elasticloadbalancing:CreateLoadBalancer",
+      "elasticloadbalancing:CreateTargetGroup",
+      "ec2:CreateSecurityGroup"
+    ],
+    "Resource": "*",
+    "Condition": {
+      "Null": {
+        "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
+      }
+    }
+  }
+]
