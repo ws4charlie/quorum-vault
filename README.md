@@ -39,6 +39,7 @@ Two rules carry the design:
 |:---|:---|
 | [People](docs/people.md) | Who asks, who approves, who runs it, and how each proves it |
 | [Core API](docs/api.md) | The one door in: checks who asks, records it, hands the work on |
+| [Services](docs/services.md) | The nine services, what each does and what it is trusted with |
 | [Ledger](docs/ledger.md) | Records every coin in double entry and checks it against the chain |
 | [Workflows](docs/workflows.md) | Carries each deposit, sweep and withdrawal through a crash |
 | [Signing zone](docs/signing-zone.md) | Checks every payment before any key signs |

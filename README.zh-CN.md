@@ -39,6 +39,7 @@
 |:---|:---|
 | [人员](docs/zh/people.md) | 谁发起、谁批准、谁运营，各自怎么证明身份 |
 | [核心 API](docs/zh/api.md) | 唯一的入口：核对请求者、记录请求、把工作交出去 |
+| [服务](docs/zh/services.md) | 九个服务，各自做什么、被托付了什么 |
 | [账本](docs/zh/ledger.md) | 用复式记账记录每一枚币，并和链上对账 |
 | [工作流](docs/zh/workflows.md) | 保证每笔充值、归集、提现在崩溃后也能走完 |
 | [签名区](docs/zh/signing-zone.md) | 每笔付款签名前都要核对 |
