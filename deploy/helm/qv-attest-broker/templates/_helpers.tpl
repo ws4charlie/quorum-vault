@@ -91,6 +91,7 @@ log.level = INFO
 {{- $v := .Values -}}
 {{- $_ := include "qab.role" . -}}
 {{- if not (has $v.env (list "" "dev" "test")) }}{{ fail "env must be empty (production), dev or test" }}{{ end -}}
+{{- if and (not (has $v.env (list "dev" "test"))) (not $v.images.broker.digest) }}{{ fail "images.broker.digest is required in production (env empty): the broker image is referenced by digest, never by tag" }}{{ end -}}
 {{- if and $v.simulation (not (has $v.env (list "dev" "test"))) }}{{ fail "simulation (the tee-sim broker, which accepts a TEST ONLY evidence root) is for env dev or test only" }}{{ end -}}
 {{- if and $v.simulation $v.images.broker.digest }}{{ fail "simulation needs the tee-sim image referenced by tag: a simulated broker is never run from an image referenced by digest (production)" }}{{ end -}}
 {{- if and $v.hsm.softhsm.enabled (not (has $v.env (list "dev" "test"))) }}{{ fail "hsm.softhsm.enabled is for env dev or test only: SoftHSM keeps the wrapping keys in files beside the broker" }}{{ end -}}

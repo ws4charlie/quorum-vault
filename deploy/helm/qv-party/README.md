@@ -64,7 +64,7 @@ What changes in the pod: no HSM PIN, no PKCS#11 module, no SoftHSM init containe
 
 Values: `attested.broker.url` and `.pins`, `attested.attester.type: mock`, `attested.attester.mock.caSecret`, `network.broker.to`, `env`. `values-kind-teesim.yaml` is the local layer (after `values-kind.yaml`).
 
-**Phases.** The data volume has one user, so the two steps that run while the party does not are phases of the release (`attested.phase`, with `attested.stopPartyAck=true`); each renders its Job and no StatefulSet:
+**Phases.** The data volume has one user, so the two steps that run while the party does not are phases of the release (`attested.phase`, with `attested.stopPartyAck=true`; migrate also `attested.migrate.partyStopped=true` after you scaled the party to zero); each renders its Job and no StatefulSet:
 | Phase | Job | Rule |
 |---|---|---|
 | `enrol` | `mpc-party tls-init -config enroll.json`: makes and seals the TLS key, prints the pin in its log | first install only: the chart refuses it when the StatefulSet exists (`lookup`, at a real install or upgrade); the Job is idempotent. It creates the data volume (kept by Helm; the StatefulSet finds it by name). Its config file is its own measurement |

@@ -233,6 +233,11 @@ prometheus.remote_write "out" {
 {{- if and (eq $a.phase "enrol") (not $a.tlsSealed) }}{{ fail "attested.phase enrol needs attested.tlsSealed (enrolment makes the sealed TLS key)" }}{{ end -}}
 {{- if and (eq $a.phase "enrol") (lookup "apps/v1" "StatefulSet" .Release.Namespace (include "qp.fullname" .)) }}{{ fail "attested.phase enrol is for the first install only: this party's StatefulSet already exists and the upgrade would delete it. Enrolment is done once; a party that runs is never enrolled again" }}{{ end -}}
 {{- if eq $a.phase "migrate" -}}
+{{- /* Two steps, enforced: the party is stopped FIRST (kubectl scale statefulset --replicas=0, wait until the pod is gone), then this phase. Otherwise the upgrade removes the StatefulSet and starts the Job at once, and the Job can lose the data-directory lock to the old pod. lookup sees the cluster only at a real install or upgrade. */ -}}
+{{- if not $a.migrate.partyStopped }}{{ fail "attested.phase migrate needs attested.migrate.partyStopped=true: stop the party first (kubectl scale statefulset <release> --replicas=0), wait until its pod is gone, then upgrade (runbook, Migration)" }}{{ end -}}
+{{- $sts := lookup "apps/v1" "StatefulSet" .Release.Namespace (include "qp.fullname" .) -}}
+{{- if and $sts (gt (int (dig "spec" "replicas" 0 $sts)) 0) }}{{ fail "attested.phase migrate: the party is still running (StatefulSet replicas > 0). Stop it first: kubectl scale statefulset <release> --replicas=0, wait until its pod is gone, then run this upgrade (runbook, Migration)" }}{{ end -}}
+{{- if lookup "v1" "Pod" .Release.Namespace (printf "%s-0" (include "qp.fullname" .)) }}{{ fail "attested.phase migrate: the party pod still exists. Wait until it is gone before the migration (it holds the data volume and its lock)" }}{{ end -}}
 {{- if not .Values.hsm.softhsm.enabled -}}
 {{- if or (not .Values.hsm.module.path) (not .Values.hsm.module.volume) }}{{ fail "attested.phase migrate needs hsm.module.path and hsm.module.volume: the migration opens the old shares through the PKCS#11 sealer" }}{{ end -}}
 {{- if not (hasPrefix "/etc/qv/hsm/" .Values.hsm.module.path) }}{{ fail "hsm.module.path must lie under /etc/qv/hsm/ (where hsm.module.volume is mounted)" }}{{ end -}}

@@ -81,6 +81,7 @@ attested:
     resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: "1", memory: 512Mi } }
   migrate:
     name: manual
+    partyStopped: false                 # REQUIRED true: you stopped the party first (kubectl scale statefulset <release> --replicas=0) and its pod is gone; the chart also checks the cluster (lookup) at a real upgrade
     timeoutSeconds: 3600
     resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { cpu: "2", memory: 1Gi } }
 hsm:

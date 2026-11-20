@@ -87,9 +87,10 @@ metadata:
   name: {{ include "qp.child" (dict "ctx" . "c" (printf "migrate-%s" $v.attested.migrate.name)) }}
   labels: {{- include "qp.jobLabelsFor" (dict "ctx" . "c" "party-migrate") | nindent 4 }}
 spec:
-  # One way, but re-runnable: after a failure the command finishes or restarts from the staged set (it never touches the old files before its COMMITTED marker). The pod is not retried by Kubernetes:
-  # read the log, then run the Job again under another attested.migrate.name.
-  backoffLimit: 0
+  # One way, but re-runnable: after a failure the command finishes or restarts from the staged set (it never touches the old files before its COMMITTED marker).
+  # Two retries: a pod that loses the data-directory lock (the old party not gone yet) or meets a broker that is briefly away fails before it changes anything, and the next pod tries again.
+  # Re-running is safe (MigrateSeal stages in .migrate-v2, writes COMMITTED, then moves; a rerun resumes or restarts the staged set).
+  backoffLimit: 2
   activeDeadlineSeconds: {{ int $v.attested.migrate.timeoutSeconds }}
   ttlSecondsAfterFinished: 86400
   template:

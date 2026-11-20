@@ -310,7 +310,7 @@ func TestAttestedEnrolConfigDiffersFromTheRunningConfig(t *testing.T) {
 
 // Migration from the PKCS#11 sealer: a phase with the Job and both configs, the running config as -to.
 func TestAttestedMigratePhase(t *testing.T) {
-	extra := []string{"--set", "attested.phase=migrate", "--set", "attested.stopPartyAck=true", "--set", "attested.tlsSealed=false", "--set", "hsm.softhsm.enabled=true"}
+	extra := []string{"--set", "attested.phase=migrate", "--set", "attested.stopPartyAck=true", "--set", "attested.migrate.partyStopped=true", "--set", "attested.tlsSealed=false", "--set", "hsm.softhsm.enabled=true"}
 	for _, role := range partyRoles {
 		t.Run(role, func(t *testing.T) {
 			objs := attestedObjs(t, role, extra...)
@@ -394,10 +394,11 @@ func TestAttestedRefusals(t *testing.T) {
 		{"a backup Job in attested mode", "B", []string{"--set", "backup.job.enabled=true", "--set", "backup.job.keysetId=k", "--set", "backup.job.outputFile=f", "--set", "backup.job.recoveryPublicConfigMap=r"}, "backup.job.enabled is not supported"},
 		{"an unknown phase", "B", []string{"--set", "attested.phase=other"}, "must be one of"},
 		{"enrol without the acknowledgement", "B", []string{"--set", "attested.phase=enrol"}, "stopPartyAck"},
-		{"migrate without the acknowledgement", "B", []string{"--set", "attested.phase=migrate", "--set", "attested.tlsSealed=false"}, "stopPartyAck"},
+		{"migrate without the acknowledgement", "B", []string{"--set", "attested.phase=migrate", "--set", "attested.migrate.partyStopped=true", "--set", "attested.tlsSealed=false"}, "stopPartyAck"},
 		{"enrol without a sealed TLS key", "B", []string{"--set", "attested.phase=enrol", "--set", "attested.stopPartyAck=true", "--set", "attested.tlsSealed=false"}, "needs attested.tlsSealed"},
-		{"migrate with a sealed TLS key", "B", []string{"--set", "attested.phase=migrate", "--set", "attested.stopPartyAck=true", "--set", "hsm.softhsm.enabled=true"}, "runs with attested.tlsSealed=false"},
-		{"migrate without the PKCS#11 module", "B", []string{"--set", "attested.phase=migrate", "--set", "attested.stopPartyAck=true", "--set", "attested.tlsSealed=false", "--set", "hsm.module.path="}, "needs hsm.module.path"},
+		{"migrate before the party is stopped", "B", []string{"--set", "attested.phase=migrate", "--set", "attested.stopPartyAck=true", "--set", "attested.tlsSealed=false", "--set", "hsm.softhsm.enabled=true"}, "attested.migrate.partyStopped=true"},
+		{"migrate with a sealed TLS key", "B", []string{"--set", "attested.phase=migrate", "--set", "attested.stopPartyAck=true", "--set", "attested.migrate.partyStopped=true", "--set", "hsm.softhsm.enabled=true"}, "runs with attested.tlsSealed=false"},
+		{"migrate without the PKCS#11 module", "B", []string{"--set", "attested.phase=migrate", "--set", "attested.stopPartyAck=true", "--set", "attested.migrate.partyStopped=true", "--set", "attested.tlsSealed=false", "--set", "hsm.module.path="}, "needs hsm.module.path"},
 		{"an enrol name that is no DNS label", "B", []string{"--set", "attested.enrol.name=Not_Valid"}, "does not match"},
 	}
 	for _, c := range cases {

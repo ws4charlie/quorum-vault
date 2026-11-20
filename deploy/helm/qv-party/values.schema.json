@@ -874,6 +874,9 @@
             },
             "resources": {
               "type": "object"
+            },
+            "partyStopped": {
+              "type": "boolean"
             }
           }
         }

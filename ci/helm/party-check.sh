@@ -26,7 +26,7 @@ for role in A B C; do
   for phase in run enrol migrate; do
     extra=(--set "attested.phase=$phase")
     [ "$phase" = run ] || extra+=(--set attested.stopPartyAck=true)
-    [ "$phase" = migrate ] && extra+=(--set attested.tlsSealed=false --set hsm.softhsm.enabled=true)
+    [ "$phase" = migrate ] && extra+=(--set attested.migrate.partyStopped=true --set attested.tlsSealed=false --set hsm.softhsm.enabled=true)
     echo "== qv-party attested role $role phase $phase: lint"
     helm lint "$chart" --strict --set "role=$role" "${base[@]}" "${extra[@]}"
     echo "== qv-party attested role $role phase $phase: template + kubeconform (Kubernetes $KUBE_VERSION)"
