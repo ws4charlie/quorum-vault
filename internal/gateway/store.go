@@ -30,6 +30,8 @@ type Guard struct {
 	approverIgnored atomic.Int64
 	// keysetIgnored is the same for the keyset log (keysets.go).
 	keysetIgnored atomic.Int64
+	// drainRefused counts the drains this process refused (keysets.go).
+	drainRefused atomic.Int64
 }
 
 // OpenGuard applies the schema to pool and returns the guard.
@@ -204,6 +206,30 @@ func (t *GuardTx) AmountFrom(ctx context.Context, kind, sender, asset string) (*
 	var sum string
 	err := t.tx.QueryRow(ctx, `SELECT COALESCE(SUM(amount), 0)::text FROM signed_intents
 		WHERE chain=$1 AND kind=$2 AND sender=$3 AND asset=$4`, t.chain, kind, sender, asset).Scan(&sum)
+	if err != nil {
+		return nil, err
+	}
+	return parseBig(sum), nil
+}
+
+// SignedDrainsSince counts the drains of this chain first admitted at or after since that were SIGNED: a drain counts when the guard holds a signature for
+// one of its digests, or when its digest is still being signed (reserved at or after pending). A drain the zone admitted but a cosigner or the signer then
+// refused, or one that expired unsigned, stays out, so a storm of refused retries cannot use up the rate or the cap. The cosigner never stores a signature
+// (party A does), so it passes the zero time as pending: every drain it authorised counts.
+func (t *GuardTx) SignedDrainsSince(ctx context.Context, since, pending time.Time) (int, error) {
+	var n int
+	err := t.tx.QueryRow(ctx, `SELECT count(*) FROM signed_intents i WHERE i.chain=$1 AND i.kind=$2 AND i.created_at >= $3
+		AND EXISTS (SELECT 1 FROM signed_digests d WHERE d.intent_id = i.intent_id AND (d.signature IS NOT NULL OR d.reserved_at >= $4))`,
+		t.chain, signjob.KindDrain, since, pending).Scan(&n)
+	return n, err
+}
+
+// SignedDrainAmountFrom is the sum of the signed drains (see SignedDrainsSince) of asset from sender, over all time: a drain's cap is per source address.
+func (t *GuardTx) SignedDrainAmountFrom(ctx context.Context, sender, asset string, pending time.Time) (*big.Int, error) {
+	var sum string
+	err := t.tx.QueryRow(ctx, `SELECT COALESCE(SUM(i.amount), 0)::text FROM signed_intents i WHERE i.chain=$1 AND i.kind=$2 AND i.sender=$3 AND i.asset=$4
+		AND EXISTS (SELECT 1 FROM signed_digests d WHERE d.intent_id = i.intent_id AND (d.signature IS NOT NULL OR d.reserved_at >= $5))`,
+		t.chain, signjob.KindDrain, sender, asset, pending).Scan(&sum)
 	if err != nil {
 		return nil, err
 	}
