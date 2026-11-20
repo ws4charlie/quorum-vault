@@ -204,3 +204,59 @@ func TestBuildDrainFromAnOldGeneration(t *testing.T) {
 		t.Fatalf("reserve %v %v", r, err)
 	}
 }
+
+// Everything but the reserve can be drained in one transfer: the node accepts it, and what stays is below the reserve.
+func TestDrainOfAllButTheReserveIsAccepted(t *testing.T) {
+	e := newEnv(t)
+	const part, shard = "qv-us/evm-anvil/ETH/hot/omnibus/0", "qv-us/evm-anvil/omnibus/0"
+	key2, _ := crypto.GenerateKey()
+	gen2 := crypto.PubkeyToAddress(key2.PublicKey)
+	cfg := e.cfg
+	cfg.HotAddresses = map[string]common.Address{part: e.hot}
+	ad, err := New(e.ctx, cfg, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ad.Close()
+	for _, q := range []string{
+		`INSERT INTO keysets (shard_id, generation, address, state, successor) VALUES ('` + shard + `', 1, '` + e.hot.Hex() + `', 'draining', 2)`,
+		`INSERT INTO keysets (shard_id, generation, address, state) VALUES ('` + shard + `', 2, '` + gen2.Hex() + `', 'active')`,
+	} {
+		if _, err := e.pool.Exec(e.ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bal, err := e.ec.BalanceAt(e.ctx, e.hot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve, err := ad.NativeDrainReserve(e.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	amount := new(big.Int).Sub(bal, reserve)
+	var u chain.UnsignedTx
+	if err := e.runTx(func(tx pgx.Tx) (err error) {
+		u, err = ad.BuildDrain(e.ctx, tx, DrainRequest{ID: "all", PartitionID: part, From: e.hot.Hex(), To: gen2.Hex(), Asset: "ETH", Amount: amount})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ad.Assemble(u, []chain.Signature{sign(t, u, e.hotKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl, _ := decodePayload(u.Payload)
+	txn, _, _, _ := pl.tx()
+	t.Logf("gas %d feecap %s tip %s value %s", txn.Gas(), txn.GasFeeCap(), txn.GasTipCap(), txn.Value())
+	h, err := ad.Broadcast(e.ctx, s)
+	if err != nil {
+		t.Fatalf("balance %s reserve %s amount %s: %v", bal, reserve, amount, err)
+	}
+	if r := e.receipt(common.HexToHash(h)); r.Status != 1 {
+		t.Fatalf("the drain reverted (gas used %d)", r.GasUsed)
+	}
+	if got, _ := e.ec.BalanceAt(e.ctx, gen2, nil); got.Cmp(amount) != 0 {
+		t.Fatalf("generation 2 holds %s, want %s", got, amount)
+	}
+}

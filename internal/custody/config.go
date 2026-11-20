@@ -64,8 +64,18 @@ type ColdFile struct {
 	ShardLimits  map[string]LimitFile `json:"shard_limits"`
 	PlanInterval string               `json:"plan_interval"` // default 5s
 	Refill       RefillFile           `json:"refill"`
+	// Drain tunes the drain of an old key generation (EVM; docs/runbooks/key-replacement.md).
+	Drain DrainFile `json:"drain"`
 	// Rebalance configures moves between the hot shards of a pool.
 	Rebalance RebalanceFile `json:"rebalance"`
+}
+
+// DrainFile tunes drains. Window is how long a drain intent lives (its not_after), which bounds how long the signing zone waits for its own view of
+// the keysets to catch up before it refuses (default 10m). RetryAfter is how long the planner leaves a generation alone after the zone refused a drain move
+// (default 1m).
+type DrainFile struct {
+	Window     string `json:"window"`
+	RetryAfter string `json:"retry_after"`
 }
 
 // RebalanceFile configures the rebalance of hot shards. Without targets nothing is moved.
@@ -214,6 +224,8 @@ type Config struct {
 	ActivityTimeout  time.Duration // 0 = the workflows' production activity timeouts
 	ColdLimits       map[string]HotLimits
 	ColdPlanInterval time.Duration
+	DrainWindow      time.Duration // the not_after of a drain intent, from now
+	DrainRetryAfter  time.Duration // how long a generation is left alone after the zone refused a drain move
 	// RebalanceTargets: the target per hot partition ID; empty when rebalance is not configured.
 	RebalanceTargets map[string]*big.Int
 	RefillTokenGas   uint64
@@ -881,6 +893,12 @@ func (c *Config) Required(asset string, amount *big.Int) (n int, auto bool) {
 func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 	var err error
 	if c.ColdPlanInterval, err = dur("cold plan_interval", cf.PlanInterval, 5*time.Second); err != nil {
+		return err
+	}
+	if c.DrainWindow, err = dur("cold drain window", cf.Drain.Window, 10*time.Minute); err != nil {
+		return err
+	}
+	if c.DrainRetryAfter, err = dur("cold drain retry_after", cf.Drain.RetryAfter, time.Minute); err != nil {
 		return err
 	}
 	c.RefillTokenGas = cf.Refill.TokenGas

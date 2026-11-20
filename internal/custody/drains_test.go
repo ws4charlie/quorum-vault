@@ -35,7 +35,7 @@ func drainWorld(t *testing.T) (*Service, *evmModel) {
 	t.Helper()
 	s, fc, m := evmWorld(t)
 	s.Chain = &drainChain{fakeChain: fc}
-	s.DrainRetryAfter = time.Hour
+	s.Cfg.DrainRetryAfter = time.Hour
 	return s, m
 }
 

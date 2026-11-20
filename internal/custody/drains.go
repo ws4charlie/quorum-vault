@@ -108,23 +108,18 @@ func (m DrainMove) Owner() Owner {
 	return Owner{Kind: OwnerKindDrain, ID: m.ID, PartitionID: m.PartitionID}
 }
 
-const (
-	defaultDrainRetryAfter = time.Minute
-	defaultDrainWindow     = 10 * time.Minute
-)
-
 func (s *Service) drainRetryAfter() time.Duration {
-	if s.DrainRetryAfter > 0 {
-		return s.DrainRetryAfter
+	if s.Cfg.DrainRetryAfter > 0 {
+		return s.Cfg.DrainRetryAfter
 	}
-	return defaultDrainRetryAfter
+	return time.Minute
 }
 
 func (s *Service) drainWindow() time.Duration {
-	if s.DrainWindow > 0 {
-		return s.DrainWindow
+	if s.Cfg.DrainWindow > 0 {
+		return s.Cfg.DrainWindow
 	}
-	return defaultDrainWindow
+	return 10 * time.Minute
 }
 
 // setDrainState records what the planner found for a leaving generation.
@@ -252,6 +247,7 @@ func (s *Service) planDrain(ctx context.Context, log *slog.Logger, shardIdx int,
 	if asset != c.Native && bal[c.Native].Cmp(c.NativeReserve()) < 0 {
 		return wait(fmt.Sprintf("the old address holds %s %s and no gas for the token transfer (it needs %s); fund it with the native asset", amount, asset, c.NativeReserve()))
 	}
+	log.Info("planning a drain move", "shard", shard, "from_generation", from.Generation, "asset", asset, "amount", amount.String(), "old_address_native", bal[c.Native].String(), "native_dust", nativeDust.String())
 	part := c.PartitionKey(asset, shardIdx).String()
 	id := "dr-" + uuid.NewString()
 	var made *DrainMove

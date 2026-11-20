@@ -158,5 +158,13 @@ func (a *Adapter) BuildDrain(ctx context.Context, tx pgx.Tx, d DrainRequest) (ch
 			return chain.UnsignedTx{}, err
 		}
 	}
-	return a.buildAndAllocate(ctx, tx, "drain", d.ID, d.PartitionID, from, to, value, data)
+	var fixed uint64
+	if native {
+		if code, err := a.ec.CodeAt(ctx, dest, nil); err != nil {
+			return chain.UnsignedTx{}, fmt.Errorf("evm: code of %s: %w", dest.Hex(), err)
+		} else if len(code) == 0 {
+			fixed = DefaultCancelGas // a plain transfer to an account without code: exactly 21000, the reserve is sized for it
+		}
+	}
+	return a.buildAndAllocateGas(ctx, tx, "drain", d.ID, d.PartitionID, from, to, value, data, fixed)
 }
