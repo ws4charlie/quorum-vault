@@ -201,7 +201,7 @@ func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent
 	if err := a.refreshCaps(ctx); err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	sh, err := a.shardOf(s.ToPartition)
+	sh, err := a.shardOf(ctx, s.ToPartition)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}

@@ -106,7 +106,10 @@ type KeysetChange struct {
 	// its signer (an MPC keyset ID, or an HSM key's CKA_ID in hex) and the 65-byte uncompressed secp256k1 public key in hex, which must hash to Address.
 	KeyRef    string `json:"key_ref,omitempty"`
 	PublicKey string `json:"public_key,omitempty"`
-	Seq       int64  `json:"seq"`       // must be higher than the current one
+	// Window (start-draining of a deposit tree, seconds, optional) is how long after this record the generation's deposit addresses
+	// stay swept before it may retire: a retire record of a deposit tree is valid only when its signing time is at least that much later. Zero: no window.
+	Window int64 `json:"window_seconds,omitempty"`
+	Seq    int64 `json:"seq"`       // must be higher than the current one
 	SignedAt  int64  `json:"signed_at"` // unix seconds
 	// Signatures of the operators over KeysetChangeMessage.
 	Signatures []OperatorSignature `json:"signatures"`
@@ -165,6 +168,9 @@ func (c KeysetChange) shape() error {
 	}
 	if c.Generation < 1 {
 		return errors.New("a change names a generation of at least 1")
+	}
+	if c.Window < 0 || (c.Window > 0 && !(tree && c.Action == KeysetStartDraining)) {
+		return errors.New("window_seconds is for the start-draining of a deposit tree, and not negative")
 	}
 	switch c.Action {
 	case KeysetRegisterCandidate:
@@ -242,6 +248,8 @@ type KeysetEntry struct {
 	// candidate registered without them: it can receive, but the zone cannot sign from it).
 	KeyRef    string
 	PublicKey string
+	// RetireAfter (deposit trees, unix seconds): a retire record must be signed at or after it (the draining record's signing time plus its window).
+	RetireAfter int64
 }
 
 func (e *KeysetEntry) clone() *KeysetEntry {
@@ -584,9 +592,16 @@ func (v *KeysetView) apply(cfg *Config, c KeysetChange, fresh bool) error {
 			return err
 		}
 		cur.State = partition.StateDraining
+		if shard.IsDepositTree() {
+			cur.RetireAfter = c.SignedAt + c.Window
+		}
 	case KeysetRetire:
 		if cur == nil || cur.State != partition.StateDraining {
 			return illegal(partition.StateDraining)
+		}
+		if shard.IsDepositTree() && c.SignedAt < cur.RetireAfter {
+			return fmt.Errorf("the deposit addresses of %s generation %d stay swept until %s (the window of its signed draining record); this record is signed earlier",
+				c.Shard, c.Generation, time.Unix(cur.RetireAfter, 0).UTC().Format(time.RFC3339))
 		}
 		cur.State = partition.StateRetired
 	case KeysetSetDrainCaps:
@@ -646,7 +661,7 @@ func (c *Config) foldKeysets(rows []KeysetChange) *KeysetView {
 
 // loadKeysetRows reads the whole log, oldest first.
 func loadKeysetRows(ctx context.Context, q queryer) ([]KeysetChange, error) {
-	rows, err := q.Query(ctx, `SELECT seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key FROM keyset_changes ORDER BY seq, id`)
+	rows, err := q.Query(ctx, `SELECT seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key, window_seconds FROM keyset_changes ORDER BY seq, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -655,7 +670,7 @@ func loadKeysetRows(ctx context.Context, q queryer) ([]KeysetChange, error) {
 	for rows.Next() {
 		var c KeysetChange
 		var caps, sigs []byte
-		if err := rows.Scan(&c.Seq, &c.Action, &c.Shard, &c.Generation, &c.Address, &c.Successor, &caps, &c.SignedAt, &sigs, &c.KeyRef, &c.PublicKey); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Action, &c.Shard, &c.Generation, &c.Address, &c.Successor, &caps, &c.SignedAt, &sigs, &c.KeyRef, &c.PublicKey, &c.Window); err != nil {
 			return nil, err
 		}
 		// A row that does not parse stays in the list as a change nothing can verify, so it is counted.
@@ -731,8 +746,8 @@ func (g *Guard) ApplyKeysetChange(ctx context.Context, cfg *Config, c KeysetChan
 	if len(c.Caps) > 0 {
 		caps, _ = json.Marshal(c.Caps)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO keyset_changes (seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		c.Seq, c.Action, c.Shard, c.Generation, c.Address, c.Successor, caps, c.SignedAt, sigs, c.KeyRef, c.PublicKey); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO keyset_changes (seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key, window_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		c.Seq, c.Action, c.Shard, c.Generation, c.Address, c.Successor, caps, c.SignedAt, sigs, c.KeyRef, c.PublicKey, c.Window); err != nil {
 		return err
 	}
 	payload := map[string]any{"action": c.Action, "shard": c.Shard, "generation": c.Generation, "seq": c.Seq, "operators": operators, "signed_at": c.SignedAt,
@@ -748,6 +763,9 @@ func (g *Guard) ApplyKeysetChange(ctx context.Context, cfg *Config, c KeysetChan
 	}
 	if c.KeyRef != "" {
 		payload["key_ref"], payload["public_key"] = c.KeyRef, c.PublicKey
+	}
+	if c.Window > 0 {
+		payload["window_seconds"] = c.Window
 	}
 	pj, _ := json.Marshal(payload)
 	if _, err := audit.AppendTx(ctx, tx, domain.AuditEvent{Actor: actor, Type: EventKeysetChanged, Payload: pj}, ""); err != nil {

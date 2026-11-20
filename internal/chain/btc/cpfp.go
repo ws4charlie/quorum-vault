@@ -102,7 +102,7 @@ func (a *Adapter) BuildCPFP(ctx context.Context, tx pgx.Tx, ownerKind, ownerID s
 		return chain.UnsignedTx{}, err
 	}
 	n := len(pp.Outputs)
-	sh, ok := a.byAddr[pp.Outputs[n-1].Address]
+	sh, ok := a.hotByAddr(ctx, pp.Outputs[n-1].Address)
 	if n < 2 || !ok {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: the transaction has no change output to spend", chain.ErrCannotBump)
 	}
@@ -126,7 +126,7 @@ func (a *Adapter) BuildCPFP(ctx context.Context, tx pgx.Tx, ownerKind, ownerID s
 		return nil
 	}
 
-	in := PayloadInput{TxID: pb.TxID, Vout: uint32(n - 1), Value: change, Path: sh.path, Sequence: SequenceRBF}
+	in := PayloadInput{TxID: pb.TxID, Vout: uint32(n - 1), Value: change, Path: sh.path, Sequence: SequenceRBF, Gen: sh.payloadGen()}
 	c := Payload{Version: PayloadVersion, Inputs: []PayloadInput{in}}
 	var fee uint64
 	if prev, old, have, err := a.childOf(ctx, tx, ownerKind, ownerID, pb.TxID); err != nil {

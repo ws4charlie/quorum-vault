@@ -477,3 +477,24 @@ func mustParseCompressed(t *testing.T, raw []byte) *ecdsa.PublicKey {
 }
 
 var _ = partition.StateActive
+
+// A deposit tree retires only after the window its signed draining record names; the record's own signing time is what is judged.
+func TestBTCZoneRetireWaitsForTheSignedWindow(t *testing.T) {
+	r := newBTCGenRig(t)
+	r.candidate()
+	r.step(btcTreeID, KeysetStartDraining, 1, func(c *KeysetChange) {
+		c.Successor, c.Caps, c.Window = 2, map[string]string{"BTC": "300000"}, 3600
+	})
+	r.activate2()
+	c := r.ch(btcTreeID, KeysetRetire, 1, nil)
+	if err := r.applyKS(r.guard, c); err == nil || !strings.Contains(err.Error(), "stay swept until") {
+		t.Fatalf("retire inside the window: %v", err)
+	}
+	r.advance(2 * time.Hour)
+	r.step(btcTreeID, KeysetRetire, 1, nil)
+	// A window on any other action is refused.
+	bad := r.ch(btcTreeID, KeysetActivate, 2, func(c *KeysetChange) { c.Window = 5 })
+	if err := r.applyKS(r.guard, bad); err == nil {
+		t.Fatal("a window on activate")
+	}
+}

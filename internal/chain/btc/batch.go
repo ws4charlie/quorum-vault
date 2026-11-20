@@ -39,7 +39,7 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 	if batchID == "" || len(members) == 0 {
 		return BatchBuild{}, errors.New("btc: a batch needs an id and at least one member")
 	}
-	sh, err := a.shardOf(partitionID)
+	sh, err := a.shardOf(ctx, partitionID)
 	if err != nil {
 		return BatchBuild{}, err
 	}
@@ -196,7 +196,7 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 			return BatchBuild{}, err
 		}
 		sum += u.value
-		p.Inputs = append(p.Inputs, PayloadInput{TxID: u.txid, Vout: u.vout, Value: u.value, Path: sh.path, Sequence: SequenceRBF})
+		p.Inputs = append(p.Inputs, PayloadInput{TxID: u.txid, Vout: u.vout, Value: u.value, Path: sh.path, Sequence: SequenceRBF, Gen: sh.payloadGen()})
 	}
 	for i, m := range members[:funded] {
 		p.Outputs = append(p.Outputs, PayloadOutput{Address: canon[i], Value: m.Amount})
@@ -223,7 +223,7 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 		a.cfg.Chain, built.TxID, batchID, string(raw), int64(fee), OwnerKindBatch); err != nil {
 		return BatchBuild{}, fmt.Errorf("btc: record batch attempt: %w", err)
 	}
-	ref := chain.KeyRef{PartitionID: partitionID, Path: PathString(sh.path)}
+	ref := chain.KeyRef{PartitionID: partitionID, Path: sh.keyPath()}
 	u := chain.UnsignedTx{Chain: a.cfg.Chain, Digest: built.Digests[0], Payload: raw, KeyRef: ref}
 	for _, d := range built.Digests[1:] {
 		u.More = append(u.More, chain.SigInput{Digest: d, KeyRef: ref})
@@ -234,7 +234,11 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 // lockCandidates reads up to limit of the partition's available hot outputs in the given order and locks them for the caller's transaction, skipping
 // the ones another transaction holds.
 func (a *Adapter) lockCandidates(ctx context.Context, tx pgx.Tx, partitionID, order string, limit int) ([]utxo, error) {
-	rows, err := tx.Query(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit
+	sh, err := a.shardOf(ctx, partitionID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND path='`+sh.keyPath()+`'
 		ORDER BY `+order+` LIMIT $3 FOR UPDATE SKIP LOCKED`, a.cfg.Chain, partitionID, limit)
 	if err != nil {
 		return nil, err

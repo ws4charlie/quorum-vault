@@ -38,12 +38,18 @@ func (a *Adapter) noteConsolidateWait(why string) {
 
 // worthSpendingSQL is the one filter for what a consolidation counts, plans and builds from: the partition's available hot outputs that are worth spending
 // at the rate ($3 is inputVSize x rate; an output at or below it costs more to spend than it carries). Dust does not count and stays where it is.
-const worthSpendingSQL = `chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND NOT cold AND value > $3`
+func worthSpendingSQL(sh shard) string {
+	return `chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND NOT cold AND value > $3 AND path='` + sh.keyPath() + `'`
+}
 
 // smallestWorthSpending reads the partition's available hot outputs that are worth spending at the rate (more than one input costs to add), smallest
 // first, at most limit of them.
 func (a *Adapter) smallestWorthSpending(ctx context.Context, partitionID string, rate uint64, limit int) ([]uint64, error) {
-	rows, err := a.pool.Query(ctx, `SELECT value FROM btc_utxos WHERE `+worthSpendingSQL+`
+	sh, err := a.shardOf(ctx, partitionID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := a.pool.Query(ctx, `SELECT value FROM btc_utxos WHERE `+worthSpendingSQL(sh)+`
 		ORDER BY value, created_at, txid, vout LIMIT $4`, a.cfg.Chain, partitionID, int64(inputVSize*rate), limit)
 	if err != nil {
 		return nil, err
@@ -72,14 +78,14 @@ func (a *Adapter) PlanConsolidation(ctx context.Context, partitionID string) (ch
 	if a.cfg.ConsolidateAbove <= 0 {
 		return none, nil
 	}
-	sh, err := a.shardOf(partitionID)
+	sh, err := a.shardOf(ctx, partitionID)
 	if err != nil {
 		return none, err
 	}
 	// The rate is read first: which outputs are dust depends on it. Only outputs worth spending are counted, with the filter that selects them.
 	rate := a.rawFeeRate(ctx)
 	var worth int
-	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM btc_utxos WHERE `+worthSpendingSQL, a.cfg.Chain, partitionID, int64(inputVSize*rate)).Scan(&worth); err != nil {
+	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM btc_utxos WHERE `+worthSpendingSQL(sh), a.cfg.Chain, partitionID, int64(inputVSize*rate)).Scan(&worth); err != nil {
 		return none, err
 	}
 	if worth <= a.cfg.ConsolidateAbove {
@@ -118,7 +124,7 @@ func (a *Adapter) BuildConsolidation(ctx context.Context, tx pgx.Tx, c chain.Con
 	if a.cfg.ConsolidateAbove <= 0 {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: consolidate_above is 0", ErrConsolidateWait)
 	}
-	sh, err := a.shardOf(c.PartitionID)
+	sh, err := a.shardOf(ctx, c.PartitionID)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -138,7 +144,7 @@ func (a *Adapter) BuildConsolidation(ctx context.Context, tx pgx.Tx, c chain.Con
 		}
 		var u utxo
 		var v int64
-		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE `+worthSpendingSQL+`
+		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE `+worthSpendingSQL(sh)+`
 			ORDER BY value, created_at, txid, vout LIMIT 1 FOR UPDATE SKIP LOCKED`, a.cfg.Chain, c.PartitionID, int64(inputVSize*rate)).Scan(&u.txid, &u.vout, &v)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chain.UnsignedTx{}, fmt.Errorf("%w: %d of %d sats in %s", chain.ErrNotEnoughOutputs, sum, want, c.PartitionID)
@@ -169,7 +175,7 @@ func (a *Adapter) BuildConsolidation(ctx context.Context, tx pgx.Tx, c chain.Con
 	}
 	p := Payload{Version: PayloadVersion}
 	for _, u := range picked {
-		p.Inputs = append(p.Inputs, PayloadInput{TxID: u.txid, Vout: u.vout, Value: u.value, Path: sh.path, Sequence: SequenceRBF})
+		p.Inputs = append(p.Inputs, PayloadInput{TxID: u.txid, Vout: u.vout, Value: u.value, Path: sh.path, Sequence: SequenceRBF, Gen: sh.payloadGen()})
 	}
 	p.Outputs = []PayloadOutput{{Address: sh.address, Value: sum - fee}}
 	built, raw, err := a.record(ctx, tx, OwnerKindConsolidate, c.ID, "send", p, fee)
