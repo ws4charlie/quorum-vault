@@ -1,0 +1,22 @@
+# The attested sealer of mpc-party (docs/runbooks/tee-broker.md): the party holds its data keys only after the broker has released them for its measurement.
+# Inputs: the party's metrics port. qv_mpc_party_sealer_ready{party} (1 once the keys are here, 0 while it waits for the broker) and
+# qv_mpc_party_attest_exchanges_total{party,outcome} (exchange_ok:*, refused:allowlist, refused:verify, refused:rate_limited, refused:nonce, refused:other, unreachable, evidence_failed, error).
+# A party with the PKCS#11 sealer publishes neither series, so these rules do nothing there.
+groups:
+  - name: qv-party-sealer
+    rules:
+      # Not ready means no sessions, health UNAVAILABLE, the gateway routes away from it. A restart takes seconds; five minutes means the broker says no or cannot be reached.
+      - alert: QVMpcPartySealerNotReady
+        expr: qv_mpc_party_sealer_ready == 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "MPC party {{ $labels.party }} has no data keys: its sealer has waited for the attestation broker for 5 minutes"
+          description: "Look at qv_mpc_party_attest_exchanges_total{party=\"{{ $labels.party }}\"}: refused:allowlist = its measurement is not allowlisted, unreachable = the broker link. Runbook: docs/runbooks/tee-broker.md"
+      # The broker answered "this measurement is not allowed". Either a new build the operators have not allowlisted, or a build nobody released.
+      - alert: QVMpcPartyAllowlistRefused
+        expr: increase(qv_mpc_party_attest_exchanges_total{outcome="refused:allowlist"}[15m]) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "The attestation broker refused party {{ $labels.party }}: its measurement is not on the allowlist"
+          description: "The party stays out of service until the allowlist is updated (signed by the operators) or the build is rolled back. Runbook: docs/runbooks/tee-broker.md"

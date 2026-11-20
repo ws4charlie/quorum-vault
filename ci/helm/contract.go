@@ -269,6 +269,9 @@ func CheckContract(objs []Obj, c Contract) []string {
 			}
 			for _, k := range ic.LoopbackOnly {
 				val := firstNonEmpty(flags[k], env[k])
+				if env["QV_METRICS_ALLOW_NON_LOOPBACK"] == "1" && ic.Zone == "business" {
+					continue // task D10: a business-zone service may bind the pod address; the NetworkPolicy lets only the monitoring namespace in
+				}
 				if val != "" && !strings.HasPrefix(val, "127.0.0.1:") && !strings.HasPrefix(val, "[::1]:") && !strings.HasPrefix(val, "localhost:") {
 					add("%s: %s=%s is not a loopback address (metrics are loopback only)", cid, k, val)
 				}

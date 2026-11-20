@@ -95,9 +95,7 @@ spec:
             - { name: metrics, mountPath: /var/lib/qv/metrics, readOnly: true }
             - { name: agent-config, mountPath: /etc/alloy, readOnly: true }
             - { name: agent-data, mountPath: /var/lib/alloy }
-            {{- if .Values.metrics.agent.remoteWrite.tokenSecret }}
             - { name: remote-write, mountPath: /etc/qv/remote-write, readOnly: true }
-            {{- end }}
         {{- end }}
       volumes:
         {{- include "qvs.secretVolume" (dict "name" "tls" "secret" .Values.tls.gateway.secretName) | nindent 8 }}
@@ -122,8 +120,5 @@ spec:
           configMap: { name: {{ include "qvs.cmName" (dict "ctx" . "c" "agent" "data" (include "qvs.agentConfig" .)) }} }
         - name: agent-data
           emptyDir: { sizeLimit: 64Mi }
-        {{- with .Values.metrics.agent.remoteWrite.tokenSecret }}
-        - name: remote-write
-          secret: { secretName: {{ . | quote }}, defaultMode: 288 }
-        {{- end }}
+        {{- include "qvs.secretVolume" (dict "name" "remote-write" "secret" (include "qvs.req" (dict "k" "metrics.agent.remoteWrite.tlsSecret" "v" .Values.metrics.agent.remoteWrite.tlsSecret))) | nindent 8 }}
         {{- end }}

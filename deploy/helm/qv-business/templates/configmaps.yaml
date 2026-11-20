@@ -28,6 +28,10 @@ data:
   {{- if .Values.approval.enabled }}
   QV_APPROVAL_ORIGINS: {{ include "qv.approvalOrigin" . | quote }}
   {{- end }}
+  {{- if .Values.metrics.enabled }}
+  QV_METRICS_ALLOW_NON_LOOPBACK: "1"
+  QV_CORE_METRICS_LISTEN: {{ printf "0.0.0.0:%d" (int .Values.metrics.port) | quote }}
+  {{- end }}
   {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
 ---
 apiVersion: v1
@@ -51,6 +55,9 @@ metadata:
 data:
   DATABASE_URL: {{ include "qv.dsn" (dict "ctx" . "role" "qv_relay" "dir" "/etc/qv/tls") | quote }}
   QV_KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
+  {{- if .Values.metrics.enabled }}
+  QV_METRICS_ALLOW_NON_LOOPBACK: "1"
+  {{- end }}
   {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
 {{- if .Values.archiver.enabled }}
 ---
@@ -63,6 +70,9 @@ data:
   QV_KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
   QV_ARCHIVE_BUCKET: {{ .Values.archive.bucket | quote }}
   QV_ARCHIVE_REGION: {{ .Values.archive.region | quote }}
+  {{- if .Values.metrics.enabled }}
+  QV_METRICS_ALLOW_NON_LOOPBACK: "1"
+  {{- end }}
   {{- with .Values.archive.endpoint }}
   QV_ARCHIVE_ENDPOINT: {{ . | quote }}
   {{- end }}

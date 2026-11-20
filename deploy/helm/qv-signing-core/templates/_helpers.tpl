@@ -155,9 +155,18 @@ prometheus.scrape "gateway" {
 prometheus.remote_write "out" {
   endpoint {
     url = {{ include "qvs.req" (dict "k" "metrics.agent.remoteWrite.url" "v" $a.remoteWrite.url) | quote }}
-    {{- if $a.remoteWrite.tokenSecret }}
-    bearer_token_file = "/etc/qv/remote-write/token"
+    tls_config {
+      cert_file = "/etc/qv/remote-write/tls.crt"
+      key_file  = "/etc/qv/remote-write/tls.key"
+      ca_file   = "/etc/qv/remote-write/ca.crt"
+    }
+  }
+  {{- with $a.externalLabels }}
+  external_labels = {
+    {{- range $k, $v := . }}
+    {{ $k }} = {{ $v | quote }},
     {{- end }}
   }
+  {{- end }}
 }
 {{- end -}}

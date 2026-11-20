@@ -15,6 +15,8 @@ imagePullSecrets: []
 images:
   party:    { repository: ghcr.io/ws4charlie/quorum-vault/mpc-party,   digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
   cosigner: { repository: ghcr.io/ws4charlie/quorum-vault/qv-cosigner, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  # only when metrics.agent.enabled: Grafana Alloy v1.10.2, the same image and digest as externalImages.alloy in deploy/images/contract.json (a test compares them)
+  agent:    { repository: docker.io/grafana/alloy, digest: "sha256:bcf27f18c4402869af112fb39e35e1db3804a404686f4caa20bdf77814219223", tag: "" }
 
 # The uid/gid every image runs as. Both containers of the pod use the SAME uid: the cosigner's socket is mode 0600, owner only (deploy/images/README.md).
 runAsUser: 65532
@@ -90,6 +92,17 @@ cosigner:
   kafka: { brokers: "redpanda.business.example.invalid:9092" }  # the business Kafka, over the explicit link; PLACEHOLDER
   resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { cpu: "1", memory: 512Mi } }
 
+# --- Metrics. Both processes serve metrics on loopback only; a signing cluster takes NO inbound scrape. With the agent on, a sidecar in the same pod reads those loopback
+# ports and remote-writes OUTWARD to the endpoint below, with a client certificate. Off by default (README "Metrics"). ---
+metrics:
+  agent:
+    enabled: false
+    remoteWrite:
+      url: ""                           # https://... (a private endpoint of the central monitoring); REQUIRED when enabled
+      tlsSecret: ""                     # REQUIRED when enabled: a Secret (cert-manager) with tls.crt, tls.key, ca.crt: the client certificate the endpoint checks, and the CA of the endpoint
+    externalLabels: {}                  # added to every series, e.g. { qv_cluster: party-b }
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 250m, memory: 192Mi } }
+
 # --- Workload ---
 party:
   resources: { requests: { cpu: "1", memory: 1Gi }, limits: { cpu: "2", memory: 2Gi } }
@@ -115,6 +128,7 @@ network:
   peerEgress: { to: [] }                # A: the endpoints of B and C; B: the endpoint of C; C: none (dials nobody)
   guardDatabase: { to: [], ports: [5432] }   # B, C: the cosigner's guard database
   kafka: { to: [], ports: [9092] }           # B, C: the business Kafka over the explicit link (outward only)
+  metricsRemoteWrite: { to: [], ports: [443] }   # REQUIRED when metrics.agent.enabled: the monitoring endpoint, outward only. NetworkPolicy is per pod: it applies to every container of the pod
   hsm: { to: [], ports: [] }            # a network HSM (CloudHSM, Luna): its addresses and ports; empty for an HSM reached some other way
 operator:
   # Pods with this label (in this namespace) may reach the caller port: the in-cluster admin Job or bastion pod of that party's operators (README "Operators").

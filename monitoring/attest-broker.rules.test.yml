@@ -1,0 +1,75 @@
+rule_files:
+  - attest-broker.rules.yml
+evaluation_interval: 1m
+tests:
+  # refusals: the first one pages, and the alert goes away when no new refusal comes
+  - interval: 1m
+    input_series:
+      - series: 'qv_attest_broker_events_total{event="release_ok"}'
+        values: '0+1x40'
+      - series: 'qv_attest_broker_events_total{event="release_refused"}'
+        values: '0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      - series: 'qv_attest_broker_events_total{event="rate_limited"}'
+        values: '0+0x40'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: QVAttestBrokerRefusals
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: QVAttestBrokerRefusals
+        exp_alerts:
+          - exp_labels: {severity: page, event: release_refused}
+            exp_annotations:
+              summary: "The attestation broker refused a party's key request (release_refused)"
+              description: "Read the broker's audit log for the rule and the party (docs/runbooks/tee-broker.md). A new build that is not on the allowlist yet is the usual cause; a measurement nobody released is an incident."
+      - eval_time: 40m
+        alertname: QVAttestBrokerRefusals
+        exp_alerts: []
+  # a refused newkey request pages too, and successes alone never do
+  - interval: 1m
+    input_series:
+      - series: 'qv_attest_broker_events_total{event="newkey_refused"}'
+        values: '0 0 1 1 1 1'
+      - series: 'qv_attest_broker_events_total{event="release_ok"}'
+        values: '0+5x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: QVAttestBrokerRefusals
+        exp_alerts:
+          - exp_labels: {severity: page, event: newkey_refused}
+            exp_annotations:
+              summary: "The attestation broker refused a party's key request (newkey_refused)"
+              description: "Read the broker's audit log for the rule and the party (docs/runbooks/tee-broker.md). A new build that is not on the allowlist yet is the usual cause; a measurement nobody released is an incident."
+  # a refused allowlist reload is a ticket; a good reload is not
+  - interval: 1m
+    input_series:
+      - series: 'qv_attest_broker_events_total{event="reload_refused"}'
+        values: '0 0 1 1 1 1 1 1'
+      - series: 'qv_attest_broker_events_total{event="reload_ok"}'
+        values: '0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: QVAttestBrokerReloadRefused
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: QVAttestBrokerReloadRefused
+        exp_alerts:
+          - exp_labels: {severity: ticket, event: reload_refused}
+            exp_annotations:
+              summary: "The attestation broker refused a new allowlist file and keeps the old one"
+              description: "The file is unsigned, signed by too few operators, malformed, or its sequence is not higher. The broker log has the reason. Runbook: docs/runbooks/tee-broker.md"
+  # PENDING metric (qv_attest_broker_cert_seconds_to_expiry): the rule is tested against the name it will have
+  - interval: 1m
+    input_series:
+      - series: 'qv_attest_broker_cert_seconds_to_expiry'
+        values: '3000000+0x30'            # 34.7 days: quiet
+      - series: 'qv_attest_broker_cert_seconds_to_expiry{instance="b"}'
+        values: '2000000+0x30'            # 23 days: alerts (the minimum counts)
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: QVAttestBrokerCertExpiringSoon
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: "The attestation broker's certificate expires in 23d 3h 33m 20s"
+              description: "The parties pin it: issue the new one, add its pin on the parties' side, restart the broker, remove the old pin. Runbook: docs/runbooks/certificates.md"

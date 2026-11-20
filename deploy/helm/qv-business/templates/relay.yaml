@@ -26,7 +26,7 @@ spec:
         - name: relay
           image: {{ include "qv.image" (dict "ctx" . "k" "relay") | quote }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
-          args: ["-audit-source", {{ .Values.kafka.auditSource | quote }}]
+          args: ["-audit-source", {{ .Values.kafka.auditSource | quote }}{{ if .Values.metrics.enabled }}, "-metrics-listen", {{ printf "0.0.0.0:%d" (int .Values.metrics.port) | quote }}{{ end }}]
           envFrom:
             - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "relay-env") }} }
           {{- if ne .Values.relay.probes.mode "none" }}

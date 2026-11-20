@@ -1,0 +1,29 @@
+{{- include "qm.guards" . -}}
+{{- /* A routing EXAMPLE: a party's alerts go to that party's operators. Receivers name Secrets; nothing secret is rendered. The operator adds a namespace matcher to the routes of an
+       AlertmanagerConfig unless the Alertmanager is set to alertmanagerConfigMatcherStrategy: None (README). */ -}}
+{{- if and .Values.alertmanager.enabled (eq .Values.clusterKind "central") }}
+{{- $a := .Values.alertmanager }}
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: qv-routing
+  labels:
+    {{- include "qm.labels" . | nindent 4 }}
+    {{- with $a.labels }}{{ toYaml . | nindent 4 }}{{ end }}
+spec:
+  route:
+    receiver: {{ $a.defaultReceiver | quote }}
+    groupBy: {{ toJson $a.groupBy }}
+    routes:
+      {{- range $r := $a.partyRoutes }}
+      - receiver: {{ $r.receiver | quote }}
+        matchers:
+          - { name: party, value: {{ $r.party | quote }}, matchType: "=" }
+      {{- end }}
+  receivers:
+    {{- range $r := $a.receivers }}
+    - name: {{ $r.name | quote }}
+      webhookConfigs:
+        - urlSecret: { name: {{ $r.webhookUrlSecret.name | quote }}, key: {{ $r.webhookUrlSecret.key | quote }} }
+    {{- end }}
+{{- end }}

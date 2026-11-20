@@ -1,0 +1,49 @@
+# The audit-head archive: qv-anchor-archiver copies every head published on qv.audit.heads into a write-once bucket
+# (runbook: docs/runbooks/audit-archive.md, design: docs/audit.md). A head that is published but not archived is a head that Kafka's retention
+# or a broker administrator can still take away, so a lag that stays is an incident, not a delay.
+#
+# Inputs: the archiver's metrics port (-metrics-listen), job qv-anchor-archiver. Every chain republishes its head at least every anchor-interval
+# (default 1 minute) even when unchanged, and the archiver counts each republish, so the newest-head time of a source moves every minute while the
+# chain, Kafka and the archiver all work. The 15 minutes below are 15 times that default: raise them with -anchor-interval.
+groups:
+  - name: qv-audit-archive
+    rules:
+      # heads wait on the topic and nothing has been archived for 10 minutes: the archive (or its credentials, or the lock check) is failing
+      - alert: QVAuditArchiveLagging
+        expr: qv_audit_archive_lag_seconds > 600
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Published audit heads are waiting to be archived (no head archived for {{ $value | humanizeDuration }})"
+          description: "Until they are in the write-once bucket, the topic's retention or a broker administrator can still remove them. Check qv_audit_archive_errors_total{kind=\"store\"} and the archiver's log. Runbook: docs/runbooks/audit-archive.md"
+      # the archive refused or could not be reached, over and over
+      - alert: QVAuditArchiveStoreErrors
+        expr: increase(qv_audit_archive_errors_total{kind="store"}[10m]) > 0
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "The audit archive refuses or cannot be reached"
+          description: "Every head is retried until it is stored, so nothing is lost while this lasts, but nothing is archived either. Runbook: docs/runbooks/audit-archive.md"
+      # something on the heads topic is not a head: a ticket, because the archiver skips it and goes on
+      - alert: QVAuditArchiveBadRecords
+        expr: increase(qv_audit_archive_errors_total{kind="record"}[1h]) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "A record on the audit heads topic is not a head and was not archived"
+          description: "Someone with write access to the topic published something that is not an audit head. Find it in the archiver's log (\"not a head\"). Runbook: docs/runbooks/audit-archive.md"
+      # no head of this source reached the archive for 15 minutes: the chain stopped publishing, Kafka is down, or the archiver is
+      - alert: QVAuditArchiveSourceSilent
+        expr: time() - qv_audit_archive_last_head_timestamp_seconds > 900
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "No audit head of {{ $labels.source }} reached the archive for 15 minutes"
+          description: "Every chain republishes its head every minute. Either the chain's publisher is down, Kafka is, or the archiver is behind. Runbook: docs/runbooks/audit-archive.md"
+      # the archiver is not scraped at all (down, or the metrics port is closed)
+      - alert: QVAuditArchiveMetricsMissing
+        expr: absent(qv_audit_archive_lag_seconds)
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "qv-anchor-archiver exposes no metrics: it is down or not scraped"
+          description: "Without it nothing is copied into the write-once bucket. Runbook: docs/runbooks/audit-archive.md"

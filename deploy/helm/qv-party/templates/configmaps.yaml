@@ -83,6 +83,17 @@ data:
   cosigner.json: |
     {{- toPrettyJson .Values.cosigner.config | nindent 4 }}
 {{- end }}
+{{- if .Values.metrics.agent.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-agent-%s" (include "qp.fullname" .) (include "qp.agentConfig" . | sha256sum | trunc 10) }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+immutable: true
+data:
+  config.alloy: {{ include "qp.agentConfig" . | quote }}
+{{- end }}
 {{- if .Values.hsm.softhsm.enabled }}
 ---
 apiVersion: v1

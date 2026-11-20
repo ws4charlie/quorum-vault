@@ -1,0 +1,50 @@
+rule_files:
+  - party-sealer.rules.yml
+evaluation_interval: 1m
+tests:
+  # not ready for 5 minutes pages; a restart that is ready within 5 minutes does not
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_sealer_ready{party="B"}'
+        values: '0 0 0 0 0 0 0 0 0 0 1 1'
+      - series: 'qv_mpc_party_sealer_ready{party="C"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1'
+      - series: 'qv_mpc_party_sealer_ready{party="A"}'
+        values: '1+0x11'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: QVMpcPartySealerNotReady
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: QVMpcPartySealerNotReady
+        exp_alerts:
+          - exp_labels: {severity: page, party: B}
+            exp_annotations:
+              summary: "MPC party B has no data keys: its sealer has waited for the attestation broker for 5 minutes"
+              description: "Look at qv_mpc_party_attest_exchanges_total{party=\"B\"}: refused:allowlist = its measurement is not allowlisted, unreachable = the broker link. Runbook: docs/runbooks/tee-broker.md"
+      - eval_time: 11m
+        alertname: QVMpcPartySealerNotReady
+        exp_alerts: []
+  # any allowlist refusal pages at once; other exchange outcomes do not
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_attest_exchanges_total{party="B",outcome="refused:allowlist"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+      - series: 'qv_mpc_party_attest_exchanges_total{party="B",outcome="unreachable"}'
+        values: '0+1x39'
+      - series: 'qv_mpc_party_attest_exchanges_total{party="C",outcome="exchange_ok:unseal"}'
+        values: '0+1x39'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: QVMpcPartyAllowlistRefused
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: QVMpcPartyAllowlistRefused
+        exp_alerts:
+          - exp_labels: {severity: page, party: B, outcome: "refused:allowlist"}
+            exp_annotations:
+              summary: "The attestation broker refused party B: its measurement is not on the allowlist"
+              description: "The party stays out of service until the allowlist is updated (signed by the operators) or the build is rolled back. Runbook: docs/runbooks/tee-broker.md"
+      - eval_time: 35m
+        alertname: QVMpcPartyAllowlistRefused
+        exp_alerts: []

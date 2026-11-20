@@ -1,0 +1,49 @@
+# Certificates that run out: every QuorumVault service publishes qv_tls_cert_seconds_to_expiry (kind="leaf" for its own certificate, kind="ca" for
+# the authorities it trusts), taken from the files it has loaded. Certificates live hours to days and services pick up the renewed files by
+# themselves, so a leaf near its end means the renewal (the operator's PKI, or `scripts/pki.sh renew` in development) has stopped.
+# Runbook: docs/runbooks/certificates.md. A service whose certificate has expired will not start, and one that expires while running is refused by its peers.
+#
+# Inputs: the services' loopback metrics ports (qv-core, qv-relay, qv-anchor-archiver, qv-cosigner: -metrics-listen) and, for the gateway, its textfile.
+groups:
+  - name: qv-tls-cert
+    rules:
+      # a leaf certificate with less than a third of a day left: the renewal job is late or has failed
+      - alert: QVTLSCertExpiringSoon
+        expr: min by (name, zone) (qv_tls_cert_seconds_to_expiry{kind="leaf"}) < 4 * 3600
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "The TLS certificate of {{ $labels.name }} ({{ $labels.zone }} zone) expires in {{ $value | humanizeDuration }}"
+          description: "The service reloads renewed files without a restart; renew them now. Runbook: docs/runbooks/certificates.md"
+      - alert: QVTLSCertExpired
+        expr: min by (name, zone) (qv_tls_cert_seconds_to_expiry{kind="leaf"}) <= 0
+        labels: {severity: page}
+        annotations:
+          summary: "The TLS certificate of {{ $labels.name }} ({{ $labels.zone }} zone) has expired"
+          description: "Its peers refuse it. Renew the files; the service reloads them. Runbook: docs/runbooks/certificates.md"
+      # The party-to-cosigner channel (pinned certificates, no CA): qv-cosigner-socket on the cosigner's side, mpc-party-<role> on the party's
+      # side (its metrics_listen). Both are loaded once at start and renewed by hand (runbook: add the new pin, restart, remove the old),
+      # so they get a month of warning, not the hours of the two rules above (which cover them as well: same metric name, kind="leaf").
+      - alert: QVPinnedCertExpiringSoon
+        expr: min by (name, zone) (qv_tls_cert_seconds_to_expiry{kind="leaf", name=~"qv-cosigner-socket|mpc-party-.*"}) < 30 * 86400
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "The pinned certificate of {{ $labels.name }} ({{ $labels.zone }} zone) expires in {{ $value | humanizeDuration }}"
+          description: "It is not renewed automatically and the process reads it only at start: issue the new one, add its pin on the other side, restart, remove the old pin. Runbook: docs/runbooks/certificates.md"
+      # the zone's authority: 30 days is the time to replace it before every certificate it signed stops working
+      - alert: QVTLSCAExpiringSoon
+        expr: min by (name, zone) (qv_tls_cert_seconds_to_expiry{kind="ca"}) < 30 * 86400
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: "The {{ $labels.zone }} zone CA that {{ $labels.name }} trusts expires in {{ $value | humanizeDuration }}"
+          description: "Roll the authority: add the new CA to every trust bundle before issuing from it. Runbook: docs/runbooks/certificates.md"
+      # new files are on disk but the service could not load them: it still serves the old certificate
+      - alert: QVTLSCertReloadFailing
+        expr: increase(qv_tls_cert_reload_failures_total[15m]) > 0
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "{{ $labels.name }} cannot load its renewed TLS files"
+          description: "It keeps the old certificate until that expires. Check its log for the reload error (a half-written pair, a certificate of the wrong zone or authority, an expired replacement)."

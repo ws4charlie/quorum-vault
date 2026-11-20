@@ -104,9 +104,46 @@ imagePullSecrets: {{ toJson . }}
 {{- if and .Values.hsm.softhsm.enabled (ne .Values.sealer.type "pkcs11") }}{{ fail "hsm.softhsm.enabled needs sealer.type pkcs11" }}{{ end -}}
 {{- if eq .Values.sealer.type "attested" }}{{ fail "sealer.type attested is an extension point of the TEE tasks: not built in this chart yet" }}{{ end -}}
 {{- if .Values.attestBroker.enabled }}{{ fail "attestBroker.enabled is an extension point of the TEE tasks: not built in this chart yet" }}{{ end -}}
+{{- if and .Values.metrics.agent.enabled (not .Values.network.metricsRemoteWrite.to) }}{{ fail "network.metricsRemoteWrite.to is required when metrics.agent.enabled: the monitoring endpoint (an empty list would mean no rule at all)" }}{{ end -}}
+{{- if and .Values.metrics.agent.enabled (not .Values.metrics.agent.remoteWrite.tlsSecret) }}{{ fail "metrics.agent.remoteWrite.tlsSecret is required when metrics.agent.enabled: the client certificate Secret" }}{{ end -}}
 {{- if and (eq .Values.sealer.type "pkcs11") (not .Values.hsm.softhsm.enabled) (not .Values.hsm.module.path) }}{{ fail "hsm.module.path is required for sealer.type pkcs11 (the vendor's PKCS#11 module; the image has none)" }}{{ end -}}
 {{- if and (eq .Values.sealer.type "pkcs11") (not .Values.hsm.softhsm.enabled) (not .Values.hsm.module.volume) }}{{ fail "hsm.module.volume is required for sealer.type pkcs11: the volume that holds the vendor's PKCS#11 module" }}{{ end -}}
 {{- if and (eq .Values.sealer.type "pkcs11") (not .Values.hsm.softhsm.enabled) (not (hasPrefix "/etc/qv/hsm/" .Values.hsm.module.path)) }}{{ fail "hsm.module.path must lie under /etc/qv/hsm/ (where hsm.module.volume is mounted)" }}{{ end -}}
+{{- end -}}
+
+{{/* The metrics agent (Grafana Alloy): scrapes the loopback metrics ports of this pod (party; cosigner for B and C) and remote-writes outward with a client certificate. It listens on loopback only. */}}
+{{- define "qp.agentConfig" -}}
+{{- $a := .Values.metrics.agent -}}
+{{- $role := include "qp.role" . -}}
+prometheus.scrape "party" {
+  targets    = [{"__address__" = {{ printf "127.0.0.1:%d" (int .Values.ports.metrics) | quote }}}]
+  job_name   = "mpc-party"
+  forward_to = [prometheus.remote_write.out.receiver]
+}
+{{- if ne $role "A" }}
+prometheus.scrape "cosigner" {
+  targets    = [{"__address__" = {{ printf "127.0.0.1:%d" (int .Values.ports.cosignerMetrics) | quote }}}]
+  job_name   = "qv-cosigner"
+  forward_to = [prometheus.remote_write.out.receiver]
+}
+{{- end }}
+prometheus.remote_write "out" {
+  endpoint {
+    url = {{ required "metrics.agent.remoteWrite.url is required when metrics.agent.enabled" $a.remoteWrite.url | quote }}
+    tls_config {
+      cert_file = "/etc/qv/remote-write/tls.crt"
+      key_file  = "/etc/qv/remote-write/tls.key"
+      ca_file   = "/etc/qv/remote-write/ca.crt"
+    }
+  }
+  {{- with $a.externalLabels }}
+  external_labels = {
+    {{- range $k, $v := . }}
+    {{ $k }} = {{ $v | quote }},
+    {{- end }}
+  }
+  {{- end }}
+}
 {{- end -}}
 
 {{/* One Service's type rules: LoadBalancer only as a PRIVATE endpoint (an internal-load-balancer annotation and source ranges). */}}

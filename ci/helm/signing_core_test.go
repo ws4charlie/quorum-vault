@@ -337,7 +337,7 @@ func TestSigningCorePolicyAndContractPass(t *testing.T) {
 func TestSigningCoreOptionalPartsPass(t *testing.T) {
 	c := scContract(t)
 	objs := scObjs(t, false, "--set", "metrics.agent.enabled=true", "--set", "metrics.agent.remoteWrite.url=https://metrics.example.invalid/api/v1/write",
-		"--set", "metrics.agent.remoteWrite.tokenSecret=qv-remote-write", "--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=qv-signed-route-1",
+		"--set", "metrics.agent.remoteWrite.tlsSecret=qv-remote-write-tls", "--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=qv-signed-route-1",
 		"--set", "signedSettings.job.files={route-1.json,route-2.json}")
 	var job, agent bool
 	for _, o := range objs {
@@ -418,7 +418,7 @@ func TestSigningCoreProductionShape(t *testing.T) {
 		var pinFromSecret bool
 		for _, e := range gw.Env {
 			if e.Name == "QV_HSM_PIN" {
-				pinFromSecret = e.Value == "" && strings.Contains(nodeText(e.ValueFrom), "secretKeyRef")
+				pinFromSecret = e.Value == "" && strings.Contains(scNodeText(e.ValueFrom), "secretKeyRef")
 			}
 		}
 		if !pinFromSecret {
@@ -451,7 +451,7 @@ func TestSigningCoreProductionShape(t *testing.T) {
 	}
 }
 
-func nodeText(n yaml.Node) string {
+func scNodeText(n yaml.Node) string {
 	b, _ := yaml.Marshal(&n)
 	return string(b)
 }
