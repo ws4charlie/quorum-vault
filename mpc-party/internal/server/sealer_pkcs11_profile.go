@@ -18,8 +18,11 @@ import (
 // Envelope versions written and read by the PKCS#11 sealer. Version 2 belongs to the attested sealer (sealer_attested.go); do not reuse it.
 //
 //	v1: {"v":1,"iv":b64,"ct":b64}                     one AES-256-GCM call, IV made by this process (SoftHSM profile).
-//	v3: {"v":3,"p":"cloudhsm","parts":[{"iv","ct"}…]}  one AES-256-GCM call per part of at most cloudhsmChunk bytes, IV made by the HSM and
-//	                                                   read back from the call; the part index and count are bound into the associated data.
+//	v3: {"v":3,"p":"cloudhsm","id","len","parts":[{"iv","ct"}…]}  one AES-256-GCM call per part of at most cloudhsmChunk bytes, IV made by
+//	                                                   the HSM and read back from the call. Each part's associated data holds the caller's
+//	                                                   data, the envelope's random id (16 bytes, fresh per seal), the part index, the part
+//	                                                   count and the total plaintext length: parts cannot be mixed between seals, moved,
+//	                                                   dropped, duplicated or cut.
 //
 // Both profiles open both versions, so a data directory sealed under one profile still opens under the other when the token holds the same key.
 const (
@@ -32,6 +35,7 @@ const (
 	// cloudhsmMaxData is AWS's documented limit for one AES-GCM call (16224 bytes, no multipart); parts are cut well below it so the tag fits too.
 	cloudhsmMaxData  = 16224
 	cloudhsmChunk    = 16000
+	envelopeIDLen    = 16
 	maxEnvelopeParts = 4096
 )
 
@@ -52,6 +56,8 @@ type envelopePart struct {
 type envelopeHSM struct {
 	V     int            `json:"v"`
 	P     string         `json:"p"`
+	ID    []byte         `json:"id"`  // random, one per seal: every part is bound to it, so parts of two seals cannot be mixed
+	Len   int            `json:"len"` // total plaintext length, bound into every part
 	Parts []envelopePart `json:"parts"`
 }
 
@@ -400,12 +406,14 @@ func (s *PKCS11Sealer) ensureKey(sess pkcs11.SessionHandle) (pkcs11.ObjectHandle
 }
 
 // partAAD binds a part of a v3 envelope to its place: a part cannot be moved, dropped, duplicated or taken from another envelope.
-func partAAD(aad []byte, i, n int) []byte {
-	out := make([]byte, 0, len(aad)+16)
+func partAAD(aad, id []byte, i, n, total int) []byte {
+	out := make([]byte, 0, len(aad)+48)
 	out = append(out, aad...)
 	out = append(out, 0, 'q', 'v', '-', 'p', 'a', 'r', 't')
+	out = append(out, id...)
 	out = binary.BigEndian.AppendUint32(out, uint32(i))
-	return binary.BigEndian.AppendUint32(out, uint32(n))
+	out = binary.BigEndian.AppendUint32(out, uint32(n))
+	return binary.BigEndian.AppendUint64(out, uint64(total))
 }
 
 func (s *PKCS11Sealer) encrypt(sess pkcs11.SessionHandle, key pkcs11.ObjectHandle, aad, pt []byte) (iv, ct []byte, err error) {
@@ -458,16 +466,20 @@ func (s *PKCS11Sealer) Seal(aad, plaintext []byte) ([]byte, error) {
 		if n == 0 {
 			n = 1
 		}
+		id := make([]byte, envelopeIDLen)
+		if _, err := rand.Read(id); err != nil {
+			return err
+		}
 		parts := make([]envelopePart, 0, n)
 		for i := 0; i < n; i++ {
 			lo, hi := i*chunk, min((i+1)*chunk, len(plaintext))
-			iv, ct, err := s.encrypt(sess, key, partAAD(aad, i, n), plaintext[lo:hi])
+			iv, ct, err := s.encrypt(sess, key, partAAD(aad, id, i, n, len(plaintext)), plaintext[lo:hi])
 			if err != nil {
 				return err
 			}
 			parts = append(parts, envelopePart{IV: iv, CT: ct})
 		}
-		out, err = json.Marshal(envelopeHSM{V: envelopeVersionHSM, P: s.prof.name, Parts: parts})
+		out, err = json.Marshal(envelopeHSM{V: envelopeVersionHSM, P: s.prof.name, ID: id, Len: len(plaintext), Parts: parts})
 		return err
 	})
 	if err != nil {
@@ -493,14 +505,14 @@ func parseEnvelope(aad, sealed []byte) (parts []envelopePart, aads [][]byte, err
 		return []envelopePart{{IV: e.IV, CT: e.CT}}, [][]byte{aad}, nil
 	case envelopeVersionHSM:
 		var e envelopeHSM
-		if err := json.Unmarshal(sealed, &e); err != nil || len(e.Parts) == 0 || len(e.Parts) > maxEnvelopeParts {
+		if err := json.Unmarshal(sealed, &e); err != nil || len(e.Parts) == 0 || len(e.Parts) > maxEnvelopeParts || len(e.ID) != envelopeIDLen || e.Len < 0 {
 			return nil, nil, fmt.Errorf("%w: bad envelope (v=%d)", ErrOpen, probe.V)
 		}
 		for i, p := range e.Parts {
 			if len(p.IV) != envelopeIVLen || len(p.CT) < envelopeTagBits/8 {
 				return nil, nil, fmt.Errorf("%w: bad envelope (v=3 part %d)", ErrOpen, i)
 			}
-			aads = append(aads, partAAD(aad, i, len(e.Parts)))
+			aads = append(aads, partAAD(aad, e.ID, i, len(e.Parts), e.Len))
 		}
 		return e.Parts, aads, nil
 	}
@@ -527,8 +539,10 @@ func (s *PKCS11Sealer) Open(aad, sealed []byte) ([]byte, error) {
 		for i, p := range parts {
 			b, err := s.api.GCMDecrypt(sess, key, p.IV, aads[i], p.CT)
 			if err != nil {
+				// Only a failure of C_Decrypt itself can mean "bad data". Anything else (C_DecryptInit refused, session or device lost,
+				// throttling) is an HSM error: it goes up as such so withSession can retry it or report UNAVAILABLE.
 				var he *hsmOpError
-				if errors.As(err, &he) && isDeviceError(he.err) {
+				if !errors.As(err, &he) || he.op != "C_Decrypt" || isDeviceError(he.err) {
 					return err
 				}
 				// Token implementations differ in the code they return for a failed GCM check (SoftHSM on macOS and Linux

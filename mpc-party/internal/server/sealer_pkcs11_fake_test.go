@@ -40,10 +40,11 @@ type fakeHSM struct {
 	next     pkcs11.SessionHandle
 	loggedIn bool
 
-	throttle  int // the next N encrypt calls fail with CKR_FUNCTION_FAILED
-	calls     map[string]int
-	logins    int
-	maxGCMLen int
+	throttle        int // the next N encrypt calls fail with CKR_FUNCTION_FAILED
+	throttleDecInit int // the next N decrypt calls fail in C_DecryptInit with CKR_FUNCTION_FAILED
+	calls           map[string]int
+	logins          int
+	maxGCMLen       int
 }
 
 func newFakeHSM(label string, cloud bool) *fakeHSM {
@@ -187,6 +188,10 @@ func (f *fakeHSM) GCMDecrypt(s pkcs11.SessionHandle, _ pkcs11.ObjectHandle, iv, 
 	if err := f.check(s); err != nil {
 		return nil, opErr("C_Decrypt", err)
 	}
+	if f.throttleDecInit > 0 {
+		f.throttleDecInit--
+		return nil, opErr("C_DecryptInit", pkcs11.Error(pkcs11.CKR_FUNCTION_FAILED))
+	}
 	pt, err := f.keys[pkcs11WrapKeyLabel].Open(nil, iv, ct, aad)
 	if err != nil {
 		return nil, opErr("C_Decrypt", pkcs11.Error(f.badTagCode))
@@ -328,7 +333,7 @@ func TestEnvelopeV3Binding(t *testing.T) {
 		t.Fatal(err)
 	}
 	var e envelopeHSM
-	if err := json.Unmarshal(sealed, &e); err != nil || e.V != envelopeVersionHSM || e.P != ProviderCloudHSM || len(e.Parts) != 3 {
+	if err := json.Unmarshal(sealed, &e); err != nil || e.V != envelopeVersionHSM || e.P != ProviderCloudHSM || len(e.Parts) != 3 || len(e.ID) != envelopeIDLen || e.Len != len(secret) {
 		t.Fatalf("envelope: %+v %v", e, err)
 	}
 	mut := map[string]func(e envelopeHSM) envelopeHSM{
@@ -336,6 +341,9 @@ func TestEnvelopeV3Binding(t *testing.T) {
 		"drop a part": func(e envelopeHSM) envelopeHSM { e.Parts = e.Parts[:2]; return e },
 		"duplicate":   func(e envelopeHSM) envelopeHSM { e.Parts = append(e.Parts, e.Parts[2]); return e },
 		"no parts":    func(e envelopeHSM) envelopeHSM { e.Parts = nil; return e },
+		"truncate":    func(e envelopeHSM) envelopeHSM { e.Parts[2].CT = e.Parts[2].CT[:len(e.Parts[2].CT)-1]; return e },
+		"other id":    func(e envelopeHSM) envelopeHSM { e.ID = bytes.Repeat([]byte{1}, envelopeIDLen); return e },
+		"other len":   func(e envelopeHSM) envelopeHSM { e.Len++; return e },
 		"short iv":    func(e envelopeHSM) envelopeHSM { e.Parts[0].IV = e.Parts[0].IV[:5]; return e },
 	}
 	for name, m := range mut {
@@ -491,5 +499,67 @@ func TestCloudHSMLoneTokenFallback(t *testing.T) {
 	}
 	if _, err := newPKCS11SealerOn(f, softHSMProfile, "fake.so", "qv-party-1", "user:pw"); err == nil {
 		t.Fatal("softhsm profile must require the label")
+	}
+}
+
+// Parts of two seals with the same key, associated data, part count and length must not combine: every tag is valid, the whole was never sealed.
+func TestEnvelopeV3PartsOfTwoSealsDoNotMix(t *testing.T) {
+	f := newFakeHSM("tok", true)
+	s := fakeSealer(t, f, cloudHSMProfile)
+	aad := []byte("same aad")
+	a := bytes.Repeat([]byte{1}, 2*cloudhsmChunk+5)
+	b := bytes.Repeat([]byte{2}, 2*cloudhsmChunk+5)
+	sa, _ := s.Seal(aad, a)
+	sb, _ := s.Seal(aad, b)
+	var ea, eb envelopeHSM
+	json.Unmarshal(sa, &ea)
+	json.Unmarshal(sb, &eb)
+	for i := range ea.Parts {
+		m := ea
+		m.Parts = append([]envelopePart(nil), ea.Parts...)
+		m.Parts[i] = eb.Parts[i]
+		raw, _ := json.Marshal(m)
+		if _, err := s.Open(aad, raw); !errors.Is(err, ErrOpen) {
+			t.Errorf("part %d taken from another seal: want ErrOpen, got %v", i, err)
+		}
+	}
+	// Also with b's header: still different ids per part.
+	m := eb
+	m.Parts = append([]envelopePart(nil), eb.Parts...)
+	m.Parts[0] = ea.Parts[0]
+	raw, _ := json.Marshal(m)
+	if _, err := s.Open(aad, raw); !errors.Is(err, ErrOpen) {
+		t.Errorf("mixed with b's header: %v", err)
+	}
+	if got, err := s.Open(aad, sa); err != nil || !bytes.Equal(got, a) {
+		t.Fatalf("untouched seal: %v", err)
+	}
+}
+
+// A throttle on C_DecryptInit is an HSM error: retried (cloudhsm), and UNAVAILABLE when it persists; never "bad data", even though the probe works.
+func TestThrottledDecryptSetupIsNotBadData(t *testing.T) {
+	f := newFakeHSM("tok", true)
+	s := fakeSealer(t, f, cloudHSMProfile)
+	sealed, err := s.Seal([]byte("a"), []byte("share"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.throttleDecInit = 1
+	if got, err := s.Open([]byte("a"), sealed); err != nil || string(got) != "share" {
+		t.Fatalf("one throttled C_DecryptInit must be retried: %q %v", got, err)
+	}
+	f.throttleDecInit = 3
+	_, err = s.Open([]byte("a"), sealed)
+	var ue *UnavailableError
+	if !errors.As(err, &ue) || errors.Is(err, ErrOpen) {
+		t.Fatalf("persistent throttle: want UnavailableError, got %v", err)
+	}
+	// softhsm profile: no retry, but still not bad data.
+	g := newFakeHSM("tok", false)
+	o := fakeSealer(t, g, softHSMProfile)
+	sg, _ := o.Seal([]byte("a"), []byte("share"))
+	g.throttleDecInit = 1
+	if _, err := o.Open([]byte("a"), sg); errors.Is(err, ErrOpen) {
+		t.Fatalf("softhsm profile: throttled setup reported as bad data: %v", err)
 	}
 }

@@ -28,7 +28,7 @@ Sources are AWS CloudHSM user guide pages for Client SDK 5, read on 2026-11-20 (
 |---|---|---|
 | 1 | provider `softhsm` | `{"v":1,"iv","ct"}`, IV made by the party |
 | 2 | attested sealer | not this sealer |
-| 3 | provider `cloudhsm` | `{"v":3,"p":"cloudhsm","parts":[{"iv","ct"}…]}`, IVs made by the HSM |
+| 3 | provider `cloudhsm` | `{"v":3,"p":"cloudhsm","id","len","parts":[{"iv","ct"}…]}`, IVs made by the HSM; every part is bound to a random per-seal id, its index, the part count and the total length |
 
 Both providers open both versions. Old data (version 1) opens unchanged. A data directory sealed under SoftHSM is **not** moved to CloudHSM by this: the wrap key is another key. Move a party with a backup restore (below).
 
