@@ -69,7 +69,6 @@ QV_BTC_RPC=http://127.0.0.1:$((b + 93))
 QV_SOL_RPC=http://127.0.0.1:$((b + 94))
 QV_TEMPORAL_ADDR=127.0.0.1:$((b + 95))
 QV_KAFKA_BROKERS=127.0.0.1:$((b + 96))
-QV_E2E_KEYCLOAK_URL=https://127.0.0.1:$((b + 97))
 EOF
 }
 lane_vars() { lane_active || return 0; local kv; _lane_vars | while IFS= read -r kv; do eval "[ -n \"\${${kv%%=*}:-}\" ]" || echo "$kv"; done; }
@@ -86,11 +85,11 @@ lane_limit() {
   echo "$n"
 }
 _lane_dir() { echo "$LANE_STATE/slots"; }
-_lane_lock() { # a mkdir lock held for milliseconds; one older than 30 s is a crashed holder's
+_lane_lock() { # a mkdir lock held for milliseconds; one older than 30 s is a killed holder's
   local l="$(_lane_dir).lock" t=0
   mkdir -p "$LANE_STATE"
   until mkdir "$l" 2>/dev/null; do
-    if [ -d "$l" ] && [ -n "$(find "$l" -maxdepth 0 -mmin +0.5 2>/dev/null)" ]; then rmdir "$l" 2>/dev/null; fi
+    if [ -d "$l" ] && [ $(( $(date +%s) - $(stat -f %m "$l" 2>/dev/null || stat -c %Y "$l" 2>/dev/null || echo 0) )) -gt 30 ]; then rmdir "$l" 2>/dev/null; fi
     sleep 0.2; t=$((t + 1)); [ "$t" -gt 300 ] && return 1
   done
 }

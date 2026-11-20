@@ -158,12 +158,12 @@ test-e2e-evm-flows:
 # Real identity provider: a two-approver withdrawal with tokens from the dev Keycloak (docker compose profile identity; `make keycloak-up` first).
 test-e2e-evm-identity:
 	./scripts/keycloak-env.sh
-	$(E2E_EVM_ENV) QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-https://127.0.0.1:8180} go test -count=1 -p 1 -timeout 25m -v -run 'TestOIDCWithRealKeycloak' ./e2e/custody/...
+	$(E2E_EVM_ENV) QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-https://127.0.0.1:$(or $(QV_KEYCLOAK_PORT),8180)} go test -count=1 -p 1 -timeout 25m -v -run 'TestOIDCWithRealKeycloak' ./e2e/custody/...
 # The approval page in a headless Chromium with a virtual passkey (SIMULATED), against the dev Keycloak (`make keycloak-up`) and the real core and gateway.
 # Chromium: QV_E2E_CHROME_URL (a running one, as CI has it), QV_E2E_CHROME, or Google Chrome / Chromium on this machine. Signs with the HSM, not mpc-party.
 test-e2e-approval-web:
 	./scripts/keycloak-env.sh
-	QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-https://127.0.0.1:8180} go test -count=1 -p 1 -timeout 25m -v -run 'TestApprovalPageInARealBrowser' ./e2e/custody/...
+	QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-https://127.0.0.1:$(or $(QV_KEYCLOAK_PORT),8180)} go test -count=1 -p 1 -timeout 25m -v -run 'TestApprovalPageInARealBrowser' ./e2e/custody/...
 keycloak-up:
 	./scripts/keycloak-env.sh
 	docker compose --profile identity up -d --wait keycloak
