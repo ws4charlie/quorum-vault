@@ -418,7 +418,7 @@ func TestSigningCoreProductionShape(t *testing.T) {
 		var pinFromSecret bool
 		for _, e := range gw.Env {
 			if e.Name == "QV_HSM_PIN" {
-				pinFromSecret = e.Value == "" && strings.Contains(scNodeText(e.ValueFrom), "secretKeyRef")
+				pinFromSecret = e.Value == "" && strings.Contains(nodeText(e.ValueFrom), "secretKeyRef")
 			}
 		}
 		if !pinFromSecret {
@@ -451,7 +451,7 @@ func TestSigningCoreProductionShape(t *testing.T) {
 	}
 }
 
-func scNodeText(n yaml.Node) string {
+func nodeText(n yaml.Node) string {
 	b, _ := yaml.Marshal(&n)
 	return string(b)
 }
