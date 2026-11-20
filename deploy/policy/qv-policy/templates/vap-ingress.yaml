@@ -1,0 +1,26 @@
+{{- if eq (include "qvp.signing" .) "true" }}
+{{- /* A signing cluster takes no traffic from outside: no Ingress and no Gateway API route, whatever the controller. */ -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: qv-no-ingress
+  labels: {{- include "qvp.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [ingresses]
+      - apiGroups: ["gateway.networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [gateways, gatewayclasses, httproutes, grpcroutes, tcproutes, tlsroutes, udproutes, backendtlspolicies, referencegrants]
+  validations:
+    - reason: Forbidden
+      message: "no Ingress or Gateway API route in a signing cluster"
+      expression: "false"
+---
+{{ include "qvp.binding" (dict "ctx" . "name" "qv-no-ingress") }}
+{{- end }}

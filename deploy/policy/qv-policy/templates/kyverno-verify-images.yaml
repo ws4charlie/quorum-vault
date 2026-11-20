@@ -1,0 +1,51 @@
+{{- $v := .Values -}}
+{{- if $v.signature.enabled }}
+{{- /* The ONE rule ValidatingAdmissionPolicy cannot express: a cosign signature check needs the registry and the transparency log. Kyverno runs this single rule and nothing else. */ -}}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: qv-verify-images
+  labels: {{- include "qvp.labels" . | nindent 4 }}
+  annotations:
+    policies.kyverno.io/title: QuorumVault image signatures
+    policies.kyverno.io/description: Every image of a QuorumVault pod must carry a cosign signature made by the publish job, and is referenced by digest.
+spec:
+  validationFailureAction: {{ ternary "Enforce" "Audit" (eq $v.enforcement "Deny") }}
+  failurePolicy: Fail
+  webhookTimeoutSeconds: {{ $v.signature.webhookTimeoutSeconds }}
+  background: false
+  rules:
+    - name: verify-qv-image-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [CREATE, UPDATE]
+              namespaceSelector:
+                matchLabels:
+                  quorumvault.io/policy: enforced
+      verifyImages:
+        - type: Cosign
+          imageReferences:
+            - {{ printf "%s/*" $v.registry | quote }}
+          required: true
+          mutateDigest: false
+          verifyDigest: true
+          failureAction: {{ ternary "Enforce" "Audit" (eq $v.enforcement "Deny") }}
+          attestors:
+            - count: 1
+              entries:
+                {{- if eq $v.signature.mode "keyless" }}
+                - keyless:
+                    issuer: {{ $v.signature.keyless.issuer | quote }}
+                    subjectRegExp: {{ $v.signature.keyless.subjectRegExp | quote }}
+                    rekor:
+                      url: {{ $v.signature.keyless.rekorUrl | quote }}
+                {{- else }}
+                - keys:
+                    publicKeys: |-
+                      {{- $v.signature.key.publicKey | nindent 22 }}
+                    rekor:
+                      url: {{ $v.signature.key.rekorUrl | quote }}
+                {{- end }}
+{{- end }}

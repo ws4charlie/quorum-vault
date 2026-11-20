@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "deploy/helm/**"
+      - "deploy/policy/**"
       - "ci/helm/**"
       - "deploy/images/contract.json"
       - "deploy/images/README.md"   # compared with contract.json by ci/helm
