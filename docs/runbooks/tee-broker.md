@@ -35,6 +35,7 @@ Entry states in `/status`: `allowing`, `not_yet_valid`, `expired`, `revoked`. A 
 | `revoke -in ... -out ... -party P -measurement HEX` | add a revocation (the entry it revokes stays as the record) |
 | `sign -in next.json -key operator.key -operator NAME [-against current.json]` | **prints what it signs** (and the difference to the list in force), then adds this operator's signature; run it by each operator in turn: the co-signature |
 | `new -seq N -out list.json -entry P,PCR0,NOT_BEFORE,NOT_AFTER[,VERSION[,STATUS]]` | a list from scratch (first list, break-glass) |
+| `touch -in ... -out ...` | the same entries, `seq` + 1 (keeps several brokers' lists in step) |
 | `keygen -key operator.key -pub operator.pub` | a new operator key (never overwrites) |
 
 Each operator reviews the printed difference, not the file: `sign ... -against current.json` prints `+` for an added entry, `~` for a changed window, `-` for an entry left out, and warns when `seq` is not higher. Key files must be mode 0600.

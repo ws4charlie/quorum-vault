@@ -6,6 +6,7 @@
 //	qv-attest-broker allowlist new -seq N -out list.json -entry PARTY,PCR0HEX,NOT_BEFORE,NOT_AFTER[,VERSION[,STATUS]] [-entry ...]
 //	qv-attest-broker allowlist add -in current.json -out next.json -party P -measurement HEX -version V -not-before T [-not-after T]
 //	qv-attest-broker allowlist expire -in current.json -out next.json -party P -measurement HEX -not-after T
+//	qv-attest-broker allowlist touch -in current.json -out next.json
 //	qv-attest-broker allowlist revoke -in current.json -out next.json -party P -measurement HEX
 //	qv-attest-broker allowlist sign -in list.json -key operator.key -operator NAME [-out list.json] [-against current.json]
 //	qv-attest-broker allowlist show -in list.json -operators broker.json [-against current.json]
@@ -128,7 +129,7 @@ func allowlist(sub string, args []string, out io.Writer) error {
 		return signList(*in, *keyPath, *operator, *outPath, *against, out)
 	case "show":
 		return showList(*in, *opsPath, *against, out)
-	case "add", "expire", "revoke":
+	case "add", "expire", "revoke", "touch":
 		return editList(sub, *in, *outPath, *party, *meas, *version, *notBefore, *notAfter, out)
 	}
 	return fmt.Errorf("allowlist: unknown command %q", sub)
@@ -317,7 +318,7 @@ func orActive(s string) string {
 
 // editList is add, expire and revoke: a copy of the list in -in with one change and the next sequence number, without signatures.
 func editList(sub, in, outPath, party, meas, version, notBefore, notAfter string, out io.Writer) error {
-	if in == "" || outPath == "" || party == "" || meas == "" {
+	if sub != "touch" && (party == "" || meas == "") || in == "" || outPath == "" {
 		return fmt.Errorf("%s: -in, -out, -party and -measurement are required", sub)
 	}
 	data, err := os.ReadFile(in)
@@ -376,6 +377,7 @@ func editList(sub, in, outPath, party, meas, version, notBefore, notAfter string
 		if !found {
 			return fmt.Errorf("expire: no entry of party %s with measurement %s", party, meas)
 		}
+	case "touch": // the same entries with the next sequence number (keeps several brokers' lists in step)
 	case "revoke":
 		var version string
 		for _, e := range l.Entries {

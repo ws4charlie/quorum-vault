@@ -382,13 +382,18 @@ func (s *Stack3) DataDir(role string) string { return filepath.Join(s.Dir, "data
 // pick it up (it returns when every broker's audit log has a "loaded" record for the new sequence). All three lists stay in step.
 // It returns the output of the first signature, which holds the difference.
 func (t *TEE) ListEdit(sub string, flags func(role string) []string) string {
+	// flags returns nil for a party whose list is not changed (its list still gets the next sequence number, so the three stay in step)
 	tb := t.s.t
 	tb.Helper()
 	t.seq++
 	var diff string
 	for _, r := range t.roles() {
 		tmp := t.listPath[r] + ".edit"
-		t.run(t.s.Bin.Broker, append([]string{"allowlist", sub, "-in", t.listPath[r], "-out", tmp}, flags(r)...)...)
+		if f := flags(r); f != nil {
+			t.run(t.s.Bin.Broker, append([]string{"allowlist", sub, "-in", t.listPath[r], "-out", tmp}, f...)...)
+		} else { // same entries, next sequence
+			t.run(t.s.Bin.Broker, "allowlist", "touch", "-in", t.listPath[r], "-out", tmp)
+		}
 		for i := 0; i < 2; i++ {
 			out := t.run(t.s.Bin.Broker, "allowlist", "sign", "-in", tmp, "-key", t.opKeys[i], "-operator", t.opNames[i], "-against", t.listPath[r])
 			if diff == "" {
@@ -428,5 +433,10 @@ func (t *TEE) SetValidUntil(ms map[string]string, until time.Time) {
 
 // RevokeRelease revokes a measurement for the parties in ms.
 func (t *TEE) RevokeRelease(ms map[string]string) {
-	t.ListEdit("revoke", func(r string) []string { return []string{"-party", r, "-measurement", ms[r]} })
+	t.ListEdit("revoke", func(r string) []string {
+		if ms[r] == "" {
+			return nil
+		}
+		return []string{"-party", r, "-measurement", ms[r]}
+	})
 }
