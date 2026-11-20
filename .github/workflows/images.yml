@@ -9,6 +9,7 @@ on:
       - "cmd/**"
       - "internal/**"
       - "mpc-party/**"
+      - "web/approval/**"
       - "go.mod"
       - "go.sum"
       - "migrations/**"

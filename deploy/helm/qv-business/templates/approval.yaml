@@ -1,0 +1,79 @@
+{{- if .Values.approval.enabled }}
+{{- /* The approval page (qv-approval-web): static files and a /config.json, on its OWN origin. No database, no egress, no secret. The browser talks to the identity provider and the core. */}}
+{{- $origin := include "qv.approvalOrigin" . }}
+{{- $a := .Values.approval }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "approval") }}
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "approval") | nindent 4 }}
+spec:
+  replicas: {{ $a.replicas }}
+  selector:
+    matchLabels: {{- include "qv.selector" (dict "ctx" . "c" "approval") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "qv.labels" (dict "ctx" . "c" "approval") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "qv.fullname" (dict "ctx" . "c" "approval") }}
+      automountServiceAccountToken: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      terminationGracePeriodSeconds: {{ $a.terminationGracePeriodSeconds }}
+      securityContext: {{- include "qv.podSecurityContext" . | nindent 8 }}
+      {{- include "qv.pullSecrets" . | nindent 6 }}
+      {{- include "qv.spread" (dict "ctx" . "c" "approval") | nindent 6 }}
+      containers:
+        - name: approval
+          image: {{ include "qv.image" (dict "ctx" . "k" "approval") | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          {{- with $a.maxLoginAge }}
+          args: ["-max-login-age", {{ . | quote }}]
+          {{- end }}
+          envFrom:
+            - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "approval-env") }} }
+          ports:
+            - { name: http, containerPort: {{ $a.port }}, protocol: TCP }
+          {{- /* The server has no health listener: it serves files, so the config document answering is its readiness. Plain http inside the pod; TLS ends at the Ingress. */}}
+          startupProbe: { httpGet: { path: /config.json, port: http }, periodSeconds: 2, failureThreshold: 30 }
+          readinessProbe: { httpGet: { path: /config.json, port: http }, periodSeconds: 10, failureThreshold: 3 }
+          livenessProbe: { httpGet: { path: /config.json, port: http }, periodSeconds: 20, failureThreshold: 3 }
+          resources: {{- toYaml $a.resources | nindent 12 }}
+          securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "approval") }}
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "approval") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "qv.selector" (dict "ctx" . "c" "approval") | nindent 4 }}
+  ports:
+    - { name: http, port: {{ $a.port }}, targetPort: http, protocol: TCP }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "approval") }}
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "approval") | nindent 4 }}
+  {{- with $a.ingress.annotations }}
+  annotations:
+    {{- range $k, $v := . }}
+    {{ $k }}: {{ $v | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+  ingressClassName: {{ $a.ingress.className }}
+  tls:
+    - hosts: [{{ $a.ingress.host | quote }}]
+      secretName: {{ $a.ingress.tlsSecret }}
+  rules:
+    - host: {{ $a.ingress.host | quote }}
+      http:
+        paths:
+          - { path: /, pathType: Prefix, backend: { service: { name: {{ include "qv.fullname" (dict "ctx" . "c" "approval") }}, port: { name: http } } } }
+{{- end }}
