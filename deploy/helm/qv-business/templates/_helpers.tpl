@@ -35,6 +35,17 @@ app.kubernetes.io/component: {{ .c }}
 postgres://{{ .role }}@{{ $d.host }}:{{ $d.port }}/{{ $d.name }}?sslmode={{ $d.sslmode }}&sslrootcert={{ .dir }}/ca.crt&sslcert={{ .dir }}/tls.crt&sslkey={{ .dir }}/tls.key
 {{- end -}}
 
+{{/* The approval page's origin (scheme://host), the one value the page's Ingress and the core's -approval-origins both come from. It must differ from the core's: the page is
+     served from its own origin so that a script of the API's origin can never run as the page (and the passkey is bound to the page's origin). */}}
+{{- define "qv.approvalOrigin" -}}
+{{- $a := .Values.approval -}}
+{{- $h := required "approval.ingress.host is required when approval.enabled" $a.ingress.host -}}
+{{- if not .Values.ingress.public.enabled }}{{ fail "approval.enabled needs ingress.public.enabled: the page calls the core's public origin" }}{{ end -}}
+{{- if eq (lower $h) (lower .Values.ingress.public.host) }}{{ fail (printf "approval.ingress.host %q is the core's public host: the approval page must be a different origin" $h) }}{{ end -}}
+{{- if and .Values.ingress.passthrough.enabled (eq (lower $h) (lower .Values.ingress.passthrough.host)) }}{{ fail (printf "approval.ingress.host %q is the core's passthrough host: the approval page must be a different origin" $h) }}{{ end -}}
+https://{{ $h }}
+{{- end -}}
+
 {{- define "qv.podSecurityContext" -}}
 runAsNonRoot: true
 runAsUser: {{ .Values.runAsUser }}

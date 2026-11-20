@@ -207,7 +207,7 @@ func scPolicy(objs []Obj, kind bool) []string {
 }
 
 // scContract loads the image contract. CheckContract was written for the business chart and hard-codes that zone: for the signing images it is shown the
-// zone as "business" after this function has checked that the contract names them as signing. The -dev image has the same contract as qv-gateway.
+// zone as "business" after this function has checked that the contract names them as signing. A -dev image (devImages) has the contract of the image it is "of".
 func scContract(t *testing.T) Contract {
 	t.Helper()
 	c, err := LoadContract()
@@ -225,7 +225,11 @@ func scContract(t *testing.T) Contract {
 		ic.Zone = "business"
 		c.Images[n] = ic
 	}
-	c.Images["qv-gateway-dev"] = c.Images["qv-gateway"]
+	for n, d := range c.DevImages {
+		if ic, ok := c.Images[d.Of]; ok && (d.Of == "qv-gateway" || d.Of == "qv-tools-signing") {
+			c.Images[n] = ic
+		}
+	}
 	return c
 }
 

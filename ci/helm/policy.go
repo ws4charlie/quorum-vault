@@ -16,6 +16,7 @@ const wantUser = 65532
 type PolicyOptions struct {
 	RequireDigest bool
 	CorePort      int
+	ApprovalPort  int   // the approval page's port; the ingress controller may reach the approval component on it only
 	LinkPorts     []int // the only ports the signing link may open: Postgres and Kafka
 }
 
@@ -204,12 +205,18 @@ func checkNetworkPolicy(o Obj, opt PolicyOptions, hasDeny *bool, add func(string
 		}
 		switch purpose {
 		case "ingress-controller":
-			if s.PodSelector.MatchLabels["app.kubernetes.io/component"] != "core" {
-				add("%s: the ingress controller may reach only the core", id)
+			// the core, and the approval page (its own port) when that component exists
+			want := opt.CorePort
+			switch s.PodSelector.MatchLabels["app.kubernetes.io/component"] {
+			case "core":
+			case "approval":
+				want = opt.ApprovalPort
+			default:
+				add("%s: the ingress controller may reach only the core and the approval page", id)
 			}
 			for _, p := range r.Ports {
-				if p.Port != opt.CorePort {
-					add("%s: ingress from outside on port %d (only the core port %d)", id, p.Port, opt.CorePort)
+				if p.Port != want {
+					add("%s: ingress from outside on port %d (only port %d)", id, p.Port, want)
 				}
 			}
 		case "signing-link":
