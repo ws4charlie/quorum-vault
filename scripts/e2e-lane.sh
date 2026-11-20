@@ -90,8 +90,10 @@ _lane_lock() { # a mkdir lock held for milliseconds; one older than 30 s is a ki
   mkdir -p "$LANE_STATE"
   until mkdir "$l" 2>/dev/null; do
     if [ -d "$l" ] && [ $(( $(date +%s) - $(stat -f %m "$l" 2>/dev/null || stat -c %Y "$l" 2>/dev/null || echo 0) )) -gt 30 ]; then rmdir "$l" 2>/dev/null; fi
-    sleep 0.2; t=$((t + 1)); [ "$t" -gt 300 ] && return 1
+    sleep 0.2; t=$((t + 1))
+    if [ "$t" -gt 300 ]; then return 1; fi
   done
+  return 0
 }
 _lane_unlock() { rmdir "$(_lane_dir).lock" 2>/dev/null; }
 _lane_holders() { # prints "<file> <pid> <units> <started epoch> <path> <what>" for live holders; removes the dead ones
