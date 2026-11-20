@@ -238,6 +238,7 @@ func checkNetworkPolicy(o Obj, opt PolicyOptions, hasDeny *bool, add func(string
 				}
 			}
 		case "party-caller", "party-peer": // qv-party: its own test (party_test.go) checks the ports and who may come
+		case "attest-broker-party": // qv-attest-broker: its own test (broker_test.go) checks the port and that the only source is the party
 		default:
 			add("%s: ingress from outside the namespace that is neither the ingress controller nor the signing link", id)
 		}

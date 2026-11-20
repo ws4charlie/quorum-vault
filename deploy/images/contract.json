@@ -1,7 +1,7 @@
 {
   "_comment": "Machine-readable form of the run-time contract in README.md (flags, environment, mounts, ports, user), for the chart drift test in ci/helm. Edit it in the same change as the README table. `flags` are written without the leading dash. `requiredAny` lists groups of which at least one member (a flag or an environment variable) must be set. `pathEnv` and `pathFlags` hold file paths that must sit on a volume mount. `dsnRole` is the Postgres role the DSN's user must be (the certificate name picks it). `listen.ports` counts container ports; for qv-attest-broker both addresses (mutual TLS `listen`, plain-http `health_listen`) are in its JSON config, so no flag names them. `devImages` are the SoftHSM variants: they must run with the environment variable shown (a production image refuses SoftHSM otherwise; qv-attest-broker does not check, see the README). deploy/images/README.md and this file are compared by ci/helm (TestContractMatchesReadme).",
   "user": 65532,
-  "mountRoots": ["/etc/qv", "/run/qv", "/var/lib/qv/metrics", "/var/lib/qv/party", "/var/lib/qv/backup"],
+  "mountRoots": ["/etc/qv", "/run/qv", "/var/lib/qv/metrics", "/var/lib/qv/party", "/var/lib/qv/backup", "/var/lib/qv/broker"],
   "forbiddenEnv": ["QV_ALLOW_PLAINTEXT", "QV_DEV_ACTOR_HEADER", "QV_OIDC_TEST_JWKS"],
   "tlsEnv": ["QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA", "QV_TLS_RELOAD"],
   "images": {
@@ -154,5 +154,10 @@
       "of": "qv-attest-broker",
       "pkcs11Lib": "/usr/lib/softhsm/libsofthsm2.so"
     }
+  },
+  "_simImages": "The tee-sim variants (SIMULATED enclave): the same images as the -dev ones plus the build tag teesim (mock attester, test evidence root), and qv-attest-ca in the party image. Never published (publish.sh refuses the names). Not in images.sh's lists, so build.sh builds them only when named: deploy/images/build.sh mpc-party-teesim qv-attest-broker-teesim. ci/helm checks the charts' use of them like a -dev image.",
+  "simImages": {
+    "mpc-party-teesim": { "of": "mpc-party" },
+    "qv-attest-broker-teesim": { "of": "qv-attest-broker", "pkcs11Lib": "/usr/lib/softhsm/libsofthsm2.so" }
   }
 }
