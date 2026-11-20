@@ -147,7 +147,7 @@ The same templates and the same binary logic. What differs is configuration only
 
 ## Known limits
 
-- **PIN as a file.** The task asked for the PIN as a file. `qv-gateway` reads the PIN only from `QV_HSM_PIN` (`cmd/qv-gateway/main.go`); `pin_file` with the group-readable mode rule exists only in `mpc-party`. The chart therefore injects it from a Secret into the environment, which `kubectl describe` does not show (the value is a reference) but `/proc/<pid>/environ` does. A small code change (`QV_HSM_PIN_FILE`, same mode rule) would let the chart mount the Secret as a file: reported to the lead, not done here (no Go code in this task).
+- **PIN as a file.** The task asked for the PIN as a file. `qv-gateway` reads the PIN only from `QV_HSM_PIN` (`cmd/qv-gateway/main.go`); `pin_file` with the group-readable mode rule exists only in `mpc-party`. The chart therefore injects it from a Secret into the environment, which `kubectl describe` does not show (the value is a reference) but `/proc/<pid>/environ` does. A file option (`QV_HSM_PIN_FILE`, same mode rule) is planned as a separate code task; the chart will then mount the Secret as a file. Until then `secretKeyRef` stays.
 - The CloudHSM module path and client-config location, and the Alloy sidecar, are not run here (see above).
 - The kind lane (task D8) installs this chart later; no cluster install was done in this task.
 - Party A's ingress rule for the gateway, and the business chart's `signingLink.from`, are in other charts.
