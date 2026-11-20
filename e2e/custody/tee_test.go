@@ -2,6 +2,7 @@ package custody_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -347,7 +348,17 @@ func plainPartyRefusesAttested(t *testing.T, cfgPath string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(plain.MPCParty, "-config", cfgPath)
+	var cfg map[string]any // a copy with its own data directory: the running party holds the lock of its own
+	if err := json.Unmarshal([]byte(readFile(cfgPath)), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["data_dir"] = filepath.Join(t.TempDir(), "data")
+	raw, _ := json.Marshal(cfg)
+	copyPath := filepath.Join(t.TempDir(), "party.json")
+	if err := os.WriteFile(copyPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(plain.MPCParty, "-config", copyPath)
 	cmd.Env = append(os.Environ(), "QV_ENV=test")
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "this build contains no attester") {
