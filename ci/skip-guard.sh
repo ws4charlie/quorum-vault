@@ -13,10 +13,10 @@ here="$(cd "$(dirname "$0")" && pwd)"
 cd "$(git -C "$here" rev-parse --show-toplevel)" || exit 2
 allow="$here/skip-allowlist"; exc="${QV_SKIP_GUARD_EXCEPTIONS:-$here/skip-guard-exceptions}"
 
-pats=(); needles=(); regexes=()
+pats=(); classes=(); needles=(); regexes=()
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in ''|'#'*) continue ;; esac
-  read -r _ p _ <<<"$line"; pats+=("$p")
+  read -r c p _ <<<"$line"; pats+=("$p"); classes+=("$c")
   pre="${p%%\**}"; [ -n "$pre" ] && needles+=("$pre")
   case "$p" in *\**) suf="${p##*\*}"; [ -n "$suf" ] && needles+=("$suf") ;; esac
   case "$pre" in */) # a directory: the path with and without the slash, its parent when that has two segments, the Go form "deploy", "helm", the bare name of a top-level one
@@ -50,6 +50,32 @@ for p in "${pats[@]}"; do
   [ "$found" = 1 ] || { bad=1; echo "EMPTY pattern: '$p' of ci/skip-allowlist matches no tracked file. A pattern for files that are not in the repository cannot be proven safe: remove it, and add it in the pull request that brings the files."; }
 done
 while IFS= read -r f; do matches "$f" && printf '%s\n' "$f"; done < "$tracked" > "$allowed"
+
+# 1b. the chart files are tested by other workflows that run on pull requests with their own path filters; a skip is safe only while those filters cover every
+# allowlisted chart path: helm.yml must cover every `chart` pattern, kind.yml (the kind lane installs the charts) every pattern under deploy/helm/.
+covers() { # covers <workflow file> <sample path>: does a pull_request `paths:` entry of the workflow match the path? (GitHub globs: ** crosses /, * does not)
+  perl -e '
+    my ($file, $sample) = @ARGV; open(my $f, "<", $file) or exit 1; my @l = <$f>; my ($in_pr, @paths) = (0);
+    for (my $i = 0; $i < @l; $i++) {
+      my $x = $l[$i]; $in_pr = 1 if $x =~ /^\s*pull_request:/;
+      next unless $in_pr;
+      if ($x =~ /^\s*paths:\s*\[(.*)\]/) { push @paths, $1 =~ /["\x27]([^"\x27]+)["\x27]/g; last }
+      if ($x =~ /^\s*paths:\s*$/) { for (my $j = $i + 1; $j < @l; $j++) { if ($l[$j] =~ /^\s*-\s*["\x27]?([^"\x27#\s]+)/) { push @paths, $1 } elsif ($l[$j] !~ /^\s*(#|$)/) { last } } last }
+      if ($x =~ /^\s*paths-ignore:/) { exit 1 }
+    }
+    exit 1 unless @paths;
+    for my $g (@paths) {
+      my $r = quotemeta($g); $r =~ s/\\\*\\\*/\x01/g; $r =~ s/\\\*/[^\/]*/g; $r =~ s/\x01/.*/g; $r =~ s/\\\?/[^\/]/g;
+      exit 0 if $sample =~ /^$r$/;
+    }
+    exit 1;' "$1" "$2"
+}
+for i in "${!pats[@]}"; do
+  [ "${classes[$i]}" = chart ] || continue
+  sample="${pats[$i]//\*/x}"
+  covers .github/workflows/helm.yml "$sample" || { bad=1; echo "WORKFLOW: .github/workflows/helm.yml no longer runs on a pull request that changes $sample (allowlisted chart path): a chart-only change would skip ci.yml and nothing would test it"; }
+  case "${pats[$i]}" in deploy/helm/*) covers .github/workflows/kind.yml "$sample" || { bad=1; echo "WORKFLOW: .github/workflows/kind.yml no longer runs on a pull request that changes $sample (allowlisted chart path): the kind lane installs the charts"; } ;; esac
+done
 
 # reviewed own-module trees (ci/skip-module-exceptions): <tree/><TAB><reason>
 modexc="$here/skip-module-exceptions"; trees=()

@@ -12,6 +12,9 @@ while IFS= read -r l; do
   case "$l" in ''|'#'*) continue ;; esac
   read -r _ p _ <<<"$l"; f="${p//\*/x}"; mkdir -p "$r/$(dirname "$f")"; echo seed > "$r/$f"
 done < "$here/skip-allowlist"
+# the workflows that test the chart paths on pull requests (the guard checks their filters)
+printf 'on:\n  pull_request:\n    paths: ["deploy/**", "ci/**"]\n' > "$r/.github/workflows/helm.yml"
+printf 'on:\n  pull_request:\n    paths: ["deploy/**", "ci/kind/**"]\n' > "$r/.github/workflows/kind.yml"
 printf 'module root\n' > "$r/go.mod"; printf 'module helmcheck\n' > "$r/ci/helm/go.mod"
 mkdir -p "$r/internal/real"; echo 'package real' > "$r/internal/real/real.go"
 git -C "$r" -c user.email=t@t -c user.name=t add -A >/dev/null; git -C "$r" -c user.email=t@t -c user.name=t commit -qm base
@@ -103,13 +106,34 @@ with_files fail "the excepted file gains a second chart read (count exceeded)" "
 with_files fail "the reviewed line changed" "$X" 'const chartCatalog = "../../deploy/helm/qv-business/values.yaml"'
 with_files fail "the reviewed line vanished (the exception is stale)" "$X" 'package x'
 printf '%s\t6\t*\twhole file, bounded\n' ".github/workflows/helm.yml" > "$r/ci/skip-guard-exceptions"
-six=$'on:\n  - "deploy/helm/**"\n  - "ci/helm/**"\n  - "deploy/images/README.md"\n  x: ci/helm/go.mod\n  y: ci/helm/go.sum\n  run: ci/helm/check.sh'
+six=$'on:\n  pull_request:\n    paths:\n      - "deploy/helm/**"\n      - "ci/helm/**"\n      - "deploy/images/README.md"\n  x: ci/helm/go.mod\n  y: ci/helm/go.sum\n  run: ci/helm/check.sh'
 with_files ok   "a whole-file exception with the reviewed count" .github/workflows/helm.yml "$six"
 with_files fail "a whole-file exception: a seventh line" .github/workflows/helm.yml "$six"$'\n  also: deploy/helm/qv-business'
 : > "$r/ci/skip-guard-exceptions"
 printf 'x\tmany\ttext\treason\n' > "$r/ci/skip-guard-exceptions"
 with_files fail "an exception line with no number" x/none.txt nothing
 : > "$r/ci/skip-guard-exceptions"
+
+# fix4: the skip is safe only while helm.yml and kind.yml run on chart changes
+printf 'on:\n  pull_request:\n    paths: ["deploy/**", "ci/**"]\n' > "$r/.github/workflows/helm.yml"; git -C "$r" add -A   # an earlier case replaced it
+wf() { # wf <ok|fail> <description> <workflow file name> <content>: replaces the fixture workflow for one check
+  local want="$1" desc="$2" f="$r/.github/workflows/$3" out rc; cp "$f" "$tmp/wf.keep"; printf '%b' "$4" > "$f"; git -C "$r" add -A
+  out="$(cd "$r" && ci/skip-guard.sh 2>&1)"; rc=$?; total=$((total + 1))
+  if [ "$want" = ok ] && [ "$rc" != 0 ]; then fails=$((fails + 1)); echo "FAIL: $desc: guard failed: $out"; fi
+  if [ "$want" = fail ] && [ "$rc" = 0 ]; then fails=$((fails + 1)); echo "FAIL: $desc: guard passed but must fail"; fi
+  cp "$tmp/wf.keep" "$f"; git -C "$r" add -A
+}
+wf fail "helm.yml stops covering ci/helm"            helm.yml 'on:\n  pull_request:\n    paths: ["deploy/**"]\n'
+wf fail "helm.yml stops covering deploy/helm"        helm.yml 'on:\n  pull_request:\n    paths: ["ci/**"]\n'
+wf fail "helm.yml loses its paths (runs on none)"    helm.yml 'on:\n  workflow_dispatch:\n'
+wf fail "helm.yml uses paths-ignore"                 helm.yml 'on:\n  pull_request:\n    paths-ignore: ["docs/**"]\n'
+wf fail "kind.yml stops covering the charts"         kind.yml 'on:\n  pull_request:\n    paths: ["ci/kind/**"]\n'
+wf fail "kind.yml covers only one chart"             kind.yml 'on:\n  pull_request:\n    paths: ["deploy/helm/qv-business/**"]\n'
+wf ok   "block-list paths that cover the charts"     kind.yml 'on:\n  pull_request:\n    paths:\n      - "deploy/**"   # comment\n      - ci/kind/**\n'
+wf ok   "a single * does not cross /, ** does"       helm.yml 'on:\n  pull_request:\n    paths: ["deploy/**", "ci/*/*"]\n'
+wf fail "a single * does not cross /"                helm.yml 'on:\n  pull_request:\n    paths: ["deploy/*", "ci/*"]\n'
+rm -f "$r/.github/workflows/kind.yml"; git -C "$r" add -A; out="$(cd "$r" && ci/skip-guard.sh 2>&1)"; rc=$?; total=$((total + 1)); [ "$rc" != 0 ] || { fails=$((fails + 1)); echo "FAIL: guard passed without kind.yml"; }
+printf 'on:\n  pull_request:\n    paths: ["deploy/**", "ci/kind/**"]\n' > "$r/.github/workflows/kind.yml"; git -C "$r" add -A
 
 # the real repository passes, and the guard really looks at it
 total=$((total + 1)); (cd "$here/.." && ci/skip-guard.sh >/dev/null 2>&1) || { fails=$((fails + 1)); echo "FAIL: the repository itself does not pass the guard"; (cd "$here/.." && ci/skip-guard.sh | head); }
