@@ -54,7 +54,24 @@ The PIN is never an environment variable and never in values. SoftHSM is a devel
 
 `mlockall` (the party locks its memory so secrets are not swapped) needs a memlock limit from the container runtime; a non-root container gets no benefit from `CAP_IPC_LOCK`, and the chart adds no capability. If the limit is too low the party logs "may be swapped" at start. Set the memlock ulimit on the node group or runtime.
 
-**Extension point (TEE tasks).** `sealer.type: attested` and `sealer.attested` (merged into the sealer block as is) and `attestBroker.enabled` exist as values; the chart refuses them until the attested sealer and the attestation broker are built. The enclave pod shape (a parent node, a device plugin, one enclave per node) is not part of this chart.
+Attested mode replaces the HSM: see "Attested mode" below.
+
+## Attested mode (`sealer.type: attested`)
+
+**The enclave is simulated.** The mode needs the tee-sim image (`mpc-party-teesim`, by tag) and `env` dev or test; the chart refuses it otherwise, and refuses any `attested.attester.type` but `mock` (there is no production attester yet). Procedure: `docs/runbooks/tee-broker.md`, "On Kubernetes". The broker is the chart `qv-attest-broker`, one per party, in another trust zone.
+
+What changes in the pod: no HSM PIN, no PKCS#11 module, no SoftHSM init container; with `attested.tlsSealed` (default) no TLS key Secret either (the key is made inside the party and kept sealed in the data volume). It gains the Secret `attested.linkSecret` (certificate for the link to the broker; default `mpc-party-<role>-broker-link-tls`), the TEST CA Secret `attested.attester.mock.caSecret`, the egress rule `network.broker`, and `QV_ENV`.
+
+Values: `attested.broker.url` and `.pins`, `attested.attester.type: mock`, `attested.attester.mock.caSecret`, `network.broker.to`, `env`. `values-kind-teesim.yaml` is the local layer (after `values-kind.yaml`).
+
+**Phases.** The data volume has one user, so the two steps that run while the party does not are phases of the release (`attested.phase`, with `attested.stopPartyAck=true`); each renders its Job and no StatefulSet:
+| Phase | Job | Rule |
+|---|---|---|
+| `enrol` | `mpc-party tls-init -config enroll.json`: makes and seals the TLS key, prints the pin in its log | first install only: the chart refuses it when the StatefulSet exists (`lookup`, at a real install or upgrade); the Job is idempotent. It creates the data volume (kept by Helm; the StatefulSet finds it by name). Its config file is its own measurement |
+| `migrate` | `mpc-party migrate-seal -from party-pkcs11.json -to party.json` | one way; needs the old `hsm.*` values and `attested.tlsSealed=false` (the certificate and its pin stay). `-to` is the running config |
+Then `attested.phase=run` starts the party on the same volume.
+
+The backup Job is refused in this mode (it would need the attester): run `kubectl exec <pod> -- mpc-party backup export ...` in the running pod.
 
 ## Update, restart and node loss
 

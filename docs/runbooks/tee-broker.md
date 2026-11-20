@@ -165,3 +165,47 @@ Each line is something only real hardware, the vendor's service or a real networ
 | 10 | Clock and time limits | Evidence freshness with the enclave's real clock; the 60 s nonce TTL against real network delay |
 | 11 | The rate limit with many keysets | A real start with the production keyset count against the broker's limit (measured in simulation: 200 keysets start in about 98 s with the defaults 600 per minute, burst 100) |
 | 12 | Revocation at once | A procedure to stop a revoked enclave (terminate the instance), since revocation alone does not take its keys away |
+
+
+# On Kubernetes (charts `qv-attest-broker` and `qv-party` attested mode)
+
+Charts: `deploy/helm/qv-attest-broker` (README there) and the attested mode of `deploy/helm/qv-party` (README, "Attested mode"). **The enclave is simulated**: the only attester is the mock, so the party chart refuses attested mode unless `env` is `dev` or `test`, and then runs only the tee-sim image (`mpc-party-teesim`, referenced by tag). Production cannot render an attested party until the Nitro attester exists (T7).
+
+## Where the broker runs, and why
+**One broker per party, in a cluster of its own that is neither the party's cluster nor the business cluster.** Reasons:
+- The broker decides who gets a party's sealing key. If the party's own operators ran it they could edit its allowlist or trust roots, and the enclave would protect nothing from them. So it sits in a trust domain the party's host administrators do not control.
+- One broker for all three parties would let one administrator release every party's key: 2-of-3 would fall. With one broker per party, a broken broker costs one party. The chart therefore lists exactly one party.
+- **Who administers it:** a small group apart from the party-host operators and from the business zone. The allowlist is signed by `min_operators` operator keys (public keys in the chart values); the cluster administrator can stop the broker, not forge an entry. A cluster administrator can still restart it with an older signed list (the list has no counter at start-up): the rollback limit below.
+- **What it can reach:** DNS and its HSM, nothing else (default-deny; no other egress rule exists). **What can reach it:** this party's pods on the mutual-TLS port, through a private endpoint (`service.type` LoadBalancer with internal annotations and source ranges, or one cluster's pod selector); optionally one named scraper on the health port. The party calls out to the broker; nothing calls into the party for this.
+- Cluster policy kind `broker` (`deploy/policy/qv-policy`) applies: immutable hash-named ConfigMaps, no dev switches, no exec for non-break-glass users.
+This is the recommendation the chart implements. It needs the human's confirmation: who owns the three broker clusters (each party's organisation, or one security group).
+
+## Key storage and what a lost volume means
+The wrapping key of the party is a non-extractable AES-256 key in the broker's PKCS#11 token (a network or cloud HSM in production: the module comes from a volume you name). The volume `data` holds only the audit log (hash-chained; `chattr +a` is not possible through the chart: ship it off the cluster). A lost audit volume breaks the chain from that point; keys are unaffected. **A lost HSM token without a vendor backup makes every wrapped data key of that party unrecoverable**: the party's shares are then recoverable only from the party's backup (`mpc-party backup`, PVE-encrypted). In development SoftHSM keeps the token on the same volume.
+
+## One replica, and the update
+The broker is a single writer: nonces in memory, one audit chain. The chart pins `replicas: 1`; the StatefulSet stops the old pod before it starts the new one. A restart voids open challenges only; parties retry. The PodDisruptionBudget has `maxUnavailable: 0`: a node drain waits for you, because the broker's outage blocks every party restart, DKG and refresh. Check that no party is restarting, then delete the pod yourself.
+
+## Bring-up of a party, in order
+1. **Certificates** (`qv-certs`, list below) and the Secrets: the broker's HSM PIN, and for the simulation the test CA (`qv-attest-ca -dir DIR`, outside the repository).
+2. **Evidence root ConfigMap** (public PEM, immutable, name ends in the 10-hex hash of the file): `trustRoots.configMap`.
+3. **Install the broker** with an allowlist that already holds the party's **enrolment** measurement (below). `helm upgrade --install ... --set-file allowlist.file=allowlist.json`.
+4. **Enrol** the party: install `qv-party` with `attested.phase=enrol attested.stopPartyAck=true`. Two ConfigMaps matter: the Job's `enroll.json` is a file, and the measurement is of that exact file plus the binary. Compute it with the same bytes the Job sees: `kubectl get cm <release>-enrol-config-<hash> -o go-template='{{index .data "enroll.json"}}' > enroll.json`, then `docker run --rm -v $PWD:/w --entrypoint /usr/local/bin/qv-attest-ca <tee-sim image> measure -binary /usr/local/bin/mpc-party -config /w/enroll.json`. Sign it into the allowlist first, upgrade the broker, then run the Job. A second run prints the same pin and changes nothing. The Job prints the **pin** on stdout: `kubectl logs job/<release>-enrol-<name>`.
+5. Do 4 for all three parties; put the three pins into the peers (`peers.*.pins`), the callers (`callerPins`) and the cosigners (`cosigner.partyPins`) values.
+6. **Start the party**: `helm upgrade` with `attested.phase=run` (default). The StatefulSet uses the data volume the enrolment made. It is not ready until the allowlist holds the measurement of the **running** config: read `party.json` from its ConfigMap the same way, measure it, sign a new allowlist (revoke the enrolment entry), upgrade the broker. The party starts by itself within the retry back-off, no restart.
+The enrol phase is **first install only**: it renders no StatefulSet, so an upgrade into it on a running party would stop it. The chart refuses that when the StatefulSet exists (`lookup`, only at a real install or upgrade, not under `helm template`), and `tls-init` itself never changes an enrolled directory.
+
+## Changing the allowlist
+Each new list is a new immutable ConfigMap (`allowlist.file`), so a `helm upgrade` rolls the broker pod (a minute without a broker; running parties keep signing, restarting parties retry). The in-place reload of a mounted file stays in the binary but the chart does not use it. **Rollback limit:** whoever can run `helm upgrade` can install an older, still validly signed list; the signatures stop forgery, not a return to an old list. Signed versioned lists (T6) address this.
+
+## Migration from the PKCS#11 sealer
+1. Allowlist the **running** measurement of the party's new (attested) config; install/upgrade the broker.
+2. `helm upgrade` with `sealer.type=attested attested.phase=migrate attested.stopPartyAck=true attested.tlsSealed=false` and the old `hsm.*` values. The release deletes the StatefulSet (the party stops; the data volume is retained) and runs the Job `migrate-seal -from party-pkcs11.json -to party.json`. Snapshot the volume first. The Job is re-runnable; read its log; run again under another `attested.migrate.name` after a failure.
+3. `helm upgrade` with `attested.phase=run`: the party starts attested. The migration keeps the file TLS certificate (its pin does not change); moving to a sealed TLS key is a later, separate step (new pin everywhere).
+
+## Chart changes needed outside the new charts (for the lead)
+- **`qv-certs`** must issue: (a) `qv-attest-broker-<role>-tls`: the broker's server certificate (tls.crt, tls.key; long-lived, key never rotated: parties pin it); (b) `mpc-party-<role>-broker-link-tls`: the party's certificate for the link to the broker (the broker pins its key). Both in the catalog (`catalog.json`, `internal/pki/catalog.go`).
+- **PIN file mode (needs the broker's owner, T6):** the broker refuses a PIN file with a group bit; kubelet adds the group-read bit to every Secret file under `fsGroup`. So a production broker cannot read the PIN from a Secret volume until `ReadPIN` accepts 0440 (as the gateway does). The chart's development path avoids this with an init container that stages a 0400 copy.
+
+## Still simulated or unproven
+No cluster has run these charts (kind lane pending). Unproven: `mlock` under the chart's security context (`drop: ALL`, container memlock limit); the enrolment and migration Jobs against a real broker; the `lookup` guard on a real upgrade; the party's `-from` config without the TLS files mounted; a private LoadBalancer between clusters for the broker.

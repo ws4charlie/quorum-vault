@@ -16,6 +16,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **SoftHSM, not hardware.** The tokens are software with no tamper resistance. The structure is what a real HSM would need, but it is not one.
 - **M-of-N is simulated.** The cold signer checks operator signatures in software; a hardware HSM would enforce it itself.
 - **The enclave is simulated.** A stand-in produces the proof, so nobody has shown that real hardware measures what the stand-in measures ([Enclaves](enclaves.md)).
+- **Nothing has run the enclave charts on a real cluster.** The broker chart and the party's enclave mode are checked by tests and, later, a local cluster with the simulated enclave. There is no production attester yet, so the chart refuses an enclave party outside development and test.
 - **Service identity is simulated.** The two certificate authorities are made by a script on a developer's machine, and their keys sit in a file. Production must bring its own PKI and a certificate manager ([certificate runbook](runbooks/certificates.md)). Metrics are plain http, reachable on the local machine only.
 - **All parties run on one machine, run by one team.** The cryptographic separation is real. The operational separation is not.
 
