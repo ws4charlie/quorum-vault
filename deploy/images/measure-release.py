@@ -2,7 +2,7 @@
 """The measurement (PCR0) a party release is allowed under, computed by anyone from a release. SIMULATED enclave only: the real Nitro PCR0 is the hash of the
 enclave image file (EIF), which needs the AWS tooling (task T7). Here PCR0 is what the simulation build's party computes about itself at start
 (mpc-party/internal/attest.MeasureImage): SHA-384 over the party binary and the config file the party starts with, each preceded by its 8-byte big-endian length.
-The binary is the one in the released `mpc-party` image (the image holds exactly that one executable, see deploy/images/README.md); the config is the
+The binary is the one in the released `mpc-party` image (the image holds exactly that one executable, see the images readme); the config is the
 deployment's own measured configuration (peer pins, caller pins, admin keys), so one release has one measurement per party and deployment. The formula is
 the same as `qv-attest-ca measure`; `selftest` checks it against the vector the Go test pins.
 
