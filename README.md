@@ -31,8 +31,6 @@ Two rules carry the design:
 <a href="docs/evm.md"><img src="docs/images/arch-evm.png" width="24%" alt="EVM"></a><a href="docs/bitcoin.md"><img src="docs/images/arch-bitcoin.png" width="24%" alt="Bitcoin"></a><a href="docs/solana.md"><img src="docs/images/arch-solana.png" width="24%" alt="Solana"></a>
 </p>
 
-Click a box to open its page.
-
 ## How it works
 
 <p align="center"><img src="docs/images/flow.png" width="72%" alt="Deposits are credited, then swept to a hot wallet. Withdrawals need approvals and a signature. Above a limit the hot wallet sends coins to cold storage; below a limit it is refilled from cold."></p>

@@ -31,8 +31,6 @@
 <a href="docs/zh/evm.md"><img src="docs/images/zh/arch-evm.png" width="24%" alt="EVM"></a><a href="docs/zh/bitcoin.md"><img src="docs/images/zh/arch-bitcoin.png" width="24%" alt="Bitcoin"></a><a href="docs/zh/solana.md"><img src="docs/images/zh/arch-solana.png" width="24%" alt="Solana"></a>
 </p>
 
-点击方框可打开对应页面。
-
 ## 怎么运作
 
 <p align="center"><img src="docs/images/zh/flow.png" width="72%" alt="存款先入账，再归集到热钱包。提现要经过审批和签名。热钱包超过上限就把币转到冷钱包，低于下限就从冷钱包补充。"></p>
