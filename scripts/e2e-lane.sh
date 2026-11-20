@@ -5,7 +5,7 @@
 #   scripts/e2e-lane.sh vars         K=V lines the Makefile imports (nothing in CI; the environment always wins)
 #   scripts/e2e-lane.sh slots        who holds the lane slots now
 #   scripts/e2e-lane.sh clean        remove the compose projects of THIS checkout (containers, volumes, networks)
-#   scripts/e2e-lane.sh clean-stale  list, then remove, projects whose checkout directory no longer exists
+#   scripts/e2e-lane.sh clean-stale [prefix]  list, then remove, projects whose checkout directory no longer exists (only names starting with prefix)
 # Sourced (by scripts/e2e-all.sh) it gives lane_project, lane_port_base, lane_acquire <units> <what> and lane_release.
 #
 # Names: project qve2e-<first 6 hex of sha1(checkout path)>; ports: a block of 100 from 12000 (below the OS's ephemeral ranges), the first block
@@ -164,9 +164,9 @@ lane_clean() {
   done
   echo "e2e-lane: clean for $LANE_ROOT"
 }
-lane_clean_stale() {
+lane_clean_stale() { # lane_clean_stale [project-prefix]: only the projects whose name starts so (default: all stale ones)
   _docker_ok || return 1
-  local p dir list="" h f path
+  local only="${1:-}" p dir list="" h f path
   # projects with a working directory that is gone (also what was started by hand under any name)
   list=$(_all_projects | while read -r p dir; do [ "$dir" != "-" ] && [ ! -d "$dir" ] && echo "$p $dir"; done | sort -u)
   # project names of checkouts that registered a block and are gone (their volumes and networks carry no directory)
@@ -177,7 +177,8 @@ lane_clean_stale() {
     h=$(_lane_hash "$path")
     _all_projects | while read -r p dir; do case "$p" in "qve2e-$h"|"qve2e-$h"-*) echo "$p $path" ;; esac; done
   done > "$LANE_STATE/.stale.$$" 2>/dev/null
-  list=$(printf '%s\n%s\n' "$list" "$(cat "$LANE_STATE/.stale.$$")" | awk 'NF' | sort -u); rm -f "$LANE_STATE/.stale.$$"
+  list=$(printf '%s\n%s\n' "$list" "$(cat "$LANE_STATE/.stale.$$")" | awk 'NF' | sort -u -k1,1); rm -f "$LANE_STATE/.stale.$$"
+  [ -n "$only" ] && list=$(printf '%s\n' "$list" | awk -v o="$only" 'index($1, o) == 1')
   if [ -z "$list" ]; then echo "e2e-lane: no stale projects"; else
     echo "stale compose projects (their checkout directory no longer exists):"
     printf '%s\n' "$list" | sed 's/^/  /'
@@ -193,7 +194,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     vars) lane_vars ;;
     slots) lane_slots ;;
     clean) lane_clean ;;
-    clean-stale) lane_clean_stale ;;
+    clean-stale) lane_clean_stale "${2:-}" ;;
     *) echo "usage: $0 show|vars|slots|clean|clean-stale" >&2; exit 2 ;;
   esac
 fi
