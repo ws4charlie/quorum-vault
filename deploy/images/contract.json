@@ -19,14 +19,15 @@
     },
     "qv-worker": {
       "zone": "business",
-      "flags": ["config", "dsn", "temporal", "namespace", "task-queue", "auto-approver-key-file", "watchdog-stall", "watchdog-interval", "stop-timeout", "tls-cert", "tls-key", "tls-ca", "tls-reload", "health-listen"],
-      "env": ["DATABASE_URL", "QV_TEMPORAL_ADDR", "QV_AUTO_APPROVER_KEY_FILE", "QV_HEALTH_LISTEN"],
+      "flags": ["config", "dsn", "temporal", "namespace", "task-queue", "auto-approver-key-file", "watchdog-stall", "watchdog-interval", "stop-timeout", "metrics-listen", "tls-cert", "tls-key", "tls-ca", "tls-reload", "health-listen"],
+      "env": ["DATABASE_URL", "QV_TEMPORAL_ADDR", "QV_AUTO_APPROVER_KEY_FILE", "QV_HEALTH_LISTEN", "QV_WORKER_METRICS_LISTEN", "QV_METRICS_ALLOW_NON_LOOPBACK"],
       "requiredFlags": ["config"],
       "requiredAny": [["dsn", "DATABASE_URL"], ["temporal", "QV_TEMPORAL_ADDR"], ["tls-cert", "QV_TLS_CERT"]],
       "pathFlags": ["config", "auto-approver-key-file", "tls-cert", "tls-key", "tls-ca"],
       "pathEnv": ["QV_AUTO_APPROVER_KEY_FILE", "QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA"],
       "dsnRole": "qv_worker",
-      "listen": { "ports": 0 }
+      "listen": { "ports": 0 },
+      "loopbackOnly": ["metrics-listen", "QV_WORKER_METRICS_LISTEN"]
     },
     "qv-relay": {
       "zone": "business",

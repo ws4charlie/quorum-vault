@@ -16,7 +16,7 @@ One release serves **one chain cell**: `qv-core` and `qv-worker` each read one c
 | approval page (optional, `approval.enabled`, **off**) | Deployment, Service, Ingress | 2 | own host, own origin; see "The approval page" |
 | NetworkPolicies | default deny + one allow per path | n/a | see "Network" |
 
-Every pod: uid/gid 65532, `runAsNonRoot`, read-only root filesystem, all capabilities dropped, no privilege escalation, seccomp `RuntimeDefault`, no host namespaces, service account token not mounted (the archiver may opt in for workload identity), requests and limits set. By default no process listens on a metrics port a scraper can reach (metrics are loopback-only). With `metrics.enabled` core, relay and archiver bind the pod address (`QV_METRICS_ALLOW_NON_LOOPBACK=1`), each gets a metrics Service, and one NetworkPolicy admits only the namespace `metrics.monitoringNamespace` on port `metrics.port`. The worker has no metrics port. Scrape objects and rules are in chart `qv-monitoring`.
+Every pod: uid/gid 65532, `runAsNonRoot`, read-only root filesystem, all capabilities dropped, no privilege escalation, seccomp `RuntimeDefault`, no host namespaces, service account token not mounted (the archiver may opt in for workload identity), requests and limits set. By default no process listens on a metrics port a scraper can reach (metrics are loopback-only). With `metrics.enabled` core, worker, relay and archiver bind the pod address (`QV_METRICS_ALLOW_NON_LOOPBACK=1`), each gets a metrics Service, and one NetworkPolicy admits only the namespace `metrics.monitoringNamespace` on port `metrics.port`. Scrape objects and rules are in chart `qv-monitoring`.
 
 ## Render and check
 

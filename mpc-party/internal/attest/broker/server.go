@@ -195,6 +195,7 @@ func (s *Server) HealthHandler() http.Handler {
 			fmt.Fprintf(w, "qv_attest_broker_events_total{event=%q} %d\n", k, v)
 		}
 		fmt.Fprintf(w, "qv_attest_broker_allowlist_sequence %d\n", s.list.Load().Seq)
+		s.writeCertMetrics(w)
 	})
 	return mux
 }

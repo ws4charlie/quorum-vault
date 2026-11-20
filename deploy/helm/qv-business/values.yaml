@@ -147,9 +147,9 @@ ingress:
     host: custody-internal.example.invalid
     annotations:
       nginx.ingress.kubernetes.io/ssl-passthrough: "true"
-# Metrics for the central monitoring (task D10; chart qv-monitoring). Off by default: the binaries then keep metrics on loopback. On: core, relay and archiver bind the pod
+# Metrics for the central monitoring (task D10; chart qv-monitoring). Off by default: the binaries then keep metrics on loopback. On: core, worker, relay and archiver bind the pod
 # address (QV_METRICS_ALLOW_NON_LOOPBACK=1), each gets a metrics Service, and ONE ingress rule lets the monitoring namespace (and nothing else) reach the metrics port.
-# The worker has no metrics port (no -metrics-listen in its code), so it has none here.
+# The worker is one of them (QV_WORKER_METRICS_LISTEN): Temporal SDK outcomes and task-queue lag, ready/stopping, certificate expiry.
 metrics:
   enabled: false
   port: 9102

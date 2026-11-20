@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/health"
 	"github.com/ws4charlie/quorum-vault/internal/pki"
+	"github.com/ws4charlie/quorum-vault/internal/workermetrics"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
 
@@ -52,6 +54,7 @@ func run(log *slog.Logger) error {
 	wdStall := flag.Duration("watchdog-stall", 2*time.Minute, "a loop workflow with no new history for this long is terminated and restarted, a withdrawal or sweep workflow is only reported (ALERT); 0 turns the watchdog off")
 	wdEvery := flag.Duration("watchdog-interval", 15*time.Second, "how often the watchdog looks")
 	stopTimeout := flag.Duration("stop-timeout", workflow.DefaultStopTimeout, "on SIGTERM: how long running activities may finish before they are cut and retried by another worker; the pod's terminationGracePeriodSeconds must be at least this plus 20 s")
+	metricsListen := flag.String("metrics-listen", os.Getenv("QV_WORKER_METRICS_LISTEN"), "serve Prometheus metrics (Temporal SDK outcomes and latencies, ready/stopping state, certificate expiry) in plain http on a loopback address, e.g. 127.0.0.1:9102 (another address only with QV_METRICS_ALLOW_NON_LOOPBACK=1); off when empty (env QV_WORKER_METRICS_LISTEN)")
 	tlsFor := pki.Flags(flag.CommandLine, "")
 	healthListen := health.Flag(flag.CommandLine)
 	flag.Parse()
@@ -87,6 +90,22 @@ func run(log *slog.Logger) error {
 	if tsrc != nil {
 		go tsrc.Run(ctx.Done())
 	}
+	// The SDK reports its metrics to reg; the listener publishes them with the worker's state and the certificate expiry.
+	reg := workermetrics.New(*stopTimeout)
+	if *metricsListen != "" {
+		if err := pki.CheckMetricsAddr(*metricsListen, pki.ZoneBusiness); err != nil {
+			return fmt.Errorf("-metrics-listen: %w", err)
+		}
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", reg.Handler(tsrc))
+		msrv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := msrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("metrics server stopped", "error", err.Error())
+			}
+		}()
+		defer msrv.Close()
+	}
 	pool, err := db.OpenTLS(ctx, *dsn, tsrc, pki.Allow{pki.ID(pki.ZoneBusiness, "postgres")})
 	if err != nil {
 		return err
@@ -113,7 +132,7 @@ func run(log *slog.Logger) error {
 	if err := workflow.RegisterNamespace(ctx, *temporalAddr, *namespace, tconn); err != nil {
 		return err
 	}
-	tc, err := client.DialContext(ctx, client.Options{HostPort: *temporalAddr, Namespace: *namespace, ConnectionOptions: tconn, Logger: sdklog.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})))})
+	tc, err := client.DialContext(ctx, client.Options{HostPort: *temporalAddr, Namespace: *namespace, ConnectionOptions: tconn, MetricsHandler: reg, Logger: sdklog.NewStructuredLogger(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})))})
 	if err != nil {
 		return fmt.Errorf("dial temporal: %w", err)
 	}
@@ -140,10 +159,13 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("qv-worker started", "chain", cfg.Chain, "failpoint", workflow.Armed())
 	probe.SetReady(true)
+	reg.SetReady(true)
 	// SIGTERM: not ready at once (the probe, see health.Serve), then the worker stops polling and waits up to -stop-timeout for the activities
 	// and workflow tasks it is running; waits (sign, nonce, refill) hand their state back early. The process then exits 0. A second signal
 	// ends it at once (exit 1); so does the bound, because the SDK cancels the activities' context then and Stop returns.
 	<-ctx.Done()
+	reg.SetReady(false)
+	reg.SetStopping()
 	log.Info("qv-worker stopping: not ready, no new tasks", "stop_timeout", stopTimeout.String())
 	again := make(chan os.Signal, 1)
 	signal.Notify(again, syscall.SIGINT, syscall.SIGTERM)
