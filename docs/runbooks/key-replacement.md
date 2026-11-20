@@ -4,6 +4,8 @@ This page is the procedure for **EVM hot shards**, run with `qv-rekey`, in the p
 
 ## The procedure with `qv-rekey`
 
+`qv-rekey` in `-mode hsm` opens the shard's token with the PIN from the file named by `QV_HSM_PIN_FILE` (mode 0400, or 0440 for a Secret volume), like `qv-gateway`; the environment form `QV_HSM_PIN` is accepted only when `QV_ENV` is `dev` or `test`, and refused otherwise.
+
 `qv-rekey` walks one replacement and **signs nothing**. Operators sign the zone's records on their own machines with `qv-keysets sign` and give the tool the files; the tool applies each file to every zone guard database and then asks the core's admin route to mirror the step. It keeps only `plan.json` in its `-dir`; where a step stands is read from the zone and the core each time, so you can stop at any step and run the same command again. A step already done is skipped. It refuses to go on when the zone and the core disagree and says which side is behind.
 
 Common flags: `-dir WORK` `-config zone.json` `-guard-dsn gateway=… -guard-dsn cosigner-b=… -guard-dsn cosigner-c=…` (every guard database), `-core https://…` `-core-ca ca.pem` `-token-file F` (an admin's token from a fresh login; the routes need step-up and a human). Run it in the signing zone (it needs the guard databases and, for `dkg`, the parties or the token).
