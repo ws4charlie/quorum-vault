@@ -104,7 +104,9 @@ type Gateway struct {
 	dec     *Decider
 	jobs    *pgxpool.Pool // business database, role qv_gateway
 	opt     Options
-	gens    *genSigners // nil without Options.Generations
+	gens    *genSigners // later generations of a key: Options.Generations and the built-in deposit-tree builder
+	edMu    sync.Mutex
+	edGens  map[string]signer.MessageDeriver // later generations of a Solana deposit tree, by partition and keyset
 
 	inflight sync.WaitGroup // signer calls still running, abandoned ones included
 
@@ -140,9 +142,8 @@ func New(cfg *Config, codecs map[string]ChainCodec, signers map[string]signer.Si
 	}
 	dec := NewDecider(cfg, codecs, guard, ModeGateway, opt.Now)
 	g := &Gateway{cfg: cfg, codecs: codecs, signers: signers, guard: guard, dec: dec, jobs: jobs, opt: opt}
-	if opt.Generations != nil {
-		g.gens = &genSigners{build: opt.Generations}
-	}
+	// A later generation of a deposit tree is reached through the partition's own party A connection, so the zone can build it from the record alone.
+	g.gens = &genSigners{build: ComposeGenerationSigners(opt.Generations, MPCDepositGenerationSigner())}
 	return g, nil
 }
 
@@ -263,6 +264,17 @@ func (g *Gateway) evaluate(ctx context.Context, job signjob.Job) (sig []byte, re
 		path, err := kp.KeyPath(job.KeyRef)
 		if err != nil {
 			return nil, false, reject(ReasonTx, "key reference: %v", err)
+		}
+		if gk, ok := kp.(GenKeyPathCodec); ok {
+			var gen uint32
+			if gen, _, err = gk.KeyPathGen(job.KeyRef); err != nil {
+				return nil, false, reject(ReasonTx, "key reference: %v", err)
+			}
+			if gen > 1 {
+				if d, err = g.depositDeriver(ctx, job, d, gen); err != nil {
+					return nil, false, err
+				}
+			}
 		}
 		ks, err := d.At(ctx, path)
 		if err != nil {
@@ -392,10 +404,21 @@ func (g *Gateway) evaluateMessage(ctx context.Context, job signjob.Job, mc Messa
 	if err != nil {
 		return nil, false, reject(ReasonTx, "key reference: %v", err)
 	}
+	gen := uint32(1)
+	if gm, ok := mc.(GenMessageCodec); ok {
+		if _, gen, _, err = gm.SignerForGen(job.KeyRef); err != nil {
+			return nil, false, reject(ReasonTx, "key reference: %v", err)
+		}
+	}
 	var s signer.MessageSigner
 	if !deposit {
 		s = g.opt.MessageSigners[job.PartitionID]
 	} else if d := g.opt.DepositSigners[job.PartitionID]; d != nil {
+		if gen > 1 {
+			if d, err = g.edDepositDeriver(ctx, job, d, gen); err != nil {
+				return nil, false, err
+			}
+		}
 		ks, err := d.At(ctx, path)
 		if err != nil {
 			var un interface{ SignerUnavailable() bool }

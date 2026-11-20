@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/ws4charlie/quorum-vault/internal/chain"
 )
 
 // PayloadVersion is the transaction version the signing zone accepts (BIP68 relative locks and RBF both work with version 2).
@@ -97,6 +99,23 @@ func ParsePath(s string) ([]uint32, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// ParseKeyRef reads the key reference of a job or the sender of a transaction: "<branch>/<index>" for generation 1 and "g<N>/<branch>/<index>" for a
+// later generation of the account key (chain.KeyPathAt).
+func ParseKeyRef(s string) (gen uint32, path []uint32, err error) {
+	g, rest, err := chain.SplitKeyPath(s)
+	if err != nil {
+		return 0, nil, err
+	}
+	if g == 1 && rest != s {
+		return 0, nil, fmt.Errorf("btc: key reference %q names generation 1 with a prefix", s)
+	}
+	path, err = ParsePath(rest)
+	if err != nil {
+		return 0, nil, err
+	}
+	return uint32(g), path, nil
 }
 
 // CheckPath refuses a path outside the deposit and hot branches, or a hardened index.

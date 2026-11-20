@@ -58,12 +58,6 @@ spec:
             {{- end }}
           envFrom:
             - configMapRef: { name: {{ include "qvs.cmName" (dict "ctx" . "c" "gateway-env" "data" (include "qvs.gatewayEnv" .)) }} }
-          {{- if $pin }}
-          env:
-            - name: QV_HSM_PIN
-              valueFrom:
-                secretKeyRef: { name: {{ .Values.hsm.pin.secretName | quote }}, key: {{ .Values.hsm.pin.key | quote }} }
-          {{- end }}
           ports:
             - { name: health, containerPort: {{ .Values.gateway.healthPort }}, protocol: TCP }
           startupProbe: { httpGet: { path: /readyz, port: health }, periodSeconds: 5, failureThreshold: {{ .Values.gateway.startupFailureThreshold }} }
@@ -76,6 +70,9 @@ spec:
             - { name: link-tls, mountPath: /etc/qv/link-tls, readOnly: true }
             - { name: config, mountPath: /etc/qv/config, readOnly: true }
             - { name: metrics, mountPath: /var/lib/qv/metrics }
+            {{- if $pin }}
+            - { name: hsm-pin, mountPath: /etc/qv/hsm-pin, readOnly: true }
+            {{- end }}
             {{- if eq .Values.hsm.mode "pkcs11" }}
             - { name: hsm-module, mountPath: {{ .Values.hsm.pkcs11.mountPath }}/lib, readOnly: true }
             {{- if .Values.hsm.pkcs11.clientConfig }}
@@ -106,6 +103,14 @@ spec:
           configMap: { name: {{ include "qvs.signingConfigName" . }} }
         - name: metrics
           emptyDir: { sizeLimit: 16Mi }
+        {{- if $pin }}
+        # The PIN as a file (QV_HSM_PIN_FILE): only the `pin` key, mode 0440, group = fsGroup. The gateway accepts 0440 and refuses a world bit or a group write bit.
+        - name: hsm-pin
+          secret:
+            secretName: {{ .Values.hsm.pin.secretName | quote }}
+            defaultMode: 288
+            items: [{ key: {{ .Values.hsm.pin.key | quote }}, path: pin }]
+        {{- end }}
         {{- if eq .Values.hsm.mode "pkcs11" }}
         - name: hsm-module
           {{- toYaml .Values.hsm.pkcs11.volume | nindent 10 }}

@@ -1,4 +1,4 @@
-# Key replacement: replacing an EVM hot shard's key
+# Key replacement: replacing an EVM hot shard's key, and the deposit keys of Bitcoin and Solana
 
 This page is the procedure for **EVM hot shards**, run with `qv-rekey`, in the planned and in the emergency order. Bitcoin and Solana (and the deposit key trees) are not covered yet. The sections after the procedure explain what the zone checks, the business side, and the drain.
 
@@ -65,8 +65,51 @@ All changes use `qv-keysets sign` (each operator, on their own machine; `-join` 
 ## What the zone checks and what it cannot
 The zone signs a drain only from a `draining` or `compromised` generation to exactly the successor's address, as a plain transfer (native: no data; token: `transfer(successor, amount)`), within the signed cap and `drains_per_hour` of the chain config (default 10; 0 turns drains off). It **cannot** check that the amount is everything: it has no chain access. A smaller drain is harmless; the rest stays on the old key until drained again.  A cap is raised with a signed `set-drain-caps` record (`qv-keysets sign -action set-drain-caps -generation G -cap ASSET=BASE_UNITS`): a draining or compromised generation, the new total per named asset.
 
-## Deposit keys of Bitcoin and Solana (data only, no operator flow yet)
-The core registers the deposit key tree of each such chain in the business database's `keysets` table (ID `entity/chain/deposit-tree/0`, generation 1 `active`, identity = the configured account xpub, or the Solana node as `<public key hex>:<chain code hex>`). Each `deposit_addresses` row carries its `generation`; a customer has one address per generation, and "get my deposit address" returns the active generation's with the older watched addresses in `older_addresses`. The scan, Reconcile and sweeps cover every generation that is not `retired`, and a sweep's sign job names the address's key as `g<N>/<path>` for generation 2 and up (generation 1 is unchanged). Nothing replaces the key yet (K6): the zone pins generation 1's key and refuses a later generation's job, so a generation-2 address cannot be swept. **Rolling update with migration 0032:** it drops the unique index on `(customer_id, chain)` that the previous release names in the EVM address insert (`ON CONFLICT`), so until an old core pod is replaced its "get deposit address" calls for EVM chains fail with a database error (Bitcoin and Solana keep working). The window is the rolling update itself; callers retry and succeed on a new pod, and nothing is written wrongly.
+## Deposit keys of Bitcoin and Solana (K6)
+The deposit key tree of such a chain is the registry entry `entity/chain/deposit-tree/0` in both sides (the zone's signed log, the core's `keysets` table). Generation 1 is the key the configs pin; every later generation exists because two operators signed it. Its identity is the account xpub (Bitcoin) or the Solana node `<public key hex>:<chain code hex>`; its key reference is the ID of a **second 2-party HD keyset on parties A and B** (curve secp256k1 or ed25519). Each `deposit_addresses` row carries its `generation`; "get my deposit address" returns the active generation's address and lists the older watched ones in `older_addresses`; a sweep's sign job names the key as `g<N>/<path>` from generation 2 (generation 1 is unchanged).
+
+**What a generation is on each chain**
+- **Bitcoin**: one generation is one account key, so it is the deposit addresses (branch 0) *and* the hot shards (branch 1, the same partition under that key). Replacing it replaces both: new work (withdrawals, batches, moves to cold, consolidations, sweeps) is built from the active generation's hot shard; the old hot shard is *drained* into the new one.
+- **Solana**: only the deposit node is replaced here. The hot shard and its nonce pools are the hot-shard replacement (K4); a sweep of any generation that is active, draining or compromised pays the partition's pinned hot shard.
+
+**States in the zone** (rules per generation; all existing fee, batching, cancel and first-send rules hold unchanged for each)
+| State | Bitcoin | Solana |
+|---|---|---|
+| candidate | signs nothing | signs nothing |
+| active | everything as before; a sweep of its addresses pays *its* hot shard | sweeps as before |
+| draining | sweeps of its addresses, only to the successor's hot shard (the successor must be active); a `drain` of its hot shard to the successor's, within the signed cap; cancels and replacements of work it already signed. No withdrawal | sweeps of its addresses |
+| compromised | as draining, except cancels and replacements | sweeps of its addresses |
+| retired | signs nothing | signs nothing |
+
+The generation an input is under is read from the zone's own derivation: the payload says which one it claims, and the zone derives the script from the account key *its own signed record* gives for that generation (an unknown generation is refused). The gateway and each cosigner judge independently from their own log.
+
+**The flow** (same tool and same ceremony as an EVM shard; `-shard` is the tree ID)
+```
+qv-rekey open        -shard qv-us/btc-main/deposit-tree/0 -mode mpc -reason "..."
+qv-rekey dkg         -admin-auth F          # a second HD keyset on the parties; F from `qv-keysets party-auth -op dkg -keyset <printed ID>`
+qv-rekey candidate   [-change F]            # zone record: -key-ref <keyset ID> -public-key <xpub | node>, no -address
+qv-rekey drain-start -cap BTC=SATS -window SECONDS [-change F]     # Solana: no -cap. The window is signed: the old generation may retire only after it
+qv-rekey activate    [-change F]            # new customers get generation 2 addresses; sweeps of old addresses now pay the new hot shard
+qv-rekey status
+qv-rekey retire      [-change F]            # refused inside the window and while anything of the generation holds more than dust
+```
+Run every zone step first (the tool applies the signed file to the gateway's and every cosigner's guard database, then mirrors the step in the core); the tool refuses to go on when the two disagree. Between `drain-start` and `activate` the chain has no active generation: withdrawals wait (like an EVM shard) and sweeps are refused and retried; run `activate` right after.
+
+**The drain of the Bitcoin hot shard** is the consolidation's shape: the partition's outputs under the old key (at most `max_inputs` a transaction, the oldest first, outputs that cost more to spend than they carry are left) go in one output to the same partition's shard under the new key. The planner (the drain loop of the worker) makes the next move when the last is final, and `status` shows `drained` when nothing above dust is left. The fee caps, the fee rate ceiling and fee bumps (RBF, cancel) apply as for any send. The zone signs it only from a draining or compromised generation, to the successor's address, within the signed `-cap BTC=SATS` and `drains_per_hour`; the cap bounds the amount the zone cannot read.
+
+**Old addresses stay watched and swept for the window (decisions D3, D5).** The window is a signed parameter of the `start-draining` record (`-window`, seconds; plan 12 months, not a core setting). The zone refuses a `retire` record signed earlier than `start-draining` time plus the window; the core refuses `retire` while the window has not passed (the tool passes the signed value), while any watched deposit address of the generation holds more than dust or has a sweep in flight, while a drain move is open, and (Bitcoin) while a hot shard under it holds more than dust. A compromised generation is never retired.
+
+**What must be kept for the window, on both parties:** the old keyset (its shares sealed in each party's token or sealer) and every backup of its generation, with the recovery key that opens them, until `retire` is done *and* the window has ended. Sweeping an old address signs with the old key, so a party that loses the old keyset cannot sweep late deposits. Do not destroy anything with this tool; use the parties' own procedure (docs/runbooks/mpc-backup-restore.md) afterwards.
+
+**Telling customers (operational, not code).** After `activate` show the new address on the deposit screen, label old addresses "will be retired on <date>" and mail customers who saved one. We do not control wallets people saved: keep the monthly sweep running and decide late deposits after the window case by case from the retained backups.
+
+**Emergency** (`drain-start -compromised`): freeze first (docs/runbooks/mpc-keyset-freeze.md), then register and activate the new generation and run `drain-start -compromised -cap BTC=SATS` (the old key is marked compromised: it signs only sweeps and drains to the successor and is never retired; there is no window). A stolen key can spend whatever lands on its old addresses, so tell customers at once; the sweeps of those addresses race the thief. Solana: the same, without a cap.
+
+**Alerts.** `ALERT: the signing zone refused the sweep of a deposit address of a later key generation` (core, once per address and process): the zone has no record that lets it sign (generation not registered or not active there, retired), see `status` and `qv-keysets show`. The usual zone alerts for keysets apply (`ALERT keyset registry`, `ALERT drain refused`).
+
+**Rolling update with migration 0032** (K5): it drops the unique index on `(customer_id, chain)` that the previous release names in the EVM address insert (`ON CONFLICT`), so until an old core pod is replaced its "get deposit address" calls for EVM chains fail with a database error. Callers retry and succeed on a new pod; nothing is written wrongly. Upgrade the zone (gateway and every cosigner) before registering a generation: an older binary does not know the deposit tree's records (it ignores them with an ALERT) or the `g<N>/` key references (it refuses the job).
+
+**Kubernetes.** `qv-rekey` runs in the signing cluster as in the EVM flow (guard databases, party A's caller port with the gateway's client certificate); `qv-keysets sign` on operators' own machines; the core calls are outward from the signing zone (or run on a business-zone host: only `-core` needs it). The drain planner is the worker's existing loop; state is the business database (`drain_moves`, `keyset_drains`, `btc_utxos.path`), so a second worker replica or a restart is safe.
 
 Generation 1 never changes: the core refuses to start when the configured key differs from the registered one.
 
@@ -117,5 +160,5 @@ Once the old generation is `draining` (or `compromised`) in the core and the suc
 - **Kubernetes.** The planner is one more loop of the worker (`drain-planner:<chain>`); nothing new runs and no new network path is needed. State is in the business database (`drain_moves`, `keyset_drains`); a second worker replica or a restart is safe (one open move per generation is a unique index, the move ID is the workflow ID). A worker older than this release does not run the loop; the migration is additive.
 
 ## What is not covered yet
-- Bitcoin and Solana hot shards, and the deposit key trees (K4, K6). A cosigner-side self-test of a candidate (a bounded transaction before activation) is not built: `dkg` checks the parties agree on the key (MPC) or test-signs in the token (HSM), and the first withdrawal after `activate` is the first real signature.
+- Solana hot shards (K4). A cosigner-side self-test of a candidate (a bounded transaction before activation) is not built: `dkg` checks the parties agree on the key (MPC) or test-signs in the token (HSM), and the first withdrawal after `activate` is the first real signature.
 - Destroying the old key's shares and backups after the window: do it by the parties' own procedures (docs/runbooks/mpc-backup-restore.md); the tool never destroys anything.

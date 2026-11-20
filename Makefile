@@ -251,7 +251,7 @@ test-e2e-btc-withdrawals:
 
 # Sweeps: credited deposits move into the hot shard and become spendable, on real mpc-party (deposit-branch keys), gateway, cosigner and regtest; and the
 # recovery of sweeps: bump, cancel, release, an outside spend, every crash boundary.
-E2E_BTC_SWEEPS := TestSweep|TestRecoverySweep
+E2E_BTC_SWEEPS := TestSweep|TestRecoverySweep|TestRekey
 test-e2e-btc-sweeps:
 	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_SWEEPS)' ./e2e/btc/...
 

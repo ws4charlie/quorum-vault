@@ -149,6 +149,13 @@ func checkSigning(objs []Obj, op scOpts) []string {
 		if !ok {
 			continue
 		}
+		for _, c := range pod.Containers {
+			for _, e := range c.Env {
+				if e.Name == "QV_HSM_PIN" {
+					add("%s: QV_HSM_PIN is an environment variable of container %s: the PIN is a file (QV_HSM_PIN_FILE), an environment is visible in process listings and crash dumps", id, c.Name)
+				}
+			}
+		}
 		if o.Kind == "Job" && o.Component() == "tools" {
 			if op.JobOffByDefault {
 				add("%s: the signed-setting Job is rendered by default", id)
@@ -409,26 +416,25 @@ func TestSigningCoreProductionShape(t *testing.T) {
 			if got := fmt.Sprint(o.Data["QV_PKCS11_LIB"]); got != "/opt/cloudhsm/lib/libcloudhsm_pkcs11.so" {
 				t.Errorf("QV_PKCS11_LIB = %s", got)
 			}
+			if got := fmt.Sprint(o.Data["QV_HSM_PIN_FILE"]); got != "/etc/qv/hsm-pin/pin" {
+				t.Errorf("QV_HSM_PIN_FILE = %s", got)
+			}
 		}
 		pod, ok := o.Pod()
 		if !ok || o.Kind != "Deployment" {
 			continue
 		}
 		gw := pod.Containers[0]
-		var pinFromSecret bool
 		for _, e := range gw.Env {
 			if e.Name == "QV_HSM_PIN" {
-				pinFromSecret = e.Value == "" && strings.Contains(nodeText(e.ValueFrom), "secretKeyRef")
+				t.Error("QV_HSM_PIN must never be an environment variable: the PIN is a file")
 			}
-		}
-		if !pinFromSecret {
-			t.Error("QV_HSM_PIN must come from a secretKeyRef, never a value")
 		}
 		mounted := map[string]bool{}
 		for _, m := range gw.VolumeMounts {
 			mounted[m.MountPath] = m.ReadOnly
 		}
-		for _, p := range []string{"/opt/cloudhsm/lib", "/opt/cloudhsm/etc", "/etc/qv/tls", "/etc/qv/link-tls", "/etc/qv/config"} {
+		for _, p := range []string{"/opt/cloudhsm/lib", "/opt/cloudhsm/etc", "/etc/qv/hsm-pin", "/etc/qv/tls", "/etc/qv/link-tls", "/etc/qv/config"} {
 			if ro, ok := mounted[p]; !ok || !ro {
 				t.Errorf("%s is not mounted read-only", p)
 			}
@@ -616,6 +622,7 @@ func TestSigningCoreRulesCatch(t *testing.T) {
 		{"Job gets a key argument", "            - -config\n            - /etc/qv/config/config.json\n            - \"/etc/qv/signed/a.json\"", "            - -config\n            - /etc/qv/config/config.json\n            - -key\n            - /etc/qv/signed/a.json", "hands a signing key"},
 		{"Job mounts a Secret key", "          configMap: { name: \"x\" }", "          secret: { secretName: operator-key }", "only the guard login certificate"},
 		{"ConfigMap edited in place", "immutable: true", "immutable: false", "must be immutable"},
+		{"PIN as an environment variable", "          ports:\n            - { name: health", "          env:\n            - { name: QV_HSM_PIN, valueFrom: { secretKeyRef: { name: p, key: pin } } }\n          ports:\n            - { name: health", "QV_HSM_PIN is an environment variable"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

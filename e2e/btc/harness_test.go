@@ -127,7 +127,7 @@ func TestMain(m *testing.M) {
 		if mpcBin, err = mpcstack.Build(dir); err != nil {
 			buildErr = err
 		}
-		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway", "qv-cold", "qv-btc-xpub", "qv-fee-caps", "qv-approvers"} {
+		for _, b := range []string{"qv-worker", "qv-core", "qv-gateway", "qv-cold", "qv-btc-xpub", "qv-fee-caps", "qv-approvers", "qv-keysets", "qv-rekey"} {
 			if buildErr != nil {
 				break
 			}

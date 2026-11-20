@@ -883,7 +883,14 @@ func (s *system) spawn(name string, env []string, args ...string) *proc {
 
 func (s *system) startGateway() {
 	s.metricsPath = filepath.Join(s.dir, "mpc-metrics.prom")
-	s.gateway = s.spawn("qv-gateway", []string{"QV_HSM_PIN=" + hsmtest.PIN(s.t)},
+	// The PIN reaches the gateway as a file (QV_HSM_PIN_FILE, mode 0400, in the run's temp directory), the way it does in production.
+	pinFile := filepath.Join(s.dir, "hsm-pin")
+	if _, err := os.Stat(pinFile); err != nil { // the gateway restarts in some tests
+		if err := os.WriteFile(pinFile, []byte(hsmtest.PIN(s.t)+"\n"), 0o400); err != nil {
+			s.t.Fatal(err)
+		}
+	}
+	s.gateway = s.spawn("qv-gateway", []string{"QV_HSM_PIN=", "QV_HSM_PIN_FILE=" + pinFile},
 		"-mpc-metrics-file", s.metricsPath, "-config", s.gwPath, "-jobs-dsn", s.gatewayJobsDSN(), "-guard-dsn", s.guardDSN, "-interval", "200ms", "-lease", gatewayLease(s.o),
 		"-worker-id", "gw-"+uuid.NewString()[:6], "-brokers", kafkaBrokers(), "-audit-source", s.auditSrc+"-gateway", "-anchor-interval", "2s")
 }
