@@ -40,10 +40,12 @@ type Options struct {
 }
 
 type Server struct {
-	cfg   *Config
-	log   *slog.Logger
-	authz Authorizer
-	store interface {
+	dataLock *dataLock // held until Shutdown (or the process ends)
+	started  atomic.Bool
+	cfg      *Config
+	log      *slog.Logger
+	authz    Authorizer
+	store    interface {
 		KeyStore
 		JobStore
 	}
@@ -95,7 +97,7 @@ type flight struct {
 	done chan struct{}
 }
 
-func New(o Options) (*Server, error) {
+func New(o Options) (srv *Server, err error) {
 	if o.Config == nil {
 		return nil, errors.New("config is required")
 	}
@@ -106,6 +108,16 @@ func New(o Options) (*Server, error) {
 		return nil, ErrNoAuthorizer
 	}
 	c := o.Config
+	// One process per data directory, checked before anything is read or written (and before the HSM login): a second one refuses to start.
+	lock, err := acquireDataLock(c.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			lock.release()
+		}
+	}()
 	cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("tls key pair: %w", err)
@@ -137,7 +149,7 @@ func New(o Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
+	return &Server{dataLock: lock, cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
 		fails: newFailStats(c.Role), cache: newKeyCache(), tcache: newTKeyCache(), rts: map[string]*ksRT{}, kick: make(chan struct{}, 1), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
 		replay: newReplayCache(c.Limits.ReplayCacheSize), inflight: map[string]*flight{}}, nil
 }
@@ -285,6 +297,7 @@ func (s *Server) Start() error {
 		go s.peerSrv.Serve(s.peerLn)
 	}
 	go s.callerSrv.Serve(s.callerLn)
+	s.started.Store(true)
 	s.log.Info("serving", "role", c.Role, "caller", s.CallerAddr(), "peer", s.PeerAddr(), "version", Version, "cbmpc_commit", cbmpc.PinnedCommit)
 	return nil
 }
@@ -331,6 +344,7 @@ func (s *Server) Shutdown(ctx context.Context) {
 	s.stopMetrics()
 	s.cache.wipeAll()
 	s.tcache.wipeAll()
+	s.dataLock.release() // last: nothing writes to the directory after this
 	s.log.Info("stopped, keysets wiped")
 }
 

@@ -1,6 +1,6 @@
 # Key replacement: keysets and drains (incomplete)
 
-> **Incomplete.** This page covers only what exists today: the signing zone's own keyset states and the zone side of a drain, for **EVM hot shards**. Planning a drain from the core (K2b), the DKG and self-test of a new key (K3), and Bitcoin and Solana are not built yet. Do not use it as a full replacement procedure.
+> **Incomplete.** This page covers the signing zone's own keyset states, the business side (the admin routes and what the core does with two generations of one shard), and the drain, for **EVM hot shards**. The DKG and self-test of a new key and the one tool that runs every step (`qv-rekey`, K3), and Bitcoin and Solana, are not built yet. Do not use it as a full replacement procedure.
 
 The zone decides from its own records, not from the business side. Each hot shard has generations of keys; a pinned hot address in the zone config is generation 1, `active`. Operators (the same key set as in [approvers](approvers.md), `min_operators` of them) change a generation's state with `qv-keysets`.
 
@@ -38,3 +38,29 @@ During a rolling update, a replica on the old binary does not know the kind `dra
 
 ## Alerts
 `ALERT keyset registry: rows of the keyset_changes table do not carry valid operator signatures…`: someone wrote to a guard database directly, or the `operators` section changed. The rows are ignored.
+
+## The business side: two generations of one shard
+The core keeps its own registry of generations (a mirror, for planning). **The zone decides from its own records, so a wrong mirror can stall work but never move money.** Always do a step in the zone first (`qv-keysets`), then the same step in the core. The routes need an `admin` token with a fresh login, belong to a human (not a service) and are audited with the admin's name.
+
+| Step | Zone (`qv-keysets`) | Core (`/v2/keysets/…`, body: `shard_id`, `generation`) |
+|---|---|---|
+| 1 | `register-candidate` | `POST candidates` (`shard_id`, `address`, `key_ref`): the address must be new to the deployment; one candidate per shard |
+| 2 | `start-draining -successor 2 -cap …` | `POST drains` (`successor`: the candidate) |
+| 3 | `activate` | `POST activations` |
+| 4 | the drain (next section) | the core plans it by itself |
+| 5 | `retire` | `POST retirements`: refused unless the chain shows nothing above dust at the old address and no transaction of it is in flight |
+| – | `mark-compromised` | `POST compromises` (`successor` may be named in the same call) |
+
+`GET /v2/keysets` lists every generation with its state, its successor and, for one that is leaving, what the drain last found.
+
+What changes while a shard has two generations:
+- **The shard keeps its one ledger account.** New withdrawals, the sweep destination (the active address of the sink shard), rebalance and refill targets use the **active** generation's address. Work already built finishes from the address it was built for, including its replacement or cancel.
+- **Between step 2 and step 3 the shard has no active address.** New work for it waits (a withdrawal polls until its deadline, then ends with the reason); do the two steps one after the other.
+- **A withdrawal waits until the active address holds what it sends** (and, for a token, the gas), while an older generation still drains into it. Its reason says which address is short.
+- **No rebalance or move to cold starts from a shard that is still draining**: part of what the books say it holds is at the old address.
+- **The factory.** After step 3 the factory still pays the old address until the cold ceremony `set-destination` names the new one; sweeps stop with "factory destination differs" until it does (they are not lost). Then update the zone's `sweep_destination`.
+- **Reconcile** adds up the addresses of the shard's generations that are not retired and compares the sum with the one ledger account; a move between two of them changes neither. A late arrival at a draining address is a difference, and the check names the generation. A retired address is checked on its own: the books expect only the dust written off at retirement; anything more is reported as a late arrival at a retired key (recover it from the backups kept for the window).
+
+**When the core and the zone disagree**
+- The core uses generation 2 and the zone still has it as a candidate (or the other way round): the zone refuses the job. A withdrawal ends voided with the zone's reason and its hold is released; a drain waits and is planned again (below).
+- A drain whose state holds in one place only waits, as the zone's page says, until the intent's `not_after`; then the core shows the zone's reason on the generation (`drain.reason`) and plans it again. Fix the missing step; nothing is lost.

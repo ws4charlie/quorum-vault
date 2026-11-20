@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -126,4 +127,19 @@ func ClientTLS(cert tls.Certificate, pins map[Pin]bool) *tls.Config {
 		InsecureSkipVerify:    true, //nolint:gosec // pinned: VerifyPinned does the verification
 		VerifyPeerCertificate: VerifyPinned(pins, time.Now),
 	}
+}
+
+// WriteCertMetrics writes the seconds left on a pinned-channel certificate in the Prometheus text format, with the same metric name and labels
+// every other certificate of the system uses (qv_tls_cert_seconds_to_expiry{name,zone,kind="leaf"}; pki.Source.WriteMetrics), so the one
+// alert rule (monitoring/tls-cert.rules.yml) covers both ends of the party-to-cosigner channel. A pinned certificate has no CA, so there
+// is no kind="ca" line. The value is negative once the certificate expired; an unreadable certificate writes nothing.
+func WriteCertMetrics(w io.Writer, name, zone string, c tls.Certificate, now time.Time) {
+	if len(c.Certificate) == 0 {
+		return
+	}
+	leaf, err := x509.ParseCertificate(c.Certificate[0])
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "qv_tls_cert_seconds_to_expiry{name=%q,zone=%q,kind=\"leaf\"} %.0f\n", name, zone, leaf.NotAfter.Sub(now).Seconds())
 }

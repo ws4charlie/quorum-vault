@@ -80,3 +80,25 @@ func RequireLoopback(addr string) error {
 	}
 	return errors.New("metrics are plain http and are served on a loopback address only (127.0.0.1 or ::1), not " + addr)
 }
+
+// MetricsAnyAddrEnv is the explicit switch that lets a BUSINESS-zone service bind its plain-http metrics to a non-loopback address
+// (the pod address, so a Prometheus in the cluster can scrape it; decision D12). Off by default. Network policy must then limit who can
+// connect: the metrics carry no secret but are not authenticated.
+const MetricsAnyAddrEnv = "QV_METRICS_ALLOW_NON_LOOPBACK"
+
+// CheckMetricsAddr is the rule for -metrics-listen: loopback always; any other address only for a business-zone service and only with
+// QV_METRICS_ALLOW_NON_LOOPBACK=1. A signing-zone service ignores the switch: nothing scrapes into the signing zone, a sidecar in the
+// same pod reads 127.0.0.1 (or the textfile) and sends the numbers outward (docs/runbooks/certificates.md, "Metrics in a pod").
+func CheckMetricsAddr(addr, zone string) error {
+	err := RequireLoopback(addr)
+	if err == nil {
+		return nil
+	}
+	if zone == ZoneBusiness && os.Getenv(MetricsAnyAddrEnv) == "1" {
+		return nil
+	}
+	if zone == ZoneBusiness {
+		return errors.New(err.Error() + " (a business-zone service may bind another address only with " + MetricsAnyAddrEnv + "=1)")
+	}
+	return err
+}

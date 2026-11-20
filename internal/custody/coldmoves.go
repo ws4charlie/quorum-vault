@@ -14,6 +14,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -185,6 +186,13 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 			}
 			if open || free.Cmp(lim.High) <= 0 {
 				return nil
+			}
+			// A shard whose old key is still draining into the active one has part of its money at the old address: nothing is moved to cold from
+			// the active address until the drain is done (the ledger would say there is more than the sending address holds).
+			if kp, perr := partition.Parse(p); perr == nil {
+				if leaving, err := shardLeaving(ctx, tx, kp.ShardID()); err != nil || leaving {
+					return err
+				}
 			}
 			// the amount comes from what the shard holds now, under the hold on the partition: never more than the snapshot said
 			freeNow, err := s.freeHot(ctx, tx, p)

@@ -2,6 +2,7 @@ package custody
 
 import (
 	"context"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -182,6 +184,14 @@ func (s *Service) PlanRebalances(ctx context.Context, log *slog.Logger) ([]Rebal
 				var cands []*shardState
 				for _, sh := range shards {
 					if sh != d && !sh.outgoing && sh.free.Cmp(sh.target) > 0 {
+						// not from a shard whose old key is still draining: part of what it holds is at the old address
+						if kp, perr := partition.Parse(sh.part); perr == nil {
+							if leaving, err := shardLeaving(ctx, tx, kp.ShardID()); err != nil {
+								return err
+							} else if leaving {
+								continue
+							}
+						}
 						cands = append(cands, sh)
 					}
 				}
@@ -202,6 +212,9 @@ func (s *Service) PlanRebalances(ctx context.Context, log *slog.Logger) ([]Rebal
 						break
 					}
 					toAddr, _, err := s.ShardAddressOf(d.part)
+					if errors.Is(err, ErrNoActiveKeyset) {
+						break // the receiving shard has no active key right now (a replacement is in progress): try again at the next pass
+					}
 					if err != nil {
 						return err
 					}

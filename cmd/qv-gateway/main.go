@@ -17,8 +17,10 @@ import (
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/auditchain"
+	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
+	"github.com/ws4charlie/quorum-vault/internal/health"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/internal/kafkatls"
 	"github.com/ws4charlie/quorum-vault/internal/mpcsigner"
@@ -55,6 +57,7 @@ func run(log *slog.Logger) error {
 	// authority issued to it (name business/gateway-link) and trusts only the business authority for that link. The signing zone's own
 	// authority is never trusted by the business database.
 	linkFor := pki.Flags(flag.CommandLine, "link-")
+	healthListen := health.Flag(flag.CommandLine)
 	flag.Parse()
 
 	if *configPath == "" || *jobsDSN == "" || *guardDSN == "" {
@@ -69,6 +72,12 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	probe := health.New(log)
+	stopHealth, err := probe.Serve(ctx, *healthListen)
+	if err != nil {
+		return err
+	}
+	defer stopHealth()
 
 	tsrc, err := tlsFor("qv-gateway", pki.ZoneSigning, log)
 	if err != nil {
@@ -88,11 +97,14 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("open job queue: %w", err)
 	}
 	defer jobs.Close()
+	probe.Check("job queue database", health.Ping(jobs))
+	probe.Check("certificates", health.Certs(tsrc, lsrc))
 	gp, err := db.NewPool(ctx, *guardDSN, tsrc, pki.Allow{pki.ID(pki.ZoneSigning, "signing-db")})
 	if err != nil {
 		return fmt.Errorf("open replay guard: %w", err)
 	}
 	defer gp.Close()
+	probe.Check("guard database", health.Ping(gp))
 	guard, err := gateway.OpenGuard(ctx, gp)
 	if err != nil {
 		return err
@@ -144,6 +156,10 @@ func run(log *slog.Logger) error {
 			return fmt.Errorf("load pkcs11: %w", err)
 		}
 		defer lib.Close()
+		// SoftHSM is for development and tests: a production start (QV_ENV unset, or not dev or test) refuses it.
+		if err := hsm.RefuseSoftHSM(lib, auth.EnvironmentFromEnv() == auth.Production); err != nil {
+			return err
+		}
 		hs, closeSigners, err := gateway.HSMSigners(cfg, lib, os.Getenv("QV_HSM_PIN"))
 		if err != nil {
 			return err
@@ -199,9 +215,12 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	log.Info("qv-gateway started", "worker", id, "chains", len(cfg.Chains), "partitions", len(signers)+len(hotMsg))
+	probe.SetReady(true)
 	if err := gw.Run(ctx, *interval); err != nil {
 		return err
 	}
+	// After SIGTERM the gateway claims no new job (the probe already says "not ready") and waits up to sign_timeout for the signer calls in
+	// flight, so terminationGracePeriodSeconds must be at least sign_timeout plus a margin (deploy/images/README.md).
 	if !gw.Wait(cfg.SignTimeout) {
 		// Closing the signers under a running call would crash inside the HSM
 		// library. Nothing is lost: an unstored signature was never released.

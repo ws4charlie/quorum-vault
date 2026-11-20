@@ -500,6 +500,9 @@ func (s *Service) buildWithdrawalTx(ctx context.Context, tx pgx.Tx, w Withdrawal
 	if s.Now().Unix() >= w.NotAfter {
 		return ErrExpired
 	}
+	if err := s.checkActiveFunded(ctx, tx, w.PartitionID, w.Asset, w.Amount); err != nil {
+		return err
+	}
 	u, err := s.Chain.BuildWithdrawal(ctx, tx, chain.WithdrawalIntent{ID: id, PartitionID: w.PartitionID, Asset: w.Asset, To: w.To, Amount: w.Amount})
 	if err != nil {
 		return err

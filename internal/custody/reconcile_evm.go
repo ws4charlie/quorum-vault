@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
 // Receipt is what Reconcile needs of a mined EVM transaction.
@@ -598,26 +599,80 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 		return b, false, err
 	}
 
-	// Hot wallets.
+	// Hot wallets. A shard has one ledger account and, while a key is being replaced, more than one address: the sum over the addresses of its
+	// generations that are not retired (the watch list) is compared with the one account. A drain moves money between two addresses of the same
+	// shard, so the sum does not change; a retired generation's address is checked on its own below (the books expect nothing there).
 	for _, sym := range c.AssetList {
-		for i, addr := range c.HotShards {
+		for i := range c.HotShards {
 			p := c.PartitionKey(sym, i).String()
 			posted, d, err := adjusted(hotAcct(p))
 			if err != nil {
 				return nil, 0, false, err
 			}
-			bal, no, err := balance(addr.Hex(), sym)
+			wl, err := s.WatchList(ctx, q, i)
 			if err != nil {
 				return nil, 0, false, err
 			}
+			bal, subject, detail, no := new(big.Int), "", "", false
+			for _, k := range wl {
+				b, skip, err := balance(k.Address, sym)
+				if err != nil {
+					return nil, 0, false, err
+				}
+				if skip {
+					no = true
+					break
+				}
+				bal.Add(bal, b)
+				if subject == "" || k.State == partition.StateActive {
+					subject = k.Address
+				}
+				if len(wl) > 1 {
+					detail += fmt.Sprintf("generation %d %s (%s) holds %s; ", k.Generation, k.Address, k.State, b)
+				}
+			}
 			if no {
 				unsupported = true
-				checks = append(checks, Check{Name: "hot", Asset: sym, Subject: addr.Hex(), OK: true, Skipped: true, Detail: "this chain cell cannot read balances yet"})
+				checks = append(checks, Check{Name: "hot", Asset: sym, Subject: subject, OK: true, Skipped: true, Detail: "this chain cell cannot read balances yet"})
 				continue
 			}
 			want := new(big.Int).Neg(posted)
-			checks = append(checks, Check{Name: "hot", Asset: sym, Subject: addr.Hex(), Ledger: want.String(), Chain: bal.String(), OK: want.Cmp(bal) == 0,
-				Detail: note("", new(big.Int).Neg(d))})
+			if len(wl) > 1 {
+				detail = "the shard's addresses added up: " + strings.TrimSuffix(detail, "; ") + ". "
+			}
+			checks = append(checks, Check{Name: "hot", Asset: sym, Subject: subject, Ledger: want.String(), Chain: bal.String(), OK: want.Cmp(bal) == 0,
+				Detail: detail + note("", new(big.Int).Neg(d))})
+		}
+	}
+	// Retired generations: the books expect nothing at their addresses. Anything that arrives there late is shown with where it is and why it
+	// matters, not hidden: the key is retired, so it is moved only by a recovery ceremony.
+	for i := range c.HotShards {
+		ks, err := shardKeysets(ctx, q, c.shardIDOf(i))
+		if err != nil {
+			return nil, 0, false, err
+		}
+		for _, k := range ks {
+			if k.State != partition.StateRetired {
+				continue
+			}
+			for _, sym := range c.AssetList {
+				b, skip, err := balance(k.Address, sym)
+				if err != nil {
+					return nil, 0, false, err
+				}
+				if skip {
+					continue
+				}
+				want := new(big.Int)
+				if sym == c.Native && k.Dust != nil {
+					want = k.Dust // written off at retirement: the address still holds it
+				}
+				detail := fmt.Sprintf("generation %d of %s is retired; the books expect %s at its address (what was written off at retirement)", k.Generation, k.ShardID, want)
+				if b.Cmp(want) != 0 {
+					detail = fmt.Sprintf("a late arrival at the address of retired generation %d of %s: the funds are on the chain, not in the books; the key is retired, so they need a recovery from the backups kept for the retirement window", k.Generation, k.ShardID)
+				}
+				checks = append(checks, Check{Name: "hot_retired", Asset: sym, Subject: k.Address, Ledger: want.String(), Chain: b.String(), OK: b.Cmp(want) == 0, Detail: detail})
+			}
 		}
 	}
 

@@ -52,6 +52,12 @@ var routeRules = map[string]auth.Rule{
 	"POST /v2/cold-close/submit":                {Roles: operators, StepUp: true},
 	"POST /v2/guardian/freezes":                 {Roles: operators},
 	"GET /v2/audit/verify":                      {Roles: operators},
+	"GET /v2/keysets":                           {Roles: operators},
+	"POST /v2/keysets/candidates":               {Roles: adminsOnly, StepUp: true, HumanOnly: true},
+	"POST /v2/keysets/activations":              {Roles: adminsOnly, StepUp: true, HumanOnly: true},
+	"POST /v2/keysets/drains":                   {Roles: adminsOnly, StepUp: true, HumanOnly: true},
+	"POST /v2/keysets/retirements":              {Roles: adminsOnly, StepUp: true, HumanOnly: true},
+	"POST /v2/keysets/compromises":              {Roles: adminsOnly, StepUp: true, HumanOnly: true},
 }
 
 // handle registers a route behind its rule: the caller is authenticated, checked against the rule, recorded in the audit trail if the

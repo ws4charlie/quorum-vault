@@ -1,0 +1,7 @@
+apiVersion: v2
+name: qv-business
+description: QuorumVault business zone - core API, worker, relay, anchor archiver and the database migration job. Dependencies (Postgres, Redpanda, Temporal, the archive bucket) are referenced, not bundled.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"
