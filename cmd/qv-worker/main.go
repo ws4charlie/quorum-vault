@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -50,6 +51,7 @@ func run(log *slog.Logger) error {
 		"file with the automated approver's Ed25519 seed (64 hex chars); optional (env QV_AUTO_APPROVER_KEY_FILE)")
 	wdStall := flag.Duration("watchdog-stall", 2*time.Minute, "a loop workflow with no new history for this long is terminated and restarted, a withdrawal or sweep workflow is only reported (ALERT); 0 turns the watchdog off")
 	wdEvery := flag.Duration("watchdog-interval", 15*time.Second, "how often the watchdog looks")
+	stopTimeout := flag.Duration("stop-timeout", workflow.DefaultStopTimeout, "on SIGTERM: how long running activities may finish before they are cut and retried by another worker; the pod's terminationGracePeriodSeconds must be at least this plus 20 s")
 	tlsFor := pki.Flags(flag.CommandLine, "")
 	healthListen := health.Flag(flag.CommandLine)
 	flag.Parse()
@@ -121,11 +123,13 @@ func run(log *slog.Logger) error {
 		return err
 	})
 
-	w := workflow.NewWorker(tc, workflow.Deps{Svc: svc, Client: tc, AutoKey: key, Log: log, T: workflow.DefaultTimings(cfg), Queue: *queue})
+	w := workflow.NewWorker(tc, workflow.Deps{Svc: svc, Client: tc, AutoKey: key, Log: log, T: workflow.DefaultTimings(cfg), Queue: *queue, StopTimeout: *stopTimeout})
 	if err := w.Start(); err != nil {
 		return err
 	}
-	defer w.Stop()
+	var stopOnce sync.Once
+	stopWorker := func() { stopOnce.Do(w.Stop) }
+	defer stopWorker()
 	if err := workflow.EnsureLoops(ctx, tc, *queue, cfg, log); err != nil {
 		return err
 	}
@@ -136,10 +140,24 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("qv-worker started", "chain", cfg.Chain, "failpoint", workflow.Armed())
 	probe.SetReady(true)
-	// SIGTERM: not ready at once (the probe), then the deferred w.Stop() stops polling and the process exits. Activities still running are
-	// handed back: Temporal retries them on another worker after their timeout (they are idempotent by design; the crash tests kill the worker).
+	// SIGTERM: not ready at once (the probe, see health.Serve), then the worker stops polling and waits up to -stop-timeout for the activities
+	// and workflow tasks it is running; waits (sign, nonce, refill) hand their state back early. The process then exits 0. A second signal
+	// ends it at once (exit 1); so does the bound, because the SDK cancels the activities' context then and Stop returns.
 	<-ctx.Done()
-	return nil
+	log.Info("qv-worker stopping: not ready, no new tasks", "stop_timeout", stopTimeout.String())
+	again := make(chan os.Signal, 1)
+	signal.Notify(again, syscall.SIGINT, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() { stopWorker(); close(done) }()
+	select {
+	case <-done:
+		log.Info("qv-worker stopped: running activities finished or were handed back")
+		return nil
+	case <-again:
+		log.Warn("qv-worker: second signal, exiting at once; activities in flight are retried by Temporal")
+		os.Exit(1) // not return: the deferred stop would wait for the Stop that is still running
+		return nil
+	}
 }
 
 func loadKey(path string) (ed25519.PrivateKey, error) {

@@ -1,0 +1,8 @@
+# Placeholders so the production values of deploy/helm/qv-certs render in CI: example.invalid endpoints, no credentials (the chart holds none: Vault login is the
+# pod's service account token, requested by cert-manager).
+issuers:
+  vault:
+    business: { server: "https://vault.example.invalid:8200", path: "pki-business/sign/business-cluster", auth: { role: qv-business } }
+    signing:  { server: "https://vault.example.invalid:8200", path: "pki-signing/sign/signing-cluster", auth: { role: qv-signing } }
+    link:     { server: "https://vault.example.invalid:8200", path: "pki-business/sign/link-signing-cluster", auth: { role: qv-link } }
+trust: { allowEmpty: true }

@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["images", "hsm", "gateway", "network", "config", "guard", "jobs", "kafka", "tls"],
+  "properties": {
+    "env": { "type": "string", "enum": ["", "dev"] },
+    "runAsUser": { "type": "integer", "const": 65532 },
+    "images": {
+      "type": "object",
+      "required": ["gateway", "tools", "agent"],
+      "additionalProperties": { "type": "object", "required": ["repository"], "properties": { "repository": { "type": "string" }, "digest": { "type": "string", "pattern": "^(sha256:[0-9a-f]{64})?$" }, "tag": { "type": "string" } } }
+    },
+    "hsm": {
+      "type": "object",
+      "properties": { "mode": { "type": "string", "enum": ["none", "pkcs11", "softhsm"] } }
+    },
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "strategy": { "type": "object", "properties": { "type": { "type": "string", "enum": ["RollingUpdate", "Recreate"] } } },
+        "healthPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 60 }
+      }
+    },
+    "config": { "type": "object", "properties": { "signTimeoutSeconds": { "type": "integer", "minimum": 1 } } },
+    "guard": { "type": "object", "properties": { "sslmode": { "type": "string", "const": "verify-full" } } },
+    "jobs": { "type": "object", "properties": { "sslmode": { "type": "string", "const": "verify-full" } } },
+    "signedSettings": {
+      "type": "object",
+      "properties": { "job": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "tool": { "type": "string", "enum": ["route", "fee-caps", "approvers", "keysets"] }, "action": { "type": "string", "enum": ["show", "apply"] } } } }
+    }
+  }
+}

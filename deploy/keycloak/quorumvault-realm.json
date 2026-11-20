@@ -1867,6 +1867,105 @@
     {
       "alwaysDisplayInConsole": false,
       "attributes": {
+        "acr.loa.map": "{\"aal3\": 3}",
+        "backchannel.logout.revoke.offline.tokens": "false",
+        "backchannel.logout.session.required": "true",
+        "default.acr.values": "aal3",
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+",
+        "realm_client": "false"
+      },
+      "authenticationFlowBindingOverrides": {},
+      "bearerOnly": false,
+      "clientAuthenticatorType": "client-secret",
+      "clientId": "qv-approve",
+      "consentRequired": false,
+      "defaultClientScopes": [
+        "profile",
+        "basic",
+        "qv-roles",
+        "email",
+        "qv-core-audience"
+      ],
+      "directAccessGrantsEnabled": false,
+      "enabled": true,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": true,
+      "implicitFlowEnabled": false,
+      "name": "QuorumVault approver CLI qv-approve (authorization code + PKCE, loopback redirect; public client, no secret)",
+      "nodeReRegistrationTimeout": -1,
+      "notBefore": 0,
+      "optionalClientScopes": [],
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "redirectUris": [
+        "http://127.0.0.1:*"
+      ],
+      "serviceAccountsEnabled": false,
+      "standardFlowEnabled": true,
+      "surrogateAuthRequired": false,
+      "webOrigins": []
+    },
+    {
+      "alwaysDisplayInConsole": false,
+      "attributes": {
+        "backchannel.logout.revoke.offline.tokens": "false",
+        "backchannel.logout.session.required": "true",
+        "pkce.code.challenge.method": "S256",
+        "realm_client": "false"
+      },
+      "authenticationFlowBindingOverrides": {
+        "browser": "bce3f72f-35ff-46be-a37d-2b21d5f6a35b"
+      },
+      "bearerOnly": false,
+      "clientAuthenticatorType": "client-secret",
+      "clientId": "qv-approve-e2e",
+      "consentRequired": false,
+      "defaultClientScopes": [
+        "profile",
+        "basic",
+        "qv-roles",
+        "email",
+        "qv-core-audience"
+      ],
+      "directAccessGrantsEnabled": false,
+      "enabled": true,
+      "frontchannelLogout": false,
+      "fullScopeAllowed": true,
+      "implicitFlowEnabled": false,
+      "name": "TEST ONLY: qv-approve loopback login in the automated tests (username and password, no passkey at the identity provider)",
+      "nodeReRegistrationTimeout": -1,
+      "notBefore": 0,
+      "optionalClientScopes": [],
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "config": {
+            "access.token.claim": "true",
+            "claim.name": "acr",
+            "claim.value": "aal3",
+            "id.token.claim": "false",
+            "jsonType.label": "String",
+            "userinfo.token.claim": "false"
+          },
+          "consentRequired": false,
+          "name": "test-acr",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper"
+        }
+      ],
+      "publicClient": true,
+      "redirectUris": [
+        "http://127.0.0.1:*"
+      ],
+      "serviceAccountsEnabled": false,
+      "standardFlowEnabled": true,
+      "surrogateAuthRequired": false,
+      "webOrigins": []
+    },
+    {
+      "alwaysDisplayInConsole": false,
+      "attributes": {
         "backchannel.logout.revoke.offline.tokens": "false",
         "backchannel.logout.session.required": "true",
         "pkce.code.challenge.method": "S256",
