@@ -7,7 +7,7 @@ Solana works differently in three ways: an account must hold a minimum balance t
 <p align="center"><img src="images/solana.png" width="60%" alt="Addresses come from a public key. Deposits are read at finality. Withdrawals sign a durable nonce instead of a blockhash. A sweep batches several addresses."></p>
 
 ## Addresses and deposits
-Customer addresses derive offline from a public node of a two-party Ed25519 key tree; hot wallets are two-of-three keys. A token balance sits in the address's own token account, the only one the books credit; tokens sent elsewhere raise a Reconcile alert. A payment below the minimum balance to a new address fails on the chain. The scan reads only finalized data, since a confirmed transaction can still be dropped with its fork.
+Customer addresses derive offline from a public node of a two-party Ed25519 key tree; hot wallets are two-of-three keys. A token balance sits in the address's own token account, the only one the books credit; tokens sent elsewhere raise a Reconcile alert. A payment below the minimum balance to a new address fails on the chain. The scan reads only finalized data, since a confirmed transaction can still be dropped with its fork. If the deposit key is replaced, a customer gets one address per key and the old ones stay watched ([Key replacement](key-replacement.md)).
 
 ## Withdrawals sign a durable nonce
 A recent-block reference would expire before the signers finish. So a withdrawal signs the value of a nonce account instead; whichever version lands first uses it up, and the network refuses every other version. The signing zone reads the whole message and accepts only a few approved shapes.

@@ -7,7 +7,7 @@ Bitcoin has no balances, only coins (UTXOs). Paying is like handing over notes a
 <p align="center"><img src="images/bitcoin.png" width="60%" alt="Customer addresses come from a public key. Deposits are credited when confirmed. A withdrawal spends chosen coins and returns change to the hot wallet. Many small coins are merged by consolidation."></p>
 
 ## Addresses come from a public key
-The core holds the account's extended public key and derives each customer's address on its own, without asking the signers. A test proves the address matches the key the parties derive. A deposit is credited only after enough confirmations. If the chain reorganises deeper than that, scanning stops with an alert, credits stay, and an operator decides.
+The core holds the account's extended public key and derives each customer's address automatically, without asking the signers. A test proves the address matches the key the parties derive. A deposit is credited only after enough confirmations. If the chain reorganises deeper than that, scanning stops with an alert, credits stay, and an operator decides. If the account key is replaced, a customer gets one address per key and the old ones stay watched ([Key replacement](key-replacement.md)).
 
 ## A withdrawal spends chosen coins
 The core picks coins from the hot wallet, pays the customer, and sends change back to the hot wallet. If the coins cannot cover it, the withdrawal waits for change to come back. Each input is signed under its own derived key, and the signing zone rebuilds the digest of every input itself, which closes the attack of collecting signatures under an understated fee.

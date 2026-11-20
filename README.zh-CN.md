@@ -43,6 +43,8 @@
 | [工作流](docs/zh/workflows.md) | 保证每笔存款、归集、提现在崩溃后也能走完 |
 | [签名区](docs/zh/signing-zone.md) | 每笔付款签名前都要核对 |
 | [MPC 签名](docs/zh/mpc.md) | 把每把密钥拆到多台机器上，没有哪台能单独签名 |
+| [部署](docs/zh/deployment.md) | 四个集群，每个信任域一个，以及测试和生产共用什么 |
+| [飞地](docs/zh/enclaves.md) | 让参与方跑在连宿主机也看不进去的地方；目前是模拟 |
 | [密钥更换](docs/zh/key-replacement.md) | 一把密钥不再可信时怎么办：新密钥接手，旧密钥被清空 |
 | [冷热钱包](docs/zh/tiers.md) | 少量放在线上，其余离线保管，并在两者之间调拨 |
 | [EVM](docs/zh/evm.md) · [Bitcoin](docs/zh/bitcoin.md) · [Solana](docs/zh/solana.md) | 每条链各自的特殊之处 |
@@ -75,4 +77,7 @@ make test-e2e-all
 | 针对签名侧的攻击 | 网关、某个参与方或数据库被攻破，都会被拒绝 |
 | 登录和审批 | API 要求真实的 OpenID Connect 令牌；通行密钥审批由签名区自己核对。用 Keycloak 和软件认证器测过，没试过硬件密钥 |
 | 审计记录 | 链头复制进一次写入的存储；篡改检查在测试里验证 |
+| 更换 EVM 热钱包密钥 | 用真实的网关、cosigner 和参与方做端到端测试，计划更换和紧急更换都测了。Bitcoin 和 Solana 的存款密钥：还没有完成 |
+| 飞地启动 | 只有模拟：代理和封存的份额用一个飞地替身测过。**还没有真实的飞地** |
+| Kubernetes 形态 | chart 和镜像会构建，并由测试检查。**还没有真实的集群运行过**（见[部署](docs/zh/deployment.md)） |
 | 真实网络、真实负载 | **还没有。** 没上过测试网或主网，也没做压测。见[局限](docs/zh/limits.md) |

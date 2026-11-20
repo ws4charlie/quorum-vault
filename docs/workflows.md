@@ -22,4 +22,4 @@ A repeated step must do the same thing, not a second thing. The job keeps its ID
 Every change that other systems should hear about writes an event in the same database transaction. A relay then sends the events to Kafka, at least once, so a crash can only delay an event. Published rows are removed after a retention period; the audit chain keeps the record.
 
 ## The watchdog restarts loops that stall
-Some jobs never end: scanning the chains, planning sweeps and moves to cold. If one stops making progress, the watchdog raises an alert, ends it and starts it again.
+Some jobs never end: scanning the chains, planning sweeps and moves to cold. If one stops making progress, the watchdog raises an alert, ends it and starts it again. Emptying an old key is one more such loop. A worker told to stop finishes or hands over its current step first.

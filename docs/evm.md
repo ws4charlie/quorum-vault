@@ -10,7 +10,7 @@ On EVM chains (Ethereum and its relatives), a customer's deposit address can be 
 Each address is a small forwarder contract. Its address is computed offline from the factory and the customer, with no key and no node. Native coin arrives even before the contract is deployed. Tokens do not notify the contract, so a sweep is a real transaction that the hot wallet pays for.
 
 ## The factory decides where deposits go
-Every forwarder asks the factory for its destination. The cold key owns the factory, so a stolen hot key cannot redirect deposits. An operations key can freeze sweeping, but only the cold key can unfreeze it or change the destination. The signing zone's config must then follow, and until it does every sweep is refused, which is the point.
+Every forwarder asks the factory for its destination. The cold key owns the factory, so a stolen hot key cannot redirect deposits. An operations key can freeze sweeping, but only the cold key can unfreeze it or change the destination. The signing zone's config must then follow, and until it does every sweep is refused, which is the point. A hot key can be replaced without changing any deposit address ([Key replacement](key-replacement.md)).
 
 ## Every transaction has a nonce
 A hot address numbers its transactions. The number is taken in the same database transaction as the withdrawal, so there are no gaps and no reuse.

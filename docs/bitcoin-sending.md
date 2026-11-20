@@ -7,7 +7,7 @@ A Bitcoin transaction can sit unconfirmed when fees rise. The system keeps room 
 <p align="center"><img src="images/bitcoin-sending.png" width="60%" alt="Each send keeps change for a higher fee. A stuck send is replaced, then pulled in by a child, or cancelled. Batches pay many withdrawals in one transaction."></p>
 
 ## Every send keeps room to raise its fee
-Each send leaves enough in its change to be raised up to the fee cap, so a stuck withdrawal can always be bumped with its own coins. If the hot wallet cannot cover that on top of the payment, the withdrawal waits, and the alert says how much would release it. The signing zone checks the same thing. The core's and the zone's fee caps must be equal, or the zone refuses with an alert that says so. Approvers can change the fee caps with signatures, without a restart, within limits that are fixed in configuration ([runbook](runbooks/btc-fee-caps.md)).
+Each send leaves enough in its change to be raised up to the fee cap, so a stuck withdrawal can always be bumped with its own coins. If the hot wallet cannot cover that on top of the payment, the withdrawal waits, and the alert says how much would release it. The signing zone checks the same thing. The core's and the zone's fee caps must be equal, or the zone refuses with an alert that says so. Approvers can change the fee caps with signatures, without a restart, within limits that are fixed in configuration. Two approvers on two machines can sign the same change by agreeing on its time, and their files are then joined ([runbook](runbooks/btc-fee-caps.md)).
 
 ## When a send is stuck or fails
 
