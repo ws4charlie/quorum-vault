@@ -288,3 +288,18 @@ func TestPubkeyPrintsWhatTheKeyFileHolds(t *testing.T) {
 		t.Fatalf("%d %q", code, msg)
 	}
 }
+
+// A threshold above what one authorization can carry is refused before anything is signed or sent (the parties refuse such a config at start-up).
+func TestPolicyRefusesAThresholdNoRequestCouldReach(t *testing.T) {
+	var keys []string
+	for range admin.MaxSignatures + 1 {
+		pub, _, _ := ed25519.GenerateKey(rand.Reader)
+		keys = append(keys, hex.EncodeToString(pub))
+	}
+	if _, err := mkPolicy(keys, admin.MaxSignatures+1, "", 0, 0); err == nil || !strings.Contains(err.Error(), "signatures one authorization may carry") {
+		t.Errorf("threshold %d: %v", admin.MaxSignatures+1, err)
+	}
+	if _, err := mkPolicy(keys, admin.MaxSignatures, "", 0, 0); err != nil {
+		t.Errorf("threshold %d with %d keys is reachable: %v", admin.MaxSignatures, len(keys), err)
+	}
+}

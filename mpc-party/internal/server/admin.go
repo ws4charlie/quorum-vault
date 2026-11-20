@@ -193,6 +193,16 @@ func (v *adminVerifier) writeMetrics(w io.Writer) {
 // different request does not collide.
 //
 // v1 only when the party's config allows it; it is logged and counted every time.
+// checkOpen is check for a follower: the body is rebuilt from the Open the caller forwarded (admin.BodyFromOpen, every request field by name), so
+// what the signature covers is what the follower is asked to do.
+func (v *adminVerifier) checkOpen(op string, open *pb.Open) (string, error) {
+	body, err := admin.BodyFromOpen(op, open)
+	if err != nil {
+		return "", err
+	}
+	return v.check(op, open.KeysetId, body, open.Admin)
+}
+
 func (v *adminVerifier) check(op, keysetID string, body proto.Message, a *pb.AdminAuth) (key string, err error) {
 	switch {
 	case a.GetV2() != nil:

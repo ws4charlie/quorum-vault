@@ -343,7 +343,7 @@ func (s *Server) groupPrecheck(ctx context.Context, open *pb.Open) (kind pb.Erro
 	}
 	switch open.Op {
 	case pb.Op_OP_DKG:
-		if _, err := s.admin.check("dkg", id, admin.DKGBody(id, open.Scheme, open.Curve), open.Admin); err != nil {
+		if _, err := s.admin.checkOpen("dkg", open); err != nil {
 			return pb.ErrorKind_ERROR_KIND_REFUSED, err.Error(), false
 		}
 		if st, err := s.store.State(ctx, id); err == nil && st.Current != 0 {
@@ -370,7 +370,7 @@ func (s *Server) groupPrecheck(ctx context.Context, open *pb.Open) (kind pb.Erro
 		if frozen, why := s.freeze.Frozen(id); frozen {
 			return pb.ErrorKind_ERROR_KIND_FROZEN, "keyset is frozen: " + why, false
 		}
-		if _, err := s.admin.check("refresh", id, admin.RefreshBody(id), open.Admin); err != nil {
+		if _, err := s.admin.checkOpen("refresh", open); err != nil {
 			return pb.ErrorKind_ERROR_KIND_REFUSED, err.Error(), false
 		}
 	default:
@@ -481,12 +481,12 @@ func (s *Server) runGroupFollower(ctx context.Context, open *pb.Open, me string,
 
 // unfreezeGroup (party A): every member verifies the operator signature itself and must be reachable; nothing is lifted
 // unless all three accepted.
-func (s *Server) unfreezeGroup(ctx context.Context, keysetID string, admin *pb.AdminAuth) (rerr error) {
+func (s *Server) unfreezeGroup(ctx context.Context, req *pb.UnfreezeRequest) (rerr error) {
 	const name = "unfreeze"
 	defer func() { s.noteFail(sideCoordinator, pb.Op_OP_UNFREEZE, peerNone, rerr) }() // both members must sign off: no single suspect
 	ctx, cancel := context.WithTimeout(ctx, s.cfg.Limits.SessionTimeout())
 	defer cancel()
-	open := &pb.Open{Op: pb.Op_OP_UNFREEZE, KeysetId: keysetID, Admin: admin}
+	open := admin.OpenOf(req)
 	sess, f := s.openGroup(ctx, name, open, false)
 	if f != nil {
 		return f // includes "party X is not reachable": nothing was lifted anywhere
@@ -524,7 +524,7 @@ func (s *Server) unfreezeFollow(ctx context.Context, stream pb.Peer_SessionServe
 	if st, err := s.store.State(ctx, open.KeysetId); err != nil || !isTScheme(st.Scheme) || st.Scheme != int32(open.Scheme) {
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "unknown 2-of-3 keyset on this party")
 	}
-	key, err := s.admin.check("unfreeze", open.KeysetId, admin.UnfreezeBody(open.KeysetId), open.Admin)
+	key, err := s.admin.checkOpen("unfreeze", open)
 	if err != nil {
 		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, err.Error())
 	}

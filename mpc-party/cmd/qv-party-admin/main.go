@@ -291,6 +291,9 @@ func mkPolicy(keys []string, threshold int, domain string, maxValidity, skew tim
 	if p.Threshold > len(p.Keys) {
 		return p, fmt.Errorf("admin_threshold %d is more than the %d admin keys", p.Threshold, len(p.Keys))
 	}
+	if p.Threshold > admin.MaxSignatures {
+		return p, fmt.Errorf("admin_threshold %d is more than the %d signatures one authorization may carry: no request could reach it", p.Threshold, admin.MaxSignatures)
+	}
 	return p, nil
 }
 

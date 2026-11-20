@@ -229,7 +229,8 @@
     },
     "adminThreshold": {
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 32
     },
     "adminAllowV1": {
       "type": ["boolean", "null"]

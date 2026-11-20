@@ -294,10 +294,7 @@ func CheckAuth2(op, keyset, domain string, a *pb.AdminAuthV2, p Policy, now time
 // CheckBody says whether the request in the file is the one body describes (the call the sender is about to make). A sender that builds the call
 // itself uses it so a file for another scheme or curve is refused before any party is contacted.
 func (r Request) CheckBody(body proto.Message) error {
-	if d, ok := body.(*pb.DKGRequest); ok {
-		body = DKGBody(d.KeysetId, d.Scheme, d.Curve)
-	}
-	want, err := BodyHash(r.Op, body)
+	want, err := BodyHash(r.Op, Canonical(body))
 	if err != nil {
 		return err
 	}

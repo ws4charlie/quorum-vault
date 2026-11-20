@@ -289,3 +289,82 @@ func TestFileVersion(t *testing.T) {
 		t.Error("file version detection")
 	}
 }
+
+// The path a request takes from the caller to a follower, with every field set to a value that is not the default: the caller hashes the request it
+// holds (Canonical), forwards OpenOf(request), and the follower rebuilds the body from that Open (BodyFromOpen). The two hashes must be the same, or a
+// field is dropped on the way and sits outside what the follower checks. The only intended differences: the AdminAuth (not part of the body; it is
+// carried beside it, and the test checks that it arrives) and the curve of a 2-of-3 DKG (set to the scheme's on both sides).
+func TestEveryAdminRequestFieldSurvivesCallerToFollower(t *testing.T) {
+	for _, d := range adminRequests(t) {
+		op := opOf(t, d)
+		req := dynNew(d)
+		set := 0
+		for i := 0; i < d.Fields().Len(); i++ {
+			fd := d.Fields().Get(i)
+			if fd.Message() != nil && fd.Message().FullName() == authMessageName {
+				continue
+			}
+			fill(req.ProtoReflect(), fd, false)
+			set++
+		}
+		if set == 0 {
+			t.Fatalf("%s has no field to fill", d.Name())
+		}
+		req.ProtoReflect().Set(d.Fields().ByName("admin"), protoreflect.ValueOfMessage((&pb.AdminAuth{V2: &pb.AdminAuthV2{Nonce: []byte("n"), Domain: "d"}}).ProtoReflect()))
+
+		empty, err := BodyHash(op, Canonical(dynNew(d)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		caller, err := BodyHash(op, Canonical(req))
+		if err != nil {
+			t.Fatalf("%s: %v", d.Name(), err)
+		}
+		if caller == empty {
+			t.Errorf("%s: a request with every field set hashes like an empty one", d.Name())
+		}
+		open := OpenOf(req)
+		if !proto.Equal(open.Admin, mustAuth(req)) {
+			t.Errorf("%s: the AdminAuth did not arrive in Open", d.Name())
+		}
+		rebuilt, err := BodyFromOpen(op, open)
+		if err != nil {
+			t.Fatalf("%s: %v", d.Name(), err)
+		}
+		follower, err := BodyHash(op, rebuilt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if caller != follower {
+			t.Errorf("%s: the follower rebuilds another body than the caller signed for:\n caller   %v\n follower %v", d.Name(), Canonical(req), rebuilt)
+		}
+		// and every single field on its own: the follower's hash moves with it, as the caller's does
+		for i := 0; i < d.Fields().Len(); i++ {
+			fd := d.Fields().Get(i)
+			if fd.Message() != nil && fd.Message().FullName() == authMessageName {
+				continue
+			}
+			one := dynNew(d)
+			fill(one.ProtoReflect(), fd, true)
+			ho, _ := BodyHash(op, Canonical(one))
+			fo, err := BodyFromOpen(op, OpenOf(one))
+			if err != nil {
+				t.Fatal(err)
+			}
+			hf, _ := BodyHash(op, fo)
+			if ho != hf || hf == empty {
+				t.Errorf("%s.%s: caller and follower disagree, or the field is not in the follower's body", d.Name(), fd.Name())
+			}
+		}
+	}
+	// the curve of a 2-of-3 DKG is the one intended difference from the request as sent
+	c := Canonical(&pb.DKGRequest{KeysetId: "k", Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Curve: pb.Curve_CURVE_ED25519}).(*pb.DKGRequest)
+	if c.Curve != pb.Curve_CURVE_SECP256K1 {
+		t.Errorf("curve of an ECDSA 2-of-3 DKG: %v", c.Curve)
+	}
+}
+
+func mustAuth(req proto.Message) *pb.AdminAuth {
+	m := req.ProtoReflect()
+	return m.Get(m.Descriptor().Fields().ByName("admin")).Message().Interface().(*pb.AdminAuth)
+}

@@ -1094,6 +1094,7 @@ func TestPartyRefusals(t *testing.T) {
 		{"NodePort", false, "B", []string{"--set", "service.peer.type=NodePort"}, "must be one of"},
 		{"no operator keys", false, "A", []string{"--set", "adminKeys=null"}, "adminKeys is required"},
 		{"threshold above the keys", false, "A", []string{"--set", "adminThreshold=2"}, "adminThreshold cannot be more than the number of adminKeys"},
+		{"threshold above what one authorization can carry", false, "A", []string{"--set", "adminThreshold=33"}, "maximum"},
 		{"no caller pins", false, "A", []string{"--set", "callerPins=null"}, "callerPins is required"},
 		{"A without B's endpoint", false, "A", []string{"--set", "peers.b.address="}, "peers.b.address is required"},
 		{"B without the cosigner config", false, "B", []string{"--set", "cosigner.config=null"}, "cosigner.config is required"},

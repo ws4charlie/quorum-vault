@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 )
 
 // Config is the JSON config file. Unknown fields are an error; a missing or invalid file stops the process.
@@ -340,6 +342,9 @@ func (c *Config) Validate() error {
 	}
 	if c.AdminThreshold < 0 || c.AdminThreshold > len(seenKey) {
 		errs = append(errs, fmt.Errorf("admin_threshold: %d is not between 0 (unset) and the %d distinct admin_keys", c.AdminThreshold, len(seenKey)))
+	}
+	if c.AdminThreshold > admin.MaxSignatures { // Verify2 refuses more signatures than this, so no request could ever reach such a threshold
+		errs = append(errs, fmt.Errorf("admin_threshold: %d is more than the %d signatures one authorization may carry (more admin_keys than that are fine; the threshold must stay within it)", c.AdminThreshold, admin.MaxSignatures))
 	}
 	req("sealer.type", c.Sealer.Type)
 	if c.Sealer.Type == AttestedSealerType {

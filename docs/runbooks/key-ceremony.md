@@ -95,7 +95,7 @@ Key file for `sign`: one line of hex, the 32-byte Ed25519 seed (or the 64-byte p
 
 ## Adding or removing an admin key
 
-`admin_keys` and `admin_threshold` are party configuration (chart `adminKeys`, `adminThreshold`). To **add** a key: add its public key on all three parties (config change and restart each), then it can sign. To **remove** one: remove it on all three; files signed by it are then refused as a whole (`not a configured admin key`): make a new request without it. Keep `adminThreshold` between 1 and the number of distinct keys (a party refuses to start otherwise; the chart refuses to render). Do the three changes in one maintenance window: a party that still lists a removed key still accepts it. Rotating the keys in a controlled, audited way is a separate piece of work (K7).
+`admin_keys` and `admin_threshold` are party configuration (chart `adminKeys`, `adminThreshold`). To **add** a key: add its public key on all three parties (config change and restart each), then it can sign. To **remove** one: remove it on all three; files signed by it are then refused as a whole (`not a configured admin key`): make a new request without it. Keep `adminThreshold` between 1 and the number of distinct keys, and at most 32 (one authorization carries at most 32 signatures; a party refuses to start otherwise, and the chart and `qv-party-admin` refuse such a value). More than 32 keys are fine while the threshold stays within 32. Do the three changes in one maintenance window: a party that still lists a removed key still accepts it. Rotating the keys in a controlled, audited way is a separate piece of work (K7).
 
 ## What a hardware key would need
 

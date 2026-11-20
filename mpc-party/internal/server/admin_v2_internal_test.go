@@ -220,6 +220,21 @@ func TestAdminConfigChecks(t *testing.T) {
 	if err := r.cfg.Validate(); err == nil || !strings.Contains(err.Error(), "admin_threshold") {
 		t.Errorf("threshold above the number of keys: %v", err)
 	}
+	// a threshold no authorization can reach (Verify2 takes at most MaxSignatures) is refused at start-up, however many keys there are
+	many := func(c *Config) {
+		for len(c.AdminKeys) < admin.MaxSignatures+1 {
+			pub, _, _ := ed25519.GenerateKey(rand.Reader)
+			c.AdminKeys = append(c.AdminKeys, hex.EncodeToString(pub))
+		}
+	}
+	r = newV2Rig(t, admin.MaxSignatures+1, many)
+	if err := r.cfg.Validate(); err == nil || !strings.Contains(err.Error(), "signatures one authorization may carry") {
+		t.Errorf("threshold %d with %d keys: %v", admin.MaxSignatures+1, len(r.cfg.AdminKeys), err)
+	}
+	r = newV2Rig(t, admin.MaxSignatures, many) // more keys than signatures is fine while the threshold is reachable
+	if err := r.cfg.Validate(); err != nil && strings.Contains(err.Error(), "admin_") {
+		t.Errorf("threshold %d with %d keys: %v", admin.MaxSignatures, len(r.cfg.AdminKeys), err)
+	}
 	r = newV2Rig(t, 2, func(c *Config) { c.AdminKeys = append(c.AdminKeys, c.AdminKeys[0]) })
 	if err := r.cfg.Validate(); err == nil || !strings.Contains(err.Error(), "listed twice") {
 		t.Errorf("a key listed twice: %v", err)

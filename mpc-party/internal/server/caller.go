@@ -75,17 +75,17 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 	} else if e != nil && !errors.Is(e, ErrNotFound) {
 		return nil, fromWrapper("dkg", e)
 	}
-	if _, e := s.admin.check("dkg", r.KeysetId, admin.DKGBody(r.KeysetId, r.Scheme, r.Curve), r.Admin); e != nil {
+	if _, e := s.admin.check("dkg", r.KeysetId, admin.Canonical(r), r.Admin); e != nil {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "dkg", "%v", e)
 	}
 	if threshold {
-		res, err := s.coordinateGroup(ctx, "dkg", &pb.Open{Op: pb.Op_OP_DKG, KeysetId: r.KeysetId, Curve: tcurve, Scheme: r.Scheme, Admin: r.Admin})
+		res, err := s.coordinateGroup(ctx, "dkg", func() *pb.Open { o := admin.OpenOf(r); o.Curve = tcurve; return o }())
 		if err != nil {
 			return nil, err
 		}
 		return &pb.DKGResponse{RootPublicKey: res.public}, nil
 	}
-	res, err := s.coordinate(ctx, "dkg", &pb.Open{Op: pb.Op_OP_DKG, KeysetId: r.KeysetId, Curve: r.Curve, Admin: r.Admin}, r.KeysetId)
+	res, err := s.coordinate(ctx, "dkg", admin.OpenOf(r), r.KeysetId)
 	if err != nil {
 		return nil, err
 	}
@@ -102,10 +102,10 @@ func (s *Server) Refresh(ctx context.Context, r *pb.RefreshRequest) (_ *pb.Refre
 		if frozen, why := s.freeze.Frozen(r.KeysetId); frozen {
 			return nil, frozenFail("refresh", r.KeysetId, why)
 		}
-		if _, e := s.admin.check("refresh", r.KeysetId, admin.RefreshBody(r.KeysetId), r.Admin); e != nil {
+		if _, e := s.admin.check("refresh", r.KeysetId, admin.Canonical(r), r.Admin); e != nil {
 			return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "refresh", "%v", e)
 		}
-		res, err := s.coordinateGroup(ctx, "refresh", &pb.Open{Op: pb.Op_OP_REFRESH, KeysetId: r.KeysetId, Scheme: pb.Scheme(st.Scheme), Admin: r.Admin})
+		res, err := s.coordinateGroup(ctx, "refresh", func() *pb.Open { o := admin.OpenOf(r); o.Scheme = pb.Scheme(st.Scheme); return o }())
 		if err != nil {
 			return nil, err
 		}
@@ -117,10 +117,10 @@ func (s *Server) Refresh(ctx context.Context, r *pb.RefreshRequest) (_ *pb.Refre
 	if frozen, why := s.freeze.Frozen(r.KeysetId); frozen {
 		return nil, frozenFail("refresh", r.KeysetId, why)
 	}
-	if _, e := s.admin.check("refresh", r.KeysetId, admin.RefreshBody(r.KeysetId), r.Admin); e != nil {
+	if _, e := s.admin.check("refresh", r.KeysetId, admin.Canonical(r), r.Admin); e != nil {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "refresh", "%v", e)
 	}
-	res, err := s.coordinate(ctx, "refresh", &pb.Open{Op: pb.Op_OP_REFRESH, KeysetId: r.KeysetId, Admin: r.Admin}, r.KeysetId)
+	res, err := s.coordinate(ctx, "refresh", admin.OpenOf(r), r.KeysetId)
 	if err != nil {
 		return nil, err
 	}
@@ -354,16 +354,16 @@ func (s *Server) Unfreeze(ctx context.Context, r *pb.UnfreezeRequest) (_ *pb.Unf
 	if !validID(r.KeysetId) {
 		return nil, invalid("unfreeze", "invalid keyset id")
 	}
-	key, e := s.admin.check("unfreeze", r.KeysetId, admin.UnfreezeBody(r.KeysetId), r.Admin)
+	key, e := s.admin.check("unfreeze", r.KeysetId, admin.Canonical(r), r.Admin)
 	if e != nil {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "unfreeze", "%v", e)
 	}
 	if st, e := s.store.State(ctx, r.KeysetId); e == nil && isTScheme(st.Scheme) {
 		// all three accept the operator signature or nothing is lifted
-		if e := s.unfreezeGroup(ctx, r.KeysetId, r.Admin); e != nil {
+		if e := s.unfreezeGroup(ctx, r); e != nil {
 			return nil, e
 		}
-	} else if e := s.unfreezeSession(ctx, r.KeysetId, r.Admin); e != nil {
+	} else if e := s.unfreezeSession(ctx, r); e != nil {
 		return nil, e
 	}
 	if e := s.freeze.Unfreeze(r.KeysetId); e != nil {

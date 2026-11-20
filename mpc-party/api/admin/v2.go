@@ -30,16 +30,125 @@ const (
 
 const authMessageName protoreflect.FullName = "qv.mpcparty.v1.AdminAuth"
 
-// DKGBody is the request body of a DKG in canonical form. A 2-of-3 scheme fixes its curve, so the curve is set to it: the caller may leave it
-// unspecified (the servers accept both) and the body, hence the signed hash, is the same either way.
-func DKGBody(keyset string, scheme pb.Scheme, curve pb.Curve) *pb.DKGRequest {
-	switch scheme {
-	case pb.Scheme_SCHEME_ECDSA_2OF3:
-		curve = pb.Curve_CURVE_SECP256K1
-	case pb.Scheme_SCHEME_ED25519_2OF3:
-		curve = pb.Curve_CURVE_ED25519
+// Canonical is the body a signature covers, made from a request as a party received it: a copy without its AdminAuth, and a 2-of-3 DKG's
+// curve set to the scheme's (the caller may leave it unspecified and the servers accept both, so the signed hash is the same either way).
+// Every other field is kept as it is: the body is the request, not a list of the fields somebody remembered.
+func Canonical(req proto.Message) proto.Message {
+	c := proto.Clone(req)
+	m := c.ProtoReflect()
+	fds := m.Descriptor().Fields()
+	for i := 0; i < fds.Len(); i++ {
+		if fd := fds.Get(i); isAuthField(fd) {
+			m.Clear(fd)
+		}
 	}
-	return &pb.DKGRequest{KeysetId: keyset, Scheme: scheme, Curve: curve}
+	if d, ok := c.(*pb.DKGRequest); ok {
+		switch d.Scheme {
+		case pb.Scheme_SCHEME_ECDSA_2OF3:
+			d.Curve = pb.Curve_CURVE_SECP256K1
+		case pb.Scheme_SCHEME_ED25519_2OF3:
+			d.Curve = pb.Curve_CURVE_ED25519
+		}
+	}
+	return c
+}
+
+func isAuthField(fd protoreflect.FieldDescriptor) bool {
+	return fd.Message() != nil && fd.Message().FullName() == authMessageName
+}
+
+var opCodes = map[string]pb.Op{OpDKG: pb.Op_OP_DKG, OpRefresh: pb.Op_OP_REFRESH, OpUnfreeze: pb.Op_OP_UNFREEZE}
+
+func newBody(op string) (proto.Message, error) {
+	switch op {
+	case OpDKG:
+		return &pb.DKGRequest{}, nil
+	case OpRefresh:
+		return &pb.RefreshRequest{}, nil
+	case OpUnfreeze:
+		return &pb.UnfreezeRequest{}, nil
+	}
+	return nil, fmt.Errorf("unknown operation %q: want dkg, refresh or unfreeze", op)
+}
+
+// copyByName copies every field of the request message req (except the AdminAuth) to or from the field of other with the same name: to other
+// when toOther, else from it. A request field other does not have, or has with another kind, is an error: nothing is dropped silently. Fields of
+// other that are not request fields are never read or written.
+func copyByName(req, other protoreflect.Message, toOther bool) error {
+	rf, of := req.Descriptor().Fields(), other.Descriptor().Fields()
+	for i := 0; i < rf.Len(); i++ {
+		fd := rf.Get(i)
+		if isAuthField(fd) {
+			continue
+		}
+		o := of.ByName(fd.Name())
+		if o == nil || o.Kind() != fd.Kind() || o.IsList() != fd.IsList() || o.IsMap() != fd.IsMap() {
+			return fmt.Errorf("%s.%s has no matching field in %s", req.Descriptor().Name(), fd.Name(), other.Descriptor().Name())
+		}
+		src, sfd, dst, dfd := req, fd, other, o
+		if !toOther {
+			src, sfd, dst, dfd = other, o, req, fd
+		}
+		if !src.Has(sfd) {
+			continue
+		}
+		v := src.Get(sfd)
+		switch {
+		case sfd.IsList():
+			l := dst.Mutable(dfd).List()
+			for j := 0; j < v.List().Len(); j++ {
+				l.Append(v.List().Get(j))
+			}
+		case sfd.Message() != nil:
+			dst.Set(dfd, protoreflect.ValueOfMessage(proto.Clone(v.Message().Interface()).ProtoReflect()))
+		default:
+			dst.Set(dfd, v)
+		}
+	}
+	return nil
+}
+
+// OpenOf is the peer message a caller forwards for an admin request: Op set, every request field copied by name (the AdminAuth too). It panics
+// when the request has a field Open does not (TestEveryAdminRequestFieldTravelsInOpen keeps that from shipping).
+func OpenOf(req proto.Message) *pb.Open {
+	op := pb.Op_OP_UNSPECIFIED
+	switch req.(type) {
+	case *pb.DKGRequest:
+		op = pb.Op_OP_DKG
+	case *pb.RefreshRequest:
+		op = pb.Op_OP_REFRESH
+	case *pb.UnfreezeRequest:
+		op = pb.Op_OP_UNFREEZE
+	default:
+		panic(fmt.Sprintf("OpenOf: %T is not an admin request", req))
+	}
+	o := &pb.Open{Op: op}
+	if err := copyByName(req.ProtoReflect(), o.ProtoReflect(), true); err != nil {
+		panic("OpenOf: " + err.Error())
+	}
+	if a := req.ProtoReflect().Descriptor().Fields().ByName("admin"); a != nil && req.ProtoReflect().Has(a) {
+		o.Admin = proto.Clone(req.ProtoReflect().Get(a).Message().Interface()).(*pb.AdminAuth)
+	}
+	return o
+}
+
+// BodyFromOpen is what a follower rebuilds from the Open it received: the request of operation op, every field copied by name, in canonical form.
+// It is what the follower checks the signature against, so a field the caller sent that is not part of the request cannot be used, and one that
+// is cannot be left out.
+func BodyFromOpen(op string, open *pb.Open) (proto.Message, error) {
+	b, err := newBody(op)
+	if err != nil {
+		return nil, err
+	}
+	if err := copyByName(b.ProtoReflect(), open.ProtoReflect(), false); err != nil {
+		return nil, err
+	}
+	return Canonical(b), nil
+}
+
+// DKGBody is the request body of a DKG in canonical form (see Canonical).
+func DKGBody(keyset string, scheme pb.Scheme, curve pb.Curve) *pb.DKGRequest {
+	return Canonical(&pb.DKGRequest{KeysetId: keyset, Scheme: scheme, Curve: curve}).(*pb.DKGRequest)
 }
 
 // RefreshBody and UnfreezeBody are the request bodies of the other two admin operations.
@@ -237,9 +346,7 @@ func KeysetOf(body proto.Message) string {
 // request/sign flow of qv-party-admin produces, in one step, for code that holds the keys (tests, drills). body is the request as the
 // caller sends it (without its AdminAuth); a 2-of-3 DKG's curve is normalized as the parties do.
 func Authorize(op string, body proto.Message, domain string, issued, expires time.Time, keys ...ed25519.PrivateKey) (*pb.AdminAuth, error) {
-	if d, ok := body.(*pb.DKGRequest); ok {
-		body = DKGBody(d.KeysetId, d.Scheme, d.Curve)
-	}
+	body = Canonical(body)
 	hash, err := BodyHash(op, body)
 	if err != nil {
 		return nil, err

@@ -15,6 +15,7 @@
 {{- $_ := set $c "key_file" "/etc/qv/party-tls/tls.key" -}}
 {{- end -}}
 {{- if gt (int $v.adminThreshold) (len $v.adminKeys) }}{{ fail "adminThreshold cannot be more than the number of adminKeys" }}{{ end -}}
+{{- if gt (int $v.adminThreshold) 32 }}{{ fail "adminThreshold cannot be more than 32: one authorization carries at most 32 signatures" }}{{ end -}}
 {{- if gt (int $v.adminThreshold) 0 }}{{- $_ := set $c "admin_threshold" (int $v.adminThreshold) -}}{{- end -}}
 {{- if not (kindIs "invalid" $v.adminAllowV1) }}{{- $_ := set $c "admin_allow_v1" $v.adminAllowV1 -}}{{- end -}}
 {{- if $v.adminDomain }}{{- $_ := set $c "admin_domain" $v.adminDomain -}}{{- end -}}
