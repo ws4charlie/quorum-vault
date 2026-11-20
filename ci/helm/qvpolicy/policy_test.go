@@ -5,7 +5,9 @@ package qvpolicy
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -536,4 +538,65 @@ func TestDeniedExamples(t *testing.T) {
 			t.Errorf("rules without a denied example:\n  %s", strings.Join(missing, "\n  "))
 		}
 	})
+}
+
+// Every optional object our charts can render is checked too: the certificate chart's trust bundles (all cluster kinds), the signing-core chart's signed-setting
+// Job, and the party chart's backup Job. A rule that rejects what our own charts or documented procedures need would break an install; a chart that breaks a rule
+// is a hole. Both are caught here.
+func TestOptionalObjectsPass(t *testing.T) {
+	_, sc, pa, pb, _ := inputs(false)
+	pemFile := filepath.Join(t.TempDir(), "ca.pem") // a placeholder certificate text: the chart only checks the PEM frame, nothing here is a secret
+	if err := os.WriteFile(pemFile, []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	certs := func(cluster string) input {
+		return input{"qv-certs " + cluster, root + "/deploy/helm/qv-certs", "qv", []string{"-f", root + "/deploy/helm/qv-certs/values.yaml", "-f", root + "/ci/helm/certs-ci-values.yaml",
+			"--set", "cluster=" + cluster, "--set-file", "trust.business=" + pemFile, "--set-file", "trust.signing=" + pemFile}}
+	}
+	job := sc
+	job.name = "qv-signing-core with the signed-setting Job"
+	job.args = append(append([]string{}, sc.args...), "--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=qv-signed-route-7-0123456789",
+		"--set", "signedSettings.job.revision=7", "--set", "signedSettings.job.files={route-1.json}")
+	backup := func(in input, name string) input {
+		in.name = name
+		in.args = append(append([]string{}, in.args...), "--set", "backup.job.enabled=true", "--set", "backup.job.keysetId=ks-1", "--set", "backup.job.outputFile=ks-1.backup",
+			"--set", "backup.job.recoveryPublicConfigMap=recovery-public-0123456789")
+		return in
+	}
+	cases := []struct {
+		kind, ns string
+		in       input
+		minPods  int
+		must     string // an object kind the render must contain, so a case cannot pass on nothing
+	}{
+		{"business", "qv", certs("business"), 0, "ConfigMap"},
+		{"signing-core", "qv", certs("signing-core"), 0, "ConfigMap"},
+		{"party", "qv", certs("party-b"), 0, "ConfigMap"},
+		{"party", "qv", certs("party-c"), 0, "ConfigMap"},
+		{"broker", "qv", certs("broker"), 0, "ConfigMap"},
+		{"signing-core", "qvs", job, 2, "Job"},
+		{"signing-core", "qvs", backup(pa, "qv-party A with the backup Job"), 2, "Job"},
+		{"party", "qv", backup(pb, "qv-party B with the backup Job"), 2, "Job"},
+	}
+	for _, c := range cases {
+		t.Run(c.kind+"/"+c.in.name, func(t *testing.T) {
+			_, ps := policies(t, c.kind, c.ns)
+			d, n := admitAll(t, ps, c.in, "v1.31")
+			for _, x := range d {
+				t.Errorf("denied: %s", x)
+			}
+			if n < c.minPods {
+				t.Errorf("only %d pods in the render, want at least %d", n, c.minPods)
+			}
+			found := false
+			for _, o := range render(t, c.in.chart, c.in.ns, c.in.args...) {
+				if qstr(o, "kind") == c.must {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("the render has no %s: the case would pass on nothing", c.must)
+			}
+		})
+	}
 }

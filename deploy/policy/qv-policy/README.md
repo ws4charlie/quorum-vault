@@ -90,6 +90,10 @@ Run in a kind cluster with this chart in kind mode plus a **production-mode copy
 9. With the application charts installed in production mode (made-up digests do not matter for the policies, signatures do): every pod starts.
 10. CEL cost: no policy is rejected with "estimated cost exceeds budget" at creation.
 
+## ConfigMaps that operators create
+
+Under the policy, a ConfigMap an operator makes for one of our pods (signed-setting files for the signing-core Job, `recovery.public` for the party backup Job, any trust bundle) must be `immutable: true`, its name must end in `-<10 hex>` (a hash of its content), and the creator must be in `configWriters`. Procedure and example: `deploy/helm/qv-signing-core/README.md` "Signed settings". `qv-certs` renders its trust bundles this way (`qv-trust-<zone>-<hash>`). The party README's backup step still says "a ConfigMap"; until that README is updated by the party chart's owner, use the same procedure (`backup.job.recoveryPublicConfigMap` is tested with a hashed name).
+
 ## Known gaps
 
 - **`qv-business` ConfigMaps are not immutable** (`qv-core-env`, `qv-worker-env`, …, no hash in the name). The business cluster therefore runs without the immutable-ConfigMap rules. Fixing it is a chart change (kind-lane hand).

@@ -9,10 +9,12 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: qv-trust-{{ $zone }}
+  name: {{ include "qv-certs.trustName" (dict "zone" $zone "pem" $pem) }}
   labels:
     {{- include "qv-certs.labels" $root | nindent 4 }}
     quorumvault.io/zone: {{ $zone }}
+    quorumvault.io/trust-bundle: {{ $zone | quote }}
+immutable: true
 data:
   ca.crt: |
     {{- $pem | trim | nindent 4 }}
