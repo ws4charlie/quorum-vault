@@ -47,6 +47,7 @@ e2e-sol-cold-crash|psi|150|3|make test-e2e-sol-cold-crash
 e2e-sol-cold-moves-crash|psi|150|3|make test-e2e-sol-cold-moves-crash
 e2e-sol-nonces|psi|90|3|make test-e2e-sol-nonces
 e2e-evm-identity|paik|100|3|make test-e2e-evm-identity
+e2e-tee-sim|pai|300|3|make test-e2e-tee-sim
 e2e-approval-web|paik|60|3|make test-e2e-approval-web
 test|p|90|1|go vet ./... && QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -short -count=1 -p 1 ./...
 mpc-signing|pa|74|1|make test-mpc

@@ -49,6 +49,7 @@ type Stack3 struct {
 	Cos     *Proc // B's cosigner
 	CosC    *Proc // C's cosigner
 
+	tee    *TEE
 	cfg    map[string]string
 	client map[string]pb.MpcPartyClient
 	conns  []*grpc.ClientConn
@@ -65,6 +66,10 @@ func Start3(t testing.TB, dir string, bin Binaries, o Opts) *Stack3 {
 	s.CertA, s.CertB, s.CertC, s.CertGW = NewCert(t, "party-a"), NewCert(t, "party-b"), NewCert(t, "party-c"), NewCert(t, "gateway")
 	s.CertCosB, s.CertCosC = NewCert(t, "cosigner-b"), NewCert(t, "cosigner-c")
 	s.adminPub, s.admin, _ = ed25519.GenerateKey(rand.Reader)
+	if o.TEE != nil { // simulated enclave: brokers, allowlist and the enrolment of the sealed TLS keys come first; they set the parties' pins
+		s.tee = &TEE{s: s, o: *o.TEE}
+		s.tee.setup()
+	}
 	s.CallerA, s.CallerB, s.CallerC, s.PeerB, s.PeerC = FreeAddr(t), FreeAddr(t), FreeAddr(t), FreeAddr(t), FreeAddr(t)
 	s.SockB = filepath.Join(os.TempDir(), fmt.Sprintf("qvcs-b-%d.sock", time.Now().UnixNano()%1e9))
 	s.SockC = filepath.Join(os.TempDir(), fmt.Sprintf("qvcs-c-%d.sock", time.Now().UnixNano()%1e9))
@@ -90,6 +95,9 @@ func Start3(t testing.TB, dir string, bin Binaries, o Opts) *Stack3 {
 	s.cfg["A"] = s.writeParty("A", o, map[string]any{"peer_address": dialB, "peer_pins": []string{pinAtoB}, "peer_c_address": dialC, "peer_c_pins": []string{pinAtoC}})
 	s.cfg["B"] = s.writeParty("B", o, map[string]any{"peer_listen": s.PeerB, "peer_pins": []string{pinBforA}, "peer_c_address": dialCfromB, "peer_c_pins": []string{pinBtoC}})
 	s.cfg["C"] = s.writeParty("C", o, map[string]any{"peer_listen": s.PeerC, "peer_a_pins": []string{pinCforA}, "peer_b_pins": []string{pinCforB}})
+	if s.tee != nil {
+		s.tee.finalize()
+	}
 	env := SoftHSMEnv()
 	s.C = NewProc(t, "party-C", filepath.Join(dir, "party-C.log"), bin.MPCParty, env, "-config", s.cfg["C"])
 	s.B = NewProc(t, "party-B", filepath.Join(dir, "party-B.log"), bin.MPCParty, env, "-config", s.cfg["B"])
@@ -140,7 +148,10 @@ func (h linkHandler) Session(in pb.Peer_SessionServer) error { return h.p.sessio
 func (s *Stack3) writeParty(role string, o Opts, extra map[string]any) string {
 	t := s.t
 	own := map[string]Cert{"A": s.CertA, "B": s.CertB, "C": s.CertC}[role]
-	crt, key := own.Write(t, s.Dir)
+	var crt, key string
+	if s.tee == nil {
+		crt, key = own.Write(t, s.Dir)
+	}
 	lim := map[string]any{"recv_timeout_ms": 5000, "session_timeout_ms": 30000, "keygen_recv_timeout_ms": 60000, "sessions_per_sec_key": 100000, "max_peer_sessions": 64}
 	if o.RecvTimeoutMS > 0 {
 		lim["recv_timeout_ms"] = o.RecvTimeoutMS
@@ -155,6 +166,12 @@ func (s *Stack3) writeParty(role string, o Opts, extra map[string]any) string {
 		"role": role, "cert_file": crt, "key_file": key, "caller_pins": []string{s.CertGW.Pin},
 		"data_dir": filepath.Join(s.Dir, "data-"+role), "admin_keys": []string{hex.EncodeToString(s.adminPub)},
 		"sealer": SealerConfig(role), "limits": lim,
+	}
+	if s.tee != nil { // simulated enclave: the TLS key is sealed in the data directory, the sealer is the attested one
+		delete(cfg, "cert_file")
+		delete(cfg, "key_file")
+		cfg["tls_sealed"] = true
+		cfg["sealer"] = s.tee.sealerCfg(role, nil)
 	}
 	switch role {
 	case "A":

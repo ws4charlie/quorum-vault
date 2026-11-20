@@ -81,6 +81,10 @@ func kafkaBrokers() string {
 // mpcMode reports whether the hot keys are two-party MPC keys (QV_CUSTODY_SIGNER=mpc) instead of HSM keys (hsm, the default).
 func mpcMode() bool { return os.Getenv("QV_CUSTODY_SIGNER") == "mpc" }
 
+// teeMode reports whether the three parties run in the SIMULATED enclave run mode (QV_CUSTODY_TEE=sim, with QV_CUSTODY_SIGNER=mpc): parties built
+// with -tags teesim on the attested sealer, one broker each (e2e/mpcstack/tee.go, docs/runbooks/tee-broker.md). Any mpc test runs in it.
+func teeMode() bool { return mpcMode() && os.Getenv("QV_CUSTODY_TEE") == "sim" }
+
 func TestMain(m *testing.M) {
 	mpcstack.ReaperMain() // in the reaper process: waits for this binary to die, kills the children, never returns
 	if err := idp.Init(); err != nil {
@@ -109,7 +113,11 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		if mpcMode() { // the production mpc-party (needs the cb-mpc build) and qv-cosigner
-			if mpcBin, err = mpcstack.Build(dir); err != nil {
+			build := mpcstack.Build
+			if teeMode() {
+				build = mpcstack.BuildTeeSim // distinct binaries, marked as simulation
+			}
+			if mpcBin, err = build(dir); err != nil {
 				buildErr = err
 			}
 		}
@@ -161,7 +169,8 @@ type opts struct {
 	// signTimeout overrides the gateway sign timeout (and with it the retry window and the lease) for a test whose signatures are
 	// made slow on purpose.
 	signTimeout string
-	mpcProxy    bool // mpc mode: A reaches B through the session proxy (partition, latency, tamper)
+	mpcProxy    bool              // mpc mode: A reaches B through the session proxy (partition, latency, tamper)
+	tee         *mpcstack.TEEOpts // tee-sim mode (QV_CUSTODY_TEE=sim): options of the simulated enclave side; nil: defaults
 	cold        *coldOpts
 	// seed is how many ETH each hot shard starts with, on chain and in the books (default 100 each). A shard that starts with 0 is dry.
 	seed []int64
@@ -408,7 +417,7 @@ func newSystem(t *testing.T, o opts) *system {
 	s.ec = ethclient.NewClient(s.rc)
 
 	if mpcMode() { // the two parties take about a second to boot: they start now, while the databases and the chain are set up, and are waited for below
-		s.mpc = mpcstack.Start3(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy})
+		s.mpc = mpcstack.Start3(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy, TEE: teeOptsFor(o)})
 		s.tm.Phase("mpc-start")
 	}
 	// Databases: the business database, and the gateway's own replay guard.
@@ -1317,4 +1326,15 @@ func (s *system) openIDs() []string {
 		rows.Close()
 	}
 	return ids
+}
+
+// teeOptsFor is the simulated enclave side of the stack (nil unless QV_CUSTODY_TEE=sim).
+func teeOptsFor(o opts) *mpcstack.TEEOpts {
+	if !teeMode() {
+		return nil
+	}
+	if o.tee != nil {
+		return o.tee
+	}
+	return &mpcstack.TEEOpts{}
 }
