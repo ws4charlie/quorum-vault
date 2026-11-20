@@ -33,7 +33,7 @@
   "properties": {
     "images": {
       "type": "object",
-      "required": ["core", "worker", "relay", "archiver", "migrate"],
+      "required": ["core", "worker", "relay", "archiver", "migrate", "approval"],
       "additionalProperties": { "$ref": "#/definitions/image" }
     },
     "runAsUser": { "const": 65532 },
@@ -57,6 +57,18 @@
       "type": "object",
       "required": ["replicas", "resources", "probes"],
       "properties": { "replicas": { "const": 1 }, "resources": { "$ref": "#/definitions/resources" }, "probes": { "$ref": "#/definitions/probes" } }
+    },
+    "approval": {
+      "type": "object",
+      "required": ["enabled", "replicas", "port", "ingress", "resources"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicas": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "clientId": { "type": "string", "minLength": 1 },
+        "ingress": { "type": "object", "required": ["host", "tlsSecret"], "properties": { "host": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$" }, "tlsSecret": { "type": "string", "minLength": 1 } } },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
     },
     "migration": { "type": "object", "properties": { "enableLogin": { "type": "boolean" } } },
     "network": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "const": true } } }

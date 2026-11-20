@@ -1,6 +1,6 @@
 {{- if .Values.podDisruptionBudgets.enabled }}
-{{- range $c := list "core" "worker" "relay" }}
-{{- if gt (int (index $.Values $c).replicas) 1 }}
+{{- range $c := list "core" "worker" "relay" "approval" }}
+{{- if and (or (ne $c "approval") $.Values.approval.enabled) (gt (int (index $.Values $c).replicas) 1) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

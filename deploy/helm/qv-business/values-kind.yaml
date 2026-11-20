@@ -7,6 +7,7 @@ images:
   relay:    { digest: "", tag: local, repository: qv-image/qv-relay }
   archiver: { digest: "", tag: local, repository: qv-image/qv-anchor-archiver }
   migrate:  { digest: "", tag: local, repository: qv-image/qv-migrate }
+  approval: { digest: "", tag: local, repository: qv-image/qv-approval-web }
 database: { host: qv-business-db-rw }
 oidc: { issuer: https://keycloak:8443/realms/qv, caSecret: qv-oidc-ca }
 archive:
@@ -28,6 +29,10 @@ relay:
   resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 256Mi } }
 archiver:
   resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 256Mi } }
+approval:                        # off, like production; `--set approval.enabled=true` turns it on
+  replicas: 1
+  ingress: { host: approval.localtest.me, tlsSecret: qv-approval-tls }
+  resources: { requests: { cpu: 25m, memory: 16Mi }, limits: { cpu: 250m, memory: 64Mi } }
 migration: { enableLogin: true }
 podDisruptionBudgets: { enabled: false }
 topologySpread: { enabled: false }

@@ -3,8 +3,8 @@
 #   docker buildx build -f deploy/images/Dockerfile --target qv-core .        (deploy/images/build.sh builds all of them; `make images`)
 #
 # Zones never mix: a final stage copies only its own zone's binaries out of the build stages.
-#   business   qv-core qv-worker qv-relay qv-anchor-archiver qv-migrate qv-tools-business (qv-guardian qv-sol-nonces)
-#   signing    qv-gateway qv-cosigner mpc-party qv-tools-signing (qv-route qv-fee-caps qv-approvers qv-btc-xpub qv-keysets qv-migrate)
+#   business   qv-core qv-worker qv-relay qv-anchor-archiver qv-migrate qv-approval-web qv-tools-business (qv-guardian qv-sol-nonces)
+#   signing    qv-gateway qv-cosigner mpc-party qv-attest-broker qv-tools-signing (qv-route qv-fee-caps qv-approvers qv-btc-xpub qv-keysets qv-migrate)
 #   not images qv-cold (offline), qv-pki (development CA, scripts/pki.sh)
 #
 # Production images contain no test-only code (no -tags devauth: no insecure sealer, no dev authorizer, no failpoints), no SoftHSM, and no secret,
@@ -13,7 +13,8 @@
 #
 # Reproducible: pinned bases (by digest), pinned Go (by SHA-256), cb-mpc at mpc-party/cbmpc.pin through the repository's own script, -trimpath,
 # -buildvcs=false, an empty build id. Pass SOURCE_DATE_EPOCH (see build.sh) so file times in the layers and the image's creation time are fixed.
-# Not pinned: the apt packages of the build stage (clang-20 from apt.llvm.org and Ubuntu's libc headers), exactly as in ci/qv-ci.Dockerfile.
+# Not pinned: the apt packages of the build stage (clang-20 from apt.llvm.org and Ubuntu's libc headers), exactly as in ci/qv-ci.Dockerfile, and SoftHSM2 in
+# the -dev images. deploy/images/README.md ("Reproducibility") says exactly which and why.
 
 # distroless 'static' (no libc) and 'cc' (glibc + libstdc++), debian13, nonroot (uid 65532), as of 2026-11-19. Multi-arch index digests.
 ARG STATIC_BASE=gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
@@ -67,7 +68,7 @@ ENV GOFLAGS="-mod=readonly -trimpath -buildvcs=false" LDFLAGS="-s -w -buildid="
 # gobin-static: no cgo anywhere in these (go list -deps shows no cgo package): static binaries for the `static` base.
 FROM src AS gobin-static
 RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; \
-    for c in qv-relay qv-anchor-archiver qv-migrate; do \
+    for c in qv-relay qv-anchor-archiver qv-migrate qv-approval-web; do \
       CGO_ENABLED=0 go build -ldflags "$LDFLAGS" -o /out/$c ./cmd/$c; \
     done
 
@@ -85,15 +86,22 @@ COPY --from=cbmpc /src/mpc-party/.deps /src/mpc-party/.deps
 RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; cd mpc-party; \
     CGO_ENABLED=1 go build -ldflags "$LDFLAGS" -o /out/mpc-party ./cmd/mpc-party
 
+# gobin-broker: qv-attest-broker (mpc-party's module): cgo for miekg/pkcs11 (dlopen of the HSM module), no cb-mpc. The production build: no -tags teesim
+# (no mock attester, no test roots; smoke.sh probes for it).
+FROM src AS gobin-broker
+RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; cd mpc-party; \
+    CGO_ENABLED=1 go build -ldflags "$LDFLAGS" -o /out/qv-attest-broker ./cmd/qv-attest-broker
+
 # bins: every binary, for the reproducibility check (build.sh repro). Not an image.
 FROM scratch AS bins
 COPY --from=gobin-static /out/ /
 COPY --from=gobin-cgo /out/ /
 COPY --from=gobin-party /out/ /
+COPY --from=gobin-broker /out/ /
 
 # dirs: empty directories owned by the non-root user, for the volumes the charts mount (a distroless image has no shell to make them).
 FROM ${UBUNTU_BASE} AS dirs
-RUN mkdir -p /d/var/lib/qv/party /d/var/lib/qv/metrics /d/run/qv /d/etc/qv && chown -R 65532:65532 /d && chmod 0750 /d/var/lib/qv/party /d/run/qv
+RUN mkdir -p /d/var/lib/qv/party /d/var/lib/qv/broker /d/var/lib/qv/metrics /d/run/qv /d/etc/qv && chown -R 65532:65532 /d && chmod 0750 /d/var/lib/qv/party /d/var/lib/qv/broker /d/run/qv
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------
 # Business zone. Config: flags or the environment (README.md). No shell, no package manager, uid 65532, nothing writes outside a mounted volume.
@@ -117,6 +125,13 @@ FROM ${STATIC_BASE} AS qv-migrate
 COPY --from=gobin-static /out/qv-migrate /usr/local/bin/qv-migrate
 ENTRYPOINT ["/usr/local/bin/qv-migrate"]
 
+# The approval page: the page's files and the server that writes its /config.json. The files are in the image (read-only, root-owned, world-readable), the
+# server runs as 65532 and writes nothing. The chart passes -dir /srv/approval, -issuer, -client-id and -api.
+FROM ${STATIC_BASE} AS qv-approval-web
+COPY --from=src /src/web/approval /srv/approval
+COPY --from=gobin-static /out/qv-approval-web /usr/local/bin/qv-approval-web
+ENTRYPOINT ["/usr/local/bin/qv-approval-web"]
+
 # Operator tools of the business zone. No entrypoint: a Job or `kubectl exec` names the tool.
 FROM ${CC_BASE} AS qv-tools-business
 COPY --from=gobin-cgo /out/qv-guardian /out/qv-sol-nonces /usr/local/bin/
@@ -139,6 +154,12 @@ COPY --from=dirs /d/run/qv /run/qv
 COPY --from=gobin-party /out/mpc-party /usr/local/bin/mpc-party
 ENTRYPOINT ["/usr/local/bin/mpc-party"]
 
+# The attestation release broker, beside each party's HSM. Its audit log needs a writable volume: /var/lib/qv/broker is provided.
+FROM ${CC_BASE} AS qv-attest-broker
+COPY --from=dirs /d/var/lib/qv/broker /var/lib/qv/broker
+COPY --from=gobin-broker /out/qv-attest-broker /usr/local/bin/qv-attest-broker
+ENTRYPOINT ["/usr/local/bin/qv-attest-broker"]
+
 # Operator tools of the signing zone. No entrypoint.
 FROM ${CC_BASE} AS qv-tools-signing
 COPY --from=gobin-cgo /out/qv-route /out/qv-fee-caps /out/qv-approvers /out/qv-btc-xpub /out/qv-keysets /usr/local/bin/
@@ -156,8 +177,8 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends softhsm
  && rm -rf /var/lib/apt/lists/* \
  && (userdel -r ubuntu 2>/dev/null || true) \
  && groupadd -g 65532 qv && useradd -u 65532 -g 65532 -M -d /nonexistent -s /usr/sbin/nologin qv \
- && mkdir -p /var/lib/qv/party /var/lib/qv/metrics /run/qv /etc/qv && chown -R 65532:65532 /var/lib/qv /run/qv /etc/qv \
- && chmod 0750 /var/lib/qv/party /run/qv
+ && mkdir -p /var/lib/qv/party /var/lib/qv/broker /var/lib/qv/metrics /run/qv /etc/qv && chown -R 65532:65532 /var/lib/qv /run/qv /etc/qv \
+ && chmod 0750 /var/lib/qv/party /var/lib/qv/broker /run/qv
 USER 65532:65532
 
 FROM dev-base AS qv-gateway-dev
@@ -171,3 +192,8 @@ ENTRYPOINT ["/usr/local/bin/qv-cosigner"]
 FROM dev-base AS mpc-party-dev
 COPY --from=gobin-party /out/mpc-party /usr/local/bin/mpc-party
 ENTRYPOINT ["/usr/local/bin/mpc-party"]
+
+# The broker with SoftHSM2 for local clusters. Same binary as production (no -tags teesim: like mpc-party-dev, the -dev variant adds SoftHSM and nothing else).
+FROM dev-base AS qv-attest-broker-dev
+COPY --from=gobin-broker /out/qv-attest-broker /usr/local/bin/qv-attest-broker
+ENTRYPOINT ["/usr/local/bin/qv-attest-broker"]
