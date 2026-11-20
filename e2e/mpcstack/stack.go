@@ -74,6 +74,17 @@ func Build(dir string) (Binaries, error) {
 	return b, err
 }
 
+// BuildPartyAdmin compiles the operator tool qv-party-admin (mpc-party/cmd/qv-party-admin) into dir.
+func BuildPartyAdmin(dir string) (string, error) {
+	p := filepath.Join(dir, "qv-party-admin")
+	cmd := exec.Command("go", "build", "-o", p, "./cmd/qv-party-admin")
+	cmd.Dir = filepath.Join(RepoRoot(), "mpc-party")
+	if o, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("build qv-party-admin: %v\n%s", err, o)
+	}
+	return p, nil
+}
+
 // RepoRoot is the root of the repository this package is in.
 func RepoRoot() string {
 	_, f, _, _ := runtime.Caller(0)
@@ -507,6 +518,9 @@ func tail(s string) string {
 	}
 	return strings.Join(l, "\n")
 }
+
+// AdminSeedHex is the operator's admin key (the seed, hex) for a key file, like Stack3.AdminSeedHex.
+func (s *Stack) AdminSeedHex() string { return hex.EncodeToString(s.admin.Seed()) }
 
 // AdminAuth is an operator signature that has not been used before (signatures are deterministic per second).
 func (s *Stack) AdminAuth(op string) *pb.AdminAuth {
