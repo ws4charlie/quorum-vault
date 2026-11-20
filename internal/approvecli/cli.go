@@ -444,23 +444,27 @@ func (c *cli) enrol(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The approver's name is the login's sub: the approval's actor is the token's sub, and the zone looks the approver up by that name. The identity is the
+	// person; it is the same by default, and differs only for a second key of one person (which needs its own login, see the runbook).
+	tok, err := c.token(ctx)
+	if err != nil {
+		return err
+	}
+	name, err := subjectOf(tok)
+	if err != nil {
+		return err
+	}
 	identity := c.o.identity
 	if identity == "" {
-		tok, err := c.token(ctx)
-		if err != nil {
-			return err
-		}
-		if identity, err = subjectOf(tok); err != nil {
-			return err
-		}
+		identity = name
 	}
 	chal := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, chal); err != nil {
 		return err
 	}
 	cd, _ := json.Marshal(map[string]any{"type": "webauthn.create", "challenge": base64.RawURLEncoding.EncodeToString(chal), "origin": origin, "crossOrigin": false})
-	uid := sha256.Sum256([]byte(identity))
-	req := ctap.MakeRequest{RPID: rpID, UserName: identity, UserID: uid[:], ClientDataHash: sha256.Sum256(cd), Algs: []ctap.Alg{ctap.EdDSA, ctap.ES256}}
+	uid := sha256.Sum256([]byte(name))
+	req := ctap.MakeRequest{RPID: rpID, UserName: name, UserID: uid[:], ClientDataHash: sha256.Sum256(cd), Algs: []ctap.Alg{ctap.EdDSA, ctap.ES256}}
 	res, err := c.key().MakeCredential(ctx, req)
 	if err != nil {
 		return fmt.Errorf("the key made no credential: %w", err)
@@ -478,7 +482,7 @@ func (c *cli) enrol(ctx context.Context) error {
 		}
 	}
 	a := cred.Attestation
-	c.out("\nCredential made for %s on %s (user verification was required and reported).\n\nWhat the key said about itself (not checked against the FIDO Metadata Service; compare by hand):\n", identity, rpID)
+	c.out("\nCredential made for %s on %s (user verification was required and reported).\n\nWhat the key said about itself (not checked against the FIDO Metadata Service; compare by hand):\n", name, rpID)
 	row := func(k, v string) {
 		if v != "" {
 			c.out("  %-22s %s\n", k, v)
@@ -495,7 +499,7 @@ func (c *cli) enrol(ctx context.Context) error {
 	row("Certificate AAGUID", a.CertAAGUID)
 	row("Certificate expires", a.CertNotAfter)
 	row("Signature counter", strconv.FormatUint(uint64(cred.SignCount), 10))
-	c.out("\nApprover entry for the operators (sign it into the zone: qv-approvers sign -action enrol -name %s -approver-file <file> ...):\n\n%s\n", identity, eb)
+	c.out("\nApprover entry for the operators (sign it into the zone: qv-approvers sign -action enrol -name %s -approver-file <file> ...):\n\n%s\n", name, eb)
 	if c.o.out != "" {
 		c.out("\n(also written to %s)\n", c.o.out)
 	}
