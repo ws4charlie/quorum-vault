@@ -54,6 +54,10 @@ ZH = {
     "Hot below its lower limit": "热钱包低于下限", "refilled from cold by people": "由人从冷钱包补充",
     # identity
     "Person": "人", "logs in with a passkey": "用通行密钥登录",
+    # api
+    "Caller": "调用者", "a person or a service": "人或服务", "checks who, records it": "核对身份，记录请求",
+    "Workflow": "工作流", "carries the work": "把事情办完", "Status": "状态", "the caller reads it later": "调用者稍后来查",
+    "checks approvals and signs, apart from the API": "核对批准并签名，与 API 分开",
     "Identity provider": "身份提供方", "signs a token": "签发令牌",
     "checks role, login age": "核对角色和登录时间",
     "Audit": "审计", "who, how, when": "谁、怎么登录、何时",
@@ -376,6 +380,15 @@ def identity():
     d.write()
 
 
+def api():
+    d = D("api", 1140, 262)
+    row(d, [("Caller", "a person or a service", "blue"), ("Core API", "checks who, records it", "green"),
+            ("Workflow", "carries the work", "amber"), ("Status", "the caller reads it later", "gray")],
+        y=20, h=100, gap=44, size=23)
+    d.box(30, 160, 1080, 76, "Signing zone", "checks approvals and signs, apart from the API", "purple")
+    d.write()
+
+
 def audit():
     d = D("audit", 1140, 330)
     gx = [30, 410, 790]
@@ -408,7 +421,7 @@ def testing():
 
 
 def build_all():
-    for f in (flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, bitcoin_sending, solana, identity, audit, testing):
+    for f in (flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, bitcoin_sending, solana, identity, api, audit, testing):
         f()
 
 

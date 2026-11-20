@@ -14,11 +14,11 @@ Two rules carry the design:
 ## Architecture
 
 <p align="center">
-<a href="docs/identity.md"><img src="docs/images/arch-operators.png" width="24%" alt="Operators and approvers"></a><br/>
+<a href="docs/people.md"><img src="docs/images/arch-operators.png" width="24%" alt="Operators and approvers"></a><br/>
 <picture><img src="docs/images/arch-a.png" width="24%" alt=""></picture><br/>
 <a href="docs/identity.md"><img src="docs/images/arch-identity.png" width="24%" alt="Identity"></a><br/>
 <picture><img src="docs/images/arch-b.png" width="24%" alt=""></picture><br/>
-<picture><img src="docs/images/arch-api.png" width="24%" alt="Core API"></picture><br/>
+<a href="docs/api.md"><img src="docs/images/arch-api.png" width="24%" alt="Core API"></a><br/>
 <picture><img src="docs/images/arch-down.png" width="72%" alt=""></picture><br/>
 <a href="docs/workflows.md"><img src="docs/images/arch-workflows.png" width="24%" alt="Workflows"></a><a href="docs/ledger.md"><img src="docs/images/arch-ledger.png" width="24%" alt="Ledger"></a><a href="docs/audit.md"><img src="docs/images/arch-audit.png" width="24%" alt="Audit trail"></a><br/>
 <picture><img src="docs/images/arch-merge.png" width="72%" alt=""></picture><br/>
@@ -37,6 +37,8 @@ Two rules carry the design:
 
 | Area | What it does |
 |---|---|
+| [People](docs/people.md) | Who asks, who approves, who runs it, and how each proves it |
+| [Core API](docs/api.md) | The one door in: checks who asks, records it, hands the work on |
 | [Ledger](docs/ledger.md) | Records every coin in double entry and checks it against the chain |
 | [Workflows](docs/workflows.md) | Carries each deposit, sweep and withdrawal through a crash |
 | [Signing zone](docs/signing-zone.md) | Checks every payment before any key signs |

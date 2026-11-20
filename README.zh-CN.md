@@ -14,11 +14,11 @@
 ## 架构
 
 <p align="center">
-<a href="docs/zh/identity.md"><img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"></a><br/>
+<a href="docs/zh/people.md"><img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"></a><br/>
 <picture><img src="docs/images/zh/arch-a.png" width="24%" alt=""></picture><br/>
 <a href="docs/zh/identity.md"><img src="docs/images/zh/arch-identity.png" width="24%" alt="身份"></a><br/>
 <picture><img src="docs/images/zh/arch-b.png" width="24%" alt=""></picture><br/>
-<picture><img src="docs/images/zh/arch-api.png" width="24%" alt="核心 API"></picture><br/>
+<a href="docs/zh/api.md"><img src="docs/images/zh/arch-api.png" width="24%" alt="核心 API"></a><br/>
 <picture><img src="docs/images/zh/arch-down.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/workflows.md"><img src="docs/images/zh/arch-workflows.png" width="24%" alt="工作流"></a><a href="docs/zh/ledger.md"><img src="docs/images/zh/arch-ledger.png" width="24%" alt="账本"></a><a href="docs/zh/audit.md"><img src="docs/images/zh/arch-audit.png" width="24%" alt="审计记录"></a><br/>
 <picture><img src="docs/images/zh/arch-merge.png" width="72%" alt=""></picture><br/>
@@ -37,6 +37,8 @@
 
 | 部分 | 作用 |
 |---|---|
+| [人员](docs/zh/people.md) | 谁发起、谁批准、谁运营，各自怎么证明身份 |
+| [核心 API](docs/zh/api.md) | 唯一入口：核对请求者、记录请求、把工作交出去 |
 | [账本](docs/zh/ledger.md) | 每一枚币都用复式记账，并和链上对账 |
 | [工作流](docs/zh/workflows.md) | 保证每笔存款、归集、提现在崩溃后也能走完 |
 | [签名区](docs/zh/signing-zone.md) | 每笔付款签名前都要核对 |
