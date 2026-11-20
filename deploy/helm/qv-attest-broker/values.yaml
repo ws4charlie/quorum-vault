@@ -1,0 +1,102 @@
+# qv-attest-broker: production defaults. One release = the broker of ONE party. values-kind.yaml overrides what differs on a local cluster.
+# Required per release (the chart refuses to render without them): party.role, party.callerPins, images (digest), operators.keys, trustRoots.configMap, allowlist.file,
+# and the HSM module volume. See README.md ("Values you must set") and "Where it runs" (why one broker per party, and in whose hands).
+
+nameOverride: ""
+
+# Exactly one pod, always. The broker is a single writer: its nonces are in memory, its audit log is one hash chain, and the HSM token (or its files) has one user. The schema
+# accepts only 1: a second replica would refuse the first one's challenges and fork the audit chain.
+replicas: 1
+
+imagePullPolicy: IfNotPresent
+imagePullSecrets: []
+# The image is referenced by DIGEST in production (a tag is refused there). The all-zero digest is a placeholder: the chart refuses to render it.
+images:
+  broker: { repository: ghcr.io/ws4charlie/quorum-vault/qv-attest-broker, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+
+runAsUser: 65532
+
+# The environment. "" = production. dev and test are the only values that allow SoftHSM and the simulated attestation (the broker's own rule: QV_ENV).
+env: ""
+
+# SIMULATED enclave (tee-sim) ONLY. True means the image is the broker built with -tags teesim (it accepts a TEST ONLY evidence root). Refused unless env is dev or test and the
+# image is referenced by tag, never by digest. Never in production.
+simulation: false
+
+ports: { mtls: 8443, health: 8444 }
+
+# The party whose keys this broker releases. The broker lists exactly one party: a broker that released the keys of several parties would be one place where 2-of-3 falls
+# (README "Where it runs").
+party:
+  role: ""                              # A, B or C
+  # SHA-256 pins (hex) of the public key of the certificate this party's pod uses on the link to the broker (`sealer.broker_cert_file`). Several during a rotation.
+  callerPins: []
+
+# The operators whose signatures make an allowlist valid: their Ed25519 PUBLIC keys (64 hex). minOperators of them must sign.
+operators:
+  minOperators: 2
+  keys: {}                              # name: <public key, 64 hex>
+
+# The evidence root(s): a ConfigMap you made (public certificate, PEM), mounted read-only. AWS Nitro root G1 in production (task T7); the test root in simulation.
+trustRoots:
+  configMap: ""
+  key: root.pem
+
+# The signed allowlist (what measurement may get which party's key, with validity), as the JSON text the operators signed:
+#   helm upgrade ... --set-file allowlist.file=allowlist.json
+# It becomes an immutable ConfigMap named with a hash of its content, so a new list is a new ConfigMap and a rollout of the pod (about a minute with the broker unreachable).
+# The mount is one file; the broker re-reads it by itself too (reloadInterval, SIGHUP) for installations that replace the file in place.
+allowlist:
+  file: ""
+
+reloadInterval: 10s                     # allowlist poll
+nonceTTL: 60s
+rate:
+  perMinute: 600                        # per party: challenge and key calls together (a start needs 2 calls per keyset plus 2)
+  burst: 100
+
+# Certificate of the broker's mutual-TLS listener: a Secret with tls.crt and tls.key, made by cert-manager (chart qv-certs). Empty = qv-attest-broker-<role in lower case>-tls.
+# The parties pin its public key (`sealer.broker_pins`), so it is long-lived.
+tls:
+  secretName: ""
+
+# --- Key storage. The wrapping key of the party is a non-extractable AES-256 key in a PKCS#11 token, made by the broker at its first start. ---
+hsm:
+  token: ""                             # PKCS#11 token label; empty = qv-attest-<role in lower case>
+  # Production: the vendor's PKCS#11 module comes from a volume you name (the image has none), mounted read-only at /etc/qv/hsm; module.path must lie under it.
+  module:
+    path: ""                            # e.g. /etc/qv/hsm/libcloudhsm_pkcs11.so
+    volume: {}                          # a Kubernetes volume source
+  # The PIN: a Secret with the key `pin`, mounted as a file. Never an environment variable, never in values.
+  pinSecret: qv-attest-broker-hsm-pin
+  # Development and kind ONLY: SoftHSM on the data volume. Needs env dev or test and the -dev (or tee-sim) image referenced by tag.
+  softhsm:
+    enabled: false
+    soPinSecret: qv-attest-broker-hsm-so-pin   # key `so-pin`; used only by the token-making init container
+
+# The one volume: the audit log (hash-chained, fsynced) and, in development, the SoftHSM token. ReadWriteOncePod: a second pod can never mount it.
+persistence:
+  size: 2Gi
+  storageClassName: ""
+  accessModes: [ReadWriteOncePod]
+
+scheduling: { nodeSelector: {}, tolerations: [], affinity: {}, priorityClassName: "" }
+serviceAccount: { annotations: {} }     # workload identity for a cloud HSM, if any; the token is never mounted
+resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: "1", memory: 256Mi } }
+
+# ClusterIP, or a LoadBalancer that is PRIVATE (an internal-load-balancer annotation and sourceRanges are required), for a party in another cluster.
+service: { type: ClusterIP, annotations: {}, sourceRanges: [] }
+
+# --- Network policies: default deny, then one allow per path. A list that is empty is no rule at all. ---
+network:
+  dns: { to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }, podSelector: { matchLabels: { k8s-app: kube-dns } } }] }
+  # REQUIRED: who may reach the mutual-TLS port: the private-endpoint addresses (or, in one cluster, the pods) of THIS party. Nothing else gets in.
+  partyIngress: { from: [] }
+  # Optional: a scraper that may reach the health port (/healthz, /metrics). Empty = nobody (the kubelet probes are not affected).
+  metricsIngress: { from: [] }
+  # A network HSM (CloudHSM, Luna): its addresses and ports; empty for an HSM reached some other way. The only egress besides DNS.
+  hsm: { to: [], ports: [] }
+
+# A node drain waits for you. maxUnavailable 0 stops the eviction of the single pod: its outage blocks every restart of the party and every DKG or refresh until it is back,
+# so a drain is a decision (README "Operating"). Set 1 to allow it.
+podDisruptionBudget: { enabled: true, maxUnavailable: 0 }

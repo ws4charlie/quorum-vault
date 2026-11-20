@@ -1,0 +1,28 @@
+{{- include "qab.guards" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "qab.fullname" . }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: false
+---
+{{/* The mutual-TLS port only. The health port (probes, /metrics) is not published by any Service. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qab.fullname" . }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- if eq .Values.service.type "LoadBalancer" }}
+  loadBalancerSourceRanges: {{- toYaml .Values.service.sourceRanges | nindent 4 }}
+  {{- end }}
+  selector: {{- include "qab.selector" . | nindent 4 }}
+  ports:
+    - { name: mtls, port: {{ .Values.ports.mtls }}, targetPort: mtls, protocol: TCP }

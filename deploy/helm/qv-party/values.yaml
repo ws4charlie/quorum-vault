@@ -49,12 +49,40 @@ limits:
 
 # --- Sealer and HSM ---
 sealer:
-  type: pkcs11                          # pkcs11 | attested (EXTENSION POINT, see below)
-  # attested is built by the TEE tasks (attested sealer, attestation broker). Whatever you put here is merged into the sealer block of the party config as is, once that
-  # sealer exists. Until then the chart refuses sealer.type=attested: it would start a pod that cannot unseal.
-  attested: {}
-attestBroker:
-  enabled: false                        # EXTENSION POINT: the attestation broker is not part of this chart yet; true is refused
+  type: pkcs11                          # pkcs11 | attested (the attested sealer: see `attested` below)
+# The environment. "" = production. dev and test are the only values that allow the SIMULATED attester (attested.attester.type mock), as SoftHSM is allowed only with
+# hsm.softhsm.enabled (QV_ENV=dev). The chart refuses either with an image referenced by digest.
+env: ""
+
+# --- Attested mode (sealer.type attested): the party holds no key of its own. At start it proves its measured image to its attestation broker (chart qv-attest-broker) and gets
+# its data keys back; with tlsSealed its TLS key is made inside and sealed too (docs/runbooks/tee-broker.md). The mode replaces the HSM: no PIN file and no PKCS#11 module are
+# mounted (the PKCS#11 settings below are read only by the one-time migration Job, phase migrate). ---
+attested:
+  # run (default): the party StatefulSet. enrol and migrate render ONLY their Job and no StatefulSet (the data volume has one user, and the party must not run): each stops the party
+  # on purpose, so each needs stopPartyAck. See README "Attested mode".
+  phase: run
+  stopPartyAck: false
+  broker:
+    url: ""                             # https://<broker service or private endpoint>:8443; REQUIRED
+    pins: []                            # SHA-256 pins (hex) of the broker's certificate public key; REQUIRED
+  # The party's TLS key is made inside the party (mpc-party tls-init) and kept sealed in the data volume: no tls.key is ever in a Secret. Then the party-tls Secret is not mounted and
+  # the pin (printed by the enrolment Job) goes into the peers' and the cosigner's values. false keeps the certificate of tls.party (the link to the broker then uses it too).
+  tlsSealed: true
+  # Certificate for the link to the broker when tlsSealed (the sealed key cannot open the link that releases the keys): a Secret with tls.crt and tls.key made by cert-manager.
+  # The broker lists its pin (qv-attest-broker party.callerPins). Empty = mpc-party-<role in lower case>-broker-link-tls.
+  linkSecret: ""
+  attester:
+    type: ""                            # mock (SIMULATION: env dev or test, image by tag, the tee-sim image). The Nitro attester is not built yet: any other value is refused.
+    mock:
+      caSecret: ""                      # mock: a Secret with root.crt, intermediate.crt, intermediate.key (the TEST CA, made by qv-attest-ca outside the repository); REQUIRED
+  enrol:
+    name: manual                        # part of the Job name; change it to run the Job again (it is idempotent: a second run prints the same pin and changes nothing)
+    timeoutSeconds: 600
+    resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: "1", memory: 512Mi } }
+  migrate:
+    name: manual
+    timeoutSeconds: 3600
+    resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { cpu: "2", memory: 1Gi } }
 hsm:
   token: ""                             # PKCS#11 token label; empty = qv-party-1, -2, -3 for A, B, C
   # Production: the vendor's PKCS#11 module comes from a volume you name (the image has none). It is mounted read-only at /etc/qv/hsm; module.path must lie under it.
@@ -133,6 +161,7 @@ network:
   kafka: { to: [], ports: [9092] }           # B, C: the business Kafka over the explicit link (outward only)
   metricsRemoteWrite: { to: [], ports: [443] }   # REQUIRED when metrics.agent.enabled: the monitoring endpoint, outward only. NetworkPolicy is per pod: it applies to every container of the pod
   hsm: { to: [], ports: [] }            # a network HSM (CloudHSM, Luna): its addresses and ports; empty for an HSM reached some other way
+  broker: { to: [], ports: [8443] }     # attested mode: the attestation broker (its private endpoint, or in one cluster its pod), outward only; REQUIRED then
 operator:
   # Pods with this label (in this namespace) may reach the caller port: the in-cluster admin Job or bastion pod of that party's operators (README "Operators").
   podLabel: { quorumvault.io/party-operator: "true" }

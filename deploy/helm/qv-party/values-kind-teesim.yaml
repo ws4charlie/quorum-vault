@@ -1,0 +1,14 @@
+# Local kind cluster, attested mode, SIMULATED enclave (tee-sim). Layered AFTER values-kind.yaml: it takes SoftHSM away again (the attested sealer uses no HSM), switches the image to the
+# tee-sim build of mpc-party (it contains the mock attester and qv-attest-ca; never published) and sets what a release must still give per party:
+#   --set attested.broker.url=https://<broker service of this party>:8443  --set attested.broker.pins='{<pin>}'  --set attested.attester.mock.caSecret=<Secret with the TEST CA>
+#   --set network.broker.to=...  and, from the enrolment, the pins of the three parties (README "Attested mode", docs/runbooks/tee-broker.md "on Kubernetes").
+env: dev
+images:
+  party: { digest: "", tag: local, repository: qv-image/mpc-party-teesim }
+sealer: { type: attested }
+hsm:
+  softhsm: { enabled: false }
+attested:
+  phase: run
+  tlsSealed: true
+  attester: { type: mock }

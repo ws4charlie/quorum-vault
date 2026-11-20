@@ -279,18 +279,6 @@
             "pkcs11",
             "attested"
           ]
-        },
-        "attested": {
-          "type": "object"
-        }
-      }
-    },
-    "attestBroker": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
         }
       }
     },
@@ -711,6 +699,32 @@
               }
             }
           }
+        },
+        "broker": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
         }
       }
     },
@@ -760,6 +774,103 @@
               "additionalProperties": {
                 "type": "string"
               }
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "env": {
+      "enum": [
+        "",
+        "dev",
+        "test"
+      ]
+    },
+    "attested": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "phase": {
+          "enum": [
+            "run",
+            "enrol",
+            "migrate"
+          ]
+        },
+        "stopPartyAck": {
+          "type": "boolean"
+        },
+        "broker": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "pins": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "tlsSealed": {
+          "type": "boolean"
+        },
+        "linkSecret": {
+          "type": "string"
+        },
+        "attester": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "mock": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "caSecret": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "enrol": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 30
+            },
+            "resources": {
+              "type": "object"
+            }
+          }
+        },
+        "migrate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "pattern": "^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 60
             },
             "resources": {
               "type": "object"

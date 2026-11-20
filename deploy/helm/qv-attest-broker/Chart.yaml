@@ -1,0 +1,7 @@
+apiVersion: v2
+name: qv-attest-broker
+description: The attestation release broker (qv-attest-broker) of ONE MPC party, as a single-writer StatefulSet in its own trust zone. It checks a party's attestation against a signed allowlist and releases that party's sealing key. Install it once per party, in a cluster that neither that party's operators nor the business zone administer. The HSM, the certificates and the allowlist file are referenced or passed in, not bundled.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"

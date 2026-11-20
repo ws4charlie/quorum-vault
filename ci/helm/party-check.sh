@@ -19,3 +19,18 @@ for kind in production kind; do
     kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" "$out/$kind-$role.yaml"
   done
 done
+# Attested mode (SIMULATED enclave, the tee-sim values): the running party and the two phases that render only a Job (enrol, migrate), for every role
+for role in A B C; do
+  rel="qv-party-$(echo "$role" | tr 'A-Z' 'a-z')"
+  base=(-f "$chart/values.yaml" -f ci/helm/ci-party-values.yaml -f "$chart/values-kind.yaml" -f "$chart/values-kind-teesim.yaml" -f ci/helm/ci-party-attested.yaml)
+  for phase in run enrol migrate; do
+    extra=(--set "attested.phase=$phase")
+    [ "$phase" = run ] || extra+=(--set attested.stopPartyAck=true)
+    [ "$phase" = migrate ] && extra+=(--set attested.tlsSealed=false --set hsm.softhsm.enabled=true)
+    echo "== qv-party attested role $role phase $phase: lint"
+    helm lint "$chart" --strict --set "role=$role" "${base[@]}" "${extra[@]}"
+    echo "== qv-party attested role $role phase $phase: template + kubeconform (Kubernetes $KUBE_VERSION)"
+    helm template "$rel" "$chart" --namespace qv --set "role=$role" "${base[@]}" "${extra[@]}" > "$out/attested-$role-$phase.yaml"
+    kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" "$out/attested-$role-$phase.yaml"
+  done
+done

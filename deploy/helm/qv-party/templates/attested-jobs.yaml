@@ -1,0 +1,157 @@
+{{- /*
+  Attested mode, the two steps that run while the party does NOT (docs/runbooks/tee-broker.md). The data volume can be mounted by ONE pod (ReadWriteOncePod), so each step is a phase of the
+  release (attested.phase): it renders its Job and no StatefulSet. The upgrade that enters the phase stops the party (attested.stopPartyAck says so); the upgrade that leaves it starts the
+  party again from the same volume.
+    enrol    first install only: mpc-party tls-init makes the party's TLS key inside, seals it, prints the pin. The Job's measurement (its config file is enroll.json) must be on the broker's allowlist
+             while it runs, and not afterwards.
+    migrate  mpc-party migrate-seal: from the PKCS#11 sealer to the attested sealer, one way, re-runnable. -from is the old config, -to is the running config (the image the attester measures).
+*/ -}}
+{{- include "qp.guards" . -}}
+{{- $v := .Values -}}
+{{- $phase := include "qp.phase" . -}}
+{{- if eq $phase "enrol" }}
+{{- /* The data volume, made here because there is no StatefulSet yet to make it. The StatefulSet of the next phase finds it by its name and uses it. `keep`: Helm never deletes it when it leaves the release. */}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "data-%s-0" (include "qp.fullname" .) | quote }}
+  labels: {{- include "qp.selector" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: {{ toJson $v.persistence.accessModes }}
+  {{- with $v.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $v.persistence.size | quote }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" (printf "enrol-%s" $v.attested.enrol.name)) }}
+  labels: {{- include "qp.jobLabelsFor" (dict "ctx" . "c" "party-enrol") | nindent 4 }}
+spec:
+  # The Job is idempotent (a second run prints the same pin and changes nothing), but a failure is not retried by the pod: the usual failure is "not allowlisted" (README), which an operator fixes, then
+  # runs the Job again under another attested.enrol.name.
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ int $v.attested.enrol.timeoutSeconds }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {{- include "qp.jobLabelsFor" (dict "ctx" . "c" "party-enrol") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "qp.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext: {{- include "qp.podSecurityContext" . | nindent 8 }}
+      {{- include "qp.pullSecrets" . | nindent 6 }}
+      {{- with $v.scheduling.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.scheduling.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: tls-init
+          image: {{ include "qp.image" (dict "ctx" . "k" "party") | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          args: ["tls-init", "-config", "/etc/qv/enrol/enroll.json"]
+          env:
+            - { name: QV_ENV, value: {{ $v.env | quote }} }
+          resources: {{- toYaml $v.attested.enrol.resources | nindent 12 }}
+          securityContext: {{- include "qp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: enrol, mountPath: /etc/qv/enrol, readOnly: true }
+            - { name: data, mountPath: /var/lib/qv/party }
+            - { name: broker-link, mountPath: /etc/qv/broker-link, readOnly: true }
+            - { name: attester-ca, mountPath: /etc/qv/attester-ca, readOnly: true }
+      volumes:
+        - name: enrol
+          configMap: { name: {{ include "qp.enrolConfigName" . }}, defaultMode: 288 }
+        - name: data
+          persistentVolumeClaim: { claimName: {{ printf "data-%s-0" (include "qp.fullname" .) | quote }} }
+        {{- include "qp.secretVolume" (dict "name" "broker-link" "secret" (include "qp.linkSecret" .)) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "attester-ca" "secret" $v.attested.attester.mock.caSecret) | nindent 8 }}
+{{- end }}
+{{- if eq $phase "migrate" }}
+{{- $soft := $v.hsm.softhsm.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" (printf "migrate-%s" $v.attested.migrate.name)) }}
+  labels: {{- include "qp.jobLabelsFor" (dict "ctx" . "c" "party-migrate") | nindent 4 }}
+spec:
+  # One way, but re-runnable: after a failure the command finishes or restarts from the staged set (it never touches the old files before its COMMITTED marker). The pod is not retried by Kubernetes:
+  # read the log, then run the Job again under another attested.migrate.name.
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ int $v.attested.migrate.timeoutSeconds }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {{- include "qp.jobLabelsFor" (dict "ctx" . "c" "party-migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "qp.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext: {{- include "qp.podSecurityContext" . | nindent 8 }}
+      {{- include "qp.pullSecrets" . | nindent 6 }}
+      {{- with $v.scheduling.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.scheduling.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate-seal
+          image: {{ include "qp.image" (dict "ctx" . "k" "party") | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          args: ["migrate-seal", "-from", "/etc/qv/config-from/party-pkcs11.json", "-to", "/etc/qv/config/party.json"]
+          env:
+            {{- with (include "qp.qvEnv" .) }}
+            - { name: QV_ENV, value: {{ . | quote }} }
+            {{- end }}
+            {{- if $soft }}
+            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }
+            {{- end }}
+          resources: {{- toYaml $v.attested.migrate.resources | nindent 12 }}
+          securityContext: {{- include "qp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: config, mountPath: /etc/qv/config, readOnly: true }
+            - { name: config-from, mountPath: /etc/qv/config-from, readOnly: true }
+            - { name: party-tls, mountPath: /etc/qv/party-tls, readOnly: true }
+            - { name: data, mountPath: /var/lib/qv/party }
+            - { name: attester-ca, mountPath: /etc/qv/attester-ca, readOnly: true }
+            - { name: hsm-pin, mountPath: /etc/qv/hsm-pin, readOnly: true }
+            {{- if $soft }}
+            - { name: softhsm-conf, mountPath: /etc/qv/softhsm, readOnly: true }
+            {{- else }}
+            - { name: hsm-module, mountPath: /etc/qv/hsm, readOnly: true }
+            {{- end }}
+      volumes:
+        - name: config
+          configMap: { name: {{ include "qp.partyConfigName" . }}, defaultMode: 288 }
+        - name: config-from
+          configMap: { name: {{ include "qp.fromConfigName" . }}, defaultMode: 288 }
+        - name: data
+          persistentVolumeClaim: { claimName: {{ printf "data-%s-0" (include "qp.fullname" .) | quote }} }
+        {{- include "qp.secretVolume" (dict "name" "party-tls" "secret" (include "qp.partySecret" .)) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "attester-ca" "secret" $v.attested.attester.mock.caSecret) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "hsm-pin" "secret" $v.hsm.pinSecret) | nindent 8 }}
+        {{- if $soft }}
+        - name: softhsm-conf
+          configMap: { name: {{ include "qp.softhsmConfigName" . }} }
+        {{- else }}
+        - name: hsm-module
+          {{- toYaml $v.hsm.module.volume | nindent 10 }}
+        {{- end }}
+{{- end }}

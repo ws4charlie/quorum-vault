@@ -40,6 +40,7 @@ type Contract struct {
 	Images         map[string]ImageContract `json:"images"`
 	ExternalImages map[string]any           `json:"externalImages"`
 	DevImages      map[string]DevImage      `json:"devImages"`
+	SimImages      map[string]DevImage      `json:"simImages"` // tee-sim variants (task Broker-chart): checked like a -dev image, not part of images.sh
 }
 
 // DevImage is a SoftHSM variant of a production image: the same binary, and an environment it must run with.

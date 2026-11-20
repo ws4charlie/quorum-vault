@@ -1,8 +1,11 @@
 {{- include "qp.guards" . -}}
+{{- if eq (include "qp.phase" .) "run" }}
 {{- $role := include "qp.role" . -}}
 {{- $cos := ne $role "A" -}}
 {{- $soft := .Values.hsm.softhsm.enabled -}}
 {{- $pkcs := eq .Values.sealer.type "pkcs11" -}}
+{{- $att := eq .Values.sealer.type "attested" -}}
+{{- $sealed := include "qp.sealedTLS" . -}}
 {{- $v := .Values -}}
 {{- /* The pod's stop bound: the party stops sessions after limits.shutdownGraceMs; the pod gets that plus 20 s (deploy/images/README.md). The cosigner needs 30 s at most. */ -}}
 {{- $grace := max 30 (add (div (int $v.limits.shutdownGraceMs) 1000) 20) -}}
@@ -85,8 +88,10 @@ spec:
           args: ["-config", "/etc/qv/config/party.json"]
           env:
             - { name: QV_HEALTH_LISTEN, value: {{ printf "0.0.0.0:%d" (int $v.ports.health) | quote }} }
+            {{- with (include "qp.qvEnv" .) }}
+            - { name: QV_ENV, value: {{ . | quote }} }
+            {{- end }}
             {{- if $soft }}
-            - { name: QV_ENV, value: dev }
             - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }
             {{- end }}
           {{- include "qp.probes" (dict "port" $v.ports.health) | nindent 10 }}
@@ -94,8 +99,16 @@ spec:
           securityContext: {{- include "qp.containerSecurityContext" . | nindent 12 }}
           volumeMounts:
             - { name: config, mountPath: /etc/qv/config, readOnly: true }
+            {{- if not $sealed }}
             - { name: party-tls, mountPath: /etc/qv/party-tls, readOnly: true }
+            {{- end }}
             - { name: data, mountPath: /var/lib/qv/party }
+            {{- if $att }}
+            {{- if $sealed }}
+            - { name: broker-link, mountPath: /etc/qv/broker-link, readOnly: true }
+            {{- end }}
+            - { name: attester-ca, mountPath: /etc/qv/attester-ca, readOnly: true }
+            {{- end }}
             {{- if $pkcs }}
             - { name: hsm-pin, mountPath: /etc/qv/hsm-pin, readOnly: true }
             {{- if $soft }}
@@ -163,7 +176,16 @@ spec:
       volumes:
         - name: config
           configMap: { name: {{ include "qp.partyConfigName" . }}, defaultMode: 288 }
+        {{- if not $sealed }}
         {{- include "qp.secretVolume" (dict "name" "party-tls" "secret" (include "qp.partySecret" .)) | nindent 8 }}
+        {{- end }}
+        {{- if $att }}
+        {{- if $sealed }}
+        {{- include "qp.secretVolume" (dict "name" "broker-link" "secret" (include "qp.linkSecret" .)) | nindent 8 }}
+        {{- end }}
+        {{- /* The TEST CA of the SIMULATED attester (the mock signs its evidence with it). Only the tee-sim image can use it; guards refuse the mock outside env dev or test. */}}
+        {{- include "qp.secretVolume" (dict "name" "attester-ca" "secret" .Values.attested.attester.mock.caSecret) | nindent 8 }}
+        {{- end }}
         {{- if $pkcs }}
         {{- include "qp.secretVolume" (dict "name" "hsm-pin" "secret" $v.hsm.pinSecret) | nindent 8 }}
         {{- if $soft }}
@@ -208,3 +230,4 @@ spec:
         resources:
           requests:
             storage: {{ $v.persistence.size | quote }}
+{{- end }}
