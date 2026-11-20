@@ -65,6 +65,8 @@ type Verifier struct {
 	shard  map[string]shardInfo // partition ID -> its own shard
 	cold   map[string]string    // pool -> canonical cold address
 	view   *FeeCapsView         // the fee caps in force (feecaps.go); the static ones until BindFeeCaps
+	// gens are the later generations of the account key this verifier knows (WithGenerations), sorted; generation 1 is the configured xpub.
+	gens []uint32
 }
 
 type shardInfo struct {
@@ -158,6 +160,82 @@ func OneShardPerPool(partitions []string) error {
 	return nil
 }
 
+// DepositGen is a later generation of the account key (deposit tree and the hot shards derived from it) as the zone's signed records give it.
+type DepositGen struct {
+	Gen  uint32
+	Xpub string
+}
+
+// WithGenerations returns a copy of v that also derives under the given generations (2 and up; the same fee caps view, the same pinned shards). A
+// payload that names a generation v does not know is refused, because its input scripts cannot be derived. v itself is not changed.
+func (v *Verifier) WithGenerations(gs []DepositGen) (*Verifier, error) {
+	acct, err := NewAccount(v.cfg.Network, v.cfg.AccountXpub)
+	if err != nil {
+		return nil, err
+	}
+	by := map[uint32]string{}
+	var list []uint32
+	for _, g := range gs {
+		if g.Gen < 2 {
+			return nil, fmt.Errorf("btc: generation %d: the configured xpub is generation 1", g.Gen)
+		}
+		if _, dup := by[g.Gen]; dup {
+			return nil, fmt.Errorf("btc: generation %d given twice", g.Gen)
+		}
+		by[g.Gen] = g.Xpub
+		list = append(list, g.Gen)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i] < list[j] })
+	acct.SetGenerationLoader(func(gen uint32) (string, error) {
+		x, ok := by[gen]
+		if !ok {
+			return "", fmt.Errorf("btc: this zone knows no account key for deposit generation %d", gen)
+		}
+		return x, nil
+	})
+	nv := *v
+	nv.acct, nv.gens = acct, list
+	return &nv, nil
+}
+
+// genOf normalizes the generation of a payload input: absent (0) is generation 1.
+func genOf(g uint32) uint32 {
+	if g == 0 {
+		return 1
+	}
+	return g
+}
+
+// ShardAddressAt is the address of the hot shard of partition under generation gen of the account key: the pinned address for generation 1, derived
+// from the generation's xpub after.
+func (v *Verifier) ShardAddressAt(partitionID string, gen uint32) (string, error) {
+	own, ok := v.shard[partitionID]
+	if !ok {
+		return "", fmt.Errorf("btc: partition %q has no pinned hot shard", partitionID)
+	}
+	return v.shardAt(own, gen)
+}
+
+func (v *Verifier) shardAt(own shardInfo, gen uint32) (string, error) {
+	if gen <= 1 {
+		return own.addr, nil
+	}
+	return v.acct.AddressAt(gen, own.path)
+}
+
+// genOfHot says which generation's hot shard address addr is (0: none of the generations this verifier knows).
+func (v *Verifier) genOfHot(own shardInfo, addr string) uint32 {
+	if addr == own.addr {
+		return 1
+	}
+	for _, g := range v.gens {
+		if a, err := v.shardAt(own, g); err == nil && a == addr {
+			return g
+		}
+	}
+	return 0
+}
+
 func reject(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrRejected}, args...)...)
 }
@@ -167,6 +245,7 @@ type Parsed struct {
 	Payload Payload
 	Built   *Unsigned
 	Index   int // the input the job signs
+	Gen     uint32 // the generation of the account key every input is under (1: the configured one)
 	Fee     uint64
 	Sum     uint64 // the sum of the inputs
 	outs    []Decoded
@@ -200,12 +279,18 @@ func (v *Verifier) Parse(u chain.UnsignedTx) (*Parsed, error) {
 		if err := CheckPath(in.Path); err != nil {
 			return nil, reject("input %d: %v", n, err)
 		}
+		if in.Gen == 1 {
+			return nil, reject("input %d: generation 1 is written as no generation", n)
+		}
+		if in.Gen != p.Inputs[0].Gen {
+			return nil, reject("input %d is under deposit generation %d, input 0 under %d: one transaction spends one generation", n, genOf(in.Gen), genOf(p.Inputs[0].Gen))
+		}
 	}
 	built, err := BuildUnsigned(p, v.acct)
 	if err != nil {
 		return nil, reject("%v", err)
 	}
-	pr := &Parsed{Payload: p, Built: built, Index: -1}
+	pr := &Parsed{Payload: p, Built: built, Index: -1, Gen: genOf(p.Inputs[0].Gen)}
 	for i, d := range built.Digests {
 		if bytes.Equal(d, u.Digest) {
 			pr.Index = i
@@ -215,7 +300,7 @@ func (v *Verifier) Parse(u chain.UnsignedTx) (*Parsed, error) {
 	if pr.Index < 0 {
 		return nil, reject("digest %x is the sighash of none of the %d inputs", u.Digest, len(p.Inputs))
 	}
-	if want := PathString(p.Inputs[pr.Index].Path); u.KeyRef.Path != want {
+	if want := chain.KeyPathAt(int(pr.Gen), PathString(p.Inputs[pr.Index].Path)); u.KeyRef.Path != want {
 		return nil, reject("the digest is for input %d, which is signed under key path %s, not %q", pr.Index, want, u.KeyRef.Path)
 	}
 	for _, in := range p.Inputs {
@@ -285,6 +370,10 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 	if !ok {
 		return reject("partition %q has no pinned hot shard", i.PartitionID)
 	}
+	ownA, err := v.shardAt(own, pr.Gen) // the partition's shard under the generation the inputs are under
+	if err != nil {
+		return reject("%v", err)
+	}
 	ownInputs := func(what string) error {
 		for n, in := range p.Inputs {
 			if PathString(in.Path) != PathString(own.path) {
@@ -305,8 +394,8 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		if pr.outs[0].Canonical != to.Canonical || p.Outputs[0].Value != amount.Uint64() {
 			return reject("the first output pays %d to %s, the intent is %s to %s", p.Outputs[0].Value, pr.outs[0].Canonical, i.Amount, to.Canonical)
 		}
-		if len(p.Outputs) == 2 && pr.outs[1].Canonical != own.addr {
-			return reject("change goes to %s, not the partition's own shard %s", pr.outs[1].Canonical, own.addr)
+		if len(p.Outputs) == 2 && pr.outs[1].Canonical != ownA {
+			return reject("change goes to %s, not the partition's own shard %s", pr.outs[1].Canonical, ownA)
 		}
 		if i.Kind == "to-cold" {
 			pool := own.key.Pool
@@ -325,15 +414,17 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 			return reject("intent source: %v", err)
 		}
 		for n, in := range p.Inputs {
-			if a, _ := v.acct.Address(in.Path); a != from.Canonical {
+			if a, _ := v.acct.AddressAt(in.Gen, in.Path); a != from.Canonical {
 				return reject("sweep: input %d is address %s, not the intent's source %s", n, a, from.Canonical)
 			}
 		}
 		if len(p.Outputs) != 1 {
 			return reject("a sweep has one output, not %d", len(p.Outputs))
 		}
-		if to.Canonical != own.addr || pr.outs[0].Canonical != own.addr {
-			return reject("a sweep pays the partition's own shard %s; the intent says %s and the output is %s", own.addr, to.Canonical, pr.outs[0].Canonical)
+		// The partition's shard under any generation this zone knows; which one a sweep of this generation may pay is the state rule of the zone
+		// (the gateway's keyset view), not of this chain code.
+		if to.Canonical != pr.outs[0].Canonical || v.genOfHot(own, to.Canonical) == 0 {
+			return reject("a sweep pays the partition's own shard %s (under a generation this zone knows); the intent says %s and the output is %s", own.addr, to.Canonical, pr.outs[0].Canonical)
 		}
 		if pr.Sum != amount.Uint64() {
 			return reject("sweep amount %s is not the sum of the inputs, %d", i.Amount, pr.Sum)
@@ -351,8 +442,8 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		if len(p.Outputs) != 1 {
 			return reject("a consolidation has one output, not %d", len(p.Outputs))
 		}
-		if to.Canonical != own.addr || pr.outs[0].Canonical != own.addr {
-			return reject("a consolidation pays the partition's own shard %s; the intent says %s and the output is %s", own.addr, to.Canonical, pr.outs[0].Canonical)
+		if to.Canonical != ownA || pr.outs[0].Canonical != ownA {
+			return reject("a consolidation pays the partition's own shard %s; the intent says %s and the output is %s", ownA, to.Canonical, pr.outs[0].Canonical)
 		}
 		if pr.Sum != amount.Uint64() {
 			return reject("consolidation amount %s is not the sum of the inputs, %d", i.Amount, pr.Sum)
@@ -366,19 +457,40 @@ func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 		if len(p.Outputs) != 1 {
 			return reject("a cpfp child has one output, not %d", len(p.Outputs))
 		}
-		if to.Canonical != own.addr || pr.outs[0].Canonical != own.addr {
-			return reject("a cpfp child pays the partition's own shard %s; the intent says %s and the output is %s", own.addr, to.Canonical, pr.outs[0].Canonical)
+		if to.Canonical != ownA || pr.outs[0].Canonical != ownA {
+			return reject("a cpfp child pays the partition's own shard %s; the intent says %s and the output is %s", ownA, to.Canonical, pr.outs[0].Canonical)
 		}
 		if amount.Sign() != 0 {
 			return reject("a cpfp intent has amount 0, not %s", i.Amount)
+		}
+	case signjob.KindDrain:
+		// A key replacement: the coins of this partition's own shard under generation G go, in one output, to the same partition's shard under another
+		// generation this zone knows. Which one (the successor the signed record names) and whether the source may be drained is the zone's state rule.
+		if err := ownInputs("drain"); err != nil {
+			return err
+		}
+		if len(p.Outputs) != 1 {
+			return reject("a drain has one output, not %d", len(p.Outputs))
+		}
+		if to.Canonical != pr.outs[0].Canonical {
+			return reject("the drain output pays %s, the intent says %s", pr.outs[0].Canonical, to.Canonical)
+		}
+		if d := v.genOfHot(own, to.Canonical); d == 0 || d == pr.Gen {
+			return reject("a drain pays the partition's shard under another generation than its own (%d), not %s", pr.Gen, to.Canonical)
+		}
+		if from, err := DecodeAddress(i.From, v.params); err != nil || from.Canonical != ownA {
+			return reject("a drain's source is the partition's shard %s under generation %d, the intent says %q", ownA, pr.Gen, i.From)
+		}
+		if pr.Sum != amount.Uint64() {
+			return reject("drain amount %s is not the sum of the inputs, %d", i.Amount, pr.Sum)
 		}
 	case "cancel":
 		// Every input as it was claimed (the guard checks that), back to the partition's own shard. Nothing else.
 		if len(p.Outputs) != 1 {
 			return reject("a cancel has one output, not %d", len(p.Outputs))
 		}
-		if to.Canonical != own.addr || pr.outs[0].Canonical != own.addr {
-			return reject("a cancel pays the partition's own shard %s; the intent says %s and the output is %s", own.addr, to.Canonical, pr.outs[0].Canonical)
+		if to.Canonical != ownA || pr.outs[0].Canonical != ownA {
+			return reject("a cancel pays the partition's own shard %s; the intent says %s and the output is %s", ownA, to.Canonical, pr.outs[0].Canonical)
 		}
 	default:
 		return reject("intent kind %q", i.Kind)
@@ -408,7 +520,11 @@ func (v *Verifier) CheckFirstSend(u chain.UnsignedTx, i signjob.Intent) error {
 		return reject("partition %q has no pinned hot shard", i.PartitionID)
 	}
 	n := len(pr.Payload.Outputs)
-	if n < 2 || pr.outs[n-1].Canonical != own.addr {
+	ownA, err := v.shardAt(own, pr.Gen)
+	if err != nil {
+		return reject("%v", err)
+	}
+	if n < 2 || pr.outs[n-1].Canonical != ownA {
 		return reject("%s has no change output to the partition's own shard: it could not be bumped to the fee cap", i.Kind)
 	}
 	var payments uint64
@@ -495,6 +611,9 @@ type Info struct {
 	Identity    string
 	SignerKey   []byte
 	Fee         uint64
+	// Gen is the generation of the account key the inputs are under (1: the configured one). DestGen is the generation of the partition's hot shard the
+	// first output pays, 0 when that output is no hot shard of the partition under a generation this zone knows (a payment, a cold address).
+	Gen, DestGen uint32
 	// Parent is set when the last output goes to the shard of the job's own partition after at least one payment: the change a CPFP child may spend.
 	Parent *Parent
 }
@@ -506,14 +625,17 @@ func (v *Verifier) Decode(u chain.UnsignedTx) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	info := Info{Sender: PathString(pr.Payload.Inputs[0].Path), Destination: pr.outs[0].Canonical, Identity: pr.Built.TxID,
-		SignerKey: pr.Built.Pubs[pr.Index], Fee: pr.Fee}
+	info := Info{Sender: chain.KeyPathAt(int(pr.Gen), PathString(pr.Payload.Inputs[0].Path)), Destination: pr.outs[0].Canonical, Identity: pr.Built.TxID,
+		SignerKey: pr.Built.Pubs[pr.Index], Fee: pr.Fee, Gen: pr.Gen}
+	if own, ok := v.shard[u.KeyRef.PartitionID]; ok {
+		info.DestGen = v.genOfHot(own, pr.outs[0].Canonical)
+	}
 	for _, in := range pr.Payload.Inputs {
 		info.Claims = append(info.Claims, in.TxID+":"+strconv.FormatUint(uint64(in.Vout), 10))
 		info.Pins = append(info.Pins, strconv.FormatUint(in.Value, 10))
 	}
 	if n := len(pr.Payload.Outputs); n >= 2 {
-		if own, ok := v.shard[u.KeyRef.PartitionID]; ok && pr.outs[n-1].Canonical == own.addr {
+		if own, ok := v.shard[u.KeyRef.PartitionID]; ok && v.genOfHot(own, pr.outs[n-1].Canonical) == pr.Gen {
 			info.Parent = &Parent{VSize: uint64(EstimateVSize(pr.Built.Tx)), Fee: pr.Fee, ChangeVout: uint32(n - 1), ChangeValue: pr.Payload.Outputs[n-1].Value}
 		}
 	}
@@ -523,7 +645,7 @@ func (v *Verifier) Decode(u chain.UnsignedTx) (Info, error) {
 // OwnsPath reports whether a path (as a key reference or sender string) is one of the allowed branches: ownership follows from
 // derivation, not from a list of addresses.
 func (v *Verifier) OwnsPath(s string) bool {
-	_, err := ParsePath(s)
+	_, _, err := ParseKeyRef(s)
 	return err == nil
 }
 

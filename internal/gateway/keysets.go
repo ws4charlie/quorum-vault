@@ -13,12 +13,15 @@ import (
 	"math/big"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ws4charlie/quorum-vault/internal/audit"
+	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
+	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/domain"
 	"github.com/ws4charlie/quorum-vault/internal/partition"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
@@ -103,7 +106,10 @@ type KeysetChange struct {
 	// its signer (an MPC keyset ID, or an HSM key's CKA_ID in hex) and the 65-byte uncompressed secp256k1 public key in hex, which must hash to Address.
 	KeyRef    string `json:"key_ref,omitempty"`
 	PublicKey string `json:"public_key,omitempty"`
-	Seq       int64  `json:"seq"`       // must be higher than the current one
+	// Window (start-draining of a deposit tree, seconds, optional) is how long after this record the generation's deposit addresses
+	// stay swept before it may retire: a retire record of a deposit tree is valid only when its signing time is at least that much later. Zero: no window.
+	Window int64 `json:"window_seconds,omitempty"`
+	Seq    int64 `json:"seq"`       // must be higher than the current one
 	SignedAt  int64  `json:"signed_at"` // unix seconds
 	// Signatures of the operators over KeysetChangeMessage.
 	Signatures []OperatorSignature `json:"signatures"`
@@ -154,14 +160,28 @@ func (c KeysetChange) shape() error {
 	if c.Seq < 1 {
 		return errors.New("a change has a sequence number of at least 1")
 	}
-	if _, err := partition.ParseShardID(c.Shard); err != nil {
-		return err
+	tree := partition.ShardID(c.Shard).IsDepositTree()
+	if !tree {
+		if _, err := partition.ParseShardID(c.Shard); err != nil {
+			return err
+		}
 	}
 	if c.Generation < 1 {
 		return errors.New("a change names a generation of at least 1")
 	}
+	if c.Window < 0 || (c.Window > 0 && !(tree && c.Action == KeysetStartDraining)) {
+		return errors.New("window_seconds is for the start-draining of a deposit tree, and not negative")
+	}
 	switch c.Action {
 	case KeysetRegisterCandidate:
+		if tree {
+			// A deposit tree has no address: the record carries the keyset to sign with (key_ref) and the public identity addresses derive from
+			// (public_key: the account xpub on Bitcoin, "<node key hex>:<chain code hex>" on Solana), which apply checks against the chain.
+			if c.Address != "" || c.Successor != 0 || len(c.Caps) != 0 || c.KeyRef == "" || c.PublicKey == "" {
+				return errors.New("register-candidate of a deposit tree carries its key reference and public key, and no address, successor or caps")
+			}
+			break
+		}
 		if c.Address == "" || c.Successor != 0 || len(c.Caps) != 0 {
 			return errors.New("register-candidate carries the address (and its key reference and public key), and no successor or caps")
 		}
@@ -177,11 +197,11 @@ func (c KeysetChange) shape() error {
 			return errors.New("set-drain-caps carries the shard, the generation and the new caps per asset, nothing else")
 		}
 	case KeysetStartDraining:
-		if c.Address != "" || c.Successor < 1 || len(c.Caps) == 0 || c.KeyRef != "" || c.PublicKey != "" {
+		if c.Address != "" || c.Successor < 1 || (len(c.Caps) == 0 && !tree) || c.KeyRef != "" || c.PublicKey != "" {
 			return errors.New("start-draining names the successor generation and the drain caps per asset, and no address")
 		}
 	case KeysetMarkCompromised:
-		if c.Address != "" || (c.Successor > 0) != (len(c.Caps) > 0) || c.KeyRef != "" || c.PublicKey != "" {
+		if c.Address != "" || ((c.Successor > 0) != (len(c.Caps) > 0) && !(tree && c.Successor > 0)) || c.KeyRef != "" || c.PublicKey != "" {
 			return errors.New("mark-compromised names a successor generation together with its drain caps, or neither, and no address")
 		}
 	default:
@@ -228,6 +248,8 @@ type KeysetEntry struct {
 	// candidate registered without them: it can receive, but the zone cannot sign from it).
 	KeyRef    string
 	PublicKey string
+	// RetireAfter (deposit trees, unix seconds): a retire record must be signed at or after it (the draining record's signing time plus its window).
+	RetireAfter int64
 }
 
 func (e *KeysetEntry) clone() *KeysetEntry {
@@ -280,6 +302,10 @@ func checkShardAddresses(chainName string, hot map[string]common.Address) error 
 func (c *Config) StaticKeysets() *KeysetView {
 	v := &KeysetView{gens: map[partition.ShardID]map[int]*KeysetEntry{}, applied: map[int64][]byte{}}
 	for name, cc := range c.Chains {
+		// The deposit key tree of a Bitcoin or Solana chain: generation 1 is the key the config pins.
+		if id, ok := cc.depositTreeID(name); ok {
+			v.gens[id] = map[int]*KeysetEntry{1: {Shard: id, Chain: name, Generation: 1, State: partition.StateActive}}
+		}
 		if cc.Family != FamilyEVM {
 			continue
 		}
@@ -295,6 +321,42 @@ func (c *Config) StaticKeysets() *KeysetView {
 		}
 	}
 	return v
+}
+
+// depositTreeID is the registry ID of the deposit key tree of a Bitcoin or Solana chain: the entity comes from the chain's pinned hot partitions.
+func (cc *ChainConfig) depositTreeID(name string) (partition.ShardID, bool) {
+	var parts []string
+	switch cc.Family {
+	case FamilyBTC:
+		for p := range cc.BTC.HotShards {
+			parts = append(parts, p)
+		}
+	case FamilySOL:
+		for p := range cc.SOL.HotShards {
+			parts = append(parts, p)
+		}
+	default:
+		return "", false
+	}
+	slices.Sort(parts)
+	for _, p := range parts {
+		if k, err := partition.Parse(p); err == nil && k.Tier == partition.TierHot {
+			if id, err := partition.DepositTreeID(k.Entity, name); err == nil {
+				return id, true
+			}
+		}
+	}
+	return "", false
+}
+
+// tree returns the generations of the deposit key tree of a chain (nil: the chain has none), by number.
+func (v *KeysetView) tree(chainName string) map[int]*KeysetEntry {
+	for id, g := range v.gens {
+		if id.IsDepositTree() && g[1] != nil && g[1].Chain == chainName {
+			return g
+		}
+	}
+	return nil
 }
 
 // Generations lists the generations of a shard, oldest first (nil for a shard the view does not know).
@@ -426,7 +488,7 @@ func (v *KeysetView) apply(cfg *Config, c KeysetChange, fresh bool) error {
 	}
 	shard := partition.ShardID(c.Shard)
 	if _, ok := v.gens[shard]; !ok {
-		return fmt.Errorf("shard %q is not a hot shard of an EVM chain in this zone's config", c.Shard)
+		return fmt.Errorf("shard %q is not a hot shard of an EVM chain, or the deposit tree of a Bitcoin or Solana chain, in this zone's config", c.Shard)
 	}
 	next := v.clone()
 	gens := next.gens[shard]
@@ -453,11 +515,39 @@ func (v *KeysetView) apply(cfg *Config, c KeysetChange, fresh bool) error {
 		if err != nil {
 			return err
 		}
+		if shard.IsDepositTree() {
+			// Bitcoin drains the hot shard of the generation (its coins move to the successor's), so it names the cap; Solana moves no hot shard here.
+			if (cc.Family == FamilyBTC) != (len(caps) > 0) {
+				return fmt.Errorf("a %s deposit tree's drain caps are %s", cc.Family, map[bool]string{true: "required (the hot shard of the generation drains)", false: "none (only sweeps move)"}[cc.Family == FamilyBTC])
+			}
+		}
 		cur.Successor, cur.Caps = c.Successor, caps
 		return nil
 	}
 	switch c.Action {
 	case KeysetRegisterCandidate:
+		if shard.IsDepositTree() {
+			top := 0
+			for g := range gens {
+				top = max(top, g)
+			}
+			if c.Generation != top+1 {
+				return fmt.Errorf("the next generation of %s is %d, not %d", c.Shard, top+1, c.Generation)
+			}
+			if err := checkTreeIdentity(cc, c.PublicKey); err != nil {
+				return err
+			}
+			for _, e := range gens {
+				if e.PublicKey == c.PublicKey || e.KeyRef == c.KeyRef {
+					return fmt.Errorf("generation %d of %s already has that key", e.Generation, c.Shard)
+				}
+			}
+			if first := cc.treeIdentity(); first == c.PublicKey {
+				return fmt.Errorf("that key is the one the config pins as generation 1")
+			}
+			gens[c.Generation] = &KeysetEntry{Shard: shard, Chain: cc.Name, Generation: c.Generation, State: partition.StateCandidate, KeyRef: c.KeyRef, PublicKey: c.PublicKey}
+			break
+		}
 		if !common.IsHexAddress(c.Address) || common.HexToAddress(c.Address) == (common.Address{}) {
 			return fmt.Errorf("%q is not an address", c.Address)
 		}
@@ -502,9 +592,16 @@ func (v *KeysetView) apply(cfg *Config, c KeysetChange, fresh bool) error {
 			return err
 		}
 		cur.State = partition.StateDraining
+		if shard.IsDepositTree() {
+			cur.RetireAfter = c.SignedAt + c.Window
+		}
 	case KeysetRetire:
 		if cur == nil || cur.State != partition.StateDraining {
 			return illegal(partition.StateDraining)
+		}
+		if shard.IsDepositTree() && c.SignedAt < cur.RetireAfter {
+			return fmt.Errorf("the deposit addresses of %s generation %d stay swept until %s (the window of its signed draining record); this record is signed earlier",
+				c.Shard, c.Generation, time.Unix(cur.RetireAfter, 0).UTC().Format(time.RFC3339))
 		}
 		cur.State = partition.StateRetired
 	case KeysetSetDrainCaps:
@@ -564,7 +661,7 @@ func (c *Config) foldKeysets(rows []KeysetChange) *KeysetView {
 
 // loadKeysetRows reads the whole log, oldest first.
 func loadKeysetRows(ctx context.Context, q queryer) ([]KeysetChange, error) {
-	rows, err := q.Query(ctx, `SELECT seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key FROM keyset_changes ORDER BY seq, id`)
+	rows, err := q.Query(ctx, `SELECT seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key, window_seconds FROM keyset_changes ORDER BY seq, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -573,7 +670,7 @@ func loadKeysetRows(ctx context.Context, q queryer) ([]KeysetChange, error) {
 	for rows.Next() {
 		var c KeysetChange
 		var caps, sigs []byte
-		if err := rows.Scan(&c.Seq, &c.Action, &c.Shard, &c.Generation, &c.Address, &c.Successor, &caps, &c.SignedAt, &sigs, &c.KeyRef, &c.PublicKey); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Action, &c.Shard, &c.Generation, &c.Address, &c.Successor, &caps, &c.SignedAt, &sigs, &c.KeyRef, &c.PublicKey, &c.Window); err != nil {
 			return nil, err
 		}
 		// A row that does not parse stays in the list as a change nothing can verify, so it is counted.
@@ -649,8 +746,8 @@ func (g *Guard) ApplyKeysetChange(ctx context.Context, cfg *Config, c KeysetChan
 	if len(c.Caps) > 0 {
 		caps, _ = json.Marshal(c.Caps)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO keyset_changes (seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		c.Seq, c.Action, c.Shard, c.Generation, c.Address, c.Successor, caps, c.SignedAt, sigs, c.KeyRef, c.PublicKey); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO keyset_changes (seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key, window_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		c.Seq, c.Action, c.Shard, c.Generation, c.Address, c.Successor, caps, c.SignedAt, sigs, c.KeyRef, c.PublicKey, c.Window); err != nil {
 		return err
 	}
 	payload := map[string]any{"action": c.Action, "shard": c.Shard, "generation": c.Generation, "seq": c.Seq, "operators": operators, "signed_at": c.SignedAt,
@@ -666,6 +763,9 @@ func (g *Guard) ApplyKeysetChange(ctx context.Context, cfg *Config, c KeysetChan
 	}
 	if c.KeyRef != "" {
 		payload["key_ref"], payload["public_key"] = c.KeyRef, c.PublicKey
+	}
+	if c.Window > 0 {
+		payload["window_seconds"] = c.Window
 	}
 	pj, _ := json.Marshal(payload)
 	if _, err := audit.AppendTx(ctx, tx, domain.AuditEvent{Actor: actor, Type: EventKeysetChanged, Payload: pj}, ""); err != nil {
@@ -702,6 +802,12 @@ func (d *Decider) keysetLag(i signjob.Intent, now time.Time, format string, args
 // keysetRules is the state rule of one EVM job, run inside the guard transaction: what the sender's generation may sign, and the drain itself. kv is
 // nil for a chain without keysets.
 func (d *Decider) keysetRules(ctx context.Context, gt *GuardTx, kv *KeysetView, cc *ChainConfig, i signjob.Intent, info TxInfo, amount *big.Int, known bool, now time.Time) error {
+	switch cc.Family {
+	case FamilyBTC:
+		return d.btcGenRules(ctx, gt, kv, cc, i, info, amount, known, now)
+	case FamilySOL:
+		return d.solGenRules(kv, cc, i, info)
+	}
 	if kv == nil {
 		if i.Kind == signjob.KindDrain {
 			return reject(ReasonKeyset, "chain %q has no keysets: a drain is for EVM hot shards", i.Chain)
@@ -815,9 +921,14 @@ func (d *Decider) drainRule(ctx context.Context, gt *GuardTx, kv *KeysetView, cc
 	if known {
 		return nil // a replacement of a drain already admitted: its rate and amount were counted then
 	}
-	limit, ok := src.Caps[i.Asset]
+	return d.drainLimits(ctx, gt, cc, src, shard, info.Sender, i.Asset, amount, now)
+}
+
+// drainLimits is the rate and the cap of a new drain: the signed record's cap for the asset on the source, and the zone's drains per hour.
+func (d *Decider) drainLimits(ctx context.Context, gt *GuardTx, cc *ChainConfig, src *KeysetEntry, shard partition.ShardID, sender, asset string, amount *big.Int, now time.Time) error {
+	limit, ok := src.Caps[asset]
 	if !ok {
-		return reject(ReasonDrainCap, "the signed record names no cap for %s on generation %d of %s", i.Asset, src.Generation, shard)
+		return reject(ReasonDrainCap, "the signed record names no cap for %s on generation %d of %s", asset, src.Generation, shard)
 	}
 	pending := d.pendingSince(now)
 	n, err := gt.SignedDrainsSince(ctx, now.Add(-time.Hour), pending)
@@ -827,12 +938,64 @@ func (d *Decider) drainRule(ctx context.Context, gt *GuardTx, kv *KeysetView, cc
 	if n >= cc.DrainsPerHour {
 		return reject(ReasonDrainRate, "%d drains in the last hour, limit %d", n, cc.DrainsPerHour)
 	}
-	sum, err := gt.SignedDrainAmountFrom(ctx, info.Sender, i.Asset, pending)
+	sum, err := gt.SignedDrainAmountFrom(ctx, sender, asset, pending)
 	if err != nil {
 		return err
 	}
 	if total := new(big.Int).Add(sum, amount); total.Cmp(limit) > 0 {
-		return reject(ReasonDrainCap, "%s already drained from %s plus %s exceeds the cap %s of the signed record", sum, info.Sender, amount, limit)
+		return reject(ReasonDrainCap, "%s already drained from %s plus %s exceeds the cap %s of the signed record", sum, sender, amount, limit)
 	}
 	return nil
+}
+
+// ---- deposit key trees (Bitcoin account key, Solana deposit node) ----
+
+// checkTreeIdentity checks the public identity a register-candidate of a deposit tree carries against the chain: the account xpub of its network (Bitcoin),
+// or "<node public key hex>:<chain code hex>" of a node the Ed25519 derivation accepts (Solana).
+func checkTreeIdentity(cc *ChainConfig, identity string) error {
+	switch cc.Family {
+	case FamilyBTC:
+		if _, err := btc.NewAccount(cc.BTC.Network, identity); err != nil {
+			return fmt.Errorf("public_key of a Bitcoin deposit tree is the account xpub of %s: %w", cc.BTC.Network, err)
+		}
+		return nil
+	case FamilySOL:
+		n, err := ParseSolNode(identity)
+		if err != nil {
+			return err
+		}
+		if _, err := n.Derive(sol.BranchExternal, 0); err != nil {
+			return fmt.Errorf("public_key of a Solana deposit tree is not a usable node: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("chain %q has no deposit tree", cc.Name)
+}
+
+// ParseSolNode reads the identity of a Solana deposit node: "<32-byte public key hex>:<32-byte chain code hex>".
+func ParseSolNode(identity string) (sol.Node, error) {
+	pub, cc, ok := strings.Cut(identity, ":")
+	var n sol.Node
+	if !ok {
+		return n, errors.New("public_key of a Solana deposit tree is <32-byte node key hex>:<32-byte chain code hex>")
+	}
+	a, err1 := hex.DecodeString(pub)
+	b, err2 := hex.DecodeString(cc)
+	if err1 != nil || err2 != nil || len(a) != 32 || len(b) != 32 {
+		return n, errors.New("public_key of a Solana deposit tree is <32-byte node key hex>:<32-byte chain code hex>")
+	}
+	copy(n.PublicKey[:], a)
+	copy(n.ChainCode[:], b)
+	return n, nil
+}
+
+// treeIdentity is the identity of the deposit tree the config pins (generation 1).
+func (cc *ChainConfig) treeIdentity() string {
+	switch cc.Family {
+	case FamilyBTC:
+		return cc.BTC.AccountXpub
+	case FamilySOL:
+		return hex.EncodeToString(cc.SOL.AccountPublicKey[:]) + ":" + hex.EncodeToString(cc.SOL.AccountChainCode[:])
+	}
+	return ""
 }
