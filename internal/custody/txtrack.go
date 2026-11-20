@@ -50,6 +50,8 @@ func OwnerTrack(o Owner) Track {
 		return Track("tocold:" + o.ID)
 	case OwnerKindRebalance:
 		return Track("rebal:" + o.ID)
+	case OwnerKindDrain:
+		return Track("drain:" + o.ID)
 	case OwnerKindConsolidate:
 		return Track("consol:" + o.ID)
 	case OwnerKindBatch:

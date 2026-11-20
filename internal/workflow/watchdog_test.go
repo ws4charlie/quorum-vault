@@ -42,17 +42,18 @@ func newDog(t *testing.T, f *fakeEngine, clock *time.Time) (*Watchdog, *bytes.Bu
 func TestWatchdogRestartsAStalledLoopAndOnlyAlertsForOwners(t *testing.T) {
 	now := time.Unix(1000, 0)
 	f := &fakeEngine{progress: map[string]Progress{
-		ScanID("c"):        {Exists: true, Running: true, RunID: "r1", Events: 10},
-		PlannerID("c"):     {Exists: true, Running: true, RunID: "r2", Events: 10},
-		ReconcilerID("c"):  {Exists: true, Running: true, RunID: "r3", Events: 10},
-		ColdPlannerID("c"): {Exists: true, Running: true, RunID: "r4", Events: 10},
-		"wd-1":             {Exists: true, Running: true, RunID: "w1", Events: 7},
+		ScanID("c"):         {Exists: true, Running: true, RunID: "r1", Events: 10},
+		PlannerID("c"):      {Exists: true, Running: true, RunID: "r2", Events: 10},
+		ReconcilerID("c"):   {Exists: true, Running: true, RunID: "r3", Events: 10},
+		ColdPlannerID("c"):  {Exists: true, Running: true, RunID: "r4", Events: 10},
+		DrainPlannerID("c"): {Exists: true, Running: true, RunID: "r5", Events: 10},
+		"wd-1":              {Exists: true, Running: true, RunID: "w1", Events: 7},
 	}}
 	dog, logs := newDog(t, f, &now)
 	dog.Check(context.Background()) // first look: everything is new
 
 	now = now.Add(40 * time.Second)
-	for _, id := range []string{PlannerID("c"), ColdPlannerID("c")} {
+	for _, id := range []string{PlannerID("c"), ColdPlannerID("c"), DrainPlannerID("c")} {
 		p := f.progress[id]
 		p.Events = 14 // the planners keep writing history
 		f.progress[id] = p
@@ -93,10 +94,11 @@ func TestWatchdogRestartsAStalledLoopAndOnlyAlertsForOwners(t *testing.T) {
 func TestWatchdogStartsALoopThatIsNotRunning(t *testing.T) {
 	now := time.Unix(1000, 0)
 	f := &fakeEngine{progress: map[string]Progress{
-		ScanID("c"):        {Exists: true, Running: false, RunID: "r1"},
-		PlannerID("c"):     {Exists: true, Running: true, RunID: "r2", Events: 1},
-		ColdPlannerID("c"): {Exists: true, Running: true, RunID: "r4", Events: 1},
-		ReconcilerID("c"):  {}, // never existed
+		ScanID("c"):         {Exists: true, Running: false, RunID: "r1"},
+		PlannerID("c"):      {Exists: true, Running: true, RunID: "r2", Events: 1},
+		ColdPlannerID("c"):  {Exists: true, Running: true, RunID: "r4", Events: 1},
+		DrainPlannerID("c"): {Exists: true, Running: true, RunID: "r5", Events: 1},
+		ReconcilerID("c"):   {}, // never existed
 	}}
 	dog, logs := newDog(t, f, &now)
 	dog.OpenOwners = nil

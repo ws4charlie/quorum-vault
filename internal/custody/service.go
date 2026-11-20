@@ -166,6 +166,7 @@ var audited = map[string]string{
 	"cold_action.requested": "cold_action.requested",
 	"cold_move.planned":     "cold_move.started",
 	"rebalance.planned":     "rebalance.started",
+	"drain.planned":         "drain.started",
 }
 
 // emit writes one outbox event for a flow, in the flow's transaction. An audited event is written a second time to the audit

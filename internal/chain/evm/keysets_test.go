@@ -140,3 +140,123 @@ func (e *tenv) cancel(ad *Adapter, kind, id string) (u chain.UnsignedTx, err err
 	})
 	return u, err
 }
+
+// A drain is built from the old address, which must be a draining (or compromised) generation of the shard; the old address's nonce is used.
+func TestBuildDrainFromAnOldGeneration(t *testing.T) {
+	e := newEnv(t)
+	const part, shard = "qv-us/evm-anvil/ETH/hot/omnibus/0", "qv-us/evm-anvil/omnibus/0"
+	key2, _ := crypto.GenerateKey()
+	gen2 := crypto.PubkeyToAddress(key2.PublicKey)
+	cfg := e.cfg
+	cfg.HotAddresses = map[string]common.Address{part: e.hot}
+	ad, err := New(e.ctx, cfg, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ad.Close()
+	for _, q := range []string{
+		`INSERT INTO keysets (shard_id, generation, address, state, successor) VALUES ('` + shard + `', 1, '` + e.hot.Hex() + `', 'active', NULL)`,
+		`INSERT INTO keysets (shard_id, generation, address, state) VALUES ('` + shard + `', 2, '` + gen2.Hex() + `', 'candidate')`,
+	} {
+		if _, err := e.pool.Exec(e.ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.mint(e.usdt, e.hot, 100)
+	drain := func(id string, from, to common.Address, asset string, amt int64) (chain.UnsignedTx, error) {
+		var u chain.UnsignedTx
+		err := e.runTx(func(tx pgx.Tx) (err error) {
+			u, err = ad.BuildDrain(e.ctx, tx, DrainRequest{ID: id, PartitionID: part, From: from.Hex(), To: to.Hex(), Asset: asset, Amount: big.NewInt(amt)})
+			return err
+		})
+		return u, err
+	}
+	if _, err := drain("d0", e.hot, gen2, "ETH", 1); err == nil {
+		t.Fatal("an active generation is not drained")
+	}
+	if _, err := e.pool.Exec(e.ctx, `UPDATE keysets SET state='draining' WHERE generation=1`); err != nil {
+		t.Fatal(err)
+	}
+	for _, asset := range []string{"ETH", "USDT"} {
+		u, err := drain("d-"+asset, e.hot, gen2, asset, 1)
+		if err != nil {
+			t.Fatalf("%s: %v", asset, err)
+		}
+		pl, _ := decodePayload(u.Payload)
+		txn, _, from, _ := pl.tx()
+		if from != e.hot || u.KeyRef.PartitionID != part {
+			t.Fatalf("%s: from %s key ref %q", asset, from, u.KeyRef.PartitionID)
+		}
+		if asset == "ETH" && (*txn.To() != gen2 || txn.Value().Int64() != 1 || len(txn.Data()) != 0) {
+			t.Fatalf("native drain tx: %+v", txn)
+		}
+		if asset == "USDT" && (*txn.To() != e.usdt || txn.Value().Sign() != 0) {
+			t.Fatalf("token drain tx: %+v", txn)
+		}
+	}
+	if _, err := drain("d-self", e.hot, e.hot, "ETH", 1); err == nil {
+		t.Fatal("a drain to itself")
+	}
+	if _, err := drain("d-other", gen2, e.hot, "ETH", 1); err == nil {
+		t.Fatal("a candidate is not drained")
+	}
+	if r, err := ad.NativeDrainReserve(e.ctx); err != nil || r.Sign() <= 0 || r.Cmp(ether) > 0 {
+		t.Fatalf("reserve %v %v", r, err)
+	}
+}
+
+// Everything but the reserve can be drained in one transfer: the node accepts it, and what stays is below the reserve.
+func TestDrainOfAllButTheReserveIsAccepted(t *testing.T) {
+	e := newEnv(t)
+	const part, shard = "qv-us/evm-anvil/ETH/hot/omnibus/0", "qv-us/evm-anvil/omnibus/0"
+	key2, _ := crypto.GenerateKey()
+	gen2 := crypto.PubkeyToAddress(key2.PublicKey)
+	cfg := e.cfg
+	cfg.HotAddresses = map[string]common.Address{part: e.hot}
+	ad, err := New(e.ctx, cfg, e.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ad.Close()
+	for _, q := range []string{
+		`INSERT INTO keysets (shard_id, generation, address, state, successor) VALUES ('` + shard + `', 1, '` + e.hot.Hex() + `', 'draining', 2)`,
+		`INSERT INTO keysets (shard_id, generation, address, state) VALUES ('` + shard + `', 2, '` + gen2.Hex() + `', 'active')`,
+	} {
+		if _, err := e.pool.Exec(e.ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bal, err := e.ec.BalanceAt(e.ctx, e.hot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve, err := ad.NativeDrainReserve(e.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	amount := new(big.Int).Sub(bal, reserve)
+	var u chain.UnsignedTx
+	if err := e.runTx(func(tx pgx.Tx) (err error) {
+		u, err = ad.BuildDrain(e.ctx, tx, DrainRequest{ID: "all", PartitionID: part, From: e.hot.Hex(), To: gen2.Hex(), Asset: "ETH", Amount: amount})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ad.Assemble(u, []chain.Signature{sign(t, u, e.hotKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl, _ := decodePayload(u.Payload)
+	txn, _, _, _ := pl.tx()
+	t.Logf("gas %d feecap %s tip %s value %s", txn.Gas(), txn.GasFeeCap(), txn.GasTipCap(), txn.Value())
+	h, err := ad.Broadcast(e.ctx, s)
+	if err != nil {
+		t.Fatalf("balance %s reserve %s amount %s: %v", bal, reserve, amount, err)
+	}
+	if r := e.receipt(common.HexToHash(h)); r.Status != 1 {
+		t.Fatalf("the drain reverted (gas used %d)", r.GasUsed)
+	}
+	if got, _ := e.ec.BalanceAt(e.ctx, gen2, nil); got.Cmp(amount) != 0 {
+		t.Fatalf("generation 2 holds %s, want %s", got, amount)
+	}
+}

@@ -490,6 +490,49 @@ func (s *Service) evmPending(ctx context.Context, q booksQ, rr ReceiptReader, h 
 		}
 	}
 
+	// Drains of an old key generation: money moves between two addresses of one shard, so nothing is booked for the amount and the sum over the
+	// shard's addresses does not change; only the gas leaves. A drain that mined at or below h and is not settled yet has its fee on the chain and
+	// not in the books (the settlement books it); a drain that reverted above h and was settled already has its fee in the books and not yet on the
+	// chain. A mined cancel of a drain move is the same: its gas is booked when the move ends.
+	drows, err := q.Query(ctx, `SELECT id, status, partition_id FROM drain_moves WHERE chain=$1 AND (status NOT IN ('confirmed','failed')
+		OR (status='failed' AND failure_reason='transaction reverted' AND updated_at > now() - interval '`+recentRevert+`')) ORDER BY created_at`, c.Chain)
+	if err != nil {
+		return nil, err
+	}
+	type drainRow struct{ id, status, partition string }
+	var dms []drainRow
+	for drows.Next() {
+		var d drainRow
+		if err := drows.Scan(&d.id, &d.status, &d.partition); err != nil {
+			drows.Close()
+			return nil, err
+		}
+		dms = append(dms, d)
+	}
+	drows.Close()
+	for _, d := range dms {
+		atts, err := s.attemptsOf(ctx, q, rr, OwnerKindDrain, d.id)
+		if err != nil {
+			return nil, err
+		}
+		at, above := minedAt(atts, h)
+		if d.status == "failed" {
+			if above != nil && !above.cancel && above.rc.Fee != nil {
+				if err := s.adjUnFee(a, d.partition, above.rc.Fee); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		if at == nil {
+			continue
+		}
+		a.mined++
+		if err := s.adjFee(a, d.partition, at.rc.Fee); err != nil {
+			return nil, err
+		}
+	}
+
 	// Refills: the cold ceremony's transaction is not one of our allocations; its hash is on the row from the moment it is imported.
 	rrows, err := q.Query(ctx, `SELECT `+refillCols+` FROM refills WHERE chain=$1 AND COALESCE(tx_hash,'') <> '' AND (status IN ('signed','broadcast')
 		OR (status='failed' AND failure_reason='transaction reverted' AND updated_at > now() - interval '`+recentRevert+`')) ORDER BY created_at`, c.Chain)
@@ -574,6 +617,7 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 		+ (SELECT count(*) FROM withdrawals WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM cold_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM rebalance_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
+		+ (SELECT count(*) FROM drain_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM refills WHERE chain=$1 AND status IN ('signed','broadcast'))`, c.Chain).Scan(&open); err != nil {
 		return nil, 0, false, err
 	}
