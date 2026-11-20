@@ -12,12 +12,12 @@ qv-gateway:signing:qv-gateway
 qv-cosigner:signing:qv-cosigner
 mpc-party:signing:mpc-party
 qv-attest-broker:signing:qv-attest-broker
-qv-tools-signing:signing:qv-route,qv-fee-caps,qv-approvers,qv-btc-xpub,qv-keysets,qv-migrate
+qv-tools-signing:signing:qv-route,qv-fee-caps,qv-approvers,qv-btc-xpub,qv-keysets,qv-party-admin,qv-migrate
 "
 # development variants (SoftHSM2 added), signing zone only
 QV_DEV_IMAGES="qv-gateway-dev:signing:qv-gateway qv-cosigner-dev:signing:qv-cosigner mpc-party-dev:signing:mpc-party qv-attest-broker-dev:signing:qv-attest-broker"
 QV_BUSINESS_BINS="qv-core qv-worker qv-relay qv-anchor-archiver qv-migrate qv-approval-web qv-guardian qv-sol-nonces"
-QV_SIGNING_BINS="qv-gateway qv-cosigner mpc-party qv-attest-broker qv-route qv-fee-caps qv-approvers qv-btc-xpub qv-keysets"
+QV_SIGNING_BINS="qv-gateway qv-cosigner mpc-party qv-attest-broker qv-route qv-fee-caps qv-approvers qv-btc-xpub qv-keysets qv-party-admin"
 QV_IMAGE_PREFIX="${QV_IMAGE_PREFIX:-qv-image/}"
 QV_IMAGE_TAG="${QV_IMAGE_TAG:-local}"
 # The release set: the production images only. The -dev variants (SoftHSM2) are never published, under any name: publish.sh, release-gate.sh and

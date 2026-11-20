@@ -207,6 +207,20 @@ func (r *Rig) Start() {
 	r.serve(ln)
 }
 
+// SetLimit restarts the broker (same address, same allowlist and audit log) with another rate limit per party; the token buckets start full.
+func (r *Rig) SetLimit(perMinute, burst int) {
+	r.T.Helper()
+	r.Stop()
+	r.Broker.Close()
+	r.cfg.RatePerMinute, r.cfg.RateBurst = perMinute, burst
+	b, err := broker.Open(r.cfg, broker.Options{})
+	if err != nil {
+		r.T.Fatalf("broker: %v", err)
+	}
+	r.Broker = b
+	r.Start()
+}
+
 // SetAllowlist signs the entries with two operators and writes the allowlist file; if the broker is running it reloads (sequence rises each time).
 func (r *Rig) SetAllowlist(entries ...attest.AllowEntry) {
 	r.T.Helper()

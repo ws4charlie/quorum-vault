@@ -3,6 +3,7 @@
 {{- /* An operator-run Job: ONE of the four signed-setting tools, with the signed change files from a ConfigMap. OFF by default. No key is mounted: signing happens on the operators' machines. */}}
 {{- if not (has .tool (list "route" "fee-caps" "approvers" "keysets")) }}{{ fail "signedSettings.job.tool must be route, fee-caps, approvers or keysets" }}{{ end }}
 {{- if not (has .action (list "show" "apply")) }}{{ fail "signedSettings.job.action must be show or apply (sign belongs on the operator's machine)" }}{{ end }}
+{{- if and .configMap (not (regexMatch "^.+-[0-9a-f]{10}$" .configMap)) }}{{ fail "signedSettings.job.configMap must end in a hash of its content (-<10 hex>) and be created immutable: README \"Signed settings\" step 2. The cluster policy refuses any other ConfigMap" }}{{ end }}
 {{- $name := printf "%s-%s-%s-%s" $.Release.Name .action .tool .revision | trunc 63 | trimSuffix "-" }}
 apiVersion: batch/v1
 kind: Job

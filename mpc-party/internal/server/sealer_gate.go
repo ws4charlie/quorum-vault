@@ -22,6 +22,9 @@ type sealerGate struct {
 	// role is the party role, for the metric labels.
 	role string
 
+	// afterKeys, when set, runs once the data keys are here and before the gate opens (the sealed TLS key is loaded there).
+	afterKeys func(context.Context) error
+
 	ready atomic.Bool
 	mu    sync.Mutex
 	why   string
@@ -71,6 +74,11 @@ func (g *sealerGate) run(ctx context.Context) {
 		g.mu.Unlock()
 		actx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		err := g.fs.PrepareSealer(actx)
+		if err == nil && g.afterKeys != nil {
+			if err = g.afterKeys(actx); err != nil {
+				g.log.Error("attested sealer: the data keys are here but the sealed TLS key cannot be loaded; the party stays not ready", "role", g.role, "err", err.Error())
+			}
+		}
 		cancel()
 		if err == nil {
 			g.ready.Store(true)

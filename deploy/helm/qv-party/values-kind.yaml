@@ -4,6 +4,7 @@ imagePullPolicy: IfNotPresent
 images:
   party:    { digest: "", tag: local, repository: qv-image/mpc-party-dev }
   cosigner: { digest: "", tag: local, repository: qv-image/qv-cosigner-dev }
+  tools:    { digest: "", tag: local, repository: qv-image/qv-tools-signing }
 sealer: { type: pkcs11 }
 hsm:
   module: { path: /usr/lib/softhsm/libsofthsm2.so }

@@ -2,7 +2,7 @@
 
 English | [中文](README.zh-CN.md)
 
-A custody system for crypto: it holds customers' coins on EVM chains, Bitcoin and Solana, and moves them only when people with the right to approve have approved, and the system that holds the keys has checked it again on its own.
+A custody system for crypto: it holds customers' coins on EVM chains, Bitcoin and Solana, and moves them only when people with the right to approve have approved, and the system that holds the keys has checked it again itself.
 
 Exchanges and custodians lose money in two ways: a key gets stolen, or the books stop matching the chain. QuorumVault splits every key across several machines, so no single machine can sign, and it keeps a ledger that can be checked against the chain at any time.
 
@@ -43,6 +43,9 @@ Two rules carry the design:
 | [Workflows](docs/workflows.md) | Carries each deposit, sweep and withdrawal through a crash |
 | [Signing zone](docs/signing-zone.md) | Checks every payment before any key signs |
 | [MPC signing](docs/mpc.md) | Splits each key across machines so no one machine can sign |
+| [Deployment](docs/deployment.md) | Four clusters, one per trust domain, and what tests share with production |
+| [Enclaves](docs/enclaves.md) | Running a party where even its host cannot look in; simulated today |
+| [Key replacement](docs/key-replacement.md) | What happens when a key is no longer trusted: a new key takes over and the old one is emptied |
 | [Hot and cold](docs/tiers.md) | Keeps a little online, the rest offline, and moves money between them |
 | [EVM](docs/evm.md) · [Bitcoin](docs/bitcoin.md) · [Solana](docs/solana.md) | What is special about each chain |
 | [Bitcoin sends](docs/bitcoin-sending.md) | How a Bitcoin send gets confirmed: fee room, replacement, cancel, child and batches |
@@ -78,4 +81,7 @@ QuorumVault ships as container images, one per binary, public on `ghcr.io`. A re
 | Attacks on the signing side | A compromised gateway, party or database is refused |
 | Login and approvals | A real OpenID Connect token is required; passkey approvals are checked by the signing zone. Tested with Keycloak and software authenticators, not hardware keys |
 | Audit record | Chain heads are copied into write-once storage; tamper checks in tests |
+| Replacing an EVM hot key | End-to-end tests, planned and emergency, with a real gateway, cosigners and parties. Bitcoin and Solana deposit keys are tested the same way; a Solana hot wallet cannot be replaced yet |
+| Enclave start-up | Simulated only: the broker and sealed shares are tested with a stand-in for the enclave. **No real enclave yet** |
+| Kubernetes shape | Charts and images are built and checked by tests. **No real cluster has run them yet** ([Deployment](docs/deployment.md)) |
 | Real networks, real load | **Not yet.** No testnet or mainnet use, and no load test. See [Limits](docs/limits.md) |

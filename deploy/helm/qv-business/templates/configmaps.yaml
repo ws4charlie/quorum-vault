@@ -1,96 +1,51 @@
-# Plain configuration only. No secret is ever rendered into a ConfigMap: certificates, keys and the custody config are Secret volumes.
+# Plain configuration only. Every ConfigMap is immutable and its name carries a hash of its content (the policy chart's rule, as the signing-core and party charts): a change is a new
+# ConfigMap, a new pod template and a rollout, never an edit in place.
+# No secret is ever rendered into a ConfigMap: certificates, keys and the custody config are Secret volumes.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "qv.fullname" (dict "ctx" . "c" "core-env") }}
+  name: {{ include "qv.cmName" (dict "ctx" . "c" "core-env" "data" (include "qv.env.core" .)) }}
   labels: {{- include "qv.labels" (dict "ctx" . "c" "core") | nindent 4 }}
+immutable: true
 data:
-  QV_HTTP_ADDR: {{ printf "0.0.0.0:%d" (int .Values.core.port) | quote }}
-  DATABASE_URL: {{ include "qv.dsn" (dict "ctx" . "role" "qv_core" "dir" "/etc/qv/tls") | quote }}
-  QV_TEMPORAL_ADDR: {{ .Values.temporal.address | quote }}
-  QV_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
-  QV_OIDC_AUDIENCE: {{ .Values.oidc.audience | quote }}
-  QV_OIDC_ROLES_CLAIM: {{ .Values.oidc.rolesClaim | quote }}
-  QV_OIDC_STEPUP_ACR: {{ .Values.oidc.stepupAcr | quote }}
-  QV_CORE_SERVICE_ALLOW: {{ .Values.serviceAllow | quote }}
-  {{- with .Values.oidc.jwksUrl }}
-  QV_OIDC_JWKS_URL: {{ . | quote }}
-  {{- end }}
-  {{- with .Values.oidc.roleMap }}
-  QV_OIDC_ROLE_MAP: {{ . | quote }}
-  {{- end }}
-  {{- with .Values.oidc.serviceClients }}
-  QV_OIDC_SERVICE_CLIENTS: {{ . | quote }}
-  {{- end }}
-  {{- if .Values.oidc.caSecret }}
-  QV_OIDC_CA_FILE: /etc/qv/oidc/ca.crt
-  {{- end }}
-  {{- if .Values.approval.enabled }}
-  QV_APPROVAL_ORIGINS: {{ include "qv.approvalOrigin" . | quote }}
-  {{- end }}
-  {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
+  {{- include "qv.env.core" . | nindent 2 }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "qv.fullname" (dict "ctx" . "c" "worker-env") }}
+  name: {{ include "qv.cmName" (dict "ctx" . "c" "worker-env" "data" (include "qv.env.worker" .)) }}
   labels: {{- include "qv.labels" (dict "ctx" . "c" "worker") | nindent 4 }}
+immutable: true
 data:
-  DATABASE_URL: {{ include "qv.dsn" (dict "ctx" . "role" "qv_worker" "dir" "/etc/qv/tls") | quote }}
-  QV_TEMPORAL_ADDR: {{ .Values.temporal.address | quote }}
-  {{- if .Values.custody.autoApprover.enabled }}
-  QV_AUTO_APPROVER_KEY_FILE: /etc/qv/approver/{{ .Values.custody.autoApprover.key }}
-  {{- end }}
-  {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
+  {{- include "qv.env.worker" . | nindent 2 }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "qv.fullname" (dict "ctx" . "c" "relay-env") }}
+  name: {{ include "qv.cmName" (dict "ctx" . "c" "relay-env" "data" (include "qv.env.relay" .)) }}
   labels: {{- include "qv.labels" (dict "ctx" . "c" "relay") | nindent 4 }}
+immutable: true
 data:
-  DATABASE_URL: {{ include "qv.dsn" (dict "ctx" . "role" "qv_relay" "dir" "/etc/qv/tls") | quote }}
-  QV_KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
-  {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
+  {{- include "qv.env.relay" . | nindent 2 }}
 {{- if .Values.archiver.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "qv.fullname" (dict "ctx" . "c" "archiver-env") }}
+  name: {{ include "qv.cmName" (dict "ctx" . "c" "archiver-env" "data" (include "qv.env.archiver" .)) }}
   labels: {{- include "qv.labels" (dict "ctx" . "c" "archiver") | nindent 4 }}
+immutable: true
 data:
-  QV_KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
-  QV_ARCHIVE_BUCKET: {{ .Values.archive.bucket | quote }}
-  QV_ARCHIVE_REGION: {{ .Values.archive.region | quote }}
-  {{- with .Values.archive.endpoint }}
-  QV_ARCHIVE_ENDPOINT: {{ . | quote }}
-  {{- end }}
-  {{- if .Values.archive.credentialsSecret }}
-  QV_ARCHIVE_ACCESS_KEY_FILE: /etc/qv/archive/{{ .Values.archive.accessKeyKey }}
-  QV_ARCHIVE_SECRET_KEY_FILE: /etc/qv/archive/{{ .Values.archive.secretKeyKey }}
-  {{- end }}
-  {{- if .Values.archive.tls.secretName }}
-  QV_ARCHIVE_TLS_CERT: /etc/qv/archive-tls/tls.crt
-  QV_ARCHIVE_TLS_KEY: /etc/qv/archive-tls/tls.key
-  QV_ARCHIVE_TLS_CA: /etc/qv/archive-tls/ca.crt
-  {{- end }}
-  {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 2 }}
+  {{- include "qv.env.archiver" . | nindent 2 }}
 {{- end }}
 {{- if .Values.approval.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "qv.fullname" (dict "ctx" . "c" "approval-env") }}
+  name: {{ include "qv.cmName" (dict "ctx" . "c" "approval-env" "data" (include "qv.env.approval" .)) }}
   labels: {{- include "qv.labels" (dict "ctx" . "c" "approval") | nindent 4 }}
+immutable: true
 data:
-  QV_APPROVAL_LISTEN: {{ printf "0.0.0.0:%d" (int .Values.approval.port) | quote }}
-  QV_APPROVAL_DIR: /srv/approval
-  QV_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
-  QV_APPROVAL_CLIENT_ID: {{ .Values.approval.clientId | quote }}
-  QV_APPROVAL_API: {{ printf "https://%s" .Values.ingress.public.host | quote }}
-  {{- with .Values.approval.assetDecimals }}
-  QV_APPROVAL_ASSET_DECIMALS: {{ . | quote }}
-  {{- end }}
+  {{- include "qv.env.approval" . | nindent 2 }}
 {{- end }}

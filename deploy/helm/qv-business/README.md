@@ -8,7 +8,7 @@ One release serves **one chain cell**: `qv-core` and `qv-worker` each read one c
 
 | Piece | Kind | Replicas | Notes |
 |---|---|---|---|
-| core | Deployment, Service, Ingress | 2 | HTTPS on 8443, PDB `minAvailable: 1`, TCP probes |
+| core | Deployment, Service, Ingress | 2 | HTTPS on 8443, PDB `minAvailable: 1`, health-listener probes |
 | worker | Deployment | 2 | PDB; queue `qv-core-<chain>` unless `worker.taskQueue` is set |
 | relay | Deployment | 2 | `FOR UPDATE SKIP LOCKED` makes two safe; PDB |
 | archiver | Deployment | 1 | refuses a bucket without Object Lock |
@@ -84,7 +84,7 @@ The hook Jobs need the `admin` certificate Secret and the database to exist at i
 
 ## Probes
 
-`core` uses TCP probes. `worker`, `relay` and `archiver` listen on no port (metrics are loopback-only), so they have **no probe** by default; `probes.mode: http` switches a component to the health route that task D2 adds (`httpPath`, `healthPort`; core uses its own port).
+Every component (core, worker, relay, archiver) runs the health listener of PR #97 (`QV_HEALTH_LISTEN=0.0.0.0:<healthPort>`, default 9100): plain http, `/readyz` for the startup and readiness probes (ready = start-up finished and the dependencies answer; a failing probe only takes the pod out of service), `/livez` for the liveness probe (the process answers; it never looks at a dependency). `probes.mode` is `health` (default), `tcp` (core only has a port to test) or `none`. The kubelet's probe comes from the node and is not governed by the namespace's network policy; nothing else may use the port.
 
 ## What the dependencies must provide
 

@@ -6,7 +6,7 @@ A hot wallet signs all day, so it holds only what the day needs. The rest sits i
 
 <p align="center"><img src="images/tiers.png" width="60%" alt="Above its upper limit a hot wallet moves the excess to cold automatically. Below its lower limit it asks for a refill, which people carry across an air gap."></p>
 
-## Bands decide when to move
+## Limits decide when to move
 Each hot wallet has a lower limit, an upper limit and a target.
 
 | Hot balance | What the system does |
@@ -19,7 +19,7 @@ Each hot wallet has a lower limit, an upper limit and a target.
 The cold address is written into the signing zone's own config, which the business side cannot change. A move can only send coins somewhere safer, so a hijacked core still cannot send "cold" money elsewhere.
 
 ## A hot wallet can change its key
-On an EVM chain a hot wallet can get a new key without a new set of books. New payments leave from the new key, the old key moves everything it holds to the new one, and only then is it retired. While both exist, the books add up the balance of both addresses. See the [key replacement runbook](runbooks/key-replacement.md).
+A hot wallet can get a new key without a new set of books: new payments leave from the new key, the old key moves everything it holds to the new one, and only then is it retired ([Key replacement](key-replacement.md)).
 
 ## Cold to hot needs people
 A refill makes coins more exposed, so it goes through a ceremony.

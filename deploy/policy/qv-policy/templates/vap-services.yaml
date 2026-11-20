@@ -1,0 +1,29 @@
+{{- $v := .Values -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: qv-services
+  labels: {{- include "qvp.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: [CREATE, UPDATE]
+        resources: [services]
+  validations:
+    - reason: Forbidden
+      message: "Services of type NodePort are not allowed"
+      expression: |-
+        !has(object.spec.type) || object.spec.type != 'NodePort'
+    - reason: Forbidden
+      message: "a LoadBalancer Service needs quorumvault.io/endpoint: private AND the cloud's internal-load-balancer annotations from loadBalancer.internalAnnotations (empty = no LoadBalancer allowed)"
+      expression: |-
+        !has(object.spec.type) || object.spec.type != 'LoadBalancer' || {{ if $v.loadBalancer.internalAnnotations }}(has(object.metadata.annotations) && 'quorumvault.io/endpoint' in object.metadata.annotations && object.metadata.annotations['quorumvault.io/endpoint'] == 'private'{{ range $a := $v.loadBalancer.internalAnnotations }} && {{ include "qvp.lit" $a.key }} in object.metadata.annotations && object.metadata.annotations[{{ include "qvp.lit" $a.key }}] == {{ include "qvp.lit" $a.value }}{{ end }}){{ else }}false{{ end }}
+    - reason: Forbidden
+      message: "externalIPs are not allowed"
+      expression: |-
+        !has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0
+---
+{{ include "qvp.binding" (dict "ctx" . "name" "qv-services") }}

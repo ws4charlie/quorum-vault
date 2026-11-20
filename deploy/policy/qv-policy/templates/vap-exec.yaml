@@ -1,0 +1,27 @@
+{{- if eq (include "qvp.signing" .) "true" }}
+{{- /* exec, attach, port-forward and debug containers into pods of a signing cluster: the break-glass group only. Admission sees the user's groups; who is in the group is RBAC and IAM (docs/runbooks/break-glass.md). */ -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: qv-no-exec
+  labels: {{- include "qvp.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: [CONNECT]
+        resources: [pods/exec, pods/attach, pods/portforward]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: [UPDATE]
+        resources: [pods/ephemeralcontainers]
+  validations:
+    - reason: Forbidden
+      message: "exec, attach, port-forward and ephemeral (debug) containers are for the break-glass group only"
+      expression: |-
+        request.userInfo.groups.exists(g, g == {{ include "qvp.lit" .Values.breakGlass.group }})
+---
+{{ include "qvp.binding" (dict "ctx" . "name" "qv-no-exec") }}
+{{- end }}
