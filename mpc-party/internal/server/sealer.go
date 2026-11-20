@@ -1,6 +1,9 @@
 package server
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Sealer protects key material at rest. P5b-4 adds the HSM implementation (AES-GCM under an in-token key).
 type Sealer interface {
@@ -13,13 +16,21 @@ var extraSealers = map[string]func(SealerConfig) (Sealer, error){}
 
 // NewSealer builds the sealer named in the config. Production: "pkcs11". The insecure test sealer exists only in binaries
 // built with -tags devauth; a production binary asked for it refuses to start.
-func NewSealer(c SealerConfig) (Sealer, error) {
+func NewSealer(c SealerConfig) (Sealer, error) { return NewSealerForRole("", c) }
+
+// NewSealerForRole is NewSealer for a party of the given role (A, B, C): the attested sealer needs it, because the broker releases keys per party.
+func NewSealerForRole(role string, c SealerConfig) (Sealer, error) {
 	switch c.Type {
 	case "pkcs11":
 		return NewPKCS11Sealer(c)
+	case AttestedSealerType:
+		if role == "" {
+			return nil, errors.New(`sealer type "attested" needs the party's role`)
+		}
+		return NewAttestedSealer(role, c)
 	}
 	if f, ok := extraSealers[c.Type]; ok {
 		return f(c)
 	}
-	return nil, fmt.Errorf("sealer type %q is not available in this build (production builds have: pkcs11)", c.Type)
+	return nil, fmt.Errorf("sealer type %q is not available in this build (production builds have: pkcs11, attested)", c.Type)
 }

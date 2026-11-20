@@ -77,6 +77,9 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 	if len(open.IntentPackage) > s.cfg.Limits.MaxIntentBytes {
 		return reject(pb.ErrorKind_ERROR_KIND_LIMIT, "intent package too large")
 	}
+	if err := s.sealerReady(); err != nil {
+		return reject(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, err.Error())
+	}
 	if !s.slots.acquire() {
 		return reject(pb.ErrorKind_ERROR_KIND_LIMIT, "too many concurrent sessions")
 	}
