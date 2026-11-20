@@ -128,3 +128,17 @@ func TestDrainShapes(t *testing.T) {
 	bad.Kind = "dreyn"
 	fail("an unknown kind", f.partSOL, job(f.partSOL, f.sysTransfer(old, succ, 1000)), bad, "not signed on this chain")
 }
+
+// The funding of a new key's pool includes the priority fee the configured price makes of the setup's compute limit.
+func TestNonceSetupFeeFollowsThePrice(t *testing.T) {
+	for _, c := range []struct {
+		price uint64
+		n     int
+		want  uint64
+	}{{0, 3, 5000}, {1000, 3, 5000 + 35}, {100_000, 3, 5000 + 3_500}, {1_000_000_000, 3, 5000 + 35_000_000}} {
+		a := &Adapter{cfg: &validatedConfig{Config: Config{ComputeUnitPrice: c.price}}}
+		if got := a.NonceSetupFee(c.n); got != c.want {
+			t.Errorf("price %d, %d accounts: %d, want %d", c.price, c.n, got, c.want)
+		}
+	}
+}

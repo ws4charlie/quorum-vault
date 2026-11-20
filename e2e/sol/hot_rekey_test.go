@@ -242,3 +242,63 @@ func TestSwFlowsHotKeyReplacementDrivenByTheTool(t *testing.T) {
 	s.mustRefuse("k4-retired-wd", s.wdIntent("k4-retired-wd", to, 1000), s.wdMsg(0, [32]byte{9}, 1000, startUnit, to, 1000), "keyset_state", "alice")
 	s.reconcileClean("at the end")
 }
+
+// A token account of the old key that is empty is closed like the others (a move with no amount): the drain goes on to the nonce accounts and the last SOL.
+func TestSwFlowsHotKeyReplacementWithAnEmptyTokenAccount(t *testing.T) {
+	ops := map[string]ed25519.PrivateKey{}
+	s := newWdSystem(t, wdOpts{pool: 3, seedTKN: []uint64{0}, gwTweak: func(gf *gateway.File) {
+		gf.Operators = &gateway.OperatorsFile{Keys: map[string]gateway.OperatorFile{}, MinOperators: 2}
+		for _, n := range []string{"op1", "op2", "op3"} {
+			pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+			ops[n] = priv
+			gf.Operators.Keys[n] = gateway.OperatorFile{PublicKey: hex.EncodeToString(pub)}
+		}
+		for name, cc := range gf.Chains {
+			n := 50
+			cc.DrainsPerHour = &n
+			gf.Chains[name] = cc
+		}
+	}})
+	oldHot, oldATA := s.hotAddr(), sol.Address(s.hotATA)
+	if _, err := s.c.rpc.GetAccount(s.ctx, oldATA, sol.Finalized); err != nil || s.tokensOf(oldHot) != 0 {
+		t.Fatalf("the old key should hold an empty token account: %v, %d tokens", err, s.tokensOf(oldHot))
+	}
+	dir := filepath.Join(s.dir, "rekey")
+	s.rekeyMust(dir, "open", "-shard", s.hotShardID(), "-mode", "mpc", "-reason", "e2e")
+	keyset := strings.Trim(slugSol.ReplaceAllString(strings.ToLower(s.hotShardID()), "-"), "-") + "-g2"
+	s.rekeyMust(dir, "dkg", "-admin-auth", s.partyAuthFor(keyset))
+	var plan struct {
+		KeyRef, PublicKey, Address string
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	plan.KeyRef, _ = raw["key_ref"].(string)
+	plan.PublicKey, _ = raw["public_key"].(string)
+	plan.Address, _ = raw["address"].(string)
+	s.rekeyMust(dir, "candidate", "-change", s.hotChange(ops, "cand", 1, "-action", "register-candidate", "-generation", "2", "-address", plan.Address, "-key-ref", plan.KeyRef, "-public-key", plan.PublicKey))
+	caps := []string{"-cap", "SOL=1000000000000", "-cap", "TKN=100000000000000"}
+	s.rekeyMust(dir, append([]string{"drain-start", "-change", s.hotChange(ops, "drain", 2, append([]string{"-action", "start-draining", "-generation", "1", "-successor", "2"}, caps...)...)}, caps...)...)
+	s.rekeyMust(dir, "activate", "-change", s.hotChange(ops, "act", 3, "-action", "activate", "-generation", "2"))
+	// the empty account is closed (not stuck on), then the drain waits for the new key's pool
+	s.waitFor(3*time.Minute, "the drain to wait for the new key's nonce pool", func() bool {
+		st, why := s.drainState(1)
+		return st == "waiting" && strings.Contains(why, "nonce pool")
+	})
+	if _, err := s.c.rpc.GetAccount(s.ctx, oldATA, sol.Finalized); err == nil {
+		t.Fatal("the empty token account of the old key is still open")
+	}
+	if out, err := s.nonceTool(t); err != nil {
+		t.Fatalf("qv-sol-nonces: %v\n%s", err, out)
+	}
+	s.waitFor(4*time.Minute, "the old generation to be drained", func() bool { st, _ := s.drainState(1); return st == "drained" })
+	if got := s.lamports(oldHot); got != 0 {
+		t.Fatalf("the old address holds %d lamports", got)
+	}
+	s.reconcileClean("after draining an empty token account")
+}

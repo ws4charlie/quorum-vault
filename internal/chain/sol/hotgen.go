@@ -83,3 +83,32 @@ func (a *Adapter) HotKeyOfGeneration(ctx context.Context, partitionID string, ge
 	raw, err := ParseAddress(addr)
 	return raw, state, err
 }
+
+// pinnedHot is the key of the generation a multi-step operation (a nonce close: build, sign, record, finish) was started for. The caller resolves it once;
+// nothing in between looks up the active generation again, so an activation in the middle cannot move the operation to another key's pool. It must be a
+// hot key of the partition's shard.
+func (a *Adapter) pinnedHot(ctx context.Context, partitionID, hotAddr string) ([32]byte, error) {
+	base, ok := a.cfg.hot[partitionID]
+	if !ok {
+		return [32]byte{}, fmt.Errorf("sol: partition %q has no hot shard", partitionID)
+	}
+	raw, err := ParseAddress(hotAddr)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("sol: hot key %q: %w", hotAddr, err)
+	}
+	if raw == base {
+		return raw, nil
+	}
+	k, err := partition.Parse(partitionID)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	var n int
+	if err := a.pool.QueryRow(ctx, `SELECT count(*) FROM keysets WHERE shard_id=$1 AND address=$2`, string(k.ShardID()), hotAddr).Scan(&n); err != nil {
+		return [32]byte{}, err
+	}
+	if n == 0 {
+		return [32]byte{}, fmt.Errorf("sol: %s is no generation of shard %s", hotAddr, k.ShardID())
+	}
+	return raw, nil
+}

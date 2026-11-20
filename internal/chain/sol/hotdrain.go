@@ -128,7 +128,11 @@ func (a *Adapter) NextDrainStep(ctx context.Context, shardPart, oldAddr, succAdd
 		if amt > 0 {
 			if _, err := a.rpc.GetAccount(ctx, Address(dst), Finalized); errors.Is(err, ErrNoAccount) {
 				ixs = append(ixs, CreateATAIx(old, dst, succ, m.raw))
-				need += 2_100_000 // the rent of the successor's account, paid by the old key (the zone's shape)
+				rent, err := a.rpc.MinimumRent(ctx, 165)
+				if err != nil {
+					return nil, rep, err
+				}
+				need += rent // the rent of the successor's account, paid by the old key (the zone's shape)
 			} else if err != nil {
 				return nil, rep, err
 			}
@@ -170,7 +174,7 @@ func (a *Adapter) NextDrainStep(ctx context.Context, shardPart, oldAddr, succAdd
 		if err != nil {
 			return nil, rep, err
 		}
-		need := uint64(len(missing))*a.cfg.NonceRent + floor + 4*DrainFee + 20_000
+		need := uint64(len(missing))*a.cfg.NonceRent + floor + a.NonceSetupFee(len(missing)) + DrainFee
 		keep := uint64(a.cfg.NoncePool+1) * DrainFee // what the old key still pays for: a withdrawal of each pool account and the last transfer
 		if have < need {
 			give := need - have

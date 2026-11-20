@@ -92,7 +92,7 @@ func (a *Adapter) BuildNonceSetupGen(ctx context.Context, partitionID string, ge
 	if err != nil {
 		return chain.UnsignedTx{}, nil, 0, err
 	}
-	ixs := []Ix{SetLimitIx(20_000 + uint32(len(missing))*5_000)}
+	ixs := []Ix{SetLimitIx(nonceSetupUnits(len(missing)))}
 	if a.cfg.ComputeUnitPrice > 0 {
 		ixs = append(ixs, SetPriceIx(a.cfg.ComputeUnitPrice))
 	}
@@ -140,4 +140,14 @@ func (a *Adapter) SubmitNonceSetup(ctx context.Context, s chain.SignedTx, wait t
 		case <-time.After(400 * time.Millisecond):
 		}
 	}
+}
+
+// nonceSetupUnits is the compute unit limit of the creation of n pool accounts.
+func nonceSetupUnits(n int) uint32 { return 20_000 + uint32(n)*5_000 }
+
+// NonceSetupFee is the most the creation of n pool accounts costs in fees: the base fee of its one signature and the priority fee the configured price
+// makes of its compute unit limit (rounded up). The rent of the accounts is not in it.
+func (a *Adapter) NonceSetupFee(n int) uint64 {
+	prio := (uint64(nonceSetupUnits(n))*a.cfg.ComputeUnitPrice + 999_999) / 1_000_000
+	return 5000 + prio
 }
