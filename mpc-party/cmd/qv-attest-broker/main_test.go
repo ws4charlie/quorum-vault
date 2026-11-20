@@ -72,3 +72,75 @@ func TestUsage(t *testing.T) {
 		t.Fatal("serve started without a config")
 	}
 }
+
+// Upgrade and revoke through the tool: add copies the list with the next sequence and no signatures; sign -against prints what changes; expire
+// sets valid-until; revoke adds a revocation that stays in the list.
+func TestAllowlistEditTools(t *testing.T) {
+	dir := t.TempDir()
+	p := func(n string) string { return filepath.Join(dir, n) }
+	v1, v2 := strings.Repeat("a1", 48), strings.Repeat("b2", 48)
+	if out, code := runCLI(t, "allowlist", "new", "-seq", "4", "-out", p("l4.json"), "-entry", "A,"+v1+",2026-01-01T00:00:00Z,,v1.0.0"); code != 0 {
+		t.Fatalf("new without an end: %s", out)
+	}
+	if b, _ := os.ReadFile(p("l4.json")); strings.Contains(string(b), "not_after") || !strings.Contains(string(b), "v1.0.0") {
+		t.Fatalf("new: %s", b)
+	}
+	if out, code := runCLI(t, "allowlist", "add", "-in", p("l4.json"), "-out", p("l5.json"), "-party", "A", "-measurement", strings.ToUpper(v2), "-version", "v1.1.0", "-not-before", "2026-02-01T00:00:00Z"); code != 0 || !strings.Contains(out, "sequence 5, 2 entries, 0 signatures") {
+		t.Fatalf("add: %s", out)
+	}
+	if out, code := runCLI(t, "allowlist", "add", "-in", p("l5.json"), "-out", p("x.json"), "-party", "A", "-measurement", v2); code == 0 {
+		t.Fatalf("add of an existing measurement: %s", out)
+	}
+	if out, code := runCLI(t, "allowlist", "expire", "-in", p("l5.json"), "-out", p("l6.json"), "-party", "A", "-measurement", v1, "-not-after", "2026-03-01T00:00:00Z"); code != 0 {
+		t.Fatalf("expire: %s", out)
+	}
+	if out, code := runCLI(t, "allowlist", "expire", "-in", p("l5.json"), "-out", p("x.json"), "-party", "A", "-measurement", "cc", "-not-after", "2026-03-01T00:00:00Z"); code == 0 {
+		t.Fatalf("expire of an unknown measurement: %s", out)
+	}
+	if out, code := runCLI(t, "allowlist", "revoke", "-in", p("l6.json"), "-out", p("l7.json"), "-party", "A", "-measurement", v1); code != 0 || !strings.Contains(out, "sequence 7, 3 entries") {
+		t.Fatalf("revoke: %s", out)
+	}
+	if out, code := runCLI(t, "allowlist", "revoke", "-in", p("l7.json"), "-out", p("x.json"), "-party", "A", "-measurement", v1); code == 0 {
+		t.Fatalf("revoke twice: %s", out)
+	}
+	// the operator sees the difference to the list in force before signing
+	runCLI(t, "allowlist", "keygen", "-key", p("k.key"))
+	out, code := runCLI(t, "allowlist", "sign", "-in", p("l7.json"), "-key", p("k.key"), "-operator", "alice", "-against", p("l4.json"), "-out", p("l7s.json"))
+	if code != 0 || !strings.Contains(out, "against sequence 4") || !strings.Contains(out, "+ A "+v2) || !strings.Contains(out, "revoked") || !strings.Contains(out, "~ A "+v1) {
+		t.Fatalf("sign -against: %s", out)
+	}
+	// an older list than the one given with -against is flagged
+	if out, _ := runCLI(t, "allowlist", "show", "-in", p("l4.json"), "-against", p("l7.json")); !strings.Contains(out, "WARNING") {
+		t.Fatalf("no warning for an older list: %s", out)
+	}
+}
+
+// The tool refuses to read, show, sign or edit a file it cannot parse strictly (a misspelled not_after must not become "no end" in a list that gets signed).
+func TestToolRefusesUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	p := func(n string) string { return filepath.Join(dir, n) }
+	m := strings.Repeat("a1", 48)
+	if out, code := runCLI(t, "allowlist", "new", "-seq", "1", "-out", p("ok.json"), "-entry", "A,"+m+",2026-01-01T00:00:00Z,2026-06-01T00:00:00Z"); code != 0 {
+		t.Fatalf("new: %s", out)
+	}
+	good, _ := os.ReadFile(p("ok.json"))
+	bad := strings.Replace(string(good), `"not_after"`, `"not_atfer"`, 1)
+	if bad == string(good) {
+		t.Fatal("test file has no not_after to misspell")
+	}
+	os.WriteFile(p("bad.json"), []byte(bad), 0o600)
+	runCLI(t, "allowlist", "keygen", "-key", p("k.key"))
+	for name, args := range map[string][]string{
+		"show":   {"allowlist", "show", "-in", p("bad.json")},
+		"sign":   {"allowlist", "sign", "-in", p("bad.json"), "-key", p("k.key"), "-operator", "alice", "-out", p("s.json")},
+		"revoke": {"allowlist", "revoke", "-in", p("bad.json"), "-out", p("r.json"), "-party", "A", "-measurement", m},
+		"touch":  {"allowlist", "touch", "-in", p("bad.json"), "-out", p("t.json")},
+	} {
+		if out, code := runCLI(t, args...); code == 0 {
+			t.Errorf("%s accepted a file with an unknown field: %s", name, out)
+		}
+	}
+	if _, err := os.Stat(p("s.json")); err == nil {
+		t.Error("a signed copy of the bad file was written")
+	}
+}

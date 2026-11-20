@@ -56,7 +56,9 @@ type blob struct {
 	CT    []byte `json:"ct"`
 }
 
-// ReadPIN takes the PIN from an environment variable or from a file with no group/other access.
+// ReadPIN takes the PIN from an environment variable or from a file that only its owner, or its owner and one group, can read: no access for others, and
+// the group may read but not write or execute (0400, 0600, 0440, 0640). The group read bit is what kubelet gives a Secret volume under fsGroup, and the pod's
+// group is the only group that sees it; the same rule as the party's own ReadPIN (internal/server/sealer_pkcs11.go).
 func ReadPIN(env, file string) (string, error) {
 	switch {
 	case env != "" && file != "":
@@ -71,8 +73,10 @@ func ReadPIN(env, file string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("hsm: pin_file: %w", err)
 		}
-		if fi.Mode().Perm()&0o077 != 0 {
-			return "", fmt.Errorf("hsm: pin_file %s has mode %v: group and others must have no access (chmod 0400)", file, fi.Mode().Perm())
+		if perm := fi.Mode().Perm(); perm&0o007 != 0 {
+			return "", fmt.Errorf("hsm: pin_file %s has mode %04o: others must have no access (chmod 0400, or 0440 for a group-readable Secret volume)", file, uint32(perm))
+		} else if perm&0o030 != 0 {
+			return "", fmt.Errorf("hsm: pin_file %s has mode %04o: the group may read it (0440) but not write or execute it", file, uint32(perm))
 		}
 		b, err := os.ReadFile(file)
 		if err != nil {

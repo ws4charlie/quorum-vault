@@ -375,3 +375,68 @@ func (s *Stack3) ConfigPath(role string) string { return s.cfg[role] }
 
 // DataDir is the data directory of a party.
 func (s *Stack3) DataDir(role string) string { return filepath.Join(s.Dir, "data-"+role) }
+
+// ListEdit changes every broker's allowlist with the operator tool the way operators do (add, expire, revoke: a copy with the next sequence number
+// and no signatures), reads the difference to the list in force while signing (sign -against), signs with two operators, and puts the file in
+// place. args is the list of tool flags for that party (party and measurement of the entry). The brokers poll the file; this waits for them to
+// pick it up (it returns when every broker's audit log has a "loaded" record for the new sequence). All three lists stay in step.
+// It returns the output of the first signature, which holds the difference.
+func (t *TEE) ListEdit(sub string, flags func(role string) []string) string {
+	// flags returns nil for a party whose list is not changed (its list still gets the next sequence number, so the three stay in step)
+	tb := t.s.t
+	tb.Helper()
+	t.seq++
+	var diff string
+	for _, r := range t.roles() {
+		tmp := t.listPath[r] + ".edit"
+		if f := flags(r); f != nil {
+			t.run(t.s.Bin.Broker, append([]string{"allowlist", sub, "-in", t.listPath[r], "-out", tmp}, f...)...)
+		} else { // same entries, next sequence
+			t.run(t.s.Bin.Broker, "allowlist", "touch", "-in", t.listPath[r], "-out", tmp)
+		}
+		for i := 0; i < 2; i++ {
+			out := t.run(t.s.Bin.Broker, "allowlist", "sign", "-in", tmp, "-key", t.opKeys[i], "-operator", t.opNames[i], "-against", t.listPath[r])
+			if diff == "" {
+				diff = out
+			}
+		}
+		if err := os.Rename(tmp, t.listPath[r]); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	for _, r := range t.roles() {
+		seq := fmt.Sprintf(`"seq":%d,`, t.seq)
+		deadline := time.Now().Add(20 * time.Second)
+		for t.AuditLines(r, `"event":"allowlist_load"`, `"outcome":"loaded"`, seq) == 0 {
+			if time.Now().After(deadline) {
+				tb.Fatalf("broker %s did not load allowlist sequence %d", r, t.seq)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	return diff
+}
+
+// AllowRelease adds the measurement of a new release for every party (overlap: the running measurement stays allowed). ms maps role -> hex.
+func (t *TEE) AllowRelease(ms map[string]string, version string) string {
+	return t.ListEdit("add", func(r string) []string {
+		return []string{"-party", r, "-measurement", ms[r], "-version", version, "-not-before", time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)}
+	})
+}
+
+// SetValidUntil sets (or moves) the end of a measurement's window for the parties in ms.
+func (t *TEE) SetValidUntil(ms map[string]string, until time.Time) {
+	t.ListEdit("expire", func(r string) []string {
+		return []string{"-party", r, "-measurement", ms[r], "-not-after", until.UTC().Format(time.RFC3339)}
+	})
+}
+
+// RevokeRelease revokes a measurement for the parties in ms.
+func (t *TEE) RevokeRelease(ms map[string]string) {
+	t.ListEdit("revoke", func(r string) []string {
+		if ms[r] == "" {
+			return nil
+		}
+		return []string{"-party", r, "-measurement", ms[r]}
+	})
+}
