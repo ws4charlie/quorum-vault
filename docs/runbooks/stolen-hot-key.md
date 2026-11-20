@@ -1,40 +1,85 @@
-# Runbook: a hot key may be stolen
+# Runbook: a hot key may be stolen (emergency)
 
-A hot key signs withdrawals and sweeps all day, so it is the one most likely to be attacked. The design assumes it can be lost, and limits
-what that costs: **the hot wallet holds little** (the excess goes to cold, see P6-1), **the forwarder factory pays only to its destination**, and the
-destination can be changed **only by the cold key**, in an offline ceremony. This runbook is the response. Read it before you need it; the
-steps marked **prepare** must exist before an incident.
+A hot key signs withdrawals and sweeps all day, so it is the one most likely to be attacked. The design assumes it can be lost and limits the cost: the hot wallet
+holds little (the excess goes to cold), the forwarder factory pays only to its destination, and the destination changes only by the cold key. This page is the
+procedure for the first hours. Read it before you need it; the steps marked **prepare** must exist before an incident.
 
-## What can and cannot happen with a stolen hot key
+**The race.** The thief holds a copy of the key and can sign on chain at any time; nothing we do stops that. Two things decide the loss: how long it takes to
+sign the emergency record, and how fast the old address is emptied afterwards. Everything below is ordered by that.
 
-| | The attacker with the hot key can | The attacker cannot |
-|---|---|---|
-| Hot wallet | sign transfers out of the hot address, up to what it holds | touch the cold address |
-| Deposits | nothing at the forwarders: they pay to the factory's destination | change the destination (only the admin, the cold key, can) |
-| After the destination is moved | still sign with the old key, but nothing new arrives there | pull new deposits towards themselves |
+## What can be saved and what cannot
 
-## Roles and what you need ready (prepare)
-
-| What | Where |
+| | |
 |---|---|
-| Guardian key, online, one per chain, can only `freeze()` | `qv-guardian`, key file on the operations host |
-| Cold key (the factory's admin), M-of-N operators | `qv-cold` on the offline machine, config with **pinned `new_destinations`** |
-| A spare hot address already listed in `new_destinations` | **prepare**: generate the next hot key *now* (`qv-rekey open` and `dkg` make it, and nothing else changes until `candidate`), put its address in the offline config. Adding an address to the offline config during an incident is possible but is a config change on the offline machine that all operators must witness |
-| Cold address funded with gas | for the ceremony fees; book it with `POST /v2/cold/fundings` |
-| The signing-zone configs and who may edit them | gateway and cosigner: `sweep_destination`, `hot_addresses`, signers |
+| **Saved** | whatever is still on the old address when its drain transfer lands; every later withdrawal (it signs from the new key); deposits swept after the new key is the destination |
+| **Lost** | what the thief moves **before** the drain lands, bounded by the hot balance; the hot balance is small by design |
+| **Exposed until swept** | deposits that arrive later at old addresses that the old key controls (Bitcoin and Solana deposit keys; they are watched and swept at emergency priority, but a thief can spend them first). EVM deposit addresses are forwarders: they pay the factory's destination, not the old key, so a stolen hot key cannot take them |
+| **Not stopped** | a transaction the thief signs with the old key is valid on chain; the signing zone refuses it only when it is asked to sign. There is no on-chain brake except the factory's `freeze()` |
 
-## Step by step
+## What exists today, per chain and key
 
-| # | Who | Step | What it protects | What is lost in the window |
-|---|---|---|---|---|
-| 1 | on-call | **Freeze the factory.** `qv-guardian freeze -rpc … -factory … -key-file guardian.key -core http://…` (it checks the key is the guardian, sends `freeze()`, waits for the receipt, books the gas against the fee account) | new deposits stop being swept to the possibly stolen address; they stay in their forwarders, safe, and can be swept later | sweeping stops for **every** deposit address of the chain until step 5; customers' deposits are credited but not yet in hot. Withdrawals are **not** stopped by this step |
-| 2 | on-call | **Stop the stolen key from signing.** Stop the gateway for that partition (or the whole gateway) and the withdrawal workflow; for an MPC key also stop party A. Do not delete anything | the attacker's requests cannot be signed through *our* path | funds already in the hot wallet are exposed to the attacker's own copy of the key: **the window between the theft and this step is lost money, bounded by the hot balance and the daily caps**. Withdrawals wait |
-| 3 | security | **Investigate.** `GET /v2/reconcile`; look for `nonce consumed` ALERTs (a transaction we did not make); compare the chain history of the hot address with the ledger | tells you what was taken and whether more keys are involved | nothing moves meanwhile |
-| 4 | key custodian + operators | **Replace the key with `qv-rekey`** ([key-replacement](key-replacement.md), emergency order): `open`, `dkg` (a new DKG on the parties, or a new key in the token: do not reuse a derived index of a suspect keyset), `candidate`, then `drain-start -compromised` (the old key now signs only its drain to the new key, within signed caps), `activate`. This replaces the by-hand edit of `hot_shards`, `signers` and `hot_addresses`: the zone learns the new key from the operators' signed records | a clean key that the attacker has never seen; the stolen key can no longer sign withdrawals or sweeps through *our* path | none |
-| 5 | operators (M of N) | **Cold ceremony: set the destination to the new hot address.** `POST /v2/cold/actions {"kind":"set-destination","param":"<new hot address>"}`, export, `qv-cold inspect/approve/sign` (read: *destination: <old> -> <new>*), import | the destination can only be changed by the cold key; this is also the **unfreeze** | the ceremony takes as long as it takes (hours); sweeping stays frozen |
-| 6 | config owners | **Update the signing-zone config by hand** (the one manual edit left): `sweep_destination` in the gateway and the cosigner configs (and the business config where it names the sink); restart the gateway and the cosigners. Until then sweeps are refused and wait (an `ALERT`), nothing is lost | the gateway and the cosigner never learn the destination from the business side | sweeping waits until this step is done |
-| 7 | on-call | **Watch sweeps reach the new address**; `GET /v2/reconcile` must be clean; old deposit addresses still work (their address does not depend on the destination) | | |
-| 8 | key custodian | **Empty the old key**: the drain started in step 4 (the planner moves tokens, then native) shows `drained` in `qv-rekey status`; raise the caps with `qv-rekey caps` if the zone refuses for the cap. A key marked compromised is **never retired**: keep its shares and backups for the forensics. Rotate the guardian too if its key may have been seen: ceremony `set-guardian` | | |
+"Record" is the one operator-signed `mark-compromised` record (successor and drain caps inside it, the zone decides from it at its next decision).
+
+| Key | In an emergency today | Manual steps left |
+|---|---|---|
+| **EVM hot shard** (HSM or MPC) | full path: `qv-rekey emergency`; the record stops ordinary signing, allows only the drain to the successor, carries the caps, lifts the hourly drain rate; core stops paying from it and sweeps wait | the cold ceremony `set-destination` (hours) and the zone config edit `sweep_destination` with a restart: sweeps wait until both are done, nothing is lost |
+| **EVM deposit keys** | none exist: forwarders pay the factory destination | the same ceremony; the guardian `freeze()` stops sweeping at once |
+| **Bitcoin hot shard** | replaced with the deposit tree (it is a child of the same account key): `-compromised` on the tree, then the drain consolidates the hot outputs into the successor's shard | DKG of the new 2-party tree; customer notice |
+| **Bitcoin deposit keys** | new addresses come from the new generation at once; old addresses stay watched, swept to the new hot shard | none; the sweep of each old address needs the 2 parties |
+| **Solana hot shard** | **not replaceable yet** (K4 in flight): stop the key's signing path (below) and move funds with cold | everything |
+| **Solana deposit keys** | like Bitcoin deposit keys | none |
+| Cold key, admin keys | not this page: "If the cold key is in doubt" below, and the key-ceremony pages | |
+
+## Decide: who and on what evidence (two minutes)
+
+- **Any one operator or the on-call person may stop signing paths** (step 1 and 2 below): stopping is cheap and reversible.
+- **The record needs `min_operators` distinct operators (the default is two).** Two is right for an emergency: the record can only stop signing for one generation and
+  let it move funds to a successor that is already registered; it cannot send money anywhere else, so a second signature costs minutes and prevents a single
+  person from taking a key out of service by mistake or by force. Do not lower it for emergencies.
+- Evidence that is enough: a `nonce consumed` ALERT for a transaction we did not make; an outgoing transaction from the hot address with no withdrawal; Reconcile
+  showing a difference at the hot address; a leaked file or a lost host that held the key; a published flaw in the signing library. When in doubt, mark: a marked key
+  that was not stolen costs a replacement; an unmarked stolen key costs the balance.
+
+## Prepare (before an incident)
+
+| What | Why |
+|---|---|
+| **A standing candidate per hot shard** (recommended): make the next key now (`qv-rekey open`, `dkg`, `candidate`), leave it a `candidate` (it signs nothing). The emergency run adopts it, so no DKG or token key has to be made while the thief races | saves the longest step: a DKG on three parties or a key in the token takes minutes and needs the parties healthy. Cost: one more key on the parties or in the token, and a candidate to re-check once a quarter (the drill does) |
+| Guardian key online, one per chain (`qv-guardian`) | `freeze()` stops all sweeping of the chain at once |
+| Cold key custodians reachable (M of N) and the offline config with the **pinned `new_destinations`** including the candidate's address | the destination ceremony cannot be improvised |
+| Operators' keys on two people's machines; `qv-keysets` and `qv-rekey` installed there; the shard's work directory | the record is signed offline; it is valid for 10 minutes after signing (`max_change_age`), so it cannot be signed in advance |
+| Cold address funded with gas | for the ceremony fees (`POST /v2/cold/fundings`) |
+| Alerts on (below) | you learn of a stall from the pager |
+
+## The procedure
+
+Times are from the drill on the local test chains (`TestEmergencyDrillStolenHotKey`); real chains add block times, parties and people.
+
+| # | Who | Step | Time |
+|---|---|---|---|
+| 1 | on-call | **Freeze the factory** (EVM): `qv-guardian freeze -rpc … -factory … -key-file guardian.key -core http://…`. Sweeps of the whole chain stop; deposits stay in their forwarders, safe | one transaction |
+| 2 | on-call | **Stop the stolen key's paths we control** only if the zone cannot be reached (it normally can): stop the gateway for that partition and the withdrawal workflow. Skip this when the record can be signed within minutes: the record does it better | seconds |
+| 3 | two operators | **Sign the emergency record and run the driver.** On the operators' machine: `qv-rekey emergency -dir D -config zone.json -guard-dsn … -core … -token-file … -shard S -mode hsm\|mpc -reason "…" -cap ASSET=N …` (one run per shard, at the same time for several). It adopts the standing candidate, or makes a key if there is none (then it needs `-admin-auth` for mpc), prints `qv-keysets sign … -seq N` lines for `register-candidate` (only if the candidate is not registered), `mark-compromised` (successor and caps in it) and `activate`; the two operators sign each (`-join` adds the second signature), then run the same command again with `-changes FILE` for each file. A kill at any point: run it again | candidate adopted: about as long as the people take to sign; no candidate: plus the DKG |
+| 4 | (automatic) | **The zone's next decision refuses the old key** for anything but its drain; the core stops paying from it and stops sweeping into it; the planner drains the most valuable asset first (price table `price_wei`), the native asset in its place once gas for the rest is set aside; shards drain at the same time | one poll, then one transfer per asset |
+| 5 | operators (M of N) | **Cold ceremony: `set-destination` to the new hot address** (`POST /v2/cold/actions`, `qv-cold inspect/approve/sign`), then the zone config `sweep_destination` and a restart of the gateway and cosigners. This also unfreezes the factory | hours; sweeps wait meanwhile |
+| 6 | on-call | **Watch** `emergency.log` in the work directory (it prints every change with the time since the start), `GET /v2/reconcile`, the old address on a block explorer | |
+
+If the run says `STALLED`, read the reason on the line: gas missing at the old address (send a little native asset to it: it is the thief's key, so only what the drain needs), a zone database that is behind (`qv-keysets show`; apply the same record again), or the cap (a signed `set-drain-caps` raises it: `qv-rekey caps`). Then run the command again.
+
+## Verify
+
+- `qv-rekey status` shows the old generation `compromised`, drain `drained`; Reconcile is clean.
+- The old address holds only dust (explorer). A withdrawal made now leaves from the new address.
+- Metrics: `qv_keyset_compromised` is set for the generation and `qv_emergency_drain_stalled_seconds` is 0.
+- Deposits made after step 5 are swept to the new address.
+
+## Afterwards
+
+1. **Rotate what else the thief may have seen:** the guardian key (ceremony `set-guardian`) if its host is in doubt; the parties' admin keys and the operators' and approvers' keys if the host that held the old key also held them; HSM PINs; the zone and business database credentials of that host.
+2. **Audit trail:** `qv-keysets show`, the audit chain (`keyset.compromised`, `drain.*`), `emergency.log`, the chain history of the old address against the ledger: what was signed in the window and by whom. Keep the old key's shares, token key and backups: they are evidence. **Never retire a compromised generation** (the zone and the tool refuse); it stays in the watch list for good.
+3. **Customers:** Bitcoin and Solana: new addresses are issued from the new generation at once; old ones stay watched and swept; tell customers to use the new ones.
+4. **Next standing candidate:** make the next candidate for the new generation.
+5. **Post-mortem** within a week, and a drill after any change to the path.
 
 ## If the guardian key is the one that leaked
 
@@ -46,9 +91,18 @@ config's `new_guardians`). Until then any freeze is undone by `set-destination`.
 Move the admin role to another cold key: ceremony `transfer-admin` (the new address pinned in `new_admins`), then **the new key** runs `accept-admin` from its own offline machine. After
 that the old key's calls revert on chain. Then update the cold address in the signing-zone config and the business config. This is the slowest path; practise it.
 
+## Alerts
+
+| Alert | Metric | When |
+|---|---|---|
+| A generation is compromised | `qv_keyset_compromised` (core metrics port) | any series: page, until the post-mortem closes it |
+| The emergency drain stalled | `qv_emergency_drain_stalled_seconds` | above 600 for 5 minutes: page |
+| The emergency metrics cannot be read | `qv_emergency_metrics_error` | 1 for 5 minutes: page |
+| Zone refused drains | `qv_drain_refusals_total` | see [key-replacement](key-replacement.md) |
+
 ## Drill
 
-Once a quarter, on the test chain: freeze with the guardian, run the destination ceremony to a spare address, update the configs, check that a deposit sent before the change reaches the new
-address, and that sweeps waited in between. `TestFactoryAdminRotationCeremony` and `TestGuardianFreezeAndCeremonyUnfreeze` do exactly this against anvil.
+Once a quarter and after every change to this path, on the test chains: `make test-e2e-all GROUPS=e2e-evm-flows` runs `TestEmergencyDrillStolenHotKey` (a withdrawal in flight and
+deposits arriving, the three records signed, the driver run killed and rerun, the old key's transactions refused, funds ending at the new key, the ledger clean). It logs the time of every step. Run the cold ceremony part by hand with a spare address ([key ceremony](key-ceremony.md)): `TestFactoryAdminRotationCeremony` and `TestGuardianFreezeAndCeremonyUnfreeze` cover it against anvil.
 
 A key ceremony (new keyset, refresh, unfreeze) is done with `qv-party-admin`: [key-ceremony.md](key-ceremony.md).

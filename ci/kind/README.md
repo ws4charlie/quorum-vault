@@ -39,6 +39,7 @@ Solana is **not** in the kind lane (the validator image is 778 MB and not needed
 | `withdraw` | an EVM and a Bitcoin withdrawal through the real pods: Keycloak token, deposit on the local chain, request, auto approval, signing by the gateway with parties A and B (cosigner B authorises), broadcast, confirmation, **exactly one payout** of the amount, Reconcile clean. The EVM deposit is swept by the pods too |
 | `crash` | party A deleted while the sign job is in flight, the worker deleted right after the job exists, the gateway rolled while signing: each withdrawal still pays once and Reconcile stays clean |
 | `upgrade` | a no-change `helm upgrade` replaces no pod; a changed value rolls the pods that read it and core stays available (a prober dials it twice a second: no refused connection) |
+| `teesim` | **simulated enclave**; run last because it replaces the three parties (new keys). A broker per party in its own namespace (chart `qv-attest-broker`), the parties in attested mode with sealed TLS keys and no HSM, the enrolment Jobs, signed allowlists made by the lane, a DKG through party A, and a restarted party that attests again. Not shown: a signature (the gateway's config would need the new pins), isolation (the evidence is a mock) |
 
 `smoke/run.sh --pending` lists what is not done. `withdraw` and `crash` drive the pods from the host through port-forwards (`tools/kindwd`); the person tokens come from the dev realm's test-only login (`qv-e2e`, as `e2e/idp`), passwords from the gitignored work dir.
 
@@ -58,8 +59,8 @@ CI prints the same numbers for the runner (`.github/workflows/kind.yml`).
 
 ## What is not done
 
-Certificate rotation, admission policies and tee-sim (marked pending). The crash and certificate cases of piece 3: an expired certificate refuses start, rotation without restart. `tools/kindctl` makes the DKG calls (`qv-party-admin` needs a signed file per call and one connection per party; the lane has one port-forward and reads the public keys back in the same tool).
+Certificate rotation and admission policies (marked pending). The crash and certificate cases of piece 3: an expired certificate refuses start, rotation without restart. `tools/kindctl` makes the DKG calls (`qv-party-admin` needs a signed file per call and one connection per party; the lane has one port-forward and reads the public keys back in the same tool).
 
 ## What it cannot show
 
-One cluster, simulated HSM (SoftHSM on a volume, `QV_ENV=dev`), no cloud, no real network between domains, no Vault. Certificate rotation, admission policies and tee-sim are later, marked as pending, not half-tested.
+One cluster, simulated HSM (SoftHSM on a volume, `QV_ENV=dev`), no cloud, no real network between domains, no Vault. Certificate rotation and admission policies are later, marked as pending, not half-tested.

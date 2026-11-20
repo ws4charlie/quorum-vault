@@ -1,0 +1,21 @@
+# Made-up values for the qv-attest-broker checks: public pins and operator keys, a placeholder allowlist. Nothing here is a credential. Pins and keys are hex values that name no real key.
+party:
+  role: B
+  callerPins: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+operators:
+  minOperators: 2
+  keys:
+    alice: "1111111111111111111111111111111111111111111111111111111111111111"
+    bob:   "2222222222222222222222222222222222222222222222222222222222222222"
+    carol: "3333333333333333333333333333333333333333333333333333333333333333"
+trustRoots: { configMap: qv-attest-evidence-root-0a1b2c3d4e }
+allowlist:
+  file: '{"seq":1,"entries":[{"party":"B","measurement":"11","not_before":"2026-01-01T00:00:00Z","not_after":"2027-01-01T00:00:00Z"}],"signatures":[]}'
+hsm:
+  module:
+    path: /etc/qv/hsm/libvendor-pkcs11.so
+    volume: { persistentVolumeClaim: { claimName: vendor-pkcs11, readOnly: true } }
+network:
+  partyIngress: { from: [{ ipBlock: { cidr: 10.30.0.0/24 } }] }
+  metricsIngress: { from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } } }] }
+  hsm: { to: [{ ipBlock: { cidr: 10.60.0.0/24 } }], ports: [2223] }

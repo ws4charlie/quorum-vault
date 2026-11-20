@@ -136,7 +136,7 @@ spec:
         - { port: {{ . }}, protocol: TCP }
         {{- end }}
 {{- end }}
-{{- if and (eq $v.sealer.type "pkcs11") (not $v.hsm.softhsm.enabled) $v.network.hsm.to $v.network.hsm.ports }}
+{{- if and (or (eq $v.sealer.type "pkcs11") (eq (include "qp.phase" .) "migrate")) (not $v.hsm.softhsm.enabled) $v.network.hsm.to $v.network.hsm.ports }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -147,12 +147,33 @@ spec:
   podSelector:
     matchExpressions:
       - { key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name | quote }}] }
-      - { key: app.kubernetes.io/component, operator: In, values: [party, party-backup] }
+      - { key: app.kubernetes.io/component, operator: In, values: [party, party-backup, party-migrate] }
   policyTypes: [Egress]
   egress:
     - to: {{- toYaml $v.network.hsm.to | nindent 8 }}
       ports:
         {{- range $v.network.hsm.ports }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+{{- end }}
+{{- if and (eq $v.sealer.type "attested") $v.network.broker.to }}
+---
+{{/* Attested mode: the party (and its enrol and migrate Jobs) reaches its attestation broker, outward only, on the broker's mutual-TLS port. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" "broker-egress") }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/instance, operator: In, values: [{{ .Release.Name | quote }}] }
+      - { key: app.kubernetes.io/component, operator: In, values: [party, party-enrol, party-migrate] }
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $v.network.broker.to | nindent 8 }}
+      ports:
+        {{- range $v.network.broker.ports }}
         - { port: {{ . }}, protocol: TCP }
         {{- end }}
 {{- end }}

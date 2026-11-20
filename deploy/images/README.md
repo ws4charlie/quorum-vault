@@ -18,6 +18,8 @@ One image per deployable process and one tools image per zone, built from one Do
 | `qv-tools-signing` | signing | `qv-route`, `qv-fee-caps`, `qv-approvers`, `qv-btc-xpub`, `qv-keysets`, `qv-party-admin`, `qv-migrate` | `cc-debian13` | glibc (`qv-party-admin` is static Go: no cgo, no cb-mpc) |
 | `qv-gateway-dev`, `qv-cosigner-dev`, `mpc-party-dev`, `qv-attest-broker-dev` | signing, **development only** | as above | `ubuntu:24.04` + SoftHSM2 | glibc, libstdc++, SoftHSM2 at `/usr/lib/softhsm/libsofthsm2.so` |
 
+**tee-sim (SIMULATED enclave).** `mpc-party-teesim` (also holds `qv-attest-ca`, the test CA and `measure` tool) and `qv-attest-broker-teesim` are the `-dev` base plus `-tags teesim` (mock attester, test evidence root). They are not in the lists of `images.sh` (`QV_TEESIM_IMAGES`): build them by name, `deploy/images/build.sh mpc-party-teesim qv-attest-broker-teesim`. Never published; the charts `qv-party` (attested mode) and `qv-attest-broker` run them only with `env` dev or test and an image by tag.
+
 **Not images.** `qv-cold` is the offline signer: it never runs in a cluster. `qv-pki` is the development CA (`scripts/pki.sh`); production certificates come from cert-manager. `qv-attest-broker` runs beside each party's HSM (signing zone); `qv-approval-web` runs in the business cluster, on its own origin. `qv-migrate` is also in `qv-tools-signing`, for `-zone signing` (the guard databases' roles): it is a schema tool, and the business migrations embedded in it are public SQL that give no access. It is the one allowed business binary in a signing image (`QV_ZONE_ALLOW` in `images.sh`).
 
 Rules every image follows:

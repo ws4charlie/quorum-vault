@@ -238,6 +238,15 @@ func (t *GuardTx) SignedDrainAmountFrom(ctx context.Context, sender, asset strin
 	return parseBig(sum), nil
 }
 
+// SignedDrainCountFrom is the number of signed drains (see SignedDrainsSince) from sender, of any asset, over all time.
+func (t *GuardTx) SignedDrainCountFrom(ctx context.Context, sender string, pending time.Time) (int, error) {
+	var n int
+	err := t.tx.QueryRow(ctx, `SELECT count(*) FROM signed_intents i WHERE i.chain=$1 AND i.kind=$2 AND i.sender=$3
+		AND EXISTS (SELECT 1 FROM signed_digests d WHERE d.intent_id = i.intent_id AND (d.signature IS NOT NULL OR d.reserved_at >= $4))`,
+		t.chain, signjob.KindDrain, sender, pending).Scan(&n)
+	return n, err
+}
+
 // CountSince counts intents of kind on this chain first signed at or after since.
 func (t *GuardTx) CountSince(ctx context.Context, kind string, since time.Time) (int, error) {
 	var n int
