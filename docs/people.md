@@ -20,7 +20,7 @@ For example, at a small exchange: the trading backend is the requester, two fina
 ## How each one proves who they are
 
 - **A login** at the company's identity provider gives the role for the core API, and big actions need a fresh one ([Identity](identity.md)).
-- **A personal key** makes an approval count: the [signing zone](signing-zone.md) checks the signature against its own list and does not trust the login alone. The key can be a hardware security key.
+- **A personal key** makes an approval count: the [signing zone](signing-zone.md) checks the signature against its own list and does not trust the login alone. The key can be a hardware security key, used on a web page or in a small terminal tool.
 - **An offline key** signs zone settings and cold moves. These never touch the online system ([Hot and cold](tiers.md)).
 
 One person can hold more than one role, but the system counts people, not keys: two keys of the same person are one approval.
