@@ -127,6 +127,12 @@ ZH = {
     "Lane": "泳道", "own DB, chains, tokens": "自己的数据库、链、令牌",
     "Group": "测试组", "Every test ends with Reconcile": "每个测试都以对账收尾",
     "Lanes run at the same time": "几条泳道同时运行",
+    # key replacement
+    "New key": "新密钥", "made, signs nothing yet": "已生成，暂不签名",
+    "Takes over": "接手", "new payments use it": "新的付款用它",
+    "Old key drains": "旧密钥清空", "funds move to the new key": "资金转到新密钥",
+    "Old key retired": "旧密钥退役", "its addresses stay watched": "它的地址继续监控",
+    "Emergency": "紧急情况", "a stolen key may only move its funds to the new key": "被盗的密钥只能把资金转到新密钥",
 }
 
 
@@ -420,8 +426,17 @@ def testing():
     d.write()
 
 
+def key_replacement():
+    d = D("key-replacement", 1140, 262)
+    row(d, [("New key", "made, signs nothing yet", "gray"), ("Takes over", "new payments use it", "green"),
+            ("Old key drains", "funds move to the new key", "amber"), ("Old key retired", "its addresses stay watched", "gray")],
+        y=20, h=100, gap=44, size=23)
+    d.box(30, 160, 1080, 76, "Emergency", "a stolen key may only move its funds to the new key", "red")
+    d.write()
+
+
 def build_all():
-    for f in (flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, bitcoin_sending, solana, identity, api, audit, testing):
+    for f in (key_replacement, flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, bitcoin_sending, solana, identity, api, audit, testing):
         f()
 
 
