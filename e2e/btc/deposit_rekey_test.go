@@ -173,6 +173,13 @@ func TestRekeyDepositKeyReplacementDrivenByTheTool(t *testing.T) {
 	}
 	clean()
 
+	acct := s.treeAccount(plan.PublicKey)
+	hot1, _ := acct.Address([]uint32{1, 0})
+	hot2, _ := acct.AddressAt(2, []uint32{1, 0})
+	dep2, _ := acct.AddressAt(2, []uint32{0, 7})
+	// A candidate signs nothing: a job from generation 2 is refused by the zone, whatever it pays.
+	s.mustRefuseHostile(acct, "h-cand", "sweep", 2, []uint32{0, 7}, dep2, hot2, "candidate")
+
 	// A withdrawal is asked for while the old key drains and no key is active: it waits, then goes out from the NEW hot shard.
 	dest := s.node.fresh()
 	s.rekeyMust(dir, "drain-start", "-cap", "BTC=80000000", "-window", "90",
@@ -182,8 +189,12 @@ func TestRekeyDepositKeyReplacementDrivenByTheTool(t *testing.T) {
 		st := s.getWd(w.ID).Status
 		return st != "broadcast" && st != "confirmed" && st != "failed"
 	})
+	// The old generation is draining: no withdrawal from it, whatever the approvals.
+	s.mustRefuseHostile(acct, "h-drain-wd", "withdrawal", 1, []uint32{1, 0}, hot1, s.node.fresh(), "draining")
 	s.rekeyMust(dir, "activate", "-change", s.treeChange("act", 3, "-action", "activate", "-generation", "2"))
 	s.restartWorker() // the worker dies in the middle of the replacement
+	s.gateway.stop()  // and so does the gateway: it starts again from its own guard database and finds the same records
+	s.startGateway()
 	s.waitFor(180*time.Second, "the waiting withdrawal confirms", func() bool { return s.getWd(w.ID).Status == "confirmed" })
 	if got := s.hotUnder("g2/1/0"); got == 0 {
 		t.Fatalf("no hot output under generation 2 after a withdrawal from the new shard (rows %v)", s.keyRefsOfJobs())
@@ -237,6 +248,10 @@ func TestRekeyDepositKeyReplacementDrivenByTheTool(t *testing.T) {
 	if g := s.treeKeysets(); g[0]["state"] != "retired" {
 		t.Fatalf("after retire: %v", g)
 	}
+	// Retired: nothing of generation 1 signs, to any address.
+	dep1, _ := acct.Address([]uint32{0, 9})
+	s.mustRefuseHostile(acct, "h-ret-sweep", "sweep", 1, []uint32{0, 9}, dep1, hot2, "retired")
+	s.mustRefuseHostile(acct, "h-ret-wd", "withdrawal", 1, []uint32{1, 0}, hot1, s.node.fresh(), "retired")
 	clean()
 	_ = hex.EncodeToString
 }
