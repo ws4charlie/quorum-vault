@@ -252,3 +252,47 @@ func mustATA(owner, mint [32]byte) [32]byte {
 }
 
 var _ = json.Marshal
+
+// A compromised generation signs every shape of a drain (a token transfer with its close, the close of an empty token account, a withdrawal of an old
+// pool account to the successor, the last SOL), takes no hourly limit (K8), and nothing else.
+func TestSolCompromisedGenerationSignsEveryDrainShape(t *testing.T) {
+	g := newSolGen(t)
+	old, new2 := g.s.hot.k.Pub, g.hot2.k.Pub
+	g.candidate2()
+	g.activate2Compromised(t)
+	src, dst := mustATA(old, g.s.mint), mustATA(new2, g.s.mint)
+	g.sign(g.job("e1", g.drainIntent("e1", "TKN", "400000", new2), g.msg(old, false, sol.CreateATAIx(old, dst, new2, g.s.mint), sol.CheckedTransferIx(src, g.s.mint, dst, old, 400_000, 6), sol.CloseAccountIx(src, new2, old))), g.s.hot)
+	g.sign(g.job("e2", g.drainIntent("e2", "TKN", "0", new2), g.msg(old, false, sol.CloseAccountIx(src, new2, old))), g.s.hot)
+	g.sign(g.job("e3", g.drainIntent("e3", "SOL", "1447680", new2), g.msg(old, false, sol.WithdrawNonceIx(sol.NonceAddress(old, 1), new2, old, 1_447_680))), g.s.hot)
+	// the config allows 5 drains an hour; a compromised source has no hourly limit, so the sixth and seventh are signed
+	for i := 0; i < 6; i++ {
+		id := fmt.Sprintf("e-sol-%d", i)
+		g.sign(g.job(id, g.drainIntent(id, "SOL", fmt.Sprint(10+i), new2), g.msg(old, false, sol.TransferIx(old, new2, uint64(10+i)))), g.s.hot)
+	}
+	// the successor only, the cap still holds, and a token transfer to a stranger's account is no drain
+	g.refuse(g.job("e4", g.drainIntent("e4", "SOL", "1", new2), g.msg(old, false, sol.TransferIx(old, soltest.NewKey().Pub, 1))), "")
+	g.refuse(g.job("e5", g.drainIntent("e5", "SOL", "5000000000", new2), g.msg(old, false, sol.TransferIx(old, new2, 5_000_000_000))), "cap")
+}
+
+// A Solana drain is a transaction for each token and each nonce account of the pool, so the bound on the drains signed from one source in all (K8,
+// max_drains_per_source) is the default of 40 plus those steps; an explicit value is taken as it is.
+func TestSolDrainBoundCoversEveryStep(t *testing.T) {
+	g := newSolGen(t)
+	cc := g.k.cfg.Chains[solChain]
+	limit := cc.maxDrainsPerSource()
+	if want := SolDrainsPerSource(cc.SOL.NoncePool, len(cc.SOL.Tokens)); limit != want || limit <= DefaultMaxDrainsPerSource {
+		t.Fatalf("the bound is %d, want %d (more than %d)", limit, want, DefaultMaxDrainsPerSource)
+	}
+	old, new2 := g.s.hot.k.Pub, g.hot2.k.Pub
+	g.candidate2()
+	g.activate2Compromised(t) // no hourly limit, so only the bound under test applies
+	for i := 0; i < limit; i++ {
+		id := fmt.Sprintf("n%d", i)
+		g.sign(g.job(id, g.drainIntent(id, "SOL", fmt.Sprint(10+i), new2), g.msg(old, false, sol.TransferIx(old, new2, uint64(10+i)))), g.s.hot)
+	}
+	g.refuse(g.job("over", g.drainIntent("over", "SOL", "5", new2), g.msg(old, false, sol.TransferIx(old, new2, 5))), "max_drains_per_source")
+	cc.MaxDrainsPerSource = 3
+	if got := cc.maxDrainsPerSource(); got != 3 {
+		t.Fatalf("an explicit bound is %d, want 3", got)
+	}
+}

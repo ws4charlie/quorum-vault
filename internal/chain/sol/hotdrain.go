@@ -69,8 +69,9 @@ func tokenAmount(accts []TokenAccount, ata string) (uint64, bool) {
 }
 
 // NextDrainStep builds the next drain transaction from the old key (oldAddr) to the successor (succAddr, generation succGen of the shard whose native partition
-// is shardPart), reading the chain at finalized commitment.
-func (a *Adapter) NextDrainStep(ctx context.Context, shardPart, oldAddr, succAddr string, succGen int) (*DrainStep, DrainReport, error) {
+// is shardPart), reading the chain at finalized commitment. emergency is a drain of a compromised key: a thief races it for the same balances, so it waits for
+// nothing the operator does and moves the SOL before the dust of the old pool (see the steps below).
+func (a *Adapter) NextDrainStep(ctx context.Context, shardPart, oldAddr, succAddr string, succGen int, emergency bool) (*DrainStep, DrainReport, error) {
 	var rep DrainReport
 	old, err := ParseAddress(oldAddr)
 	if err != nil {
@@ -164,7 +165,29 @@ func (a *Adapter) NextDrainStep(ctx context.Context, shardPart, oldAddr, succAdd
 	if err != nil {
 		return nil, rep, err
 	}
-	if len(missing) > 0 {
+	if emergency {
+		// An emergency does not wait for the new pool (an operator creates it once the new key holds the money, which this drain is bringing), and the
+		// SOL, the largest part of what is left, goes before the old pool's accounts (a few thousand lamports each): all but the fee of every
+		// transaction still to come.
+		open := uint64(0)
+		for i := 0; i < a.cfg.NoncePool; i++ {
+			if _, err := a.rpc.GetAccount(ctx, Address(NonceAddress(old, i)), Finalized); err == nil {
+				open++
+			} else if !errors.Is(err, ErrNoAccount) {
+				return nil, rep, err
+			}
+		}
+		// the old address stays rent-exempt until its last transaction (a balance above zero and below the minimum is refused on chain)
+		floor, err := a.rpc.MinimumRent(ctx, 0)
+		if err != nil {
+			return nil, rep, err
+		}
+		keep := floor + (open+1)*DrainFee
+		if lamports > keep+DrainFee {
+			give := lamports - keep - DrainFee
+			return mk("sol", Native, give, fmt.Sprintf("%d lamports to the successor (emergency: before the old pool's accounts)", give), build(TransferIx(old, succ, give)))
+		}
+	} else if len(missing) > 0 {
 		have, _, err := a.rpc.Lamports(ctx, succAddr, Finalized)
 		if err != nil {
 			return nil, rep, err

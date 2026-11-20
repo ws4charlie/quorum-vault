@@ -35,7 +35,7 @@ import (
 
 // solDrainer is what the Solana cell gives the planner.
 type solDrainer interface {
-	NextDrainStep(ctx context.Context, shardPart, oldAddr, succAddr string, succGen int) (*sol.DrainStep, sol.DrainReport, error)
+	NextDrainStep(ctx context.Context, shardPart, oldAddr, succAddr string, succGen int, emergency bool) (*sol.DrainStep, sol.DrainReport, error)
 	RecentSubmit(ctx context.Context, raw []byte) (string, error)
 	RecentStatus(ctx context.Context, hash string, bh [32]byte) (sol.RecentState, error)
 	DrainCost(ctx context.Context, hash, oldAddr, succAddr string) (*big.Int, error)
@@ -134,7 +134,7 @@ func (s *Service) driveSolGeneration(ctx context.Context, log *slog.Logger, sd s
 		if busy > 0 {
 			return created, wait(fmt.Sprintf("%d transactions built from the old address are still in flight; the drain starts when they are final", busy), 0)
 		}
-		st, rep, err := sd.NextDrainStep(ctx, nativePart, from.Address, succ.Address, succ.Generation)
+		st, rep, err := sd.NextDrainStep(ctx, nativePart, from.Address, succ.Address, succ.Generation, from.State == partition.StateCompromised)
 		if err != nil {
 			return created, wait("cannot read the old address: "+err.Error(), 0)
 		}

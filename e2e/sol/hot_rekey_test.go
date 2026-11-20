@@ -302,3 +302,70 @@ func TestSwFlowsHotKeyReplacementWithAnEmptyTokenAccount(t *testing.T) {
 	}
 	s.reconcileClean("after draining an empty token account")
 }
+
+// The emergency (K8): the old key is marked compromised. It signs only its drain to the successor, the drain waits for nothing an operator does (the new
+// pool is created afterwards), and the key is never retired.
+func TestSwFlowsHotKeyCompromisedDrainsWithoutWaitingForThePool(t *testing.T) {
+	ops := map[string]ed25519.PrivateKey{}
+	s := newWdSystem(t, wdOpts{pool: 3, gwTweak: func(gf *gateway.File) {
+		gf.Operators = &gateway.OperatorsFile{Keys: map[string]gateway.OperatorFile{}, MinOperators: 2}
+		for _, n := range []string{"op1", "op2", "op3"} {
+			pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+			ops[n] = priv
+			gf.Operators.Keys[n] = gateway.OperatorFile{PublicKey: hex.EncodeToString(pub)}
+		}
+	}})
+	oldHot := s.hotAddr()
+	tokensBefore := s.tokensOf(oldHot)
+	if tokensBefore == 0 || s.lamports(oldHot) == 0 {
+		t.Fatal("the old key holds nothing")
+	}
+	dir := filepath.Join(s.dir, "rekey")
+	s.rekeyMust(dir, "open", "-shard", s.hotShardID(), "-mode", "mpc", "-reason", "the hot key may be stolen (e2e)")
+	keyset := strings.Trim(slugSol.ReplaceAllString(strings.ToLower(s.hotShardID()), "-"), "-") + "-g2"
+	s.rekeyMust(dir, "dkg", "-admin-auth", s.partyAuthFor(keyset))
+	b, err := os.ReadFile(filepath.Join(dir, "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	keyRef, _ := raw["key_ref"].(string)
+	pub, _ := raw["public_key"].(string)
+	newHot, _ := raw["address"].(string)
+	s.rekeyMust(dir, "candidate", "-change", s.hotChange(ops, "cand", 1, "-action", "register-candidate", "-generation", "2", "-address", newHot, "-key-ref", keyRef, "-public-key", pub))
+	caps := []string{"-cap", "SOL=1000000000000", "-cap", "TKN=100000000000000"}
+	s.rekeyMust(dir, append([]string{"drain-start", "-compromised", "-change", s.hotChange(ops, "mark", 2, append([]string{"-action", "mark-compromised", "-generation", "1", "-successor", "2"}, caps...)...)}, caps...)...)
+	// the zone: a compromised key signs no ordinary withdrawal
+	to := newKey(t).pub
+	s.mustRefuse("k4-c-wd", s.wdIntent("k4-c-wd", to, 1000), s.wdMsg(0, [32]byte{9}, 1000, startUnit, to, 1000), "keyset_state", "alice")
+	s.rekeyMust(dir, "activate", "-change", s.hotChange(ops, "act", 3, "-action", "activate", "-generation", "2"))
+
+	// the drain does not wait for the new pool: the old address ends at zero with no pool created for the new key
+	var lastSt, lastWhy string
+	t.Cleanup(func() { t.Logf("drain state %q: %s", lastSt, lastWhy) })
+	s.waitFor(4*time.Minute, "the compromised generation to be drained", func() bool { lastSt, lastWhy = s.drainState(1); return lastSt == "drained" })
+	if got := s.lamports(oldHot); got != 0 {
+		t.Fatalf("the old address holds %d lamports", got)
+	}
+	if got := s.tokensOf(newHot); got != tokensBefore {
+		t.Fatalf("the new key holds %d tokens, the old one held %d", got, tokensBefore)
+	}
+	for i := 0; i < 3; i++ {
+		if s.nonceExists(i) {
+			t.Fatalf("pool account %d of the old key is still open", i)
+		}
+	}
+	s.reconcileClean("the compromised generation is drained")
+	// never retired
+	if o, err := s.rekeyTool(dir, "retire", "-change", s.hotChange(ops, "ret", 4, "-action", "retire", "-generation", "1")); err == nil {
+		t.Fatalf("retire of a compromised generation was accepted:\n%s", o)
+	}
+	// the new key takes over once its pool exists
+	if out, err := s.nonceTool(t); err != nil {
+		t.Fatalf("qv-sol-nonces: %v\n%s", err, out)
+	}
+	s.reconcileClean("the new key has its pool")
+}

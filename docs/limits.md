@@ -37,6 +37,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **Replacing a Solana hot wallet pauses its withdrawals briefly.** The new key cannot create its nonce accounts before it is active and funded, so new withdrawals wait between the switch and an operator creating them. Tokens of a kind the config does not list, and token accounts that are not the standard one, are reported and never moved ([Key replacement](key-replacement.md)).
+- **A Solana emergency drain moves tokens in the order of the asset list, not by value,** and has run on a local validator only; the SOL goes first among the rest, and the new nonce pool is created by an operator afterwards ([stolen hot key](runbooks/stolen-hot-key.md)).
 - **An emergency cannot save what a thief moves first.** The old key stays valid on chain until its funds are moved; only the signing zone refuses it. The cold ceremony that points deposits at the new key takes hours and sweeps wait meanwhile; the emergency drill has run on local chains only ([stolen hot key](runbooks/stolen-hot-key.md)).
 
 **Chains**
