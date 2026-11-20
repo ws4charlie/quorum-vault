@@ -751,7 +751,8 @@ func (cf ChainFile) buildSOL(name string, enabledApprovers int) (*ChainConfig, e
 	}
 	return &ChainConfig{Name: name, Family: FamilySOL, SOL: sc, Assets: assets,
 		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour,
-		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour, ConsolidationsPerHour: cf.ConsolidationsPerHour}, nil
+		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour, ConsolidationsPerHour: cf.ConsolidationsPerHour,
+		DrainsPerHour: drainsPerHour(cf)}, nil
 }
 
 // checkDepositSigner validates an ed25519-2of3 signer entry: the hot keyset's 32-byte public key and the optional deposit key tree.
