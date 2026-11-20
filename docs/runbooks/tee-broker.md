@@ -11,7 +11,7 @@ Its own trust zone (own host or cluster, own HSM), outside the party hosts. Only
 ## Configuration
 JSON, flags `serve -config broker.json`; secrets are files (token PIN `pkcs11.pin_file`, mode 0400; TLS key). Fields: see `internal/attest/broker/config.go`. Pins are SHA-256 of the SPKI, as on every link. `health_listen` (e.g. `127.0.0.1:8444`) serves `/healthz` and `/metrics` for pod probes; no data.
 
-The production build refuses to start without trust roots, without a valid signed allowlist, with `allow_debug`, or with a root marked TEST ONLY. The simulation build (`-tags teesim`) is for dev and CI only and prints a warning.
+The production build refuses to start without trust roots, without a valid signed allowlist, with `allow_debug`, or with a root marked TEST ONLY. The broker also refuses a SoftHSM module unless `QV_ENV` is `dev` or `test` (unset or any other value is production; the module is recognised from what it reports, not its file name), as the gateway and the party do: SoftHSM keeps the wrapping keys in files beside the broker. The simulation build (`-tags teesim`) is for dev and CI only and prints a warning.
 
 ## Change the allowlist (new measurement, overlap, revoke)
 Operators are the Ed25519 keys in `operators` of the config; `min_operators` signatures are needed.

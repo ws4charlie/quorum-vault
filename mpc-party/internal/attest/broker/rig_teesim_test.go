@@ -75,6 +75,7 @@ func setupToken(dir string) error {
 
 func needHSM(t *testing.T) {
 	t.Helper()
+	t.Setenv("QV_ENV", "test") // the broker refuses SoftHSM in production (hsm.go)
 	if hsmErr != nil {
 		if os.Getenv("QV_REQUIRE_HSM") != "" {
 			t.Fatalf("SoftHSM is required (QV_REQUIRE_HSM) but unavailable: %v", hsmErr)
