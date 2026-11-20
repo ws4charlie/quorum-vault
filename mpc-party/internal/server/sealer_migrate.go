@@ -178,9 +178,15 @@ func MigrateSeal(ctx context.Context, from, to *Config, opt MigrateOptions) (Mig
 		count     *int
 		name      func(file string) (string, bool)
 	}{
-		{"keys", "key", &rep.Keys, func(f string) (string, bool) { n := strings.TrimSuffix(f, ".json"); return n, strings.HasSuffix(f, ".json") && validID(n) }},
+		{"keys", "key", &rep.Keys, func(f string) (string, bool) {
+			n := strings.TrimSuffix(f, ".json")
+			return n, strings.HasSuffix(f, ".json") && validID(n)
+		}},
 		{"jobs", "job", &rep.Jobs, func(f string) (string, bool) { return strings.TrimSuffix(f, ".json"), jobFileRe.MatchString(f) }},
-		{"freeze", "freeze", &rep.Freezes, func(f string) (string, bool) { n := strings.TrimSuffix(f, ".json"); return n, strings.HasSuffix(f, ".json") && validID(n) }},
+		{"freeze", "freeze", &rep.Freezes, func(f string) (string, bool) {
+			n := strings.TrimSuffix(f, ".json")
+			return n, strings.HasSuffix(f, ".json") && validID(n)
+		}},
 	} {
 		files, err := os.ReadDir(filepath.Join(dir, d.dir))
 		if errors.Is(err, os.ErrNotExist) {
