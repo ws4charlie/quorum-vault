@@ -204,28 +204,14 @@ func (s *Service) treeDrainView(ctx context.Context, gen int) (*DrainView, error
 	if s.Cfg.Family != FamilyBTC {
 		return nil, nil
 	}
-	var out *DrainView
-	drained := 0
-	for i := range s.Cfg.BTC.HotShards {
-		var d DrainView
-		err := s.Pool.QueryRow(ctx, `SELECT state, reason FROM keyset_drains WHERE shard_id=$1 AND generation=$2`, string(s.Cfg.shardIDOf(i)), gen).Scan(&d.State, &d.Reason)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if d.State == "drained" {
-			drained++
-			continue
-		}
-		if out == nil || (out.State == "moving" && d.State == "waiting") {
-			x := d
-			out = &x
-		}
+	id, err := s.Cfg.depositTreeID()
+	if err != nil {
+		return nil, err
 	}
-	if out == nil && drained == len(s.Cfg.BTC.HotShards) && drained > 0 {
-		out = &DrainView{State: "drained"}
+	var d DrainView
+	err = s.Pool.QueryRow(ctx, `SELECT state, reason FROM keyset_drains WHERE shard_id=$1 AND generation=$2`, string(id), gen).Scan(&d.State, &d.Reason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
 	}
-	return out, nil
+	return &d, err
 }

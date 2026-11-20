@@ -49,26 +49,47 @@ func (s *Service) planBTCDrains(ctx context.Context, log *slog.Logger) ([]DrainM
 		if k.State != partition.StateDraining && k.State != partition.StateCompromised {
 			continue
 		}
+		// One state row per generation of the tree (keyset_drains is keyed by it), aggregated over the hot partitions: moving while any moves, waiting
+		// (the first reason) while any waits, drained when all are.
+		agg := btcDrainState{state: "drained"}
 		for i := range s.Cfg.BTC.HotShards {
-			m, err := s.planBTCDrain(ctx, log, d, i, k, ks)
+			m, st, err := s.planBTCDrain(ctx, log, d, i, k, ks)
 			if err != nil {
 				log.Error("could not plan a drain", "shard", s.Cfg.shardIDOf(i), "generation", k.Generation, "error", err.Error())
+				agg = agg.merge(btcDrainState{state: "waiting", reason: err.Error()})
 				continue
 			}
+			agg = agg.merge(st)
 			if m != nil {
 				created = append(created, *m)
 			}
+		}
+		if err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+			return setDrainState(ctx, tx, string(tree), k.Generation, agg.state, agg.reason, 0)
+		}); err != nil {
+			return created, err
 		}
 	}
 	return created, nil
 }
 
-func (s *Service) planBTCDrain(ctx context.Context, log *slog.Logger, d btcDrainer, shardIdx int, from KeysetInfo, all []KeysetInfo) (*DrainMove, error) {
+type btcDrainState struct{ state, reason string }
+
+// merge puts two partitions' findings together: moving beats waiting beats drained.
+func (a btcDrainState) merge(b btcDrainState) btcDrainState {
+	rank := map[string]int{"drained": 0, "waiting": 1, "moving": 2}
+	if rank[b.state] > rank[a.state] || (b.state == a.state && a.reason == "") {
+		return b
+	}
+	return a
+}
+
+func (s *Service) planBTCDrain(ctx context.Context, log *slog.Logger, d btcDrainer, shardIdx int, from KeysetInfo, all []KeysetInfo) (*DrainMove, btcDrainState, error) {
 	c := s.Cfg
-	shard := string(c.shardIDOf(shardIdx))
+	shard := string(from.ShardID) // the deposit tree: drain_moves and keyset_drains refer to its generations
 	part := c.PartitionKey(c.Native, shardIdx).String()
-	wait := func(reason string) (*DrainMove, error) {
-		return nil, InTx(ctx, s.Pool, func(tx pgx.Tx) error { return setDrainState(ctx, tx, shard, from.Generation, "waiting", reason, 0) })
+	wait := func(reason string) (*DrainMove, btcDrainState, error) {
+		return nil, btcDrainState{state: "waiting", reason: reason}, nil
 	}
 	var succ *KeysetInfo
 	for i := range all {
@@ -84,15 +105,15 @@ func (s *Service) planBTCDrain(ctx context.Context, log *slog.Logger, d btcDrain
 	}
 	var open bool
 	var retryAt *time.Time
-	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM drain_moves WHERE shard_id=$1 AND from_generation=$2 AND status NOT IN ('confirmed','failed')),
-		(SELECT retry_after FROM keyset_drains WHERE shard_id=$1 AND generation=$2 AND state='waiting')`, shard, from.Generation).Scan(&open, &retryAt); err != nil {
-		return nil, err
+	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM drain_moves WHERE shard_id=$1 AND from_generation=$2 AND partition_id=$3 AND status NOT IN ('confirmed','failed')),
+		(SELECT retry_after FROM keyset_drains WHERE shard_id=$1 AND generation=$2 AND state='waiting')`, shard, from.Generation, part).Scan(&open, &retryAt); err != nil {
+		return nil, btcDrainState{}, err
 	}
 	if open {
-		return nil, nil
+		return nil, btcDrainState{state: "moving", reason: "a move is open"}, nil
 	}
 	if retryAt != nil && time.Now().Before(*retryAt) {
-		return nil, nil
+		return nil, btcDrainState{state: "waiting", reason: "the zone's refusal is being waited out"}, nil
 	}
 	fromAddr, err := d.ShardAddressAtGen(part, from.Generation)
 	if err != nil {
@@ -103,7 +124,7 @@ func (s *Service) planBTCDrain(ctx context.Context, log *slog.Logger, d btcDrain
 		return wait("cannot derive the successor's shard address: " + err.Error())
 	}
 	if n, err := d.ReservedUnder(ctx, part, from.Generation); err != nil {
-		return nil, err
+		return nil, btcDrainState{}, err
 	} else if n > 0 {
 		return wait(fmt.Sprintf("%d outputs of the old shard are reserved by transactions that are not final; the drain starts when they are", n))
 	}
@@ -115,11 +136,7 @@ func (s *Service) planBTCDrain(ctx context.Context, log *slog.Logger, d btcDrain
 		return wait(plan.Wait)
 	}
 	if plan.Amount == nil || plan.Amount.Sign() <= 0 {
-		err := InTx(ctx, s.Pool, func(tx pgx.Tx) error { return setDrainState(ctx, tx, shard, from.Generation, "drained", "", 0) })
-		if err == nil {
-			log.Info("a generation's shard is drained; retiring the generation is an operator step", "shard", shard, "generation", from.Generation, "address", fromAddr)
-		}
-		return nil, err
+		return nil, btcDrainState{state: "drained"}, nil
 	}
 	id := "dr-" + uuid.NewString()
 	var made *DrainMove
@@ -136,13 +153,11 @@ func (s *Service) planBTCDrain(ctx context.Context, log *slog.Logger, d btcDrain
 		}
 		made = &DrainMove{ID: id, ShardID: shard, FromGeneration: from.Generation, ToGeneration: succ.Generation, From: fromAddr, To: toAddr,
 			Asset: c.Native, PartitionID: part, Amount: new(big.Int).Set(plan.Amount), Status: "planned"}
-		if err := setDrainState(ctx, tx, shard, from.Generation, "moving", fmt.Sprintf("moving %s %s in %d outputs", plan.Amount, c.Native, plan.Inputs), 0); err != nil {
-			return err
-		}
 		return emit(ctx, tx, outbox.TopicColdMoves, id, "drain.planned", map[string]any{"chain": c.Chain, "shard": shard, "from_generation": from.Generation,
 			"to_generation": succ.Generation, "from": fromAddr, "to": toAddr, "asset": c.Native, "amount": plan.Amount.String()})
 	})
-	return made, err
+	st := btcDrainState{state: "moving", reason: fmt.Sprintf("moving %s %s in %d outputs", plan.Amount, c.Native, plan.Inputs)}
+	return made, st, err
 }
 
 // buildBTCDrainJob builds the move (reserving the old shard's outputs) and enqueues its sign job, in one transaction.
