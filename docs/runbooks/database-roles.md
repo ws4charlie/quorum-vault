@@ -38,7 +38,7 @@ CREATE DATABASE qv_gateway_guard OWNER qv_gateway_guard;
 REVOKE CONNECT ON DATABASE qv_gateway_guard FROM PUBLIC;
 ```
 
-Cosigners B and C share one certificate name, so they share one role and are not separated from each other here; distinct names would fix that.
+Cosigners B and C have their own certificate names and roles (`cosigner-b` → `qv_cosigner_b_guard`, `cosigner-c` → `qv_cosigner_c_guard`), each the owner of its own guard database. The cosigner's database keeps the name `qv_cosigner_guard` (one per cluster): `CREATE DATABASE qv_cosigner_guard OWNER qv_cosigner_b_guard;` in cluster B, with `qv_cosigner_c_guard` in cluster C.
 
 ## Temporal's database
 

@@ -663,9 +663,11 @@ func WithdrawalWorkflow(ctx workflow.Context, in Input) error {
 	if hold == 0 {
 		hold = time.Hour
 	}
+	// Versioned: an execution already in this loop on the old code has no marker and keeps waiting without a bound (its history replays as it was).
+	bounded := workflow.GetVersion(ctx, "feecaps-hold", workflow.DefaultVersion, 1) >= 1
 	holdUntil := workflow.Now(ctx).Add(hold)
 	for r.Kind == txRefused && custody.IsFeeCapsRefusal(r.Reason) {
-		if workflow.Now(ctx).After(holdUntil) {
+		if bounded && workflow.Now(ctx).After(holdUntil) {
 			if err := call(ctx, opts(ctx), nil, a.Park, o, "the zone has refused fee caps for "+hold.String()+": "+r.Reason+" (apply the same signed fee-cap change to the core and the zone, then clear this note; docs/runbooks/btc-fee-caps.md)"); err != nil {
 				return err
 			}

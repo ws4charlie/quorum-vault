@@ -32,6 +32,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **Some rollbacks cannot be detected.** If both parties are restored to the same older generation, nothing notices. A party restored to older state of the same generation may sign a repeated job again. The broker cannot destroy the keys of old generations ([Enclaves](enclaves.md)).
 - **A new key is not test-signed before it takes over.** The first real signature after activation is the first proof that it works ([Key replacement](key-replacement.md)).
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
+- **A cosigner started against an empty guard database cannot tell it from a new install.** It starts without replay history or audit chain, so after a wrong database setting or a restore from nothing the checks are silently weaker until noticed ([Certificates](runbooks/certificates.md)).
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **A Solana hot wallet cannot be replaced yet.** Every other key can ([Key replacement](key-replacement.md)).
 

@@ -1407,3 +1407,32 @@ func TestPartyOperatorJobFlagsMatchTheTool(t *testing.T) {
 		}
 	}
 }
+
+// The cosigner's guard DATABASE keeps its name on upgrade (it holds the replay records and the audit chain); only the role (the owner, the certificate's
+// map target) is per cosigner. A new install may set another database name explicitly.
+func TestCosignerGuardDatabaseKeepsItsNameOnUpgrade(t *testing.T) {
+	dsn := func(out string) string {
+		i := strings.Index(out, "QV_COSIGNER_GUARD_DSN")
+		if i < 0 {
+			t.Fatal("no QV_COSIGNER_GUARD_DSN in the render")
+		}
+		j := strings.Index(out[i:], "postgres://")
+		return out[i+j : i+j+strings.IndexAny(out[i+j:], "?\"")]
+	}
+	for role, owner := range map[string]string{"B": "qv_cosigner_b_guard", "C": "qv_cosigner_c_guard"} {
+		out, err := partyRender(false, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := dsn(out), "postgres://"+owner+"@qv-signing-db-rw:5432/qv_cosigner_guard"; got != want {
+			t.Errorf("role %s upgrade path: %s, want %s", role, got, want)
+		}
+		out, err = partyRender(false, role, "--set", "cosigner.database.name=qv_cosigner_new", "--set", "cosigner.database.role=qv_x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := dsn(out), "postgres://qv_x@qv-signing-db-rw:5432/qv_cosigner_new"; got != want {
+			t.Errorf("role %s explicit values: %s, want %s", role, got, want)
+		}
+	}
+}

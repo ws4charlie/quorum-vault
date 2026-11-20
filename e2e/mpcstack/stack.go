@@ -190,7 +190,7 @@ type Proc struct {
 }
 
 func NewProc(t testing.TB, name, logPath, bin string, env []string, args ...string) *Proc {
-	p := &Proc{Name: name, Log: logPath, bin: bin, args: dbtest.RoleArgs(t, bin, args), env: env}
+	p := &Proc{Name: name, Log: logPath, bin: bin, args: dbtest.RoleArgs(t, bin, args), env: env} // not for qv-cosigner (RoleArgs refuses it): NewCosignerProc names the role
 	t.Cleanup(func() { p.Stop() })
 	return p
 }

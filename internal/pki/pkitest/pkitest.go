@@ -108,7 +108,7 @@ func EnvFor(binary string) []string {
 	case "qv-anchor-archiver":
 		return Env(pki.ZoneBusiness, "archiver")
 	case "qv-cosigner":
-		return CosignerEnv("b") // cosigner C: the caller passes CosignerEnv("c") after this (a later value wins)
+		return nil // no default identity: B and C are different names, so the caller names the role (CosignerEnv); without it the cosigner refuses to start (TLS is required)
 	case "qv-gateway":
 		c, k, a := Files(pki.ZoneBusiness, "gateway-link")
 		return append(Env(pki.ZoneSigning, "gateway"), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a, "QV_ENV=test") // test: the e2e HSM is SoftHSM, which production refuses

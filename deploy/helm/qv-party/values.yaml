@@ -88,8 +88,8 @@ cosigner:
   database:                             # the cosigner's OWN guard database (never the gateway's), certificate name `cosigner-<role>` maps to this role
     host: qv-signing-db-rw
     port: 5432
-    name: ""                            # empty = qv_cosigner_<role in lower case>_guard
-    role: ""                            # empty = qv_cosigner_<role in lower case>_guard (B: qv_cosigner_b_guard, C: qv_cosigner_c_guard)
+    name: qv_cosigner_guard             # the DATABASE keeps its name (it holds the replay records and the audit chain; renaming it would start an empty one). New installs may set another
+    role: ""                            # empty = qv_cosigner_<role in lower case>_guard (B: qv_cosigner_b_guard, C: qv_cosigner_c_guard), the owner of the database
     sslmode: verify-full
   kafka: { brokers: "redpanda.business.example.invalid:9092" }  # the business Kafka, over the explicit link; PLACEHOLDER
   resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { cpu: "1", memory: 512Mi } }

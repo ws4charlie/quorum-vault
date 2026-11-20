@@ -122,7 +122,7 @@ spec:
             - -audit-source
             - {{ default (printf "cosigner-%s" ($role | lower)) $v.cosigner.auditSource | quote }}
           env:
-            - { name: QV_COSIGNER_GUARD_DSN, value: {{ printf "postgres://%s@%s:%d/%s?sslmode=%s&sslrootcert=/etc/qv/tls/ca.crt&sslcert=/etc/qv/tls/tls.crt&sslkey=/etc/qv/tls/tls.key" (default (include "qp.cosignerGuard" .) $v.cosigner.database.role) $v.cosigner.database.host (int $v.cosigner.database.port) (default (include "qp.cosignerGuard" .) $v.cosigner.database.name) $v.cosigner.database.sslmode | quote }} }
+            - { name: QV_COSIGNER_GUARD_DSN, value: {{ printf "postgres://%s@%s:%d/%s?sslmode=%s&sslrootcert=/etc/qv/tls/ca.crt&sslcert=/etc/qv/tls/tls.crt&sslkey=/etc/qv/tls/tls.key" (default (include "qp.cosignerGuard" .) $v.cosigner.database.role) $v.cosigner.database.host (int $v.cosigner.database.port) $v.cosigner.database.name $v.cosigner.database.sslmode | quote }} }
             - { name: QV_KAFKA_BROKERS, value: {{ $v.cosigner.kafka.brokers | quote }} }
             - { name: QV_TLS_CERT, value: /etc/qv/tls/tls.crt }
             - { name: QV_TLS_KEY, value: /etc/qv/tls/tls.key }

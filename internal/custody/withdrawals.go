@@ -536,8 +536,9 @@ type unsentUndoer interface {
 func (s *Service) RebuildWithdrawalJob(ctx context.Context, id string) (bool, error) {
 	jobID := OwnerTrack(Owner{Kind: "withdrawal", ID: id}).FirstJob()
 	rebuilt := false
+	refusal := ""
 	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		rebuilt = false
+		rebuilt, refusal = false, ""
 		un, ok := s.Chain.(unsentUndoer)
 		if !ok {
 			return nil
@@ -561,8 +562,7 @@ func (s *Service) RebuildWithdrawalJob(ctx context.Context, id string) (bool, er
 		if st != signjob.StatusRejected || !IsFeeCapsRefusal(reason) {
 			return nil
 		}
-		feeCapsRefusals.Add(1)
-		slog.Error("ALERT btc fee caps: the zone's reason for refusing the withdrawal", "withdrawal", id, "reason", reason)
+		refusal = reason
 		if err := un.UndoUnsent(ctx, tx, "withdrawal", id); err != nil {
 			return err
 		}
@@ -577,6 +577,12 @@ func (s *Service) RebuildWithdrawalJob(ctx context.Context, id string) (bool, er
 		rebuilt = true
 		return nil
 	})
+	if rebuilt && err == nil {
+		// Counted and logged once per refusal, after the rebuild committed: a rebuild that fails rolls back, leaves the same rejected job, and is retried at
+		// every poll, which must not count again.
+		feeCapsRefusals.Add(1)
+		slog.Error("ALERT btc fee caps: the zone's reason for refusing the withdrawal", "withdrawal", id, "reason", refusal)
+	}
 	return rebuilt && err == nil, err
 }
 

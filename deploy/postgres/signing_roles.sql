@@ -5,8 +5,8 @@
 --
 --   CREATE DATABASE qv_gateway_guard OWNER qv_gateway_guard;
 --   REVOKE CONNECT ON DATABASE qv_gateway_guard FROM PUBLIC;
---   CREATE DATABASE qv_cosigner_b_guard OWNER qv_cosigner_b_guard;   (and the same for qv_cosigner_c_guard)
---   REVOKE CONNECT ON DATABASE qv_cosigner_b_guard FROM PUBLIC;
+--   CREATE DATABASE qv_cosigner_guard OWNER qv_cosigner_b_guard;   (in cluster B; OWNER qv_cosigner_c_guard in cluster C: one database per cluster, the name kept)
+--   REVOKE CONNECT ON DATABASE qv_cosigner_guard FROM PUBLIC;
 --
 -- Cosigners B and C have their own certificate names (signing/cosigner-b, signing/cosigner-c) and their own roles: B cannot open C's guard database
 -- on a server both use, and a certificate of one maps to the other's role nowhere (deploy/postgres/signing.pg_ident.conf).

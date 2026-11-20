@@ -164,7 +164,18 @@ type proc struct {
 
 func startProc(t testing.TB, name, bin string, env []string, args ...string) *proc {
 	t.Helper()
-	p := &proc{name: name, cmd: exec.Command(bin, dbtest.RoleArgs(t, bin, args)...), out: &syncBuf{}, done: make(chan struct{})}
+	return startProcAs(t, name, bin, "", env, args...)
+}
+
+// startCosignerProc starts qv-cosigner as cosigner "b" or "c": its own certificates, its own link certificate and its own guard-database role.
+func startCosignerProc(t testing.TB, name, role string, args ...string) *proc {
+	t.Helper()
+	return startProcAs(t, name, binCosigner, role, pkitest.CosignerEnv(role), args...)
+}
+
+func startProcAs(t testing.TB, name, bin, cosignerRole string, env []string, args ...string) *proc {
+	t.Helper()
+	p := &proc{name: name, cmd: exec.Command(bin, dbtest.RoleArgsFor(t, bin, cosignerRole, args)...), out: &syncBuf{}, done: make(chan struct{})}
 	p.cmd.Env = append(append(os.Environ(), pkitest.EnvFor(filepath.Base(bin))...), env...)
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
 	mpcstack.Guard(p.cmd)
@@ -433,7 +444,7 @@ func mustJSON(v any) []byte { b, _ := json.MarshalIndent(v, "", " "); return b }
 
 func (s *stack) startCosignerC(t *testing.T) {
 	ccrt, ckey := s.certCosC.write(t, s.dir)
-	s.cosignerC = startProc(t, "cosigner-c", binCosigner, nil, "-config", s.cosignerCfgC, "-guard-dsn", s.csGuardDSNC, "-gateway-guard-dsn", s.gwGuardDSN, "-socket", s.sockC, "-socket-cert", ccrt, "-socket-key", ckey, "-party-pins", s.certC.pin)
+	s.cosignerC = startCosignerProc(t, "cosigner-c", "c", "-config", s.cosignerCfgC, "-guard-dsn", s.csGuardDSNC, "-gateway-guard-dsn", s.gwGuardDSN, "-socket", s.sockC, "-socket-cert", ccrt, "-socket-key", ckey, "-party-pins", s.certC.pin)
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if c, err := net.Dial("unix", s.sockC); err == nil {
@@ -447,7 +458,7 @@ func (s *stack) startCosignerC(t *testing.T) {
 
 func (s *stack) startCosigner(t *testing.T) {
 	bcrt, bkey := s.certCosB.write(t, s.dir)
-	s.cosigner = startProc(t, "cosigner", binCosigner, nil, "-config", s.cosignerCfg, "-guard-dsn", s.csGuardDSN, "-gateway-guard-dsn", s.gwGuardDSN, "-socket", s.sock, "-socket-cert", bcrt, "-socket-key", bkey, "-party-pins", s.certB.pin)
+	s.cosigner = startCosignerProc(t, "cosigner", "b", "-config", s.cosignerCfg, "-guard-dsn", s.csGuardDSN, "-gateway-guard-dsn", s.gwGuardDSN, "-socket", s.sock, "-socket-cert", bcrt, "-socket-key", bkey, "-party-pins", s.certB.pin)
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if c, err := net.Dial("unix", s.sock); err == nil {

@@ -37,6 +37,7 @@ func (c *rebuildChain) UndoUnsent(context.Context, pgx.Tx, string, string) error
 // transaction: nothing is voided and the hold stays. Any other refusal changes nothing.
 func TestRebuildWithdrawalJobAfterFeeCapsRefusal(t *testing.T) {
 	ctx := context.Background()
+	counted0 := feeCapsRefusals.Load()
 	s, fc := newSvc(t)
 	rc := &rebuildChain{fakeChain: fc}
 	s.Chain = rc
@@ -110,8 +111,13 @@ func TestRebuildWithdrawalJobAfterFeeCapsRefusal(t *testing.T) {
 	// If the build cannot be made now the refusal stays on record and nothing is lost: the transaction rolls back.
 	reject("tx_mismatch: " + btc.FeeCapsSeqNote)
 	s.Chain = &failingRebuild{rebuildChain: rc}
-	if ok, err := s.RebuildWithdrawalJob(ctx, w.ID); err == nil || ok {
-		t.Fatalf("a failed build: %v %v", ok, err)
+	for i := 0; i < 2; i++ { // the poll retries a rebuild that fails: it must not count the same refusal again
+		if ok, err := s.RebuildWithdrawalJob(ctx, w.ID); err == nil || ok {
+			t.Fatalf("a failed build: %v %v", ok, err)
+		}
+	}
+	if n := feeCapsRefusals.Load() - counted0; n != 1 {
+		t.Fatalf("the counter moved by %d: one refusal rebuilt once, then two failed rebuilds, want 1", n)
 	}
 	if st, _, js := state(); st != WdSigning || js != "rejected" {
 		t.Fatalf("after a failed rebuild: withdrawal %s, job %s", st, js)

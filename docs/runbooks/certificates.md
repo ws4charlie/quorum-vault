@@ -70,10 +70,11 @@ Servers first, so they accept both names for a bounded time; then clients, one c
 Per cosigner (role `b` or `c`):
 1. **Accept both.**
    - Kafka: run the new `acl.sh` (adds `cosigner-link-b` and `-c`; the old `cosigner-link` rule stays).
-   - Postgres of that cluster: create `qv_cosigner_<role>_guard`, move ownership (`ALTER DATABASE ... OWNER TO`, `REASSIGN OWNED BY qv_cosigner_guard TO qv_cosigner_<role>_guard`), `GRANT qv_cosigner_<role>_guard TO qv_cosigner_guard` so the running pod keeps working, and add `qv cosigner-<role> qv_cosigner_<role>_guard` to the map **beside** the old `qv cosigner qv_cosigner_guard` line.
+   - Postgres of that cluster: the guard database **keeps its name** (`qv_cosigner_guard`; it holds the replay records and the audit chain, and the chart default keeps pointing at it, so the pod finds its history). Create `qv_cosigner_<role>_guard`, move ownership only (`ALTER DATABASE qv_cosigner_guard OWNER TO`, `REASSIGN OWNED BY qv_cosigner_guard TO qv_cosigner_<role>_guard`), `GRANT qv_cosigner_<role>_guard TO qv_cosigner_guard` so the running pod keeps working, and add `qv cosigner-<role> qv_cosigner_<role>_guard` to the map **beside** the old `qv cosigner qv_cosigner_guard` line.
 2. **Issue.** Upgrade `qv-certs`: it now issues `cosigner-<role>` and `cosigner-link-<role>` in this cluster.
+   Before step 3: **a cosigner cannot tell an empty guard database from a new install, so it does not refuse to start on one.** If the chart or the role points at a wrong or new database the cosigner starts with no replay history and no audit chain: before the switch, check that the database in `QV_COSIGNER_GUARD_DSN` is the old one (`SELECT count(*) FROM audit_log`) and compare after the switch.
 3. **Switch.** Upgrade `qv-party` (new image, default Secrets and role of the new names). The pod restarts. Check the log line `"cosigner":"cosigner-<role>"`, a published head under that source and a signature through the party.
-4. **Remove the old name** after both cosigners run on the new names: delete the old `cosigner-link` ACL rule, the old map line, the membership and `qv_cosigner_guard`, and the old Secrets.
+4. **Remove the old name** after both cosigners run on the new names: delete the old `cosigner-link` ACL rule, the old map line, the membership and the old **role** `qv_cosigner_guard` (never the database of that name), and the old Secrets.
 5. **Test the refusal.** Keep a copy of the old certificate files before step 4 and try them after: Postgres and Kafka must refuse them. Also try C's new certificate at B's database: refused.
 
 The compose files and the e2e stacks need no step: they take the files from `qv-pki`, which issues the new names.
