@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Phase 3 of `make kind-up`: the real charts with their values-kind.yaml. Generated files (custody config, keys) are in the gitignored work dir; no secret is in a values file.
-# Installed so far: qv-business. NOT yet: qv-signing-core and qv-party x3 (README, "Status"): they need the DKG first, see ci/kind/README.md.
+# Installed: qv-party x3 + DKG, qv-business. NOT yet: qv-signing-core (README, "Status").
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$QV_KIND_ROOT"
 S="$WORK/secrets"
 
 mk_secret() { local ns="$1" name="$2"; shift 2; kn "$ns" create secret generic "$name" "$@" --dry-run=client -o yaml | k apply -f - >/dev/null; }
+
+"$KDIR/parties.sh"
+"$KDIR/dkg.sh"
 
 log "audit bucket (Object Lock, COMPLIANCE) in SeaweedFS"
 kn "$NS_BIZ" port-forward svc/seaweedfs 18333:8333 >/dev/null 2>&1 & PF=$!
