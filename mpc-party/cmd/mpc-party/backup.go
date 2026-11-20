@@ -91,6 +91,8 @@ func cmdGenKey(args []string) error {
 }
 
 func openStore(cfgPath string) (*server.Config, *server.FileStore, error) {
+	// The simulated attester measures the binary and the config file the party runs with: this command is run with that same file.
+	server.RunningConfigPath = cfgPath
 	cfg, err := server.LoadConfig(cfgPath)
 	if err != nil {
 		return nil, nil, err

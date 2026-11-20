@@ -24,6 +24,9 @@ type Config struct {
 
 	CertFile string `json:"cert_file"` // this party's certificate (PEM), used on both ports
 	KeyFile  string `json:"key_file"`
+	// TLSSealed (attested sealer only): the party's TLS private key is made inside the party (`mpc-party tls-init`), sealed under its local data key
+	// and read from <data_dir>/tls-key.sealed.json; cert_file and key_file must then be empty (the certificate is <data_dir>/tls-cert.pem).
+	TLSSealed bool `json:"tls_sealed"`
 
 	// Pins are lowercase hex SHA-256 of the leaf certificate's public key (SPKI); renewal with the same key keeps them.
 	PeerPins   []string `json:"peer_pins"`   // the other party's certificate (exactly the cert it presents)
@@ -85,7 +88,12 @@ type AttesterConfig struct {
 	MeasureBinary string `json:"measure_binary"`
 	MeasureConfig string `json:"measure_config"`
 	PCR0          string `json:"pcr0"`
+	// Debug (mock only): the document carries all-zero PCRs, as an enclave started in debug mode does. The verifier must refuse it.
+	Debug bool `json:"debug"`
 }
+
+// RunningConfigPath is the config file this process was started with (set by cmd/mpc-party); the simulated attester measures it.
+var RunningConfigPath string
 
 func (c SealerConfig) validateAttested() error {
 	var errs []error
@@ -253,8 +261,17 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("peer_c_address must differ from peer_address"))
 	}
 	req("caller_listen", c.CallerListen)
-	req("cert_file", c.CertFile)
-	req("key_file", c.KeyFile)
+	if c.TLSSealed {
+		if c.Sealer.Type != AttestedSealerType {
+			errs = append(errs, errors.New("tls_sealed needs sealer.type \"attested\""))
+		}
+		if c.CertFile != "" || c.KeyFile != "" {
+			errs = append(errs, errors.New("tls_sealed: cert_file and key_file must be empty (the key is sealed in the data directory)"))
+		}
+	} else {
+		req("cert_file", c.CertFile)
+		req("key_file", c.KeyFile)
+	}
 	req("data_dir", c.DataDir)
 	if c.Role == "A" && c.PeerListen != "" {
 		errs = append(errs, errors.New("peer_listen is only for roles B and C (party A dials)"))
@@ -289,10 +306,10 @@ func (c *Config) Validate() error {
 	}
 	req("sealer.type", c.Sealer.Type)
 	if c.Sealer.Type == AttestedSealerType {
-		if c.Sealer.BrokerCertFile == "" {
+		if c.Sealer.BrokerCertFile == "" && !c.TLSSealed { // a sealed TLS key cannot open the link that releases the keys: that link has its own files
 			c.Sealer.BrokerCertFile = c.CertFile
 		}
-		if c.Sealer.BrokerKeyFile == "" {
+		if c.Sealer.BrokerKeyFile == "" && !c.TLSSealed {
 			c.Sealer.BrokerKeyFile = c.KeyFile
 		}
 		if err := c.Sealer.validateAttested(); err != nil {

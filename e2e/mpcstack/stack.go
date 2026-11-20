@@ -51,7 +51,11 @@ import (
 // ---- binaries ----
 
 // Binaries are the two executables this package starts. Build them once per test binary (in TestMain).
-type Binaries struct{ MPCParty, Cosigner string }
+type Binaries struct {
+	MPCParty, Cosigner string
+	// Broker and AttestCA are set by BuildTeeSim only (the simulated enclave run mode, tee.go).
+	Broker, AttestCA string
+}
 
 // Build compiles the production mpc-party (no dev authorizer, no failpoints, no insecure sealer) and qv-cosigner into dir.
 func Build(dir string) (Binaries, error) {
@@ -371,6 +375,8 @@ type Opts struct {
 	Proxy bool
 	// Limits override the parties' defaults; zero keeps the value below.
 	RecvTimeoutMS, SessionTimeoutMS, KeygenRecvTimeoutMS int
+	// TEE starts the three parties in the simulated enclave run mode (tee.go): Bin must come from BuildTeeSim. Nil: the usual PKCS#11 parties.
+	TEE *TEEOpts
 }
 
 type Stack struct {

@@ -170,7 +170,7 @@ func (s *Server) WriteMetrics(w io.Writer) {
 		fmt.Fprintf(w, "%s{party=%q,side=%q,op=%q,peer=%q,kind=%q} %d\n", failMetricName, s.cfg.Role, k.side, k.op, k.peer, k.kind, vals[k])
 	}
 	// the party's own certificate (its ports and the channel to its cosigner); pinned, never reloaded, so the time left is that of the loaded one
-	wire.WriteCertMetrics(w, "mpc-party-"+strings.ToLower(s.cfg.Role), "signing", s.cert, time.Now())
+	wire.WriteCertMetrics(w, "mpc-party-"+strings.ToLower(s.cfg.Role), "signing", s.certNow(), time.Now())
 	if s.gate != nil {
 		s.gate.writeMetrics(w)
 	}
