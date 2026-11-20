@@ -57,6 +57,9 @@ run "audit_archive_is_compliance_locked_for_seven_years" {
 }
 
 run "workload_accounts_cannot_delete_logs_or_heads" {
+  variables {
+    archiver_role_exists = true
+  }
   assert {
     condition = alltrue([
       for k in ["heads_bucket", "trail_bucket", "flow_bucket"] : alltrue([
@@ -85,8 +88,18 @@ run "workload_accounts_cannot_delete_logs_or_heads" {
 }
 
 run "audit_keys_do_not_trust_workload_accounts_roots" {
+  variables {
+    archiver_role_exists = true
+  }
   assert {
     condition     = !strcontains(output.policies["heads_key"], "222222222222") && !strcontains(output.policies["heads_key"], "333333333333")
     error_message = "only the business archiver role (and the audit account itself) may use the archive key"
+  }
+}
+
+run "phase_1_names_no_archiver_yet" {
+  assert {
+    condition     = !strcontains(output.policies["heads_bucket"], "qv-archiver") && !strcontains(output.policies["heads_key"], "qv-archiver")
+    error_message = "before the business root exists the archive admits nobody but the audit account"
   }
 }

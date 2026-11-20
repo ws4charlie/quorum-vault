@@ -45,7 +45,7 @@ module "kms_heads" {
   description        = "Encrypts the audit-head archive"
   account_id         = local.account
   region             = var.region
-  external_user_arns = [local.archiver_arn]
+  external_user_arns = var.archiver_role_exists ? [local.archiver_arn] : []
 }
 
 module "kms_logs" {
@@ -63,7 +63,7 @@ module "heads_bucket" {
   name        = local.heads_bucket
   kms_key_arn = module.kms_heads.arn
   object_lock = { enabled = true, days = var.audit_heads_retention_days }
-  extra_policy_statements = [
+  extra_policy_statements = [for st in [
     {
       Sid       = "ArchiverReadAndPut"
       Effect    = "Allow"
@@ -85,7 +85,7 @@ module "heads_bucket" {
       Action    = local.archiver_denied
       Resource  = ["arn:aws:s3:::${local.heads_bucket}", "arn:aws:s3:::${local.heads_bucket}/*"]
     },
-  ]
+  ] : st if var.archiver_role_exists]
 }
 
 module "trail_bucket" {

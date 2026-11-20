@@ -39,3 +39,9 @@ variable "archiver_role_name" {
   type        = string
   default     = "qv-archiver"
 }
+
+variable "archiver_role_exists" {
+  description = "PHASE 2. false on the first apply (the business root has not made the archiver role yet; AWS refuses a policy that names a role that does not exist). Set true after the business root is applied: the archive bucket and its key then admit that one role."
+  type        = bool
+  default     = false
+}

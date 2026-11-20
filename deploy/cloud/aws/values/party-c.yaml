@@ -1,0 +1,30 @@
+# qv-party, role C, in the party-c cluster (roots/party-c).
+role: C
+persistence:
+  storageClassName: qv-gp3-encrypted                  # kmsKeyId = <party-c.kms_keys.ebs>
+service:
+  # The qv-party chart makes the internal NLBs (type LoadBalancer + the annotations qv-policy requires). After they exist, apply the root again with nlb_services.
+  caller:
+    type: LoadBalancer
+    annotations:
+      quorumvault.io/endpoint: private
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    sourceRanges: [<signing-core VPC range from cidrs.json>]
+  peer:
+    type: LoadBalancer
+    annotations:
+      quorumvault.io/endpoint: private
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    sourceRanges: [<signing-core VPC range from cidrs.json>, <party-b VPC range>]
+network:
+  guardDatabase: { to: [{ podSelector: { matchLabels: { cnpg.io/cluster: qv-guard } } }], ports: [5432] }
+  kafka:
+    to: [{ ipBlock: { cidr: <party-c.endpoint_ips.cosigner-c-heads.0>/32 } }]
+    ports: [9092, 9093, 9094]
+  hsm:
+    to: [{ ipBlock: { cidr: <party-c.hsm.ips.0>/32 } }]
+    ports: [2223, 2224, 2225]

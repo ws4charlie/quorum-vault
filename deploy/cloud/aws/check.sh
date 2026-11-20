@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Every check of the AWS reference deployment that needs no account, no credentials and no network call to AWS. CI (.github/workflows/terraform.yml) and people run the same file.
 #   deploy/cloud/aws/check.sh            all checks
-#   deploy/cloud/aws/check.sh fmt        one step: fmt | validate | test | lint | scan | creds
+#   deploy/cloud/aws/check.sh fmt        one step: fmt | validate | test | lint | scan | values | creds
 # Needs on PATH: terraform (the version pinned in the workflow), tflint (with `tflint --init` done), trivy. The provider is downloaded from the public registry by `init`; nothing talks to AWS.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -58,6 +58,11 @@ fi
 if want scan; then
   echo "== trivy config (suppressions, each with its reason: .trivyignore.yaml)"
   trivy config --skip-version-check --quiet --severity LOW,MEDIUM,HIGH,CRITICAL --ignorefile .trivyignore.yaml --exit-code 1 . || fail "trivy config"
+fi
+
+if want values; then
+  echo "== chart values for the AWS shape: every key exists in the chart"
+  python3 values/values_test.py || fail "values"
 fi
 
 if want creds; then
