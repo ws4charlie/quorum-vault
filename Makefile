@@ -5,17 +5,24 @@ export
 endif
 
 export CGO_ENABLED := 1
+# Local runs get a compose project name and a block of host ports of their own per checkout (scripts/e2e-lane.sh; nothing in CI), so two worktrees
+# do not collide. Set a variable in the environment or .env to override it. `make e2e-lane` shows them, `make e2e-clean` removes this checkout's stacks.
+define lane_set
+$(1) ?= $(2)
+export $(1)
+endef
+$(foreach kv,$(shell scripts/e2e-lane.sh vars),$(eval $(call lane_set,$(word 1,$(subst =, ,$(kv))),$(patsubst $(word 1,$(subst =, ,$(kv)))=%,%,$(kv)))))
 # Both Postgres servers want TLS and a client certificate (docs/runbooks/certificates.md): the DSNs name the files `make pki` writes.
 # (one variable, QV_PKI_DIR: the environment wins, so a nested make or scripts/e2e-all.sh keeps the directory of its own run)
 QV_PKI_DIR ?= $(CURDIR)/data/pki
 export QV_PKI_DIR
-DATABASE_URL ?= postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/business/admin/ca.crt&sslcert=$(QV_PKI_DIR)/business/admin/tls.crt&sslkey=$(QV_PKI_DIR)/business/admin/tls.key
+DATABASE_URL ?= postgres://qv@localhost:$(or $(QV_PG_PORT),55432)/quorumvault?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/business/admin/ca.crt&sslcert=$(QV_PKI_DIR)/business/admin/tls.crt&sslkey=$(QV_PKI_DIR)/business/admin/tls.key
 export DATABASE_URL
 # the signing zone's Postgres (the replay-guard databases) is another server with another authority
-QV_SIGNING_DB_URL ?= postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/signing/admin/ca.crt&sslcert=$(QV_PKI_DIR)/signing/admin/tls.crt&sslkey=$(QV_PKI_DIR)/signing/admin/tls.key
+QV_SIGNING_DB_URL ?= postgres://qv@localhost:$(or $(QV_SIGNING_DB_PORT),55433)/qv_signing?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/signing/admin/ca.crt&sslcert=$(QV_PKI_DIR)/signing/admin/tls.crt&sslkey=$(QV_PKI_DIR)/signing/admin/tls.key
 export QV_SIGNING_DB_URL
 
-.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images
+.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images e2e-lane e2e-clean e2e-clean-stale e2e-slots
 
 setup: softhsm pki db-up chain-up
 
@@ -318,6 +325,16 @@ test-mpc-soak:
 #   make test-e2e-all LANES=4                another number of lanes
 test-e2e-all:
 	QV_E2E_GROUPS='$(GROUPS)' $(if $(LANES),LANES=$(LANES)) scripts/e2e-all.sh
+
+# Lanes: this checkout's compose project and ports; remove only its stacks; list and remove the stacks of checkouts that no longer exist; who holds the lane slots.
+e2e-lane:
+	scripts/e2e-lane.sh show
+e2e-clean:
+	scripts/e2e-lane.sh clean
+e2e-clean-stale:
+	scripts/e2e-lane.sh clean-stale
+e2e-slots:
+	scripts/e2e-lane.sh slots
 
 # Container images of every deployable and the tools images (deploy/images/README.md): production images and the -dev variants, built locally, never pushed.
 # The first build compiles cb-mpc and takes several minutes. `deploy/images/build.sh repro` builds every binary twice and compares the hashes.
