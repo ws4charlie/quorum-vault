@@ -17,7 +17,13 @@ deploy/cloud/aws/
 ## Design note
 
 **Accounts.** An AWS Organization with five member accounts and a separate management account that holds nothing else: `business`, `signing-core`, `party-b`, `party-c`, `audit`.
-Two parties never share an account or an administrator. The audit account holds what the others must not be able to delete: the audit-head archive, CloudTrail and flow logs. Shared: nothing
+Two parties never share an account or an administrator. The audit account holds what the others must not be able to delete: the audit-head archive, CloudTrail and flow logs. **Why the audit account is its own root.** The archive and the logs are worth something only if the people they record cannot delete or rewrite them. Any domain's administrators can change
+that domain's own account (stop a trail, empty a bucket, destroy a key), so the store must be in an account none of them controls. Object Lock in COMPLIANCE mode stops even the audit administrators from deleting
+before the retention ends, but it does not stop a bucket policy or a key from being changed: only separation does. **Who administers it:** a small group that belongs to no domain (for example security or compliance, not
+the business, signing-core, party-b or party-c teams), with its own Identity Center permission set and its own Terraform role; the management-account owner can reach it only to create it. A person with access to the audit account must
+not hold a role in a party account, and the reverse. The audit root creates no network and no cluster, so it has no run-time dependency on a domain.
+
+Shared: nothing
 at run time (no shared VPC, no shared state, no shared keys). Shared by hand only: the organization, single sign-on, and the guardrail policies (SCPs) in the runbook.
 
 **Networks.** One VPC per domain, address ranges that never overlap (`cidrs.json`). No peering, no transit gateway, no VPN. The signing and party VPCs have no internet gateway, no NAT and no route out
