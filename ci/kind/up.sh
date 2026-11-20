@@ -16,8 +16,8 @@ phase_images() {
   log "images: dependencies by digest, services from this checkout"
   pull_pinned
   # always built: the docker layer cache makes an unchanged image a no-op, and a stale image against a newer chart fails in confusing ways (a flag the chart passes and the old binary lacks).
-  # QV_KIND_SKIP_BUILD=1 keeps what is there.
-  if [ "${QV_KIND_SKIP_BUILD:-}" != 1 ]; then log "building the service images"; QV_IMAGE_PREFIX=qv-image/ QV_IMAGE_TAG=local deploy/images/build.sh $LOCAL_IMAGES >&2   # the names the values-kind files and load_images use, whatever the caller exported; fi
+  # QV_KIND_SKIP_BUILD=1 keeps what is there. The image names are forced to the ones the values-kind files and load_images use, whatever the caller exported.
+  if [ "${QV_KIND_SKIP_BUILD:-}" != 1 ]; then log "building the service images"; QV_IMAGE_PREFIX=qv-image/ QV_IMAGE_TAG=local deploy/images/build.sh $LOCAL_IMAGES >&2; fi
 }
 
 phase_cluster() {
