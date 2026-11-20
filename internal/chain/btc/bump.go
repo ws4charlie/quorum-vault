@@ -106,8 +106,8 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	if ownerKind == "sweep" {
 		return a.buildSweepReplacement(ctx, tx, ownerID)
 	}
-	if ownerKind == OwnerKindConsolidate {
-		return a.buildConsolidateReplacement(ctx, tx, ownerID)
+	if ownerKind == OwnerKindConsolidate || ownerKind == OwnerKindDrain {
+		return a.buildConsolidateReplacement(ctx, tx, ownerKind, ownerID)
 	}
 	if ownerKind != "withdrawal" && ownerKind != "to-cold" && ownerKind != OwnerKindBatch {
 		return chain.UnsignedTx{}, errLater
@@ -116,7 +116,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	sh, ok := a.byAddr[p.Outputs[len(p.Outputs)-1].Address]
+	sh, ok := a.hotByAddr(ctx, tx, p.Outputs[len(p.Outputs)-1].Address)
 	if len(p.Outputs) < 2 || !ok {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: the transaction has no change output to pay a higher fee from", chain.ErrCannotBump)
 	}
@@ -161,7 +161,7 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 	if err := a.refreshCaps(ctx); err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	if ownerKind != "withdrawal" && ownerKind != "sweep" && ownerKind != "to-cold" && ownerKind != OwnerKindConsolidate && ownerKind != OwnerKindBatch {
+	if ownerKind != "withdrawal" && ownerKind != "sweep" && ownerKind != "to-cold" && ownerKind != OwnerKindConsolidate && ownerKind != OwnerKindDrain && ownerKind != OwnerKindBatch {
 		return chain.UnsignedTx{}, errLater
 	}
 	var n int
@@ -209,9 +209,11 @@ func (a *Adapter) buildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 	if err := tx.QueryRow(ctx, `SELECT partition_id FROM btc_utxos WHERE chain=$1 AND txid=$2 AND vout=$3`, a.cfg.Chain, p.Inputs[0].TxID, p.Inputs[0].Vout).Scan(&part); err != nil {
 		return chain.UnsignedTx{}, fmt.Errorf("btc: partition of the attempt's inputs: %w", err)
 	}
-	sh, err := a.shardOf(part)
+	// A cancel pays the partition's shard under the generation its inputs are under (the zone's rule), whichever generation is active now.
+	inGen := int(genOf(p.Inputs[0].Gen))
+	sh, err := a.shardOfGen(part, inGen)
 	if err != nil && ownerKind == "sweep" && len(a.shards) > 0 {
-		sh, err = a.sinkShard(), nil // a deposit-only cell recorded the output without a partition: the sweep pays the sink shard
+		sh, err = a.shardOfGen(a.sinkPartition(), inGen) // a deposit-only cell recorded the output without a partition: the sweep pays the sink shard
 	}
 	if err != nil {
 		return chain.UnsignedTx{}, err
@@ -262,7 +264,7 @@ func (a *Adapter) buildSweepReplacement(ctx context.Context, tx pgx.Tx, ownerID 
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	sh, ok := a.byAddr[p.Outputs[0].Address]
+	sh, ok := a.hotByAddr(ctx, tx, p.Outputs[0].Address)
 	if len(p.Outputs) != 1 || !ok {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: a sweep has one output to a shard", chain.ErrCannotBump)
 	}
@@ -308,12 +310,16 @@ func (a *Adapter) buildSweepReplacement(ctx context.Context, tx pgx.Tx, ownerID 
 // buildConsolidateReplacement bumps a consolidation: the same inputs and the one output to the shard lower by the extra fee (a consolidation has no
 // change, so the output pays). The new fee follows the replacement rule and must stay under the fee caps and consolidate_max_fee_rate, and the output
 // must stay above dust. If not it returns chain.ErrCannotBump: an ALERT, the consolidation keeps waiting, nothing is voided.
-func (a *Adapter) buildConsolidateReplacement(ctx context.Context, tx pgx.Tx, ownerID string) (chain.UnsignedTx, error) {
-	p, oldFee, err := a.lastSend(ctx, tx, OwnerKindConsolidate, ownerID)
+func (a *Adapter) buildConsolidateReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ownerID string) (chain.UnsignedTx, error) {
+	ceiling := a.cfg.ConsolidateMaxFeeRate // a drain may pay up to the fee cap: it is a key replacement, not housekeeping
+	if ownerKind == OwnerKindDrain {
+		ceiling = a.caps().MaxFeeRate
+	}
+	p, oldFee, err := a.lastSend(ctx, tx, ownerKind, ownerID)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	sh, ok := a.byAddr[p.Outputs[0].Address]
+	sh, ok := a.hotByAddr(ctx, tx, p.Outputs[0].Address)
 	if len(p.Outputs) != 1 || !ok {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: a consolidation has one output to a shard", chain.ErrCannotBump)
 	}
@@ -326,12 +332,12 @@ func (a *Adapter) buildConsolidateReplacement(ctx context.Context, tx pgx.Tx, ow
 		return chain.UnsignedTx{}, err
 	}
 	vs := uint64(EstimateVSize(built.Tx))
-	fee, err := a.escalate(ctx, tx, OwnerKindConsolidate, ownerID, oldFee, vs, min(a.feeCap(vs), a.cfg.ConsolidateMaxFeeRate*vs), func(fee uint64) error {
+	fee, err := a.escalate(ctx, tx, ownerKind, ownerID, oldFee, vs, min(a.feeCap(vs), ceiling*vs), func(fee uint64) error {
 		if err := a.checkFee(fee, vs); err != nil {
 			return err
 		}
-		if fee > a.cfg.ConsolidateMaxFeeRate*vs {
-			return fmt.Errorf("%w: %d sats over %d vbytes is above the consolidation ceiling of %d sat/vB", chain.ErrCannotBump, fee, vs, a.cfg.ConsolidateMaxFeeRate)
+		if fee > ceiling*vs {
+			return fmt.Errorf("%w: %d sats over %d vbytes is above the ceiling of %d sat/vB", chain.ErrCannotBump, fee, vs, ceiling)
 		}
 		if sum < fee+DustLimit(KindP2WPKH)+1 {
 			return fmt.Errorf("%w: %d sats cannot pay a fee of %d and leave an output above dust", chain.ErrCannotBump, sum, fee)
@@ -342,7 +348,7 @@ func (a *Adapter) buildConsolidateReplacement(ctx context.Context, tx pgx.Tx, ow
 		return chain.UnsignedTx{}, err
 	}
 	p.Outputs[0].Value = sum - fee
-	b2, raw, err := a.record(ctx, tx, OwnerKindConsolidate, ownerID, "send", p, fee)
+	b2, raw, err := a.record(ctx, tx, ownerKind, ownerID, "send", p, fee)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}

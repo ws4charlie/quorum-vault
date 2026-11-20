@@ -214,6 +214,16 @@ func (s *Service) reconcileBTC(ctx context.Context, rep *Report) error {
 	for _, h := range c.BTC.HotShards {
 		hots = append(hots, h.Address)
 	}
+	// The shards under every generation of the account key are the shards' money too (K6).
+	if hl, ok := s.Chain.(interface {
+		HotAddresses(context.Context) ([]string, error)
+	}); ok {
+		all, err := hl.HotAddresses(ctx)
+		if err != nil {
+			return err
+		}
+		hots = all
+	}
 	var colds []string
 	for _, a := range c.BTC.ColdAddresses {
 		colds = append(colds, a)
@@ -346,9 +356,23 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 		if m := moves[p]; m != nil {
 			booked.Add(booked, m)
 		}
-		want := new(big.Int).Sub(booked, spent(h.Address))
-		out = append(out, Check{Name: "hot", Asset: btc.Native, Subject: h.Address, Ledger: want.String(), Chain: bal(h.Address).String(), OK: want.Cmp(bal(h.Address)) == 0,
-			Detail: note(fmt.Sprintf("read at chain height %d", v.Height), spent(h.Address))})
+		// The partition's shard under every generation of the account key holds its money together: the ledger has one account for it.
+		addrs := []string{h.Address}
+		if hl, ok := s.Chain.(interface {
+			HotAddressesOf(context.Context, string) ([]string, error)
+		}); ok {
+			if addrs, err = hl.HotAddressesOf(ctx, p); err != nil {
+				return nil, err
+			}
+		}
+		spentAll, balAll := new(big.Int), new(big.Int)
+		for _, ad := range addrs {
+			spentAll.Add(spentAll, spent(ad))
+			balAll.Add(balAll, bal(ad))
+		}
+		want := new(big.Int).Sub(booked, spentAll)
+		out = append(out, Check{Name: "hot", Asset: btc.Native, Subject: h.Address, Ledger: want.String(), Chain: balAll.String(), OK: want.Cmp(balAll) == 0,
+			Detail: note(fmt.Sprintf("read at chain height %d", v.Height), spentAll)})
 		var rows string
 		if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(SUM(value),0)::text FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND NOT deposit AND status IN ('available','reserved')`,
 			c.Chain, p).Scan(&rows); err != nil {

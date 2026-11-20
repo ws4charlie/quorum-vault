@@ -88,6 +88,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	reason := fs.String("reason", "", "open: why the key is replaced")
 	adminAuth := fs.String("admin-auth", "", "dkg (mpc): the operator's `qv-keysets party-auth -op dkg -keyset ID` file")
 	rpc := fs.String("rpc", "", "status, activate: the chain's RPC URL, to read the factory's destination")
+	window := fs.Int64("window", 0, "drain-start of a deposit tree: seconds its old deposit addresses stay swept before the old generation may retire (the signed record carries it)")
 	factory := fs.String("factory", "", "status, activate: the forwarder factory's address")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -107,7 +108,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	defer closeZone()
-	env := &Env{Dir: *dir, Zone: zone, Out: out, Now: time.Now, ChangeFile: *change, Caps: caps, Compromised: *compromised}
+	env := &Env{Dir: *dir, Zone: zone, Out: out, Now: time.Now, ChangeFile: *change, Caps: caps, Compromised: *compromised, Window: *window}
 	var hdr []string
 	hdr = append(hdr, headers...)
 	env.Core = &httpCore{base: strings.TrimRight(*coreURL, "/"), tokenFile: *tokenFile, headers: hdr, caCert: *coreCA}
@@ -132,6 +133,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			switch p.Mode {
 			case "mpc":
 				env.Keys = &mpcKeys{cfg: cfg, partition: part, adminAuth: *adminAuth}
+				if isTreePlan(p.Shard) {
+					env.Keys = &treeKeys{cfg: cfg, partition: part, adminAuth: *adminAuth}
+				}
 			case "hsm":
 				k, closeKeys, err := newHSMKeys(cfg, part)
 				if err != nil {
@@ -213,7 +217,11 @@ func (z *zoneDBs) Views(ctx context.Context, shard string) (map[string]ZoneView,
 		}
 		zv := ZoneView{Seq: v.Seq, Gens: map[int]ZoneGen{}}
 		for _, e := range v.Generations(partition.ShardID(shard)) {
-			zv.Gens[e.Generation] = ZoneGen{State: e.State, Address: e.Address, KeyRef: e.KeyRef, Successor: e.Successor}
+			addr := e.Address
+			if addr == "" {
+				addr = e.PublicKey // a deposit tree has no address: its identity stands for it (the core records the same string)
+			}
+			zv.Gens[e.Generation] = ZoneGen{State: e.State, Address: addr, KeyRef: e.KeyRef, Successor: e.Successor}
 		}
 		if len(zv.Gens) == 0 {
 			return nil, fmt.Errorf("%s: the zone does not know shard %s", s.name, shard)
@@ -237,6 +245,9 @@ func (z *zoneDBs) Apply(ctx context.Context, c gateway.KeysetChange) error {
 }
 
 func (z *zoneDBs) Partition(shard string) (string, error) {
+	if isTreePlan(shard) {
+		return z.treePartition(shard)
+	}
 	var parts []string
 	for _, cc := range z.cfg.Chains {
 		for p := range cc.EVM.HotAddresses {

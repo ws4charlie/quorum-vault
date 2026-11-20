@@ -1,6 +1,7 @@
 package custody
 
 import (
+	"sync"
 	"context"
 	"errors"
 	"fmt"
@@ -42,6 +43,8 @@ type Service struct {
 	Now    func() time.Time
 
 	keysets atomic.Pointer[map[partition.ShardID]partition.Keyset] // the active keyset of every shard of this chain, from the registry (nil until Bootstrap)
+
+	sweepAlerted sync.Map // address -> true: the ALERT for a refused sweep of a later key generation was given (per process)
 
 	reconSkipSince  atomic.Int64 // Unix time the chain comparisons of Reconcile began to be skipped (0: they are not)
 	mismatchAlerted atomic.Bool  // the "destination changed on chain" ALERT was given and the mismatch has not cleared since

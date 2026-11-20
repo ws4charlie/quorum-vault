@@ -68,8 +68,12 @@ func (v *Verifier) VerifyBatch(u chain.UnsignedTx, b signjob.Batch) ([]BatchPaym
 	if len(p.Outputs) != n && len(p.Outputs) != n+1 {
 		return nil, reject("batch of %d members has %d outputs, want the %d payments and at most one change", n, len(p.Outputs), n)
 	}
-	if len(p.Outputs) == n+1 && pr.outs[n].Canonical != own.addr {
-		return nil, reject("change goes to %s, not the partition's own shard %s", pr.outs[n].Canonical, own.addr)
+	ownA, err := v.shardAt(own, pr.Gen)
+	if err != nil {
+		return nil, reject("%v", err)
+	}
+	if len(p.Outputs) == n+1 && pr.outs[n].Canonical != ownA {
+		return nil, reject("change goes to %s, not the partition's own shard %s", pr.outs[n].Canonical, ownA)
 	}
 	ids := map[string]bool{}
 	pairs := map[string]bool{}

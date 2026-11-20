@@ -43,6 +43,10 @@ type TxInfo struct {
 	// intent is a kind that keeps a change (a withdrawal, a hot-to-cold move, a batch), so that a CPFP child can be judged against what the zone itself
 	// signed. Nil: nothing to record.
 	Parent *ParentFacts
+	// Gen and DestGen (Bitcoin) are the generation of the account key the inputs are under and the generation of the partition's hot shard the first
+	// output pays (0: it pays no hot shard of the partition). DepositGens (Solana) is the generation of each deposit key a sweep spends.
+	Gen, DestGen uint32
+	DepositGens  []uint32
 }
 
 // ParentFacts is what the guard remembers about a signed transaction's change: its size and fee, and which output is the change and what it holds.
