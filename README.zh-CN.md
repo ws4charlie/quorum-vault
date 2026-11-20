@@ -14,20 +14,20 @@
 ## 架构
 
 <p align="center">
-<img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"><br/>
-<img src="docs/images/zh/arch-a.png" width="24%" alt=""><br/>
+<a href="docs/zh/identity.md"><img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"></a><br/>
+<picture><img src="docs/images/zh/arch-a.png" width="24%" alt=""></picture><br/>
 <a href="docs/zh/identity.md"><img src="docs/images/zh/arch-identity.png" width="24%" alt="身份"></a><br/>
-<img src="docs/images/zh/arch-b.png" width="24%" alt=""><br/>
-<img src="docs/images/zh/arch-api.png" width="24%" alt="核心 API"><br/>
-<img src="docs/images/zh/arch-down.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-b.png" width="24%" alt=""></picture><br/>
+<picture><img src="docs/images/zh/arch-api.png" width="24%" alt="核心 API"></picture><br/>
+<picture><img src="docs/images/zh/arch-down.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/workflows.md"><img src="docs/images/zh/arch-workflows.png" width="24%" alt="工作流"></a><a href="docs/zh/ledger.md"><img src="docs/images/zh/arch-ledger.png" width="24%" alt="账本"></a><a href="docs/zh/audit.md"><img src="docs/images/zh/arch-audit.png" width="24%" alt="审计记录"></a><br/>
-<img src="docs/images/zh/arch-merge.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-merge.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/tiers.md"><img src="docs/images/zh/arch-tiers.png" width="24%" alt="冷热钱包"></a><br/>
-<img src="docs/images/zh/arch-merge2.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-merge2.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/signing-zone.md"><img src="docs/images/zh/arch-zone.png" width="48%" alt="签名区"></a><br/>
-<img src="docs/images/zh/arch-down2.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-down2.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/mpc.md"><img src="docs/images/zh/arch-mpc.png" width="72%" alt="MPC 参与方"></a><br/>
-<img src="docs/images/zh/arch-split.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-split.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/evm.md"><img src="docs/images/zh/arch-evm.png" width="24%" alt="EVM"></a><a href="docs/zh/bitcoin.md"><img src="docs/images/zh/arch-bitcoin.png" width="24%" alt="Bitcoin"></a><a href="docs/zh/solana.md"><img src="docs/images/zh/arch-solana.png" width="24%" alt="Solana"></a>
 </p>
 
