@@ -1,0 +1,127 @@
+{{- $root := . -}}
+{{- $mode := .Values.issuers.mode -}}
+{{- $vaultKey := dict "qv-business" "business" "qv-signing" "signing" "qv-business-link" "link" -}}
+{{- $sas := dict -}}
+{{- range $iss := (include "qv-certs.issuerNames" . | fromJsonArray) }}
+{{- if eq $mode "vault" }}
+{{- $v := get $root.Values.issuers.vault (get $vaultKey $iss) }}
+{{- if not (and $v.server $v.path $v.auth.role) }}{{ fail (printf "issuers.vault.%s needs server, path and auth.role (issuer %s)" (get $vaultKey $iss) $iss) }}{{- end }}
+{{- $_ := set $sas $v.auth.serviceAccountName true }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $iss }}
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+spec:
+  vault:
+    server: {{ $v.server | quote }}
+    path: {{ $v.path | quote }}
+    {{- with $v.namespace }}
+    namespace: {{ . | quote }}
+    {{- end }}
+    {{- with $v.caBundle }}
+    caBundle: {{ . | quote }}
+    {{- end }}
+    auth:
+      kubernetes:
+        mountPath: {{ $v.auth.mountPath | quote }}
+        role: {{ $v.auth.role | quote }}
+        serviceAccountRef:
+          name: {{ $v.auth.serviceAccountName }}
+{{- else }}
+{{- /* mode ca: kind and CI. The authority is made here, at install time; its key is a Secret of this cluster. */}}
+{{- if eq $iss "qv-business-link" }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $iss }}
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ $root.Values.issuers.ca.linkSecretName }}
+{{- else }}
+{{- $zone := trimPrefix "qv-" $iss }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: qv-{{ $zone }}-bootstrap
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: qv-{{ $zone }}-ca
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+spec:
+  isCA: true
+  commonName: quorumvault-{{ $zone }}-ca
+  secretName: qv-{{ $zone }}-ca
+  duration: {{ $root.Values.issuers.ca.duration }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Never
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: qv-{{ $zone }}-bootstrap
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $iss }}
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+spec:
+  ca:
+    secretName: qv-{{ $zone }}-ca
+{{- end }}
+{{- end }}
+{{- end }}
+{{- /* cert-manager asks Kubernetes for a token of the Vault service account: that account and the right to request its token (vault mode only) */}}
+{{- range $sa, $_ := $sas }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa }}
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $sa }}-token
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: [{{ $sa | quote }}]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $sa }}-token
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $sa }}-token
+subjects:
+  - kind: ServiceAccount
+    name: {{ $root.Values.issuers.certManager.serviceAccount }}
+    namespace: {{ $root.Values.issuers.certManager.namespace }}
+{{- end }}

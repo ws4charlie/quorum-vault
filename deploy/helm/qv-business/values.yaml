@@ -58,7 +58,7 @@ tls:
   worker:   { secretName: qv-worker-tls }
   relay:    { secretName: qv-relay-tls }
   archiver: { secretName: qv-archiver-tls }
-  admin:    { secretName: qv-admin-tls }    # the migration Job only: certificate name `admin`, Postgres role `qv` (owner)
+  admin:    { secretName: qv-migrator-tls } # the migration Job only (the key stays `admin`): certificate name `migrator`, Postgres role `qv` (owner); Secret name rule: deploy/helm/qv-certs
 
 # --- The custody config (business zone) ---
 custody:
@@ -86,6 +86,9 @@ worker:
   # The worker, relay and archiver listen on no port (metrics are loopback-only), so a TCP probe has nothing to connect to: default none.
   # With mode http, set healthPort to the port D2's health route listens on.
   probes: { mode: none, httpPath: /healthz, healthPort: 8081 }
+  # On SIGTERM the worker is not ready at once, polls no more and lets running activities finish for this long, then exits 0 (qv-worker -stop-timeout).
+  # terminationGracePeriodSeconds must be at least stopTimeoutSeconds + 20 (the chart check refuses less); a sign wait hands back at once, so a normal stop takes seconds.
+  stopTimeoutSeconds: 40
   terminationGracePeriodSeconds: 60
 relay:
   replicas: 2
