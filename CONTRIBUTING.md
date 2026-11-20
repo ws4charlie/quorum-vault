@@ -45,7 +45,7 @@ Services and both Postgres servers talk over TLS with client certificates only (
 
 ## Configuration
 
-All optional; see [.env.example](.env.example). `DATABASE_URL`, `SOFTHSM2_CONF`, `QV_HSM_PIN`, `QV_PKCS11_LIB` and `QV_CUSTODY_SIGNER` (`hsm` or `mpc`) are the ones you meet first.
+All optional; see [.env.example](.env.example). `DATABASE_URL`, `SOFTHSM2_CONF`, `QV_HSM_PIN` (the gateway reads `QV_HSM_PIN_FILE` outside dev and test: [docs/runbooks/hsm-pin.md](docs/runbooks/hsm-pin.md)), `QV_PKCS11_LIB` and `QV_CUSTODY_SIGNER` (`hsm` or `mpc`) are the ones you meet first.
 
 ## More
 

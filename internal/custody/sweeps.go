@@ -421,9 +421,9 @@ func (s *Service) FailSweepBeforeBroadcast(ctx context.Context, id, reason, feeT
 		if fee != nil {
 			fs = fee.String()
 		}
-		var part string
-		err = tx.QueryRow(ctx, `UPDATE sweeps SET status='failed', failure_reason=$2, fee=NULLIF($3,'')::numeric, updated_at=now() WHERE id=$1 AND status IN ('planned','signing') RETURNING to_partition_id`,
-			id, reason, fs).Scan(&part)
+		var part, from string
+		err = tx.QueryRow(ctx, `UPDATE sweeps SET status='failed', failure_reason=$2, fee=NULLIF($3,'')::numeric, updated_at=now() WHERE id=$1 AND status IN ('planned','signing') RETURNING to_partition_id, from_address`,
+			id, reason, fs).Scan(&part, &from)
 		if isNoRows(err) {
 			return nil // already ended: a repeat books nothing
 		}
@@ -433,6 +433,7 @@ func (s *Service) FailSweepBeforeBroadcast(ctx context.Context, id, reason, feeT
 		if err := s.recordFee(ctx, tx, feeTx, part, fee); err != nil { // the cancel paid gas from the shard's address
 			return err
 		}
+		s.alertRefusedLaterGeneration(ctx, tx, from, reason)
 		return emit(ctx, tx, outbox.TopicSweeps, id, "sweep.failed", map[string]any{"reason": reason})
 	})
 }
@@ -695,4 +696,24 @@ func (s *Service) observeFactoryTx(ctx context.Context, tx pgx.Tx, frozen bool) 
 		typ = "factory.frozen"
 	}
 	return auditEvent(ctx, tx, s.Cfg.Chain, typ, map[string]any{"actor": "chain", "chain": s.Cfg.Chain})
+}
+
+// alertRefusedLaterGeneration raises ONE ALERT per deposit address when the signing zone refused a sweep of an address under a later generation of the
+// deposit key tree: the sweep is retried with a back-off and would otherwise fail in silence. The usual causes are a zone that has not been given the
+// generation (its signed record is missing there), a candidate that was never activated, and a retired generation (docs/runbooks/key-replacement.md).
+func (s *Service) alertRefusedLaterGeneration(ctx context.Context, q kq, from, reason string) {
+	if !strings.Contains(reason, "refused") {
+		return
+	}
+	for _, addr := range strings.Split(from, ",") {
+		var gen int
+		if err := q.QueryRow(ctx, `SELECT generation FROM deposit_addresses WHERE chain=$1 AND address=$2`, s.Cfg.Chain, addr).Scan(&gen); err != nil || gen < 2 {
+			continue
+		}
+		if _, seen := s.sweepAlerted.LoadOrStore(addr, true); seen {
+			continue
+		}
+		slog.Error("ALERT: the signing zone refused the sweep of a deposit address of a later key generation; it is retried with a back-off and stays unswept until the zone's signed records allow it (generation not registered or not active there, or retired)",
+			"chain", s.Cfg.Chain, "address", addr, "generation", gen, "reason", reason)
+	}
 }

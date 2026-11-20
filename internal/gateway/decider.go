@@ -177,16 +177,14 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 	if err != nil {
 		return nil, err
 	}
-	// The keysets of an EVM chain's hot shards, from this zone's own config and signed log. With no change applied the config's view is the
-	// codec's own, so only a zone that has a log judges by an overlay.
-	var kv *KeysetView
-	if cc.Family == FamilyEVM {
-		if kv, err = d.keysetView(ctx); err != nil {
-			return nil, err
-		}
-		if ec, ok := codec.(*EVMCodec); ok && kv.Seq > 0 {
-			codec = ec.overlay(kv, cc)
-		}
+	// The keysets of the chain (EVM hot shards, the deposit key tree of Bitcoin and Solana), from this zone's own config and signed log. With no change
+	// applied the config's view is the EVM codec's own, so only a zone that has a log judges by an overlay.
+	kv, err := d.keysetView(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if codec, err = overlayCodec(codec, kv, cc); err != nil {
+		return nil, err
 	}
 	if err := d.refreshFeeCaps(ctx, intent.Chain, codec, set); err != nil {
 		return nil, err

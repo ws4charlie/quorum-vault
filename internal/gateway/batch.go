@@ -56,6 +56,13 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 	if err != nil {
 		return nil, err
 	}
+	kv, err := d.keysetView(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if codec, err = overlayCodec(codec, kv, cc); err != nil {
+		return nil, err
+	}
 	if err := d.refreshFeeCaps(ctx, b.Chain, codec, set); err != nil {
 		return nil, err
 	}
@@ -140,6 +147,9 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 			return reject(ReasonMemberReused, "%s is a withdrawal id the zone signed; a batch never shares an id with one", b.ID)
 		}
 		known := rec != nil && bytes.Equal(rec.Hash, hash[:])
+		if err := d.keysetRules(ctx, gt, kv, cc, intent, info, total, known, now); err != nil {
+			return err
+		}
 		if rec == nil {
 			// A new batch: the fee-bump reserve of its first send, and no member the zone has signed before, alone or in another batch. A
 			// replacement or a repeat of this very batch (known) has its members recorded already.

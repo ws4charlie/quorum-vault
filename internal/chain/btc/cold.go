@@ -25,11 +25,11 @@ func (a *Adapter) MaxMove(ctx context.Context, partitionID string) (*big.Int, er
 	if err := a.refreshCaps(ctx); err != nil {
 		return nil, err
 	}
-	sh, err := a.shardOf(partitionID)
+	sh, err := a.shardOf(ctx, a.pool, partitionID)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := a.pool.Query(ctx, `SELECT value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit
+	rows, err := a.pool.Query(ctx, `SELECT value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND path='`+sh.keyPath()+`'
 		ORDER BY created_at, txid, vout LIMIT $3`, a.cfg.Chain, partitionID, a.cfg.MaxInputs)
 	if err != nil {
 		return nil, err
@@ -219,8 +219,12 @@ func (a *Adapter) ChainView(ctx context.Context, addrs []string) (chain.ChainVie
 		}
 		add(c)
 	}
-	for _, sh := range a.shards {
-		add(sh.address)
+	hots, err := a.HotAddresses(ctx)
+	if err != nil {
+		return chain.ChainView{}, err
+	}
+	for _, ad := range hots {
+		add(ad)
 	}
 	type row struct {
 		txid    string
@@ -231,20 +235,25 @@ func (a *Adapter) ChainView(ctx context.Context, addrs []string) (chain.ChainVie
 		cold    bool
 		address string
 	}
-	rows, err := a.pool.Query(ctx, `SELECT txid, vout, value, status, deposit, cold, COALESCE(address,''), partition_id FROM btc_utxos WHERE chain=$1 AND status IN ('available','reserved')`, a.cfg.Chain)
+	rows, err := a.pool.Query(ctx, `SELECT txid, vout, value, status, deposit, cold, COALESCE(address,''), partition_id, path FROM btc_utxos WHERE chain=$1 AND status IN ('available','reserved')`, a.cfg.Chain)
 	if err != nil {
 		return chain.ChainView{}, err
 	}
 	var table []row
 	for rows.Next() {
 		var r row
-		var part string
-		if err := rows.Scan(&r.txid, &r.vout, &r.value, &r.status, &r.deposit, &r.cold, &r.address, &part); err != nil {
+		var part, path string
+		if err := rows.Scan(&r.txid, &r.vout, &r.value, &r.status, &r.deposit, &r.cold, &r.address, &part, &path); err != nil {
 			rows.Close()
 			return chain.ChainView{}, err
 		}
 		if !r.deposit && !r.cold {
-			sh, err := a.shardOf(part)
+			gen, _, err := chain.SplitKeyPath(path) // the generation of the account key the output's key belongs to
+			if err != nil {
+				rows.Close()
+				return chain.ChainView{}, err
+			}
+			sh, err := a.shardOfGen(part, gen)
 			if err != nil {
 				rows.Close()
 				return chain.ChainView{}, err
@@ -324,7 +333,7 @@ func (a *Adapter) ChainView(ctx context.Context, addrs []string) (chain.ChainVie
 		if b, ok := v.Balance[ad]; ok {
 			b.Add(b, amt)
 		}
-		if _, hot := a.byAddr[ad]; hot {
+		if _, hot := a.hotByAddr(ctx, a.pool, ad); hot {
 			v.Diffs = append(v.Diffs, chain.OutputDiff{Address: ad, Output: k, Detail: "an unspent output on a hot address that the table does not hold"})
 			continue
 		}
@@ -446,7 +455,7 @@ func (a *Adapter) BuildRefill(ctx context.Context, b chain.RefillBuild) (coldsig
 	if err := a.refreshCaps(ctx); err != nil {
 		return coldsign.BTCRequest{}, err
 	}
-	sh, err := a.shardOf(b.PartitionID)
+	sh, err := a.shardOf(ctx, a.pool, b.PartitionID)
 	if err != nil {
 		return coldsign.BTCRequest{}, err
 	}

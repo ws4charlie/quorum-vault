@@ -51,7 +51,7 @@ Only signers whose `backend` is not `mpc` use the HSM; with MPC signers only, se
 |---|---|---|
 | Module | the vendor's PKCS#11 module, **not in the image** (`qv-gateway` is a glibc image that `dlopen`s it). It comes from a volume (`hsm.pkcs11.volume`, any volume source) mounted read-only at `<mountPath>/lib`; `QV_PKCS11_LIB` names the file | `/usr/lib/softhsm/libsofthsm2.so` in the `qv-gateway-dev` image |
 | Client config | `hsm.pkcs11.clientConfig`: files for `<mountPath>/etc` (CloudHSM: `cloudhsm-pkcs11.json` with the cluster address, `customerCA.crt`). Public data. Immutable ConfigMap | none |
-| PIN | Secret `hsm.pin.secretName`, key `pin`, injected as the environment variable `QV_HSM_PIN` (`secretKeyRef`) | the same, plus key `so-pin` for the token Job; made by the kind setup, random, never in the repo |
+| PIN | Secret `hsm.pin.secretName`, key `pin`, mounted as a **file** at `/etc/qv/hsm-pin/pin` (mode 0440, group = `fsGroup`; `QV_HSM_PIN_FILE`). The gateway accepts 0440 and refuses a world bit or a group write bit; `QV_HSM_PIN` in the environment is refused outside dev and test | the same, plus key `so-pin` for the token Job; made by the kind setup, random, never in the repo |
 | `QV_ENV` | unset (production: the binary refuses SoftHSM) | `dev` |
 | Token | made by the HSM operator | a `ReadWriteOnce` volume and a Helm hook Job that runs `softhsm2-util --init-token` (idempotent) |
 
@@ -137,7 +137,7 @@ The gateway opens no port: it writes `mpc.prom` (route and party health) and `mp
 | The signing config (approvers, bounds, chains, signers, `mpc_route`, party addresses and pins) | `config.signing` (JSON, `--set-file`). **No secret in it**: the keys are public keys, the pins are certificate hashes, the addresses are addresses, the signers name a token label and a key id. An **immutable ConfigMap** named `<release>-config-<hash>`: a change is a new ConfigMap and a rollout, never an edit in place. The config repo's two-person rule is the control; the other checkers (cosigners B and C) hold their own copies in their own clusters |
 | Plain settings (DSNs without password, Kafka, probe address, metrics file, TLS file paths) | immutable ConfigMap `<release>-gateway-env-<hash>` |
 | Certificates and keys | Secret volumes from cert-manager (task D5), mode 0440 with `fsGroup` 65532: `tls.gateway`, `tls.gatewayLink` |
-| HSM PIN | a Secret that exists already (External Secrets); read by the gateway **only** from the environment, so it is a `secretKeyRef` |
+| HSM PIN | a Secret that exists already (External Secrets); mounted as a file (`QV_HSM_PIN_FILE`), never an environment variable |
 
 The chart renders no Secret. The policy test refuses a Secret object, a PEM private key, a password in a URL, a secret-named value in a ConfigMap, and an inline secret in an environment variable.
 
@@ -147,7 +147,7 @@ The same templates and the same binary logic. What differs is configuration only
 
 ## Known limits
 
-- **PIN as a file.** The task asked for the PIN as a file. `qv-gateway` reads the PIN only from `QV_HSM_PIN` (`cmd/qv-gateway/main.go`); `pin_file` with the group-readable mode rule exists only in `mpc-party`. The chart therefore injects it from a Secret into the environment, which `kubectl describe` does not show (the value is a reference) but `/proc/<pid>/environ` does. A file option (`QV_HSM_PIN_FILE`, same mode rule) is planned as a separate code task; the chart will then mount the Secret as a file. Until then `secretKeyRef` stays.
+- **PIN as a file: done.** The gateway reads `QV_HSM_PIN_FILE` (`docs/runbooks/hsm-pin.md`); the chart mounts the Secret's `pin` key as a file and never sets `QV_HSM_PIN`. A policy test fails the render if `QV_HSM_PIN` is an environment variable.
 - The CloudHSM module path and client-config location, and the Alloy sidecar, are not run here (see above).
 - The kind lane (task D8) installs this chart later; no cluster install was done in this task.
 - Party A's ingress rule for the gateway, and the business chart's `signingLink.from`, are in other charts.
