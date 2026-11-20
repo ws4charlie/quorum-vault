@@ -113,3 +113,58 @@ func (a *Adapter) NativeDrainReserve(ctx context.Context) (*big.Int, error) {
 	}
 	return r, nil
 }
+
+// DrainRequest is one transfer of a drain: everything the old address of a shard holds of one asset (or what the planner decided) to the successor's.
+type DrainRequest struct {
+	ID          string // the nonce owner
+	PartitionID string // the shard's partition of the asset
+	From, To    string // the old generation's address and the successor's
+	Asset       string
+	Amount      *big.Int
+}
+
+// BuildDrain builds a transfer of Amount of Asset from the old address to the successor, allocating the OLD address's nonce inside tx. The sender must
+// be a generation of the partition's shard that is draining or compromised (the registry of this database; the signing zone judges by its own).
+func (a *Adapter) BuildDrain(ctx context.Context, tx pgx.Tx, d DrainRequest) (chain.UnsignedTx, error) {
+	if d.Amount == nil || d.Amount.Sign() <= 0 {
+		return chain.UnsignedTx{}, errors.New("evm: drain amount must be > 0")
+	}
+	if !common.IsHexAddress(d.From) || !common.IsHexAddress(d.To) {
+		return chain.UnsignedTx{}, fmt.Errorf("evm: drain from %q to %q", d.From, d.To)
+	}
+	from, dest := common.HexToAddress(d.From), common.HexToAddress(d.To)
+	if from == dest {
+		return chain.UnsignedTx{}, errors.New("evm: drain to the same address")
+	}
+	shard, err := shardOf(d.PartitionID)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	var state string
+	if err := tx.QueryRow(ctx, `SELECT state FROM keysets WHERE shard_id=$1 AND lower(address)=lower($2)`, string(shard), from.Hex()).Scan(&state); err != nil {
+		return chain.UnsignedTx{}, fmt.Errorf("evm: %s is no generation of %s: %w", from.Hex(), shard, err)
+	}
+	if state != partition.StateDraining && state != partition.StateCompromised {
+		return chain.UnsignedTx{}, fmt.Errorf("evm: the generation at %s is %s, a drain needs it draining or compromised", from.Hex(), state)
+	}
+	tok, native, err := a.cfg.asset(d.Asset)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	to, value, data := dest, new(big.Int).Set(d.Amount), []byte(nil)
+	if !native {
+		to, value = tok.Address, new(big.Int)
+		if data, err = packTransfer(dest, d.Amount); err != nil {
+			return chain.UnsignedTx{}, err
+		}
+	}
+	var fixed uint64
+	if native {
+		if code, err := a.ec.CodeAt(ctx, dest, nil); err != nil {
+			return chain.UnsignedTx{}, fmt.Errorf("evm: code of %s: %w", dest.Hex(), err)
+		} else if len(code) == 0 {
+			fixed = DefaultCancelGas // a plain transfer to an account without code: exactly 21000, the reserve is sized for it
+		}
+	}
+	return a.buildAndAllocateGas(ctx, tx, "drain", d.ID, d.PartitionID, from, to, value, data, fixed)
+}

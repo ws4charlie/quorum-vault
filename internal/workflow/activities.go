@@ -650,6 +650,65 @@ func (a *Activities) FailConsolidation(ctx context.Context, id, reason string) e
 	return nonRetry(a.D.Svc.FailConsolidationBeforeBroadcast(ctx, id, reason))
 }
 
+// ---- drain of an old key generation (EVM) ----
+
+// PlanDrains makes the next move of every draining generation that has an active successor. It returns how many it created.
+func (a *Activities) PlanDrains(ctx context.Context) (int, error) {
+	stop := heartbeating(ctx)
+	defer stop()
+	mv, err := a.D.Svc.PlanDrains(ctx, a.log())
+	return len(mv), err
+}
+
+// StartOpenDrains starts a Drain workflow for every unfinished drain move that has none running.
+func (a *Activities) StartOpenDrains(ctx context.Context) (int, error) {
+	open, err := a.D.Svc.OpenDrains(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, m := range open {
+		if err := a.start(ctx, m.ID, DrainWorkflow, Input{ID: m.ID, T: a.D.T}); err != nil {
+			return 0, fmt.Errorf("start drain %s: %w", m.ID, err)
+		}
+	}
+	return len(open), nil
+}
+
+// LoadDrain reads the drain move (the same view as a cold move).
+func (a *Activities) LoadDrain(ctx context.Context, id string) (ColdState, error) {
+	m, err := a.D.Svc.GetDrain(ctx, id)
+	return ColdState{Status: m.Status, Part: m.PartitionID, Parked: m.Parked()}, err
+}
+
+// BuildDrainJob builds the drain transfer and enqueues its sign job in one transaction.
+func (a *Activities) BuildDrainJob(ctx context.Context, id string) (string, error) {
+	job, err := a.D.Svc.BuildDrainJob(ctx, id)
+	if err != nil {
+		return "", nonRetry(err)
+	}
+	Hit(custody.OwnerKindDrain, "after_build")
+	return job, nil
+}
+
+// SettleDrain books a mined drain (its fee only).
+func (a *Activities) SettleDrain(ctx context.Context, id, txHash string, reverted bool) error {
+	st := chain.TxConfirmed
+	if reverted {
+		st = chain.TxFailed
+	}
+	if err := a.D.Svc.SettleDrain(ctx, id, txHash, st); err != nil {
+		return nonRetry(err)
+	}
+	Hit(custody.OwnerKindDrain, "after_settle")
+	return nil
+}
+
+// FailDrain ends a drain move that never broadcast, once its nonce is freed; the reason is kept on the generation as a wait.
+func (a *Activities) FailDrain(ctx context.Context, id, reason, feeTx string) error {
+	a.log().Error("ALERT: a drain waits: "+reason+" (docs/runbooks/key-replacement.md)", "drain", id)
+	return nonRetry(a.D.Svc.FailDrainBeforeBroadcast(ctx, id, reason, feeTx))
+}
+
 // ---- hot-shard rebalance steps ----
 
 // PlanRebalances creates a rebalance for every hot shard below its target that a fuller shard can feed. It returns how many it created.
@@ -751,6 +810,8 @@ func killKind(jobID string) (string, string) {
 		return custody.OwnerKindToCold, jobID
 	case len(jobID) > 6 && jobID[:6] == "rebal:":
 		return custody.OwnerKindRebalance, jobID
+	case len(jobID) > 6 && jobID[:6] == "drain:":
+		return custody.OwnerKindDrain, jobID
 	case len(jobID) > 7 && jobID[:7] == "consol:":
 		return custody.OwnerKindConsolidate, jobID
 	case len(jobID) > 6 && jobID[:6] == "batch:":
@@ -788,6 +849,8 @@ func (a *Activities) RecordBroadcast(ctx context.Context, o OwnerArg, txHash str
 		return a.D.Svc.RecordColdMoveBroadcast(ctx, o.ID, txHash)
 	case custody.OwnerKindRebalance:
 		return a.D.Svc.RecordRebalanceBroadcast(ctx, o.ID, txHash)
+	case custody.OwnerKindDrain:
+		return a.D.Svc.RecordDrainBroadcast(ctx, o.ID, txHash)
 	case custody.OwnerKindConsolidate:
 		return a.D.Svc.RecordConsolidationBroadcast(ctx, o.ID, txHash)
 	case custody.OwnerKindBatch:
@@ -848,6 +911,8 @@ func (a *Activities) Park(ctx context.Context, o OwnerArg, reason string) error 
 		return a.D.Svc.ParkColdMove(ctx, o.ID, reason)
 	case custody.OwnerKindRebalance:
 		return a.D.Svc.ParkRebalance(ctx, o.ID, reason)
+	case custody.OwnerKindDrain:
+		return a.D.Svc.ParkDrain(ctx, o.ID, reason)
 	case custody.OwnerKindConsolidate:
 		return a.D.Svc.ParkConsolidation(ctx, o.ID, reason)
 	case custody.OwnerKindBatch:

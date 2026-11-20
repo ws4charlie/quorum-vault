@@ -17,10 +17,11 @@ import (
 )
 
 // Names of the long-running workflows (their workflow IDs).
-func ScanID(chain string) string        { return "scan:" + chain }
-func PlannerID(chain string) string     { return "sweep-planner:" + chain }
-func ReconcilerID(chain string) string  { return "withdrawal-reconciler:" + chain }
-func ColdPlannerID(chain string) string { return "cold-planner:" + chain }
+func ScanID(chain string) string         { return "scan:" + chain }
+func PlannerID(chain string) string      { return "sweep-planner:" + chain }
+func ReconcilerID(chain string) string   { return "withdrawal-reconciler:" + chain }
+func ColdPlannerID(chain string) string  { return "cold-planner:" + chain }
+func DrainPlannerID(chain string) string { return "drain-planner:" + chain }
 
 // RegisterNamespace creates the Temporal namespace if it does not exist (the
 // dev server starts without one). Idempotent.
@@ -55,6 +56,8 @@ func NewWorker(c client.Client, d Deps) worker.Worker {
 	w.RegisterWorkflow(ColdMoveWorkflow)
 	w.RegisterWorkflow(ConsolidationWorkflow)
 	w.RegisterWorkflow(RebalanceWorkflow)
+	w.RegisterWorkflow(DrainWorkflow)
+	w.RegisterWorkflow(DrainPlannerWorkflow)
 	w.RegisterWorkflow(BatchWorkflow)
 	w.RegisterWorkflow(RefillWorkflow)
 	w.RegisterWorkflow(SweepWorkflow)
@@ -79,7 +82,7 @@ func loopSpecsFor(family, chain string) []loopSpec {
 	if family == custody.FamilyBTC {
 		return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}, {ColdPlannerID(chain), ColdPlannerWorkflow}}
 	}
-	return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}, {ColdPlannerID(chain), ColdPlannerWorkflow}}
+	return []loopSpec{{ScanID(chain), ScanWorkflow}, {PlannerID(chain), SweepPlannerWorkflow}, {ReconcilerID(chain), WithdrawalReconcilerWorkflow}, {ColdPlannerID(chain), ColdPlannerWorkflow}, {DrainPlannerID(chain), DrainPlannerWorkflow}}
 }
 
 func startLoop(ctx context.Context, c client.Client, queue string, t Timings, l loopSpec) error {

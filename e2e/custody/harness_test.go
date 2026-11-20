@@ -113,7 +113,7 @@ func TestMain(m *testing.M) {
 				buildErr = err
 			}
 		}
-		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold", "qv-guardian", "qv-approval-web", "qv-approvers"} {
+		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold", "qv-guardian", "qv-keysets", "qv-approval-web", "qv-approvers"} {
 			// The worker is built with -tags devauth: only then does it have the crash-test failpoints (QV_FAILPOINT).
 			args := []string{"build", "-o", filepath.Join(dir, b)}
 			if b == "qv-worker" {
@@ -172,6 +172,9 @@ type opts struct {
 	route *routeOpts
 	// gwRefuse makes the gateway (and the cosigner) refuse every job of one kind: "sweep", "to-cold" or "rebalance" (its per-hour limit is 0).
 	gwRefuse string
+	// keysets gives the signing zone an operators section (three operators, two must sign: s.ops) so qv-keysets can change keyset states, and the business
+	// config short drain timings (drain_test.go).
+	keysets bool
 }
 
 // routeOpts are the health rules of the mpc_route section (zero: the gateway's defaults).
@@ -283,6 +286,7 @@ type system struct {
 	keyPath string
 	dir     string
 	approv  map[string]ed25519.PrivateKey
+	ops     map[string]ed25519.PrivateKey          // the zone operators (opts.keysets)
 	wa      map[string]*webauthntest.Authenticator // SIMULATED WebAuthn approvers (software authenticators)
 
 	svc *custody.Service
@@ -548,6 +552,10 @@ func newSystem(t *testing.T, o opts) *system {
 			cf.Cold.PlanInterval = "1s"
 		}
 	}
+	if o.keysets {
+		cf.Cold.PlanInterval = "1s"
+		cf.Cold.Drain = custody.DrainFile{Window: sd(20 * time.Second), RetryAfter: sd(4 * time.Second)}
+	}
 	s.cf = cf
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
 	writeJSON(t, s.cfgPath, cf)
@@ -606,6 +614,24 @@ func newSystem(t *testing.T, o opts) *system {
 	}
 	if o.approvalWeb {
 		gf.Operators = s.newOperators()
+	}
+	if o.keysets {
+		opf := &gateway.OperatorsFile{Keys: map[string]gateway.OperatorFile{}, MinOperators: 2}
+		s.ops = map[string]ed25519.PrivateKey{}
+		for _, name := range []string{"op1", "op2", "op3"} {
+			pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+			s.ops[name] = priv
+			opf.Keys[name] = gateway.OperatorFile{PublicKey: hex.EncodeToString(pub)}
+			if err := os.WriteFile(filepath.Join(s.dir, name+".key"), []byte(hex.EncodeToString(priv.Seed())), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		gf.Operators = opf
+		// every refused attempt of a drain counts against the zone's hourly limit (default 10), and a test retries every few seconds
+		c := gf.Chains[s.chainName]
+		perHour := 1000
+		c.DrainsPerHour = &perHour
+		gf.Chains[s.chainName] = c
 	}
 	s.gf = gf
 	s.gwPath = filepath.Join(s.dir, "gateway.json")
@@ -886,8 +912,8 @@ func (s *system) startCore() {
 func (s *system) terminateWorkflows() {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	ids := []string{workflow.ScanID(s.chainName), workflow.PlannerID(s.chainName), workflow.ReconcilerID(s.chainName), workflow.ColdPlannerID(s.chainName)}
-	for _, q := range []string{`SELECT id FROM withdrawals`, `SELECT id FROM sweeps`, `SELECT id FROM cold_moves`, `SELECT id FROM rebalance_moves`, `SELECT id FROM refills`} {
+	ids := []string{workflow.ScanID(s.chainName), workflow.PlannerID(s.chainName), workflow.ReconcilerID(s.chainName), workflow.ColdPlannerID(s.chainName), workflow.DrainPlannerID(s.chainName)}
+	for _, q := range []string{`SELECT id FROM withdrawals`, `SELECT id FROM sweeps`, `SELECT id FROM cold_moves`, `SELECT id FROM rebalance_moves`, `SELECT id FROM drain_moves`, `SELECT id FROM refills`} {
 		rows, err := s.pool.Query(ctx, q)
 		if err != nil {
 			continue

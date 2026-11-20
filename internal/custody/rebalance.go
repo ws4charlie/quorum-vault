@@ -2,8 +2,8 @@ package custody
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"

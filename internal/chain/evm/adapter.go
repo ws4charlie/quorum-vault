@@ -237,15 +237,24 @@ func (a *Adapter) sweepData(ctx context.Context, q queryer, s chain.SweepIntent)
 }
 
 func (a *Adapter) buildAndAllocate(ctx context.Context, tx pgx.Tx, kind, id, partition string, from, to common.Address, value *big.Int, data []byte) (chain.UnsignedTx, error) {
+	return a.buildAndAllocateGas(ctx, tx, kind, id, partition, from, to, value, data, 0)
+}
+
+// buildAndAllocateGas is buildAndAllocate with a fixed gas limit when fixedGas is not zero (a plain transfer to an account without code costs exactly
+// 21000; asking the node to estimate a transfer of nearly the whole balance can come back far too high).
+func (a *Adapter) buildAndAllocateGas(ctx context.Context, tx pgx.Tx, kind, id, partition string, from, to common.Address, value *big.Int, data []byte, fixedGas uint64) (chain.UnsignedTx, error) {
 	if id == "" {
 		return chain.UnsignedTx{}, errors.New("evm: empty owner id")
 	}
-	gas, err := a.estimate(ctx, from, to, value, data)
-	if err != nil {
-		return chain.UnsignedTx{}, err
-	}
-	if gas > 21000 {
-		gas = gas * 12 / 10
+	gas := fixedGas
+	if gas == 0 {
+		var err error
+		if gas, err = a.estimate(ctx, from, to, value, data); err != nil {
+			return chain.UnsignedTx{}, err
+		}
+		if gas > 21000 {
+			gas = gas * 12 / 10
+		}
 	}
 	tip, feeCap, _, err := a.fees(ctx)
 	if err != nil {

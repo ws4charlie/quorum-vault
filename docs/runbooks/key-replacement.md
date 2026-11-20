@@ -47,7 +47,7 @@ The core keeps its own registry of generations (a mirror, for planning). **The z
 | 1 | `register-candidate` | `POST candidates` (`shard_id`, `address`, `key_ref`): the address must be new to the deployment; one candidate per shard |
 | 2 | `start-draining -successor 2 -cap …` | `POST drains` (`successor`: the candidate) |
 | 3 | `activate` | `POST activations` |
-| 4 | the drain (next section) | the core plans it by itself |
+| 4 | (the zone signs the drain when asked) | the core plans and runs the drain by itself (next section) |
 | 5 | `retire` | `POST retirements`: refused unless the chain shows nothing above dust at the old address and no transaction of it is in flight |
 | – | `mark-compromised` | `POST compromises` (`successor` may be named in the same call) |
 
@@ -64,3 +64,15 @@ What changes while a shard has two generations:
 **When the core and the zone disagree**
 - The core uses generation 2 and the zone still has it as a candidate (or the other way round): the zone refuses the job. A withdrawal ends voided with the zone's reason and its hold is released; a drain waits and is planned again (below).
 - A drain whose state holds in one place only waits, as the zone's page says, until the intent's `not_after`; then the core shows the zone's reason on the generation (`drain.reason`) and plans it again. Fix the missing step; nothing is lost.
+
+## The drain, from the core
+Once the old generation is `draining` (or `compromised`) in the core and the successor is `active`, the worker's drain planner makes the moves, one at a time per generation: each **token** that has a balance, then the **native asset last**, keeping only what the final transfer's gas needs (a twofold plain transfer at the current fee cap, never more than `max_tx_fee_wei`). Each move is a `drain` job: the shard's partition, `from` the old address, `to` the successor, a short `not_after` (`cold.drain.window`, default 10 minutes). It uses the normal transaction driver (nonce of the **old** address, fee bump, cancel, crash recovery).
+
+- **Books.** The shard's ledger account does not change: a drain moves money between two addresses of one shard. The gas is booked as a cost (fee account to the shard's native account), like any fee.
+- **Waits, never a lost place.** `GET /v2/keysets` shows, per leaving generation, `drain.state`: `moving`, `waiting` with the reason, or `drained`. It waits when: the successor is not active in the core; transactions built from the old address are still in flight; the old address has a token but no gas for it; or the zone refused or delayed the move (the zone's own words: not draining or not active **in the zone** yet, the cap, `drains_per_hour`, no `start-draining` record). A refused move ends (its nonce is freed by a cancel) and the planner makes the same move again after `cold.drain.retry_after` (default 1 minute), from what the address holds then.
+- **Each attempt counts in the zone.** The zone counts every drain job it admits against `drains_per_hour` (default 10) **and against the cap of the signed record**, also one that then waits and expires. Do not leave a drain refused for long, and give the zone caps with room (a few times the balance), or raise `drains_per_hour`; there is no action yet to raise a cap.
+- **Drained.** `drained` means nothing above dust is left. The planner never retires: do `retire` in the zone, then `POST retirements`, which reads the chain again and writes off the dust as a cost. A compromised generation is never retired; it stays in the watch list.
+- **Kubernetes.** The planner is one more loop of the worker (`drain-planner:<chain>`); nothing new runs and no new network path is needed. State is in the business database (`drain_moves`, `keyset_drains`); a second worker replica or a restart is safe (one open move per generation is a unique index, the move ID is the workflow ID). A worker older than this release does not run the loop; the migration is additive.
+
+## What is not covered yet
+- **Signing from a second key.** The zone's signers are one key per partition, wired by config. Until the tool of K3 wires the successor's key, the zone cannot sign withdrawals, sweeps or rebalances **from generation 2**: they are built (the core uses the active address) and refused. Do not run a real replacement before K3.
