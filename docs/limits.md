@@ -35,6 +35,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **A Solana hot wallet cannot be replaced yet.** Every other key can ([Key replacement](key-replacement.md)).
+- **An emergency cannot save what a thief moves first.** The old key stays valid on chain until its funds are moved; only the signing zone refuses it. The cold ceremony that points deposits at the new key takes hours and sweeps wait meanwhile; the emergency drill has run on local chains only ([stolen hot key](runbooks/stolen-hot-key.md)).
 
 **Chains**
 - **Bitcoin has one hot shard per pool,** so no rebalance. Taproot addresses are not supported, because the signing library cannot derive them ([spike note](spikes/btc-taproot.md)).
