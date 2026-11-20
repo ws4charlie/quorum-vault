@@ -238,7 +238,13 @@ func (s *system) senderIs(id string, want common.Address) {
 
 func rekeyShard(t *testing.T) *system {
 	t.Helper()
-	return shardFunded(t, opts{})
+	s := shardFunded(t, opts{})
+	t.Cleanup(func() {
+		if t.Failed() {
+			s.dump("rekey")
+		}
+	})
+	return s
 }
 
 // ---- the planned replacement ----
@@ -372,10 +378,10 @@ func TestRekeyFullReplacementDrivenByTheTool(t *testing.T) {
 	usdtBefore := s.usdtBalance(gen2)
 	c2 := s.newCustomer("c-after")
 	s.sendETH(c2, eth(1))
-	s.mintUSDT(c2, 5_000_000)
-	s.waitAvailable("c-after", "USDT", big.NewInt(5_000_000), 60*time.Second)
+	s.mintUSDT(c2, 700_000_000)
+	s.waitAvailable("c-after", "USDT", big.NewInt(700_000_000), 60*time.Second)
 	s.waitFor(180*time.Second, "the new deposit swept to generation 2", func() bool {
-		return s.usdtBalance(gen2).Cmp(new(big.Int).Add(usdtBefore, big.NewInt(5_000_000))) == 0
+		return s.usdtBalance(gen2).Cmp(new(big.Int).Add(usdtBefore, big.NewInt(700_000_000))) == 0
 	})
 	s.waitIdle(90 * time.Second)
 	s.reconcileClean()
