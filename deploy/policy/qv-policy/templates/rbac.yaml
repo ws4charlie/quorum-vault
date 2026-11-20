@@ -1,0 +1,72 @@
+{{- $v := .Values -}}
+{{- /* Roles from design section 10 "who has kubectl", as far as RBAC can say it. Everything is bound with a RoleBinding in our own namespaces: there is no ClusterRoleBinding, so no role can span two clusters' worth of namespaces. */ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: qv-read-only
+  labels: {{- include "qvp.labels" . | nindent 4 }}
+rules:
+  # No Secrets, no exec, no write of anything. Logs are readable: the code logs no secrets (a rule of the project).
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, endpoints, events, configmaps, persistentvolumeclaims, serviceaccounts]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies, ingresses]
+    verbs: [get, list, watch]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch]
+  - apiGroups: [cert-manager.io]
+    resources: [certificates, issuers]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: qv-break-glass
+  labels: {{- include "qvp.labels" . | nindent 4 }}
+rules:
+  # Recovery access for the two-person procedure: look inside a pod, add a debug container, delete a pod. Still no Secrets, no ConfigMap or RBAC writes.
+  - apiGroups: [""]
+    resources: [pods/exec, pods/attach, pods/portforward]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [pods/ephemeralcontainers]
+    verbs: [update, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [pods/log, events]
+    verbs: [get, list, watch]
+{{- range $ns := $v.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qv-read-only
+  namespace: {{ $ns }}
+  labels: {{- include "qvp.labels" $ | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: qv-read-only }
+subjects: {{ if not $v.readers.groups }}[]{{ end }}
+  {{- range $g := $v.readers.groups }}
+  - { apiGroup: rbac.authorization.k8s.io, kind: Group, name: {{ $g | quote }} }
+  {{- end }}
+{{- if $v.breakGlass.subjects }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qv-break-glass
+  namespace: {{ $ns }}
+  labels: {{- include "qvp.labels" $ | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: qv-break-glass }
+subjects: {{- toYaml $v.breakGlass.subjects | nindent 2 }}
+{{- end }}
+{{- end }}

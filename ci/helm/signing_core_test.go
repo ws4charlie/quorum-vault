@@ -344,7 +344,7 @@ func TestSigningCorePolicyAndContractPass(t *testing.T) {
 func TestSigningCoreOptionalPartsPass(t *testing.T) {
 	c := scContract(t)
 	objs := scObjs(t, false, "--set", "metrics.agent.enabled=true", "--set", "metrics.agent.remoteWrite.url=https://metrics.example.invalid/api/v1/write",
-		"--set", "metrics.agent.remoteWrite.tlsSecret=qv-remote-write-tls", "--set", "metrics.agent.cluster=signing-core", "--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=qv-signed-route-1",
+		"--set", "metrics.agent.remoteWrite.tlsSecret=qv-remote-write-tls", "--set", "metrics.agent.cluster=signing-core", "--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=qv-signed-route-1-0123456789",
 		"--set", "signedSettings.job.files={route-1.json,route-2.json}")
 	var job, agent bool
 	for _, o := range objs {
@@ -582,8 +582,9 @@ func TestSigningCoreRefusals(t *testing.T) {
 		{"empty link peers", false, []string{"--set", "network.kafka.peers=null"}, "network.kafka.peers is required"},
 		{"agent without an endpoint", false, []string{"--set", "metrics.agent.enabled=true"}, "remoteWrite.url is required"},
 		{"Job without its ConfigMap", false, []string{"--set", "signedSettings.job.enabled=true"}, "configMap is required"},
-		{"sign in a cluster", false, []string{"--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x", "--set", "signedSettings.job.action=sign"}, "must be one of"},
-		{"unknown tool", false, []string{"--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x", "--set", "signedSettings.job.tool=sh"}, "must be one of"},
+		{"sign in a cluster", false, []string{"--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x-0123456789", "--set", "signedSettings.job.action=sign"}, "must be one of"},
+		{"Job ConfigMap without a content hash", false, []string{"--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=qv-signed-route-7"}, "must end in a hash"},
+		{"unknown tool", false, []string{"--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x-0123456789", "--set", "signedSettings.job.tool=sh"}, "must be one of"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -606,7 +607,7 @@ func TestSigningCoreRefusals(t *testing.T) {
 
 // Each rule is worth only what it catches: break the rendered manifest in one way and want that violation.
 func TestSigningCoreRulesCatch(t *testing.T) {
-	prod := scText(t, false, "--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x", "--set", "signedSettings.job.files={a.json}")
+	prod := scText(t, false, "--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x-0123456789", "--set", "signedSettings.job.files={a.json}")
 	cases := []struct{ name, from, to, want string }{
 		{"Ingress added", "\n---\n", "\n---\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata: { name: x }\nspec: {}\n---\n", "no Ingress"},
 		{"Service added", "\n---\n", "\n---\napiVersion: v1\nkind: Service\nmetadata: { name: x }\nspec: { type: ClusterIP }\n---\n", "no Service at all"},
@@ -620,7 +621,7 @@ func TestSigningCoreRulesCatch(t *testing.T) {
 		{"Job runs sign", "          command: [\"/usr/local/bin/qv-route\"]", "          command: [\"/usr/local/bin/qv-route\", \"sign\", \"-key\", \"/etc/qv/signed/key\"]", "not one of the four"},
 		{"Job runs another binary", "/usr/local/bin/qv-route", "/bin/sh", "not one of the four"},
 		{"Job gets a key argument", "            - -config\n            - /etc/qv/config/config.json\n            - \"/etc/qv/signed/a.json\"", "            - -config\n            - /etc/qv/config/config.json\n            - -key\n            - /etc/qv/signed/a.json", "hands a signing key"},
-		{"Job mounts a Secret key", "          configMap: { name: \"x\" }", "          secret: { secretName: operator-key }", "only the guard login certificate"},
+		{"Job mounts a Secret key", "          configMap: { name: \"x-0123456789\" }", "          secret: { secretName: operator-key }", "only the guard login certificate"},
 		{"ConfigMap edited in place", "immutable: true", "immutable: false", "must be immutable"},
 		{"PIN as an environment variable", "          ports:\n            - { name: health", "          env:\n            - { name: QV_HSM_PIN, valueFrom: { secretKeyRef: { name: p, key: pin } } }\n          ports:\n            - { name: health", "QV_HSM_PIN is an environment variable"},
 	}

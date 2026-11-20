@@ -22,7 +22,7 @@ export DATABASE_URL
 QV_SIGNING_DB_URL ?= postgres://qv@localhost:$(or $(QV_SIGNING_DB_PORT),55433)/qv_signing?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/signing/admin/ca.crt&sslcert=$(QV_PKI_DIR)/signing/admin/tls.crt&sslkey=$(QV_PKI_DIR)/signing/admin/tls.key
 export QV_SIGNING_DB_URL
 
-.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images e2e-lane e2e-clean e2e-clean-stale e2e-slots
+.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery test-e2e-tee-sim mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images e2e-lane e2e-clean e2e-clean-stale e2e-slots
 
 setup: softhsm pki db-up chain-up
 
@@ -169,6 +169,12 @@ keycloak-up:
 	docker compose --profile identity up -d --wait keycloak
 keycloak-down:
 	docker compose --profile identity down keycloak
+# SIMULATED enclave run mode (research/TEE.md, docs/runbooks/tee-broker.md): the whole signing path with the three parties built with -tags teesim,
+# on the attested sealer, each with its own broker (own SoftHSM token, signed allowlist) and its TLS key sealed. Any mpc test runs in this mode with
+# QV_CUSTODY_TEE=sim (for example: make test-e2e-evm TEST=TestMPCRefreshDuringLiveWithdrawals with that variable set).
+E2E_TEE_SIM := TestTEESim
+test-e2e-tee-sim:
+	$(E2E_EVM_ENV) QV_CUSTODY_TEE=sim go test -count=1 -p 1 -timeout 40m -v -run '$(E2E_TEE_SIM)' ./e2e/custody/...
 test-e2e-evm-tx-failures:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_TX_FAILURES)' ./e2e/custody/...
 # recovery keeps one crash boundary on pull requests: the worker dies right after the broadcast.
@@ -344,3 +350,12 @@ images:
 # Business-zone chart checks (deploy/helm/qv-business): lint, render, Kubernetes schemas, policy and image-contract tests. Needs helm and kubeconform (brew install helm kubeconform).
 helm-check:
 	ci/helm/check.sh
+
+# The kind lane (ci/kind/README.md): a local cluster for THIS checkout with the dependencies and the charts installed; `kind-smoke` runs the checks against it; `kind-down` removes it.
+.PHONY: kind-up kind-smoke kind-down
+kind-up:
+	ci/kind/up.sh
+kind-smoke:
+	ci/kind/smoke/run.sh
+kind-down:
+	ci/kind/down.sh

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/attest"
 )
@@ -15,6 +16,9 @@ import (
 
 // SimulatedEnclave is true in a build that contains the mock attester.
 const SimulatedEnclave = true
+
+// SimulationMarker is printed at start and is in the binary's text: a tee-sim binary can be told from a production one by it.
+const SimulationMarker = "QV-SIMULATED-ENCLAVE: this binary contains the mock attester (-tags teesim); it proves nothing about isolation"
 
 func init() {
 	attesterFactories["mock"] = func(c AttesterConfig) (attest.Attester, error) {
@@ -31,13 +35,25 @@ func init() {
 			if pcr0, err = hex.DecodeString(c.PCR0); err != nil || len(pcr0) != 48 {
 				return nil, fmt.Errorf("attester.pcr0 must be 96 hex characters")
 			}
-		case c.MeasureBinary != "" && c.MeasureConfig != "":
-			if pcr0, err = attest.MeasureFiles(c.MeasureBinary, c.MeasureConfig); err != nil {
+		default:
+			// What actually runs: this process's own executable and the config file it was started with, unless the config names other files
+			// (tests do). A real enclave's PCR0 covers the whole image, config included; changing one byte of either file changes the measurement.
+			bin, cfgPath := c.MeasureBinary, c.MeasureConfig
+			if bin == "" {
+				if bin, err = os.Executable(); err != nil {
+					return nil, fmt.Errorf("attester: cannot find the running binary: %w", err)
+				}
+			}
+			if cfgPath == "" {
+				cfgPath = RunningConfigPath
+			}
+			if cfgPath == "" {
+				return nil, errors.New("attester: set pcr0, or measure_config (the running party measures the config file it was started with)")
+			}
+			if pcr0, err = attest.MeasureFiles(bin, cfgPath); err != nil {
 				return nil, err
 			}
-		default:
-			return nil, errors.New("attester: set pcr0, or measure_binary and measure_config")
 		}
-		return &attest.MockAttester{CA: ca, PCR0: pcr0, PCR8: attest.MeasureCert([]byte("mock signing cert"))}, nil
+		return &attest.MockAttester{CA: ca, PCR0: pcr0, Debug: c.Debug, PCR8: attest.MeasureCert([]byte("mock signing cert"))}, nil
 	}
 }

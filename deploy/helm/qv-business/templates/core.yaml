@@ -28,10 +28,10 @@ spec:
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           args: ["-config", "/etc/qv/custody/{{ .Values.custody.key }}"]
           envFrom:
-            - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "core-env") }} }
+            - configMapRef: { name: {{ include "qv.cmName" (dict "ctx" . "c" "core-env" "data" (include "qv.env.core" .)) }} }
           ports:
             - { name: https, containerPort: {{ .Values.core.port }}, protocol: TCP }
-          {{- include "qv.probes" (dict "probes" .Values.core.probes "port" "https") | nindent 10 }}
+          {{- include "qv.probes" (dict "probes" .Values.core.probes "tcpPort" "https") | nindent 10 }}
           resources: {{- toYaml .Values.core.resources | nindent 12 }}
           securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}
           volumeMounts:

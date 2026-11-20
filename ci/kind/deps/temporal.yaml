@@ -1,0 +1,141 @@
+# Temporal for the business namespace, as in compose: server 1.32.1 (frontend, internal frontend, history, matching, worker in one pod), TLS to its Postgres with its own
+# certificate as the client certificate, TLS with a client certificate on the frontend, and the name gate (nginx, deploy/temporal-gate) as the only door.
+apiVersion: batch/v1
+kind: Job
+metadata: { name: temporal-schema, namespace: qv }
+spec:
+  backoffLimit: 6
+  template:
+    metadata: { labels: { app: temporal-schema } }
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: schema
+          image: temporalio/admin-tools:1.32.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              cp /pki/tls.key /tmp/sql.key && chmod 600 /tmp/sql.key
+              temporal-sql-tool --db temporal create-database || true
+              temporal-sql-tool --db temporal setup-schema -v 0.0
+              temporal-sql-tool --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
+              temporal-sql-tool --db temporal_visibility create-database || true
+              temporal-sql-tool --db temporal_visibility setup-schema -v 0.0
+              temporal-sql-tool --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+          env:
+            - { name: SQL_PLUGIN, value: postgres12 }
+            - { name: SQL_HOST, value: qv-temporal-db-rw }
+            - { name: SQL_PORT, value: "5432" }
+            - { name: SQL_USER, value: temporal }
+            - { name: SQL_TLS, value: "true" }
+            - { name: SQL_TLS_CERT_FILE, value: /pki/tls.crt }
+            - { name: SQL_TLS_KEY_FILE, value: /tmp/sql.key }
+            - { name: SQL_TLS_CA_FILE, value: /pki/ca.crt }
+            - { name: SQL_TLS_SERVER_NAME, value: qv-temporal-db-rw }
+          resources: { requests: { cpu: 50m, memory: 64Mi } }
+          volumeMounts: [{ name: pki, mountPath: /pki, readOnly: true }, { name: tmp, mountPath: /tmp }]
+      volumes:
+        - { name: pki, secret: { secretName: qv-temporal-tls } }
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: temporal, namespace: qv }
+spec:
+  selector: { app: temporal }
+  ports: [{ name: grpc, port: 7233, targetPort: 7233 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: temporal, namespace: qv }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: temporal } }
+  template:
+    metadata: { labels: { app: temporal } }
+    spec:
+      containers:
+        - name: temporal
+          image: temporalio/server:1.32.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "cp /pki/tls.key /tmp/sql.key && chmod 600 /tmp/sql.key && exec /etc/temporal/entrypoint.sh"]
+          env:
+            - { name: DB, value: postgres12 }
+            - { name: DB_PORT, value: "5432" }
+            - { name: POSTGRES_SEEDS, value: qv-temporal-db-rw }
+            - { name: POSTGRES_USER, value: temporal }
+            - { name: POSTGRES_PWD, value: "" }
+            - { name: DBNAME, value: temporal }
+            - { name: VISIBILITY_DBNAME, value: temporal_visibility }
+            - { name: BIND_ON_IP, value: 0.0.0.0 }
+            - name: TEMPORAL_BROADCAST_ADDRESS
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - { name: DYNAMIC_CONFIG_FILE_PATH, value: /etc/temporal/dynamicconfig.yaml }
+            - { name: SQL_TLS_ENABLED, value: "true" }
+            - { name: SQL_CA, value: /pki/ca.crt }
+            - { name: SQL_CERT, value: /pki/tls.crt }
+            - { name: SQL_CERT_KEY, value: /tmp/sql.key }
+            - { name: SQL_HOST_VERIFICATION, value: "true" }
+            - { name: SQL_HOST_NAME, value: qv-temporal-db-rw }
+            - { name: TEMPORAL_TLS_FRONTEND_CERT, value: /pki/tls.crt }
+            - { name: TEMPORAL_TLS_FRONTEND_KEY, value: /pki/tls.key }
+            - { name: TEMPORAL_TLS_CLIENT1_CA_CERT, value: /pki/ca.crt }
+            - { name: TEMPORAL_TLS_CLIENT2_CA_CERT, value: /pki/ca.crt }
+            - { name: TEMPORAL_TLS_REQUIRE_CLIENT_AUTH, value: "true" }
+            - { name: TEMPORAL_TLS_SERVER_CA_CERT, value: /pki/ca.crt }
+            - { name: TEMPORAL_TLS_FRONTEND_SERVER_NAME, value: temporal }
+            - { name: TEMPORAL_TLS_SERVER_CERT, value: /pki/tls.crt }
+            - { name: TEMPORAL_TLS_SERVER_KEY, value: /pki/tls.key }
+            - { name: TEMPORAL_TLS_INTERNODE_SERVER_NAME, value: temporal }
+            - { name: USE_INTERNAL_FRONTEND, value: "true" }
+            - { name: TEMPORAL_SERVICES, value: "frontend,internal-frontend,history,matching,worker" }
+            - { name: TEMPORAL_TLS_REFRESH_INTERVAL, value: 1m }
+            - { name: GRPC_ENFORCE_ALPN_ENABLED, value: "false" }
+            - { name: TEMPORAL_TLS_EXPIRATION_CHECKS_WARNING_WINDOW, value: 4h }
+          ports: [{ containerPort: 7233 }]
+          readinessProbe: { tcpSocket: { port: 7233 }, periodSeconds: 3, failureThreshold: 60 }
+          resources: { requests: { cpu: 200m, memory: 384Mi }, limits: { memory: 1Gi } }
+          volumeMounts:
+            - { name: pki, mountPath: /pki, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+            - { name: dyn, mountPath: /etc/temporal/dynamicconfig.yaml, subPath: dynamicconfig.yaml }
+      volumes:
+        - { name: pki, secret: { secretName: qv-temporal-tls } }
+        - { name: tmp, emptyDir: {} }
+        - { name: dyn, configMap: { name: temporal-dynamicconfig } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: temporal-gate, namespace: qv }
+spec:
+  selector: { app: temporal-gate }
+  ports: [{ name: grpc, port: 7233, targetPort: 7233 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: temporal-gate, namespace: qv }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: temporal-gate } }
+  template:
+    metadata: { labels: { app: temporal-gate, app.kubernetes.io/name: temporal-gate } }   # the label the business chart's network policy names
+    spec:
+      containers:
+        - name: gate
+          image: nginx:1.27-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/cfg/start.sh"]
+          ports: [{ containerPort: 7233 }]
+          readinessProbe: { tcpSocket: { port: 7233 }, periodSeconds: 3, failureThreshold: 20 }
+          resources: { requests: { cpu: 20m, memory: 24Mi }, limits: { memory: 128Mi } }
+          volumeMounts:
+            - { name: pki, mountPath: /pki, readOnly: true }
+            - { name: cfg, mountPath: /cfg, readOnly: true }
+            - { name: nginx, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf, readOnly: true }
+      volumes:
+        - { name: pki, secret: { secretName: qv-temporal-tls } }
+        - { name: cfg, configMap: { name: temporal-gate-cfg } }
+        - { name: nginx, configMap: { name: temporal-gate-nginx } }

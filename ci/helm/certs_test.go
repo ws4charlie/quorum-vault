@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -516,7 +517,7 @@ func TestCertsTrustBundles(t *testing.T) {
 		var got []string
 		for _, o := range mustRender(t, "values.yaml", "--set", "cluster="+c, "--set-file", "trust.business="+pemFile, "--set-file", "trust.signing="+pemFile) {
 			if o.Kind == "ConfigMap" {
-				got = append(got, o.Metadata.Name)
+				got = append(got, regexp.MustCompile(`-[0-9a-f]{10}$`).ReplaceAllString(o.Metadata.Name, "")) // the name ends in a content hash
 				if s, _ := o.Data["ca.crt"].(string); !strings.HasPrefix(s, "-----BEGIN CERTIFICATE-----") {
 					t.Errorf("%s: %s has no ca.crt", c, o.Metadata.Name)
 				}
@@ -573,6 +574,50 @@ func TestCertsLifetimes(t *testing.T) {
 		}
 		if s.PrivateKey.Rotation == "Never" && d < 90*24*time.Hour {
 			t.Errorf("%s: a pinned identity with a lifetime of %s", o.Metadata.Name, d)
+		}
+	}
+}
+
+// kind runs one cluster with four namespaces, and all of them must issue under the SAME authority. With issuers.ca.existing the chart makes no CA of its own: it
+// renders only the issuers that read the Secrets the kind setup copied into the namespace. Without the switch a signing namespace would invent a second signing CA.
+func TestCertsExistingCAMakesNoAuthority(t *testing.T) {
+	for _, c := range []string{"business", "signing-core", "party-b", "party-c"} {
+		own := mustRender(t, "values-kind.yaml", "--set", "cluster="+c)
+		shared := mustRender(t, "values-kind.yaml", "--set", "cluster="+c, "--set", "issuers.ca.existing=true")
+		ownCAs, sharedCAs, selfSigned, caIssuers := 0, 0, 0, map[string]string{}
+		for _, o := range own {
+			if o.Kind == "Certificate" && certSpecOf(o).IsCA {
+				ownCAs++
+			}
+		}
+		for _, o := range shared {
+			if o.Kind == "Certificate" && certSpecOf(o).IsCA {
+				sharedCAs++
+			}
+			if o.Kind == "Issuer" && strings.Contains(o.Raw, "selfSigned") {
+				selfSigned++
+			}
+			if o.Kind == "Issuer" && strings.Contains(o.Raw, "secretName:") {
+				caIssuers[o.Metadata.Name] = o.Raw
+			}
+		}
+		if ownCAs == 0 {
+			t.Errorf("%s: without the switch kind makes no CA (the test would prove nothing)", c)
+		}
+		if sharedCAs != 0 || selfSigned != 0 {
+			t.Errorf("%s: with issuers.ca.existing the chart still makes %d CA certificates and %d self-signed issuers", c, sharedCAs, selfSigned)
+		}
+		if _, ok := caIssuers["qv-signing"]; c != "business" && !ok {
+			t.Errorf("%s: no CA issuer reads the signing Secret", c)
+		}
+		if _, ok := caIssuers["qv-business"]; c == "business" && !ok {
+			t.Errorf("%s: no CA issuer reads the business Secret", c)
+		}
+	}
+	// production never holds a CA, with or without the switch
+	for _, o := range mustRender(t, "values.yaml", "--set", "cluster=business", "--set", "issuers.ca.existing=true") {
+		if o.Kind == "Issuer" && !strings.Contains(o.Raw, "vault:") {
+			t.Errorf("issuer %s is not a Vault issuer", o.Metadata.Name)
 		}
 	}
 }

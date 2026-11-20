@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "deploy/helm/**"
+      - "deploy/policy/**"
       - "ci/helm/**"
       - "monitoring/*.rules.yml"   # the chart's rule copies are compared with these (ci/helm/monitoring_test.go)
       - "deploy/images/contract.json"

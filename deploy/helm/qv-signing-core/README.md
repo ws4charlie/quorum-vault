@@ -88,21 +88,23 @@ The gateway reaches the **caller port** of party A (this cluster), of party B, a
 
 The MPC route, fee caps, approver registry and keyset state are applied to the guard database by operators with `qv-route`, `qv-fee-caps`, `qv-approvers`, `qv-keysets`. **No signing key ever enters the cluster.** `sign` runs on each operator's own machine. Only `show` and `apply` run in the cluster, as a Job from the `qv-tools-signing` image, logging in to the guard database with the gateway's certificate (role `qv_gateway_guard`).
 
-Who: only this cluster's operators (they hold `create` on Jobs and ConfigMaps in the namespace; nobody else has standing access).
+Who: only this cluster's operators (they hold `create` on Jobs and ConfigMaps in the namespace; nobody else has standing access). With the cluster policies (`deploy/policy/qv-policy`) installed, the signed-files ConfigMap must be **immutable with a content hash at the end of its name**, and the person creating or deleting it must be one of the policy's `configWriters` (the GitOps identity or a group the operators' break-glass-free write access is mapped to; ask the cluster's policy owners). The Job template refuses a name without the hash.
 
 ```bash
 # 1. on the operators' machines: sign, then gather the files (see docs/runbooks/mpc-signing-pair.md, approvers.md, btc-fee-caps.md, mpc-keyset-freeze.md)
-# 2. put the signed files into a ConfigMap in the namespace
-kubectl -n qvs create configmap qv-signed-route-7 --from-file=route-1.json --from-file=route-2.json
+# 2. put the signed files into an IMMUTABLE ConfigMap whose name ends in a hash of the files (10 hex characters)
+H=$(cat route-1.json route-2.json | sha256sum | cut -c1-10)
+kubectl -n qvs create configmap "qv-signed-route-7-$H" --from-file=route-1.json --from-file=route-2.json --dry-run=client -o yaml \
+  | kubectl patch --local -f - -p '{"immutable":true}' -o yaml | kubectl -n qvs apply -f -
 # 3. render the Job (the same release values) and apply it
 helm template qv deploy/helm/qv-signing-core -n qvs -f <the release values> \
   --set signedSettings.job.enabled=true --set signedSettings.job.tool=route --set signedSettings.job.action=apply \
-  --set signedSettings.job.revision=7 --set signedSettings.job.configMap=qv-signed-route-7 \
+  --set signedSettings.job.revision=7 --set signedSettings.job.configMap="qv-signed-route-7-$H" \
   --set 'signedSettings.job.files={route-1.json,route-2.json}' \
   -s templates/signed-setting-job.yaml | kubectl -n qvs apply -f -
 # 4. read the result; the Job is deleted after a day
 kubectl -n qvs logs job/qv-apply-route-7
-kubectl -n qvs delete configmap qv-signed-route-7
+kubectl -n qvs delete configmap "qv-signed-route-7-$H"
 ```
 
 `action=show` prints the current setting and the next sequence number (the number the operators need before they sign). `tool` is `route`, `fee-caps`, `approvers` or `keysets`; `extraArgs` carries a tool's own flags (`["-chain","btc-main"]` for fee-caps). The Job runs one tool, takes `/etc/qv/config/config.json` (the same signing config: the tool checks every signature against its approvers and operators), mounts the guard login certificate and the two ConfigMaps, and nothing else. Egress: the guard database only. A test renders the Job and fails if it runs another binary, runs `sign`, gets a key or identity argument, or mounts another Secret.

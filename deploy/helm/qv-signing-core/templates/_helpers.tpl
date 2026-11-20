@@ -85,7 +85,7 @@ imagePullSecrets: {{ toJson . }}
 {{- end -}}
 
 {{/* The name of an immutable ConfigMap: the content hash is part of the name, so a change is a new object and a new rollout. */}}
-{{- define "qvs.cmName" -}}{{ printf "%s-%s-%s" .ctx.Release.Name .c (.data | toJson | sha256sum | trunc 10) | trunc 63 | trimSuffix "-" }}{{- end -}}
+{{- define "qvs.cmName" -}}{{ printf "%s-%s" (printf "%s-%s" .ctx.Release.Name .c | trunc 52 | trimSuffix "-") (.data | toJson | sha256sum | trunc 10) }}{{- end -}}
 {{- define "qvs.signingConfigName" -}}{{ include "qvs.cmName" (dict "ctx" . "c" "config" "data" (include "qvs.signingConfig" .)) }}{{- end -}}
 
 {{- define "qvs.signingConfig" -}}

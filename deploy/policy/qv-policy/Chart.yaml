@@ -1,0 +1,7 @@
+apiVersion: v2
+name: qv-policy
+description: Cluster-enforced rules for a QuorumVault cluster (Pod Security labels, ValidatingAdmissionPolicies, image signature check, RBAC roles). Installed once per cluster, by the cluster's own operators.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.30.0-0"

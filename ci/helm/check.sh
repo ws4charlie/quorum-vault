@@ -21,6 +21,7 @@ kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" "$out/approval.
 ci/helm/party-check.sh   # chart list: qv-party (qv-business is above)
 ci/helm/certs-check.sh   # deploy/helm/qv-certs (task D5)
 ci/helm/monitoring-check.sh   # deploy/helm/qv-monitoring and the metrics parts of the other charts (task D10)
+ci/helm/policy-check.sh  # deploy/policy/qv-policy (task D9): cluster policies and their offline tests
 
 echo "== policy and contract tests"
 (cd ci/helm && CI=1 go test -count=1 ./...)

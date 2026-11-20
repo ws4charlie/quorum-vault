@@ -755,3 +755,34 @@ func attestFor(c server.SealerConfig) (attest.Attester, error) {
 	}
 	return &attest.MockAttester{CA: ca, PCR0: pcr0, PCR8: attest.MeasureCert([]byte("mock signing cert"))}, nil
 }
+
+// The broker answers rate_limited during a start (many keysets, a low limit): the party stays not ready, says so, retries by itself and becomes ready
+// without a restart. Every other test runs with the limit off.
+func TestAttestedStartRecoversFromRateLimit(t *testing.T) {
+	c := newAttCluster(t)
+	c.up()
+	c.waitReady(30 * time.Second)
+	for _, id := range []string{"ks1", "ks2", "ks3", "ks4"} {
+		c.p.dkg(t, id, pb.Curve_CURVE_SECP256K1)
+	}
+	c.down()
+	c.r.SetLimit(60, 3) // a start needs 2 calls per keyset plus 2: ten calls, three at once, one more per second
+	c.up()
+	defer c.down()
+	deadline := time.Now().Add(30 * time.Second)
+	for !strings.Contains(c.logA.String(), "rate_limited") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the broker never rate limited the start:\n%s", c.logA.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var m bytes.Buffer
+	c.p.A.WriteMetrics(&m)
+	if !strings.Contains(m.String(), `outcome="refused:rate_limited"`) {
+		t.Fatalf("metrics after a rate limited start: %s", m.String())
+	}
+	c.waitReady(90 * time.Second) // no restart: the gate retries and only fetches what is still missing
+	if err := c.p.A.Ready(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}

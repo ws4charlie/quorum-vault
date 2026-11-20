@@ -53,3 +53,8 @@ quorumvault.io/cluster: {{ .Values.cluster }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
+
+{{/* The name of a zone's trust bundle (dict "zone" "pem"): qv-trust-<zone>-<first 10 hex of the SHA-256 of the trimmed PEM>. The bundle is immutable and the name follows its content, so a CA roll is a new ConfigMap and consumers change one reference; nobody edits a trust anchor in place. The qv-policy chart accepts only such names in a signing cluster. */}}
+{{- define "qv-certs.trustName" -}}
+qv-trust-{{ .zone }}-{{ .pem | trim | sha256sum | trunc 10 }}
+{{- end -}}

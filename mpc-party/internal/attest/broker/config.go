@@ -38,9 +38,17 @@ type Config struct {
 
 	NonceTTL       string `json:"nonce_ttl,omitempty"`       // default "60s"
 	ReloadInterval string `json:"reload_interval,omitempty"` // allowlist file poll, default "10s"; "0" turns polling off (SIGHUP still reloads)
-	RatePerMinute  int    `json:"rate_per_minute,omitempty"` // per party, challenge and release calls together; default 30
-	RateBurst      int    `json:"rate_burst,omitempty"`      // default 10
+	RatePerMinute  int    `json:"rate_per_minute,omitempty"` // per party, challenge and release calls together; default 600
+	RateBurst      int    `json:"rate_burst,omitempty"`      // default 100
 }
+
+// Default limit per party (challenge and key calls together). A start needs 2 calls per keyset plus 2, so 200 keysets are 402 calls: with these
+// defaults the limit adds about 30 s to such a start (measured start-up: docs/measurements/tee-sim.md); with the former 30 per minute and burst 10 it
+// added 13 minutes and the 6th DKG in a row failed. The limit stays per party: a flood from one party cannot use another's tokens.
+const (
+	DefaultRatePerMinute = 600
+	DefaultRateBurst     = 100
+)
 
 // PartyEntry lists the public-key pins (SHA-256 of the SPKI, as every pinned link uses) of the callers of one party.
 type PartyEntry struct {
@@ -70,7 +78,7 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func (c Config) settings() (*settings, error) {
-	s := &settings{nonceTTL: time.Minute, reload: 10 * time.Second, rate: 30, burst: 10, pins: map[[32]byte]string{}, pinSet: map[cosigner.Pin]bool{}}
+	s := &settings{nonceTTL: time.Minute, reload: 10 * time.Second, rate: DefaultRatePerMinute, burst: DefaultRateBurst, pins: map[[32]byte]string{}, pinSet: map[cosigner.Pin]bool{}}
 	var err error
 	if c.NonceTTL != "" {
 		if s.nonceTTL, err = time.ParseDuration(c.NonceTTL); err != nil || s.nonceTTL < time.Second || s.nonceTTL > 10*time.Minute {
