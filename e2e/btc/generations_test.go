@@ -2,6 +2,7 @@ package btce2e
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,9 +15,12 @@ import (
 
 // secondDepositXpub is the deposit key of generation 2 in these tests: a fixed software account key, whose public half is all the core needs to derive
 // and watch addresses. (The signing zone pins generation 1's key until K6 teaches it later generations, so a generation-2 address cannot be swept here.)
-func secondDepositXpub(t *testing.T) string {
+func secondDepositXpub(t *testing.T) string { return secondDepositXpubOf(t, 0x5a) }
+
+// secondDepositXpubOf is that key for a seed byte: tests of one group share the node, so each uses its own key and never meets another's coins.
+func secondDepositXpubOf(t *testing.T, seed byte) string {
 	t.Helper()
-	m, err := hdkeychain.NewMaster(bytes.Repeat([]byte{0x5a}, 32), &chaincfg.RegressionNetParams)
+	m, err := hdkeychain.NewMaster(bytes.Repeat([]byte{seed}, 32), &chaincfg.RegressionNetParams)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,4 +161,98 @@ func TestSweepOfAnOldGenerationAddressAfterTheReplacement(t *testing.T) {
 		t.Fatalf("the generation 2 address holds %d", got)
 	}
 	s.reconcileClean()
+}
+
+// A generation-2 deposit cannot be swept before K6 (the signing zone pins generation 1's key), and that must fail safe: the deposit is credited, the zone refuses
+// the sweep with a reason, the outputs are released and visible to Reconcile (clean), the address is left alone with a growing back-off instead of being retried
+// in a storm, and generation-1 sweeps go on, before and after.
+func TestSweepOfASecondGenerationAddressIsRefusedSafely(t *testing.T) {
+	s := sweepSystem(t, opts{retryAfter: "20s"}, 0)
+	stop := s.keepMining()
+	defer stop()
+	old := s.newCustomer("g1")
+	s.rotateDepositKey(secondDepositXpubOf(t, 0x6b))
+	cur := s.depositAddressOf("g1")["address"].(string)
+	before := s.onChain(cur)
+	s.node.pay(map[string]string{old: btcAmount(20_000_000), cur: btcAmount(30_000_000)})
+	s.node.mine(6, "")
+	s.waitAvailable("g1", 50_000_000, 60*time.Second)
+
+	// the old address is swept; the generation-2 address's sweep fails with a reason
+	s.waitFor(120*time.Second, "generation 1 swept and generation 2 refused", func() bool {
+		var ok, bad bool
+		for _, w := range s.sweepRows() {
+			ok = ok || (w.From == old && w.Status == "confirmed")
+			bad = bad || (w.From == cur && w.Status == "failed")
+		}
+		return ok && bad
+	})
+	s.node.mine(1, "")
+	var reason string
+	for _, w := range s.sweepRows() {
+		if w.From == cur {
+			reason = w.Reason
+		}
+	}
+	t.Logf("generation 2 sweep refused: %s", reason)
+	if reason == "" {
+		t.Fatal("the refused sweep has no reason")
+	}
+	// nothing of generation 2 was signed or sent; its output is available again and the books are unchanged
+	if n := s.count(`SELECT count(*) FROM btc_utxos WHERE chain=$1 AND address=$2 AND status='available'`, s.chain, cur); n != 1 {
+		t.Fatalf("%d available outputs at the generation 2 address", n)
+	}
+	if n := s.count(`SELECT count(*) FROM sign_jobs WHERE chain=$1 AND key_ref LIKE 'g2/%' AND status='done'`, s.chain); n != 0 {
+		t.Fatalf("%d generation 2 jobs were signed", n)
+	}
+	if got := s.onChain(cur); got != before+30_000_000 {
+		t.Fatalf("the generation 2 address holds %d", got)
+	}
+	s.reconcileClean()
+
+	// no retry storm: the address is left alone for the back-off, so at most one more attempt in the next 25 seconds
+	n0 := 0
+	for _, w := range s.sweepRows() {
+		if w.From == cur {
+			n0++
+		}
+	}
+	time.Sleep(25 * time.Second)
+	n1 := 0
+	for _, w := range s.sweepRows() {
+		if w.From == cur {
+			n1++
+		}
+		if w.From == cur && w.Status != "failed" && w.Status != "planned" && w.Status != "building" {
+			t.Logf("generation 2 sweep %s is %s", w.ID, w.Status)
+		}
+	}
+	if n1 > n0+1 {
+		t.Fatalf("%d sweeps of the generation 2 address after %d: a retry storm", n1, n0)
+	}
+	// generation 1 is not blocked by it: a later deposit to the old address is swept
+	s.node.pay(map[string]string{old: btcAmount(10_000_000)})
+	s.node.mine(6, "")
+	s.waitAvailable("g1", 60_000_000, 60*time.Second)
+	s.waitFor(120*time.Second, "a second generation 1 sweep", func() bool {
+		n := 0
+		for _, w := range s.sweepRows() {
+			if w.From == old && w.Status == "confirmed" {
+				n++
+			}
+		}
+		return n >= 2
+	})
+	s.reconcileClean()
+	for _, p := range []*proc{s.core, s.worker, s.gateway} {
+		if p == nil {
+			continue
+		}
+		b, _ := os.ReadFile(p.log)
+		for _, l := range strings.Split(string(b), "\n") {
+			if strings.Contains(l, "ALERT") {
+				t.Logf("%s: %s", p.name, l)
+			}
+		}
+	}
 }
