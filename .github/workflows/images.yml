@@ -1,7 +1,10 @@
 name: images
 
 # Builds every container image (deploy/images/Dockerfile), smoke-tests the binaries, and checks that no layer holds a secret, a test-only build or the other
-# zone's binary. NOTHING is pushed or signed from a pull request: publishing and signing exist only behind the manual `publish` input below (default off).
+# zone's binary. NOTHING is pushed or signed from a pull request. A release is manual (docs/runbooks/release.md):
+#   gh workflow run images.yml --ref vX.Y.Z -f publish=true
+# runs `gate` (a version tag on main with green CI), then `publish` (push by digest, SBOM, cosign keyless signature, release manifest).
+# `dry-run` runs the same build, checks and manifest without a registry login, a push or a signature: on every pull request, and on a manual run with publish=false.
 on:
   pull_request:
     paths:
@@ -18,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Push the images to ghcr.io and sign them (cosign keyless) with an SBOM. Off unless a maintainer turns it on."
+        description: "RELEASE: push the images to ghcr.io and sign them (cosign keyless) with an SBOM. Run it from a tag vX.Y.Z on main; anything else is refused. Off = dry run."
         type: boolean
         default: false
 
@@ -35,8 +38,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Build every image (production and -dev), locally only
         run: deploy/images/build.sh
       - name: Smoke test (every binary starts non-root, read-only, no network; no test-only code)
@@ -51,31 +54,111 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Build all binaries twice and compare SHA-256
         run: deploy/images/build.sh repro
 
-  publish:
-    # Manual only, and only when the `publish` input is true. Pushing and signing are a human decision: this job is not part of any pull request run.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+  dry-run:
+    # Everything the release does except the registry and the signature: build the release images only, smoke test, secret check, digests, manifest. No login,
+    # no id-token, no packages permission: the token of this job can only read. A pull request cannot publish.
+    if: ${{ github.event_name == 'pull_request' || !inputs.publish }}
     needs: [build, repro]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build the release images, smoke test, secret check (as the publish job does before it pushes)
+        env:
+          QV_CHECK_SET: release
+        run: |
+          deploy/images/build.sh
+          deploy/images/smoke.sh
+          deploy/images/check-secrets.sh
+      - name: Dry run of publish.sh (OCI archives, digests, manifest; nothing pushed, nothing signed)
+        env:
+          VERSION: v0.0.0-dryrun.${{ github.sha }}
+          PUBLISH: "0"
+          OUT: ${{ runner.temp }}/release
+        run: deploy/images/publish.sh   # also checks its own manifest: every release image, real digests, no -dev name
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-manifest-dry-run
+          path: ${{ runner.temp }}/release/release-*.json
+          retention-days: 7
+
+  gate:
+    # A real release only: a tag vMAJOR.MINOR.PATCH[-rc.N] whose commit is on main and has a green ci run. Read-only token (actions: read lists the runs).
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.gate.outputs.version }}
+      commit: ${{ steps.gate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0   # the ancestor check needs main's history
+          persist-credentials: false
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: deploy/images/release-gate.sh >> "$GITHUB_OUTPUT"
+
+  publish:
+    # Pushes, attaches SBOM and provenance, signs. Only after the gate, the build and the reproducibility check passed on the same tag. It cannot create the
+    # GitHub Release (contents: read): the runbook attaches the manifest by hand, after looking at it.
+    needs: [gate, build, repro]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: release   # optional: add required reviewers to the `release` environment in the repository settings for a second pair of eyes
+    permissions:
+      contents: read
       packages: write
       id-token: write # cosign keyless signing
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: sigstore/cosign-installer@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3.10.1
+      - name: Build the release images locally, smoke test, secret check (nothing is pushed until all three pass)
+        env:
+          QV_CHECK_SET: release
+        run: |
+          deploy/images/build.sh
+          deploy/images/smoke.sh
+          deploy/images/check-secrets.sh
       - name: Log in to ghcr.io
         env:
           GH_TOKEN: ${{ github.token }}
         run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-      - name: Build, push (by digest), SBOM and sign
+      - name: Push (by digest), SBOM, provenance, sign, write the manifest
         env:
-          REGISTRY: ghcr.io/${{ github.repository_owner }}
-          TAG: ${{ github.sha }}
+          PUBLISH: "1"
+          VERSION: ${{ needs.gate.outputs.version }}
+          COMMIT: ${{ needs.gate.outputs.commit }}
+          OUT: ${{ runner.temp }}/release
         run: deploy/images/publish.sh
+      - name: Check what was pushed, from the outside (secret scan of the pulled images, signature, tag, SBOM)
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          OUT: ${{ runner.temp }}/release
+        run: |
+          python3 -I -c 'import json,sys; [print(i["ref"]) for i in json.load(open(sys.argv[1]))["images"].values()]' "$OUT/release-$VERSION.json" | while read -r ref; do docker pull -q "$ref"; done
+          python3 -I -c 'import json,sys; [print(i["ref"]) for i in json.load(open(sys.argv[1]))["images"].values()]' "$OUT/release-$VERSION.json" | xargs deploy/images/check-secrets.sh
+          deploy/images/verify-release.sh "$OUT/release-$VERSION.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()   # a failed run still leaves what it wrote: the runbook needs it to find what was pushed
+        with:
+          name: release-${{ needs.gate.outputs.version }}
+          path: ${{ runner.temp }}/release/release-*.json   # the manifest and, beside it, its .sigstore.json bundle
+          retention-days: 90

@@ -27,7 +27,8 @@ while IFS=: read -r name zone bins; do
 done < <(qv_all_images | grep -v -- '-dev:' )
 # the -dev images: same binaries, and SoftHSM present. Output is captured first, never piped into `grep -q` (it exits early, the writer gets SIGPIPE and
 # `pipefail` turns a pass into a random failure), and a failure prints what the command said.
-for d in $QV_DEV_IMAGES; do
+# QV_CHECK_SET=release (the publish job): the -dev images are not built, so they are not checked
+for d in $([ "${QV_CHECK_SET:-}" = release ] || echo "$QV_DEV_IMAGES"); do
   name="${d%%:*}"; img="${QV_IMAGE_PREFIX}${name}:${QV_IMAGE_TAG}"; b="${d##*:}"
   set +e
   out="$(docker run --rm --network none --read-only --cap-drop ALL --entrypoint "/usr/local/bin/$b" "$img" -h 2>&1)"; rc=$?
