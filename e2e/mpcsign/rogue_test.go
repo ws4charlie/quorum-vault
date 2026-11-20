@@ -342,13 +342,17 @@ func rogueAdminOperations(t *testing.T, to string) {
 				return s.freshAuth(wrong, wb)
 			}), pb.ErrorKind_ERROR_KIND_REFUSED, "does not verify")
 		})
+		if op.op != pb.Op_OP_DKG {
+			continue // the keyset of a refresh or unfreeze is looked up before the signature; TestPartiesRefuse covers a changed field through A
+		}
 		t.Run(op.name+" with a field changed after signing", func(t *testing.T) {
-			// signed for the 2-of-3 ECDSA scheme the Open carries, then the Open names the Ed25519 one
-			if op.op != pb.Op_OP_DKG {
-				t.Skip("the keyset of a refresh or unfreeze is looked up before the signature (TestPartiesRefuse covers it through A)")
-			}
+			// signed for what the Open carries, then one field of the request changes: the 2-party (B) keyset's curve, or the 2-of-3 scheme (C)
 			o := with(open(), op.str, func(o string, b proto.Message) *pb.AdminAuth { return s.freshAuth(o, b) })
-			o.Scheme = pb.Scheme_SCHEME_ED25519_2OF3
+			if to == "C" {
+				o.Scheme = pb.Scheme_SCHEME_ED25519_2OF3
+			} else {
+				o.Curve = pb.Curve_CURVE_ED25519
+			}
 			r.refused(t, o, pb.ErrorKind_ERROR_KIND_REFUSED, "does not verify")
 		})
 	}
