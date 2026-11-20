@@ -131,3 +131,6 @@ topologySpreadConstraints:
 imagePullSecrets: {{ toJson . }}
 {{- end }}
 {{- end -}}
+
+{{/* ConfigMap name: release-qualified component + a hash of the content, so a change of content is a new object and a new pod template. */}}
+{{- define "qv.cmName" -}}{{ printf "%s-%s-%s" .ctx.Release.Name .c (.data | sha256sum | trunc 10) | trunc 63 | trimSuffix "-" }}{{- end -}}

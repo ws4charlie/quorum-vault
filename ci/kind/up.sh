@@ -17,7 +17,7 @@ phase_images() {
   pull_pinned
   # always built: the docker layer cache makes an unchanged image a no-op, and a stale image against a newer chart fails in confusing ways (a flag the chart passes and the old binary lacks).
   # QV_KIND_SKIP_BUILD=1 keeps what is there.
-  if [ "${QV_KIND_SKIP_BUILD:-}" != 1 ]; then log "building the service images"; deploy/images/build.sh $LOCAL_IMAGES >&2; fi
+  if [ "${QV_KIND_SKIP_BUILD:-}" != 1 ]; then log "building the service images"; QV_IMAGE_PREFIX=qv-image/ QV_IMAGE_TAG=local deploy/images/build.sh $LOCAL_IMAGES >&2   # the names the values-kind files and load_images use, whatever the caller exported; fi
 }
 
 phase_cluster() {
@@ -33,8 +33,8 @@ phase_cluster() {
   for t in $LOCAL_IMAGES; do imgs+=("qv-image/$t:local"); done
   load_images "${imgs[@]}"
   for n in $ALL_NS; do k create namespace "$n" --dry-run=client -o yaml | k apply -f - >/dev/null; done
-  hm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
-  hm repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null 2>&1 || true
+  hm repo add jetstack https://charts.jetstack.io --force-update >/dev/null
+  hm repo add cnpg https://cloudnative-pg.github.io/charts --force-update >/dev/null
   log "cert-manager $CERT_MANAGER_CHART"
   hm upgrade --install cert-manager jetstack/cert-manager --version "$CERT_MANAGER_CHART" -n cert-manager --create-namespace \
     --set crds.enabled=true --set global.leaderElection.namespace=cert-manager --wait --timeout 4m >/dev/null
@@ -45,7 +45,7 @@ phase_cluster() {
 case "$PHASE" in
   images)  phase_images ;;
   cluster) phase_images; phase_cluster ;;
-  all)     phase_images; phase_cluster; [ -x "$KDIR/install.sh" ] && "$KDIR/install.sh" ;;
+  all)     phase_images; phase_cluster; "$KDIR/install.sh" ;;
   *) echo "usage: up.sh [all|images|cluster]" >&2; exit 2 ;;
 esac
 log "done"

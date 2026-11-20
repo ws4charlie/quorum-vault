@@ -38,7 +38,7 @@ spec:
             - -stop-timeout
             - {{ printf "%ds" (int .Values.worker.stopTimeoutSeconds) | quote }}
           envFrom:
-            - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "worker-env") }} }
+            - configMapRef: { name: {{ include "qv.cmName" (dict "ctx" . "c" "worker-env" "data" (include "qv.env.worker" .)) }} }
           {{- if ne .Values.worker.probes.mode "none" }}
           {{- include "qv.probes" (dict "probes" .Values.worker.probes) | nindent 10 }}
           {{- end }}

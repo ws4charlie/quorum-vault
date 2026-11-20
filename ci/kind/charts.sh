@@ -12,14 +12,13 @@ mk_secret() { local ns="$1" name="$2"; shift 2; kn "$ns" create secret generic "
 "$KDIR/dkg.sh"
 
 log "audit bucket (Object Lock, COMPLIANCE) in SeaweedFS"
-kn "$NS_BIZ" port-forward svc/seaweedfs 18333:8333 >/dev/null 2>&1 & PF=$!
-trap 'kill $PF 2>/dev/null || true' EXIT
-sleep 3
+trap pf_stop EXIT
+pf_start "$NS_BIZ" svc/seaweedfs 8333
 g() { kn "$NS_BIZ" get secret "$1" -o jsonpath="{.data.$2}" | base64 -d; }
 ( umask 077; g qv-admin-tls 'tls\.crt' > "$WORK/admin.crt"; g qv-admin-tls 'tls\.key' > "$WORK/admin.key" )
-QV_MKBUCKET_ENDPOINT=https://127.0.0.1:18333 QV_MKBUCKET_AK="$(g seaweedfs-env ROOT_AK)" QV_MKBUCKET_SK="$(g seaweedfs-env ROOT_SK)" \
+QV_MKBUCKET_ENDPOINT="https://127.0.0.1:$PF_PORT" QV_MKBUCKET_AK="$(g seaweedfs-env ROOT_AK)" QV_MKBUCKET_SK="$(g seaweedfs-env ROOT_SK)" \
   go run ./ci/kind/tools/mkbucket -cert "$WORK/admin.crt" -key "$WORK/admin.key" -ca "$S/ca-business.crt"
-kill $PF 2>/dev/null || true
+pf_stop
 
 log "qv-business"
 # the custody config: the repository's example with the cluster's chain address (rpc credentials would be added here; the example has none)

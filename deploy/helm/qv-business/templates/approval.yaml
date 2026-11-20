@@ -34,7 +34,7 @@ spec:
           args: ["-max-login-age", {{ . | quote }}]
           {{- end }}
           envFrom:
-            - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "approval-env") }} }
+            - configMapRef: { name: {{ include "qv.cmName" (dict "ctx" . "c" "approval-env" "data" (include "qv.env.approval" .)) }} }
           ports:
             - { name: http, containerPort: {{ $a.port }}, protocol: TCP }
           {{- /* The server has no health listener: it serves files, so the config document answering is its readiness. Plain http inside the pod; TLS ends at the Ingress. */}}

@@ -13,13 +13,12 @@ sel() { echo "{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name:
 rndpin() { [ -s "$S/$1" ] || ( umask 077; openssl rand -hex 8 | tr a-f 0-5 > "$S/$1" ); cat "$S/$1"; }
 
 guard_setup() { # ns database role-name: roles from qv-migrate -zone signing (the repository's own tool), then the database the role owns, as signing_roles.sql says
-  local ns="$1" db="$2" owner="$3" pf d
+  local ns="$1" db="$2" owner="$3" d
   d="$(mktemp -d)"; chmod 700 "$d"
   crt "$ns" qv-signing-admin-tls > "$d/c.crt"; key "$ns" qv-signing-admin-tls > "$d/c.key"; chmod 600 "$d/c.key"; kn "$ns" get secret qv-signing-admin-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > "$d/ca.crt"
-  kn "$ns" port-forward svc/qv-guard-rw 15433:5432 >/dev/null 2>&1 & pf=$!
-  sleep 3
-  go run ./cmd/qv-migrate -zone signing -enable-login -dsn "postgres://qv@127.0.0.1:15433/qv_signing?sslmode=verify-full&sslrootcert=$d/ca.crt&sslcert=$d/c.crt&sslkey=$d/c.key"
-  kill $pf 2>/dev/null || true; rm -rf "$d"
+  pf_start "$ns" svc/qv-guard-rw 5432
+  go run ./cmd/qv-migrate -zone signing -enable-login -dsn "postgres://qv@127.0.0.1:$PF_PORT/qv_signing?sslmode=verify-full&sslrootcert=$d/ca.crt&sslcert=$d/c.crt&sslkey=$d/c.key"
+  pf_stop; rm -rf "$d"
   pg() { kn "$ns" exec qv-guard-1 -c postgres -- psql -U postgres -v ON_ERROR_STOP=1 -Atqc "$1"; }
   [ "$(pg "SELECT 1 FROM pg_database WHERE datname='$db'")" = 1 ] || pg "CREATE DATABASE $db OWNER $owner"
   pg "REVOKE CONNECT ON DATABASE $db FROM PUBLIC"

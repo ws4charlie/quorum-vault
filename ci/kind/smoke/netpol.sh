@@ -5,9 +5,10 @@
 . "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"; set +e
 rc=0; bad() { echo "FAIL: $*"; rc=1; }
 img=nginx:1.27-alpine
-probe() { # ns label host port -> 0 when the TCP connect works. A throw-away pod with the given labels.
+probe() { # ns label host port -> 0 when the TCP connect works. A throw-away pod with the given labels. It waits 6 s first: kindnet programs the policy of a new pod a moment AFTER it starts,
+  # and a connect in that window gets through (found by the lane: a "blocked" check that passed or failed by luck).
   local ns="$1" labels="$2" host="$3" port="$4" name="probe-$RANDOM"
-  k -n "$ns" run "$name" --image=$img --image-pull-policy=IfNotPresent --restart=Never --labels="$labels" --command -- sh -c "nc -z -w 3 $host $port && echo OPEN || echo CLOSED" >/dev/null
+  k -n "$ns" run "$name" --image=$img --image-pull-policy=IfNotPresent --restart=Never --labels="$labels" --command -- sh -c "sleep 6; nc -z -w 3 $host $port && echo OPEN || echo CLOSED" >/dev/null
   for _ in $(seq 60); do ph="$(k -n "$ns" get pod "$name" -o jsonpath='{.status.phase}')"; [ "$ph" = Succeeded ] || [ "$ph" = Failed ] && break; sleep 1; done
   out="$(k -n "$ns" logs "$name" 2>/dev/null)"; k -n "$ns" delete pod "$name" --wait=false >/dev/null
   [ "$out" = OPEN ]
