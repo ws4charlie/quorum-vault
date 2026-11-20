@@ -134,7 +134,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 	if !common.IsHexAddress(w.To) {
 		return chain.UnsignedTx{}, fmt.Errorf("evm: withdrawal destination %q", w.To)
 	}
-	from, err := a.cfg.hot(w.PartitionID)
+	from, err := a.hotFor(ctx, tx, w.PartitionID)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -161,7 +161,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 // factory: deployAndFlush(salt, tokens). The hot wallet pays gas. The salt comes
 // from the deposit_addresses row of s.From.
 func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent) (chain.UnsignedTx, error) {
-	from, err := a.cfg.hot(s.ToPartition)
+	from, err := a.hotFor(ctx, tx, s.ToPartition)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -190,11 +190,15 @@ func (a *Adapter) checkDestination(ctx context.Context) error {
 		return fmt.Errorf("evm: read factory destination: %w", err)
 	}
 	dest := common.BytesToAddress(out)
-	switch {
-	case dest == (common.Address{}):
+	if dest == (common.Address{}) {
 		return ErrSweepFrozen
-	case dest != a.cfg.SweepDestination:
-		return fmt.Errorf("%w: factory %s, config %s", ErrDestinationMismatch, dest, a.cfg.SweepDestination)
+	}
+	want, err := a.sweepDestination(ctx, a.pool)
+	if err != nil {
+		return err
+	}
+	if dest != want {
+		return fmt.Errorf("%w: factory %s, expected %s (the active address of the sink shard)", ErrDestinationMismatch, dest, want)
 	}
 	return nil
 }
@@ -360,7 +364,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	if err := a.checkFee(params.Gas, params.GasFeeCap); err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	u, err := a.unsigned(params, from, a.cfg.partitionOf(from))
+	u, err := a.unsigned(params, from, a.partitionOfAddress(ctx, tx, from))
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -393,7 +397,7 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 	u, err := a.unsigned(eth.TxParams{
 		ChainID: new(big.Int).SetUint64(a.cfg.ChainID), Nonce: uint64(r.nonce), To: from, Value: new(big.Int),
 		Gas: DefaultCancelGas, GasTipCap: tip, GasFeeCap: feeCap,
-	}, from, a.cfg.partitionOf(from))
+	}, from, a.partitionOfAddress(ctx, tx, from))
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -648,10 +652,12 @@ func (a *Adapter) finalize(ctx context.Context, txHash string) {
 // EstimateSweepFee is eth_estimateGas of the sweep call times the current
 // (base fee + tip), in wei.
 func (a *Adapter) EstimateSweepFee(ctx context.Context, s chain.SweepIntent) (*big.Int, error) {
-	from := a.cfg.SweepDestination
+	from, err := a.sweepDestination(ctx, a.pool)
+	if err != nil {
+		return nil, err
+	}
 	if s.ToPartition != "" {
-		var err error
-		if from, err = a.cfg.hot(s.ToPartition); err != nil {
+		if from, err = a.hotFor(ctx, a.pool, s.ToPartition); err != nil {
 			return nil, err
 		}
 	}

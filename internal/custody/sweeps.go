@@ -359,7 +359,12 @@ func (s *Service) sweepDestination(partitionID string) (string, error) {
 		return a, nil
 	}
 	if s.Cfg.Family != FamilyBTC {
-		return s.Cfg.EVM.SweepDestination.Hex(), nil
+		// The factory pays the active address of the sink shard (the configured one while the shard has one generation).
+		a, _, err := s.ShardAddressOf(s.Cfg.SinkPartition(s.Cfg.Native))
+		if err != nil {
+			return "", err
+		}
+		return a, nil
 	}
 	a, _, err := s.ShardAddressOf(partitionID)
 	return a, err

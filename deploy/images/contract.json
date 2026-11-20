@@ -1,0 +1,71 @@
+{
+  "_comment": "Machine-readable form of the run-time contract in README.md (flags, environment, mounts, ports, user), for the chart drift test in ci/helm. Edit it in the same change as the README table. `flags` are written without the leading dash. `requiredAny` lists groups of which at least one member (a flag or an environment variable) must be set. `pathEnv` and `pathFlags` hold file paths that must sit on a volume mount. `dsnRole` is the Postgres role the DSN's user must be (the certificate name picks it).",
+  "user": 65532,
+  "mountRoots": ["/etc/qv", "/run/qv", "/var/lib/qv/metrics"],
+  "forbiddenEnv": ["QV_ALLOW_PLAINTEXT", "QV_DEV_ACTOR_HEADER", "QV_OIDC_TEST_JWKS"],
+  "tlsEnv": ["QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA", "QV_TLS_RELOAD"],
+  "images": {
+    "qv-core": {
+      "zone": "business",
+      "flags": ["config", "addr", "dsn", "temporal", "namespace", "task-queue", "metrics-listen", "oidc-issuer", "oidc-audience", "oidc-jwks-url", "oidc-roles-claim", "oidc-role-map", "oidc-service-clients", "oidc-stepup-acr", "oidc-ca-file", "service-allow", "tls-cert", "tls-key", "tls-ca", "tls-reload"],
+      "env": ["DATABASE_URL", "QV_HTTP_ADDR", "QV_TEMPORAL_ADDR", "QV_OIDC_ISSUER", "QV_OIDC_AUDIENCE", "QV_OIDC_JWKS_URL", "QV_OIDC_ROLES_CLAIM", "QV_OIDC_ROLE_MAP", "QV_OIDC_SERVICE_CLIENTS", "QV_OIDC_STEPUP_ACR", "QV_OIDC_CA_FILE", "QV_CORE_SERVICE_ALLOW", "QV_CORE_METRICS_LISTEN", "QV_ENV"],
+      "requiredFlags": ["config"],
+      "requiredAny": [["dsn", "DATABASE_URL"], ["addr", "QV_HTTP_ADDR"], ["temporal", "QV_TEMPORAL_ADDR"], ["tls-cert", "QV_TLS_CERT"]],
+      "pathFlags": ["config", "oidc-ca-file", "tls-cert", "tls-key", "tls-ca"],
+      "pathEnv": ["QV_OIDC_CA_FILE", "QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA"],
+      "dsnRole": "qv_core",
+      "listen": { "flag": "addr", "env": "QV_HTTP_ADDR", "ports": 1 },
+      "loopbackOnly": ["metrics-listen", "QV_CORE_METRICS_LISTEN"]
+    },
+    "qv-worker": {
+      "zone": "business",
+      "flags": ["config", "dsn", "temporal", "namespace", "task-queue", "auto-approver-key-file", "watchdog-stall", "watchdog-interval", "tls-cert", "tls-key", "tls-ca", "tls-reload"],
+      "env": ["DATABASE_URL", "QV_TEMPORAL_ADDR", "QV_AUTO_APPROVER_KEY_FILE"],
+      "requiredFlags": ["config"],
+      "requiredAny": [["dsn", "DATABASE_URL"], ["temporal", "QV_TEMPORAL_ADDR"], ["tls-cert", "QV_TLS_CERT"]],
+      "pathFlags": ["config", "auto-approver-key-file", "tls-cert", "tls-key", "tls-ca"],
+      "pathEnv": ["QV_AUTO_APPROVER_KEY_FILE", "QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA"],
+      "dsnRole": "qv_worker",
+      "listen": { "ports": 0 }
+    },
+    "qv-relay": {
+      "zone": "business",
+      "flags": ["dsn", "brokers", "audit-source", "anchor-interval", "prune-retention", "prune-interval", "prune-batch", "batch", "idle", "metrics-listen", "tls-cert", "tls-key", "tls-ca", "tls-reload"],
+      "env": ["DATABASE_URL", "QV_KAFKA_BROKERS"],
+      "requiredFlags": [],
+      "requiredAny": [["dsn", "DATABASE_URL"], ["brokers", "QV_KAFKA_BROKERS"], ["tls-cert", "QV_TLS_CERT"]],
+      "pathFlags": ["tls-cert", "tls-key", "tls-ca"],
+      "pathEnv": ["QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA"],
+      "dsnRole": "qv_relay",
+      "listen": { "ports": 0 },
+      "loopbackOnly": ["metrics-listen"]
+    },
+    "qv-anchor-archiver": {
+      "zone": "business",
+      "flags": ["brokers", "group", "retention", "metrics-listen", "archive-endpoint", "archive-bucket", "archive-region", "archive-path-style", "archive-tls-cert", "archive-tls-key", "archive-tls-ca", "archive-tls-reload", "tls-cert", "tls-key", "tls-ca", "tls-reload"],
+      "env": ["QV_KAFKA_BROKERS", "QV_ARCHIVE_ENDPOINT", "QV_ARCHIVE_BUCKET", "QV_ARCHIVE_REGION", "QV_ARCHIVE_ACCESS_KEY", "QV_ARCHIVE_ACCESS_KEY_FILE", "QV_ARCHIVE_SECRET_KEY", "QV_ARCHIVE_SECRET_KEY_FILE", "QV_ARCHIVE_TLS_CERT", "QV_ARCHIVE_TLS_KEY", "QV_ARCHIVE_TLS_CA", "QV_ARCHIVE_TLS_RELOAD"],
+      "requiredFlags": [],
+      "requiredAny": [["brokers", "QV_KAFKA_BROKERS"], ["archive-bucket", "QV_ARCHIVE_BUCKET"], ["tls-cert", "QV_TLS_CERT"]],
+      "pathFlags": ["tls-cert", "tls-key", "tls-ca", "archive-tls-cert", "archive-tls-key", "archive-tls-ca"],
+      "pathEnv": ["QV_ARCHIVE_ACCESS_KEY_FILE", "QV_ARCHIVE_SECRET_KEY_FILE", "QV_ARCHIVE_TLS_CERT", "QV_ARCHIVE_TLS_KEY", "QV_ARCHIVE_TLS_CA", "QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA"],
+      "forbiddenEnv": ["QV_ARCHIVE_ACCESS_KEY", "QV_ARCHIVE_SECRET_KEY"],
+      "listen": { "ports": 0 },
+      "loopbackOnly": ["metrics-listen"]
+    },
+    "qv-migrate": {
+      "zone": "business",
+      "flags": ["zone", "dsn", "enable-login"],
+      "env": ["DATABASE_URL"],
+      "requiredFlags": ["zone"],
+      "requiredAny": [["dsn", "DATABASE_URL"]],
+      "pathFlags": [],
+      "pathEnv": [],
+      "dsnRole": "qv",
+      "listen": { "ports": 0 },
+      "noTLSEnv": true,
+      "flagValues": { "zone": ["business"] },
+      "flagOnlyIn": { "enable-login": "enable-login" }
+    }
+  },
+  "externalImages": {}
+}

@@ -307,6 +307,7 @@ func HSMEnv(t testing.TB) (pin string) {
 		t.Skip("no SoftHSM config: run scripts/setup-softhsm.sh")
 	}
 	os.Setenv("SOFTHSM2_CONF", conf)
+	t.Setenv("QV_ENV", "test") // SoftHSM is refused when QV_ENV is unset (production); child processes inherit this
 	pin = os.Getenv("QV_HSM_PIN")
 	if pin == "" {
 		pin = pinFromDotEnv(dir)

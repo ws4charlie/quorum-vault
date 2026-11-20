@@ -112,7 +112,9 @@ func EnvFor(binary string) []string {
 		return append(Env(pki.ZoneSigning, "cosigner"), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a)
 	case "qv-gateway":
 		c, k, a := Files(pki.ZoneBusiness, "gateway-link")
-		return append(Env(pki.ZoneSigning, "gateway"), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a)
+		return append(Env(pki.ZoneSigning, "gateway"), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a, "QV_ENV=test") // test: the e2e HSM is SoftHSM, which production refuses
+	case "mpc-party":
+		return []string{"QV_ENV=test"} // the e2e sealer token is SoftHSM, which production refuses
 	}
 	return nil
 }

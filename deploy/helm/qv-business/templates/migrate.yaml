@@ -1,0 +1,69 @@
+{{- /*
+  Helm hooks, in this order, before any other resource of the release is created or changed:
+    -10  service account and network policy of the job   (hook resources do not wait for the rest of the chart)
+     -5  qv-migrate                 applies the pending migrations as the owner role (certificate `admin` -> role `qv`)
+     -4  qv-migrate -enable-login   ALTER ROLE ... LOGIN for the service roles (docs/runbooks/database-roles.md "Login")
+  The services check at start that no migration is pending and refuse to run otherwise, so a skipped hook fails safe.
+*/ -}}
+{{- if .Values.migration.enabled }}
+{{- $m := include "qv.fullname" (dict "ctx" . "c" "migrate") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $m }}
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "migrate") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+automountServiceAccountToken: false
+{{- range $step := list (dict "name" "migrate" "weight" "-5" "extra" (list)) (dict "name" "enable-login" "weight" "-4" "extra" (list "-enable-login")) }}
+{{- if or (eq $step.name "migrate") $.Values.migration.enableLogin }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ if eq $step.name "migrate" }}{{ $m }}{{ else }}{{ printf "%s-%s" $m $step.name | trunc 63 | trimSuffix "-" }}{{ end }}
+  labels: {{- include "qv.labels" (dict "ctx" $ "c" "migrate") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: {{ $step.weight | quote }}
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $.Values.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ $.Values.migration.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: {{- include "qv.labels" (dict "ctx" $ "c" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $m }}
+      automountServiceAccountToken: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext: {{- include "qv.podSecurityContext" $ | nindent 8 }}
+      {{- include "qv.pullSecrets" $ | nindent 6 }}
+      containers:
+        - name: {{ $step.name }}
+          image: {{ include "qv.image" (dict "ctx" $ "k" "migrate") | quote }}
+          imagePullPolicy: {{ $.Values.imagePullPolicy }}
+          args:
+            - -zone
+            - business
+            {{- range $step.extra }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: DATABASE_URL
+              value: {{ include "qv.dsn" (dict "ctx" $ "role" "qv" "dir" "/etc/qv/admin") | quote }}
+          resources: {{- toYaml $.Values.migration.resources | nindent 12 }}
+          securityContext: {{- include "qv.containerSecurityContext" $ | nindent 12 }}
+          volumeMounts:
+            - { name: admin-tls, mountPath: /etc/qv/admin, readOnly: true }
+      volumes:
+        {{- include "qv.secretVolume" (dict "name" "admin-tls" "secret" $.Values.tls.admin.secretName) | nindent 8 }}
+{{- end }}
+{{- end }}
+{{- end }}

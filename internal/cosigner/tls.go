@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -31,6 +32,20 @@ func SocketTLS(certFile, keyFile string, partyPins []string) (*tls.Config, error
 		return nil, fmt.Errorf("cosigner socket: certificate: %w", err)
 	}
 	return wire.ServerTLS(cert, pins), nil
+}
+
+// SocketCertName is the name label of the socket certificate's expiry metric.
+const SocketCertName = "qv-cosigner-socket"
+
+// WriteSocketMetrics writes the seconds left on the socket certificate loaded by SocketTLS (cfg nil, the development plain-text channel, writes
+// nothing), in the format and under the metric name of every other certificate (qv_tls_cert_seconds_to_expiry), so monitoring/tls-cert.rules.yml
+// alerts on it. The certificate is read once at start (a rotation restarts the process, docs/runbooks/certificates.md), so this is the
+// time left on the one in use.
+func WriteSocketMetrics(w io.Writer, cfg *tls.Config, now time.Time) {
+	if cfg == nil || len(cfg.Certificates) == 0 {
+		return
+	}
+	wire.WriteCertMetrics(w, SocketCertName, "signing", cfg.Certificates[0], now)
 }
 
 // ListenUnixTLS is ListenUnix with the authenticated channel on top. A nil cfg is plain text: only for the development switch.

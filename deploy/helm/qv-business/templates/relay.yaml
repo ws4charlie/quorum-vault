@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "relay") }}
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "relay") | nindent 4 }}
+spec:
+  replicas: {{ .Values.relay.replicas }}
+  selector:
+    matchLabels: {{- include "qv.selector" (dict "ctx" . "c" "relay") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "qv.labels" (dict "ctx" . "c" "relay") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "qv.fullname" (dict "ctx" . "c" "relay") }}
+      automountServiceAccountToken: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      terminationGracePeriodSeconds: {{ .Values.relay.terminationGracePeriodSeconds }}
+      securityContext: {{- include "qv.podSecurityContext" . | nindent 8 }}
+      {{- include "qv.pullSecrets" . | nindent 6 }}
+      {{- include "qv.spread" (dict "ctx" . "c" "relay") | nindent 6 }}
+      containers:
+        - name: relay
+          image: {{ include "qv.image" (dict "ctx" . "k" "relay") | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          args: ["-audit-source", {{ .Values.kafka.auditSource | quote }}]
+          envFrom:
+            - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "relay-env") }} }
+          {{- if ne .Values.relay.probes.mode "none" }}
+          {{- include "qv.probes" (dict "probes" .Values.relay.probes "port" .Values.relay.probes.healthPort) | nindent 10 }}
+          {{- end }}
+          resources: {{- toYaml .Values.relay.resources | nindent 12 }}
+          securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/qv/tls, readOnly: true }
+      volumes:
+        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.relay.secretName) | nindent 8 }}

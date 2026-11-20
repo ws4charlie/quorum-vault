@@ -77,6 +77,12 @@ func (a *API) Handler() http.Handler {
 	a.handle(mux, "POST /v2/cold-close/submit", a.submitColdSetup)
 	a.handle(mux, "POST /v2/guardian/freezes", a.guardianFreeze)
 	a.handle(mux, "GET /v2/audit/verify", a.auditVerify)
+	a.handle(mux, "GET /v2/keysets", a.listKeysets)
+	a.handle(mux, "POST /v2/keysets/candidates", a.registerKeysetCandidate)
+	a.handle(mux, "POST /v2/keysets/activations", a.activateKeyset)
+	a.handle(mux, "POST /v2/keysets/drains", a.startDrainingKeyset)
+	a.handle(mux, "POST /v2/keysets/retirements", a.retireKeyset)
+	a.handle(mux, "POST /v2/keysets/compromises", a.compromiseKeyset)
 	return mux
 }
 

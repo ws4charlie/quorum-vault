@@ -353,3 +353,34 @@ func TestFlagsEnvNames(t *testing.T) {
 		t.Fatalf("-tls-cert default %q", got)
 	}
 }
+
+func TestCheckMetricsAddr(t *testing.T) {
+	t.Setenv(MetricsAnyAddrEnv, "")
+	for _, a := range []string{"127.0.0.1:9101", "[::1]:9101", "localhost:9101"} {
+		for _, z := range []string{ZoneBusiness, ZoneSigning} {
+			if err := CheckMetricsAddr(a, z); err != nil {
+				t.Errorf("%s in %s: %v", a, z, err)
+			}
+		}
+	}
+	// default: the loopback rule holds in both zones
+	for _, z := range []string{ZoneBusiness, ZoneSigning} {
+		if err := CheckMetricsAddr("0.0.0.0:9101", z); err == nil {
+			t.Errorf("0.0.0.0 accepted in %s without the switch", z)
+		}
+	}
+	// the switch opens the business zone only
+	t.Setenv(MetricsAnyAddrEnv, "1")
+	for _, a := range []string{"0.0.0.0:9101", "10.1.2.3:9101", ":9101"} {
+		if err := CheckMetricsAddr(a, ZoneBusiness); err != nil {
+			t.Errorf("%s with the switch in business: %v", a, err)
+		}
+		if err := CheckMetricsAddr(a, ZoneSigning); err == nil {
+			t.Errorf("%s accepted in the signing zone: the switch must not open it", a)
+		}
+	}
+	t.Setenv(MetricsAnyAddrEnv, "true") // only "1" counts, like QV_ALLOW_PLAINTEXT
+	if err := CheckMetricsAddr("0.0.0.0:9101", ZoneBusiness); err == nil {
+		t.Error(`"true" must not turn the switch on`)
+	}
+}

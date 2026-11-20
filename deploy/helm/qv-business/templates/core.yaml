@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "core") }}
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "core") | nindent 4 }}
+spec:
+  replicas: {{ .Values.core.replicas }}
+  selector:
+    matchLabels: {{- include "qv.selector" (dict "ctx" . "c" "core") | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "qv.labels" (dict "ctx" . "c" "core") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmaps.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "qv.fullname" (dict "ctx" . "c" "core") }}
+      automountServiceAccountToken: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      terminationGracePeriodSeconds: {{ .Values.core.terminationGracePeriodSeconds }}
+      securityContext: {{- include "qv.podSecurityContext" . | nindent 8 }}
+      {{- include "qv.pullSecrets" . | nindent 6 }}
+      {{- include "qv.spread" (dict "ctx" . "c" "core") | nindent 6 }}
+      containers:
+        - name: core
+          image: {{ include "qv.image" (dict "ctx" . "k" "core") | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          args: ["-config", "/etc/qv/custody/{{ .Values.custody.key }}"]
+          envFrom:
+            - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "core-env") }} }
+          ports:
+            - { name: https, containerPort: {{ .Values.core.port }}, protocol: TCP }
+          {{- include "qv.probes" (dict "probes" .Values.core.probes "port" "https") | nindent 10 }}
+          resources: {{- toYaml .Values.core.resources | nindent 12 }}
+          securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/qv/tls, readOnly: true }
+            - { name: custody, mountPath: /etc/qv/custody, readOnly: true }
+            {{- if .Values.oidc.caSecret }}
+            - { name: oidc-ca, mountPath: /etc/qv/oidc, readOnly: true }
+            {{- end }}
+      volumes:
+        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.core.secretName) | nindent 8 }}
+        {{- include "qv.custodyVolume" (dict "ctx" .) | nindent 8 }}
+        {{- if .Values.oidc.caSecret }}
+        - name: oidc-ca
+          secret: { secretName: {{ .Values.oidc.caSecret }}, defaultMode: 292 }
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "core") }}
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "core") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "qv.selector" (dict "ctx" . "c" "core") | nindent 4 }}
+  ports:
+    - { name: https, port: {{ .Values.core.port }}, targetPort: https, protocol: TCP }

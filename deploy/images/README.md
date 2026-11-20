@@ -46,7 +46,7 @@ The first build compiles cb-mpc (several minutes). CI ([`images.yml`](../../.git
 
 ## Run-time contract
 
-`TLS` means the three files of one identity: `-tls-cert`, `-tls-key`, `-tls-ca` (environment `QV_TLS_CERT`, `QV_TLS_KEY`, `QV_TLS_CA`), re-read every `-tls-reload` (`QV_TLS_RELOAD`, default 1 minute). A second identity has the prefix `link-` (`-link-tls-cert`, `QV_LINK_TLS_CERT`, …). A DSN names its own client certificate files (`sslcert`, `sslkey`, `sslrootcert`); those files must be readable by uid 65532 too. Metrics are plain http and **loopback only** (`pki.RequireLoopback`, `internal/pki/flags.go:70`): a scraper cannot reach them from outside the pod (design decision D12).
+`TLS` means the three files of one identity: `-tls-cert`, `-tls-key`, `-tls-ca` (environment `QV_TLS_CERT`, `QV_TLS_KEY`, `QV_TLS_CA`), re-read every `-tls-reload` (`QV_TLS_RELOAD`, default 1 minute). A second identity has the prefix `link-` (`-link-tls-cert`, `QV_LINK_TLS_CERT`, …). A DSN names its own client certificate files (`sslcert`, `sslkey`, `sslrootcert`); those files must be readable by uid 65532 too. Metrics are plain http and **loopback only** by default (`pki.RequireLoopback`): a business-zone service (`qv-core`, `qv-relay`, `qv-anchor-archiver`) may bind another address, e.g. the pod address, only with `QV_METRICS_ALLOW_NON_LOOPBACK=1`; signing-zone services never (a sidecar reads them; decision D12, runbook `certificates.md`).
 
 | Image | Command | Flags and environment | Files it reads | Writes | Listens |
 |---|---|---|---|---|---|
@@ -63,7 +63,39 @@ The first build compiles cb-mpc (several minutes). CI ([`images.yml`](../../.git
 
 All images: user `65532:65532`, `ENTRYPOINT` as the table says (none for the tools images), no `CMD`, no `VOLUME`, no `EXPOSE` (the ports are configuration). Directories that exist and belong to 65532: `/var/lib/qv/party`, `/var/lib/qv/metrics`, `/run/qv`, `/etc/qv` (in the images that use them). Mount volumes there, or elsewhere and set the flag.
 
-Secrets: PINs, private keys and DSN passwords are never in the image or in an environment dump you can avoid: mount them as files. Note for the party: `pin_file` must have **no group or other permission bits** (`sealer_pkcs11.go:61`); Kubernetes sets group read on a Secret volume when `fsGroup` is set, which that check refuses. Use `pin_env` or see the report of task D1 (code change for D2).
+### Probes, shutdown, state (D2)
+
+**Probes.** `qv-core`, `qv-worker`, `qv-relay`, `qv-anchor-archiver`, `qv-gateway`, `qv-cosigner`: `-health-listen` / `QV_HEALTH_LISTEN` (off when empty; use `0.0.0.0:9100`): plain http, `GET /livez` (always 200) and `GET /readyz` (200, or 503 with the body `not ready`, no detail). Nothing else is served on that port. `mpc-party`: the same, flag `-health-listen` / `QV_HEALTH_LISTEN` (its gRPC `Health` is on the mutual-TLS caller port, which a kubelet gRPC probe cannot use). Use `httpGet` probes: `livenessProbe` on `/livez`, `readinessProbe` and `startupProbe` on `/readyz`. Separate listener rather than the service port: `qv-gateway` and `qv-cosigner` have no http port, and `qv-core`'s port is TLS with client-certificate rules.
+
+| Service | Ready means |
+|---|---|
+| `qv-core` | start-up finished, business database answers, certificate not expired |
+| `qv-worker` | as core, and Temporal answers `CheckHealth` |
+| `qv-relay` | database answers, certificate valid |
+| `qv-anchor-archiver` | the bucket passed the Object Lock check and the consumer runs, certificate valid |
+| `qv-gateway` | job-queue database and guard database answer, both certificates valid |
+| `qv-cosigner` | guard database answers, both certificates valid, socket open |
+| `mpc-party` | data directory locked, sealer open, listeners up, certificate valid; **not** the other parties |
+
+All go "not ready" the moment SIGTERM arrives.
+
+**Stop (SIGTERM).** Every service stops accepting, finishes what it has, exits 0. `terminationGracePeriodSeconds` must exceed:
+
+| Service | Bound after SIGTERM | Set at least |
+|---|---|---|
+| `qv-core`, `qv-cosigner` | 10 s for running requests | 30 s |
+| `qv-worker` | immediate: `Stop` does not wait; activities in flight are retried by Temporal | 30 s |
+| `qv-relay`, `qv-anchor-archiver` | one batch / one poll, a few seconds | 30 s |
+| `qv-gateway` | `sign_timeout` of the signing config (default 30 s) for signer calls in flight; then exit **1** if one still runs (closing the HSM under it would crash; nothing is lost, an unstored signature was never released). Right as it is | `sign_timeout` + 30 s |
+| `mpc-party` | `limits.shutdown_grace_ms` (default 10 s), then running sessions are cut | grace + 20 s |
+
+**One process per `data_dir`.** `mpc-party` takes an exclusive `flock` on `<data_dir>/.lock` before it reads anything; a second process on the directory exits with "in use by another mpc-party process". The kernel drops the lock when the holder dies (kill -9 included). The volume must support `flock` (block volumes, `ReadWriteOncePod`; check NFS).
+
+**PIN file.** `pin_file` may have mode 0400/0600 or be group-readable (0440/0640, a Secret volume with `fsGroup`); a world bit or a group write/execute bit is refused. The log names the accepted mode when the group can read it.
+
+**SoftHSM.** `qv-gateway` and `mpc-party` refuse a SoftHSM PKCS#11 module unless `QV_ENV` is `dev` or `test` (unset or any other value is production). Detection is by what the module reports (library manufacturer/description, token manufacturer/model contain "softhsm"), not the file name. The `-dev` images must be run with `QV_ENV=dev`. `qv-cold` (offline) is not a service and is unchanged.
+
+Secrets: PINs, private keys and DSN passwords are never in the image or in an environment dump you can avoid: mount them as files. Note for the party: `pin_file` may be group-readable but not group-writable and has no world bit (see above), so a Secret volume with `fsGroup` works.
 
 ## For the TEE measurement (TEE-T1)
 
