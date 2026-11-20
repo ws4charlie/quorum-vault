@@ -33,7 +33,7 @@ func render(t *testing.T, file string, extra ...string) []Obj {
 }
 
 func opts(digest bool) PolicyOptions {
-	return PolicyOptions{RequireDigest: digest, CorePort: 8443, LinkPorts: []int{5432, 9092}}
+	return PolicyOptions{RequireDigest: digest, CorePort: 8443, ApprovalPort: 8090, LinkPorts: []int{5432, 9092}}
 }
 
 func TestPolicyPasses(t *testing.T) {

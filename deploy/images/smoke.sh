@@ -43,5 +43,13 @@ probe() { # probe <image> <binary> <string>
 }
 n="$(probe mpc-party mpc-party 'sealer key file must hold 64 hex chars')"; [ "$n" = 0 ] && echo "ok   mpc-party has no insecure sealer" || { echo "FAIL mpc-party contains the insecure sealer"; fail=1; }
 n="$(probe mpc-party mpc-party 'I UNDERSTAND THIS PARTY SIGNS ANYTHING')"; [ "$n" = 0 ] && echo "ok   mpc-party has no dev-allow-all authorizer" || { echo "FAIL mpc-party contains dev-allow-all"; fail=1; }
+n="$(probe qv-attest-broker qv-attest-broker 'attest: mock attester has no CA')"; [ "$n" = 0 ] && echo "ok   qv-attest-broker has no mock attester (no teesim)" || { echo "FAIL qv-attest-broker contains the teesim mock attester"; fail=1; }
 n="$(probe qv-worker qv-worker 'QV_FAILPOINT')"; [ "$n" = 0 ] && echo "ok   qv-worker has no failpoints" || { echo "FAIL qv-worker contains failpoints"; fail=1; }
+# the approval page's files are in the image (the server is useless without them); output is captured, no `grep -q` on a pipe
+cid="$(docker create "${QV_IMAGE_PREFIX}qv-approval-web:${QV_IMAGE_TAG}")"
+for f in index.html app.js intent.js style.css; do
+  set +e; docker cp "$cid:/srv/approval/$f" - >/dev/null 2>&1; rc=$?; set -e
+  if [ "$rc" = 0 ]; then echo "ok   qv-approval-web has /srv/approval/$f"; else echo "FAIL qv-approval-web lacks /srv/approval/$f"; fail=1; fi
+done
+docker rm -f "$cid" >/dev/null
 exit "$fail"
