@@ -14,7 +14,7 @@ for k in central business signing; do
   echo "== qv-monitoring $k: lint, template, kubeconform"
   helm lint "$chart" --strict --set clusterKind="$k" --set alertmanager.enabled=true
   helm template qv-monitoring "$chart" --namespace monitoring --set clusterKind="$k" --set alertmanager.enabled=true > "$out/$k.yaml"
-  [ -s "$out/$k.yaml" ] && validate "$out/$k.yaml" || echo "(renders nothing)"
+  if [ -s "$out/$k.yaml" ]; then validate "$out/$k.yaml"; else echo "(renders nothing)"; fi
 done
 echo "== qv-business with metrics on: template, kubeconform"
 helm template qv deploy/helm/qv-business --namespace qv -f deploy/helm/qv-business/values.yaml -f ci/helm/ci-digests.yaml --set metrics.enabled=true > "$out/business-metrics.yaml"

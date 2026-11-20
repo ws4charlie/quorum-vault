@@ -15,7 +15,7 @@ groups:
           description: "Look at qv_mpc_party_attest_exchanges_total{party=\"{{ $labels.party }}\"}: refused:allowlist = its measurement is not allowlisted, unreachable = the broker link. Runbook: docs/runbooks/tee-broker.md"
       # The broker answered "this measurement is not allowed". Either a new build the operators have not allowlisted, or a build nobody released.
       - alert: QVMpcPartyAllowlistRefused
-        expr: increase(qv_mpc_party_attest_exchanges_total{outcome="refused:allowlist"}[15m]) > 0
+        expr: sum by (party, outcome) ((increase(qv_mpc_party_attest_exchanges_total{outcome="refused:allowlist"}[15m]) unless (qv_mpc_party_attest_exchanges_total{outcome="refused:allowlist"} unless qv_mpc_party_attest_exchanges_total{outcome="refused:allowlist"} offset 15m)) or (qv_mpc_party_attest_exchanges_total{outcome="refused:allowlist"} unless qv_mpc_party_attest_exchanges_total{outcome="refused:allowlist"} offset 15m)) > 0
         labels: {severity: page}
         annotations:
           summary: "The attestation broker refused party {{ $labels.party }}: its measurement is not on the allowlist"

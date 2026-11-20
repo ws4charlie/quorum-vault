@@ -8,7 +8,7 @@ groups:
   - name: qv-drain
     rules:
       - alert: QVDrainRefused
-        expr: sum by (mode) (increase(qv_drain_refusals_total[15m])) > 0
+        expr: sum by (mode) ((increase(qv_drain_refusals_total[15m]) unless (qv_drain_refusals_total unless qv_drain_refusals_total offset 15m)) or (qv_drain_refusals_total unless qv_drain_refusals_total offset 15m)) > 0
         labels: {severity: page}
         annotations:
           summary: "The signing zone refused a drain ({{ $labels.mode }})"

@@ -2,21 +2,23 @@
 # (runbook: docs/runbooks/tee-broker.md). Inputs: the broker's /metrics (health_listen), read in the pod; in a signing cluster that is the agent sidecar's job.
 #   qv_attest_broker_events_total{event}: release_refused, newkey_refused (a party was refused: not allowlisted, evidence did not verify, rate limited, audit write failed),
 #   reload_refused (a new allowlist file was refused: unsigned, too few signatures, malformed, sequence not higher), release_ok, newkey_ok, reload_ok, rate_limited, challenge_busy.
-# Counters appear with their first event, so `increase` of a series that does not exist yet is empty and never fires: that is the quiet state.
+# Counters appear with their first event (samples 1, 1, 1), so a bare increase() misses the first one. The refusal rules use: increase() for a series that existed a window ago, the value
+# itself for one that did not (it started at 0 inside the window). Limit: a scrape gap of over 5 minutes makes a series look new once and re-reports its old total for one window.
+# The programs should publish every counter at 0 from start (monitoring/pending-metrics.txt, reports/D10-r1.md); the rules stay correct either way.
 groups:
   - name: qv-attest-broker
     rules:
       # A refusal is either a party that must not run (a measurement that is not allowlisted, forged evidence) or an operator mistake (an allowlist that lacks the new build). Both need a human at once:
       # a party refused its keys does not start.
       - alert: QVAttestBrokerRefusals
-        expr: sum by (event) (increase(qv_attest_broker_events_total{event=~"(release|newkey)_refused"}[15m])) > 0
+        expr: sum by (event) ((increase(qv_attest_broker_events_total{event=~"(release|newkey)_refused"}[15m]) unless (qv_attest_broker_events_total{event=~"(release|newkey)_refused"} unless qv_attest_broker_events_total{event=~"(release|newkey)_refused"} offset 15m)) or (qv_attest_broker_events_total{event=~"(release|newkey)_refused"} unless qv_attest_broker_events_total{event=~"(release|newkey)_refused"} offset 15m)) > 0
         labels: {severity: page}
         annotations:
           summary: "The attestation broker refused a party's key request ({{ $labels.event }})"
           description: "Read the broker's audit log for the rule and the party (docs/runbooks/tee-broker.md). A new build that is not on the allowlist yet is the usual cause; a measurement nobody released is an incident."
       # The broker keeps the allowlist in force and says no to the new file. Until it is fixed, a new build cannot start and a revoked entry is still honoured.
       - alert: QVAttestBrokerReloadRefused
-        expr: increase(qv_attest_broker_events_total{event="reload_refused"}[1h]) > 0
+        expr: sum by (event) ((increase(qv_attest_broker_events_total{event="reload_refused"}[1h]) unless (qv_attest_broker_events_total{event="reload_refused"} unless qv_attest_broker_events_total{event="reload_refused"} offset 1h)) or (qv_attest_broker_events_total{event="reload_refused"} unless qv_attest_broker_events_total{event="reload_refused"} offset 1h)) > 0
         labels: {severity: ticket}
         annotations:
           summary: "The attestation broker refused a new allowlist file and keeps the old one"

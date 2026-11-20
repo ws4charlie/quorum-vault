@@ -48,3 +48,18 @@ tests:
       - eval_time: 35m
         alertname: QVMpcPartyAllowlistRefused
         exp_alerts: []
+  # the series is absent until the first refusal and then reads 1, 1, 1: that first refusal must page
+  - interval: 1m
+    input_series:
+      - series: 'qv_mpc_party_attest_exchanges_total{party="B",outcome="refused:allowlist"}'
+        values: '_x3 1x40'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: QVMpcPartyAllowlistRefused, exp_alerts: []}
+      - eval_time: 5m
+        alertname: QVMpcPartyAllowlistRefused
+        exp_alerts:
+          - exp_labels: {severity: page, party: B, outcome: "refused:allowlist"}
+            exp_annotations:
+              summary: "The attestation broker refused party B: its measurement is not on the allowlist"
+              description: "The party stays out of service until the allowlist is updated (signed by the operators) or the build is rolled back. Runbook: docs/runbooks/tee-broker.md"
+      - {eval_time: 35m, alertname: QVMpcPartyAllowlistRefused, exp_alerts: []}

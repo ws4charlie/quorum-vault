@@ -2,13 +2,11 @@ rule_files:
   - drain.rules.yml
 evaluation_interval: 1m
 tests:
-  # PENDING metric (qv_drain_refusals_total): tested against the name it will have. One refusal in the gateway pages; a flat counter does not; the cosigner is its own series.
+  # PENDING metric (qv_drain_refusals_total): tested against the name it will have. One refusal in the gateway pages and resolves.
   - interval: 1m
     input_series:
       - series: 'qv_drain_refusals_total{mode="gateway"}'
         values: '0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
-      - series: 'qv_drain_refusals_total{mode="cosigner"}'
-        values: '4+0x39'
     alert_rule_test:
       - eval_time: 2m
         alertname: QVDrainRefused
@@ -23,3 +21,25 @@ tests:
       - eval_time: 35m
         alertname: QVDrainRefused
         exp_alerts: []
+  # a process publishes the counter only after its first refusal: the series is absent, then reads 1, 1, 1; that first refusal must page
+  - interval: 1m
+    input_series:
+      - series: 'qv_drain_refusals_total{mode="cosigner"}'
+        values: '_x3 1x40'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: QVDrainRefused, exp_alerts: []}
+      - eval_time: 5m
+        alertname: QVDrainRefused
+        exp_alerts:
+          - exp_labels: {severity: page, mode: cosigner}
+            exp_annotations:
+              summary: "The signing zone refused a drain (cosigner)"
+              description: "The ALERT line 'drain refused' in the cosigner log has the intent, the source and the reason. Repeated refusals: a stuck planner, or the business zone probing. Runbook: docs/runbooks/key-replacement.md"
+      - {eval_time: 35m, alertname: QVDrainRefused, exp_alerts: []}
+  # a counter that has been flat for longer than the window does not page (the cosigner's four old refusals)
+  - interval: 1m
+    input_series:
+      - series: 'qv_drain_refusals_total{mode="cosigner"}'
+        values: '4+0x60'
+    alert_rule_test:
+      - {eval_time: 30m, alertname: QVDrainRefused, exp_alerts: []}

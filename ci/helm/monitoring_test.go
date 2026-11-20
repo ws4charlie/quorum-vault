@@ -867,3 +867,32 @@ func monKeys(m map[string]Obj) []string {
 	sort.Strings(k)
 	return k
 }
+
+// monitoring-check.sh must stop when kubeconform rejects a render that is not empty (an earlier `validate ... || echo` turned that failure into success). A fake kubeconform that always fails
+// stands in for the real one: the script has to exit non-zero at the first validation and must not reach the end; with one that succeeds it has to get through.
+func TestMonitoringCheckStopsOnFailedValidation(t *testing.T) {
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	run := func(exit int) (string, error) {
+		bin := t.TempDir()
+		fake := fmt.Sprintf("#!/bin/sh\necho \"fake kubeconform $*\" >&2\nexit %d\n", exit)
+		if err := os.WriteFile(filepath.Join(bin, "kubeconform"), []byte(fake), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		c := exec.Command("bash", "monitoring-check.sh")
+		c.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		out, err := c.CombinedOutput()
+		return string(out), err
+	}
+	out, err := run(1)
+	if err == nil {
+		t.Fatalf("a failed kubeconform did not stop monitoring-check.sh:\n%s", out)
+	}
+	if strings.Contains(out, "qv-business with metrics on") {
+		t.Fatalf("the script went on after the first failed validation:\n%s", out)
+	}
+	if out, err := run(0); err != nil {
+		t.Fatalf("with a passing kubeconform the script failed: %v\n%s", err, out)
+	}
+}
