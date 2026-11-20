@@ -348,7 +348,7 @@ func TestCertsPinnedIdentitiesNeverRotateKeys(t *testing.T) {
 	objs := mustRender(t, "values.yaml", "--set", "cluster=party-b")
 	for i := range objs {
 		if objs[i].Kind == "Certificate" && strings.Contains(objs[i].Raw, "mpc-party-b") {
-			objs[i].Spec = mustNode(t, strings.ReplaceAll(nodeText(t, objs[i].Spec), "rotationPolicy: Never", "rotationPolicy: Always"))
+			objs[i].Spec = mustNode(t, strings.ReplaceAll(certNodeText(t, objs[i].Spec), "rotationPolicy: Never", "rotationPolicy: Always"))
 		}
 	}
 	if len(checkPinned(objs, cat)) == 0 {
@@ -356,7 +356,7 @@ func TestCertsPinnedIdentitiesNeverRotateKeys(t *testing.T) {
 	}
 }
 
-func nodeText(t testing.TB, n yaml.Node) string {
+func certNodeText(t testing.TB, n yaml.Node) string {
 	t.Helper()
 	b, err := yaml.Marshal(&n)
 	if err != nil {
