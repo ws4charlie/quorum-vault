@@ -58,7 +58,7 @@ tls:
   worker:   { secretName: qv-worker-tls }
   relay:    { secretName: qv-relay-tls }
   archiver: { secretName: qv-archiver-tls }
-  admin:    { secretName: qv-admin-tls }    # the migration Job only: certificate name `admin`, Postgres role `qv` (owner)
+  admin:    { secretName: qv-migrator-tls } # the migration Job only (the key stays `admin`): certificate name `migrator`, Postgres role `qv` (owner); Secret name rule: deploy/helm/qv-certs
 
 # --- The custody config (business zone) ---
 custody:

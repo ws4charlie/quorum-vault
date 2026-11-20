@@ -19,5 +19,7 @@ helm template qv "$chart" --namespace qv -f "$chart/values.yaml" -f ci/helm/ci-d
 kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" "$out/approval.yaml"
 "$(dirname "$0")/check-signing-core.sh"
 ci/helm/party-check.sh   # chart list: qv-party (qv-business is above)
+ci/helm/certs-check.sh   # deploy/helm/qv-certs (task D5)
+
 echo "== policy and contract tests"
 (cd ci/helm && CI=1 go test -count=1 ./...)

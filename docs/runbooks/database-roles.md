@@ -11,13 +11,13 @@ Every service connects to Postgres as a role of its own. The certificate's name 
 | `qv-relay` | `qv_relay` | Read `outbox`, change only its `published_at` and `chained_at`; append to and read `audit_log`; call `outbox_prune()`. Nothing else. |
 | `qv-anchor-archiver` | `qv_archiver` | Nothing: it reads Kafka and writes the archive store. |
 | `qv-gateway` (link) | `qv_gateway` | Read and update `sign_jobs`. |
-| admin, `qv-migrate` | `qv` | Owner. |
+| `migrator` (the migration Job on Kubernetes), `admin` (operators, tests, the compose stack) | `qv` | Owner. Two names, one role: the Job holds a certificate that is good for nothing else (no Kafka superuser, no Temporal access), and the operators' `admin` is not kept in a cluster Secret. |
 
 `keysets` (key registry): core and worker select, insert, update; nobody deletes. `drain_moves` and `keyset_drains` (key replacement, migration 0031): the worker selects, inserts and updates them (it plans and drives drains); the core only selects (its admin API shows them). The exact grants are the matrix in `migrations/0030_service_roles.sql`. A table added by a later migration is closed to every service role until that migration grants it.
 
 ## Migrations
 
-`qv-core` and `qv-worker` never apply migrations. They check at start that every migration is recorded and that the database has none this binary does not know, and refuse to start otherwise, naming the files. Run the migrations first, as the owner (the admin certificate):
+`qv-core` and `qv-worker` never apply migrations. They check at start that every migration is recorded and that the database has none this binary does not know, and refuse to start otherwise, naming the files. Run the migrations first, as the owner (the `migrator` certificate on Kubernetes, the `admin` certificate by hand):
 
 ```bash
 DATABASE_URL='postgres://qv@db:5432/quorumvault?sslmode=verify-full&sslrootcert=...&sslcert=admin.crt&sslkey=admin.key' go run ./cmd/qv-migrate

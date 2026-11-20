@@ -1,0 +1,57 @@
+# Production values: certificates come from Vault (or OpenBao) PKI through cert-manager's Vault issuer. No CA key is created or held in any cluster.
+# Install once per cluster:  helm install qv-certs deploy/helm/qv-certs -n <namespace> -f values.yaml --set cluster=<cluster> -f <your site values>
+
+# Which cluster this release is: business | signing-core | party-b | party-c | broker. The chart renders exactly the catalog entries that name it
+# (catalog.json, generated from internal/pki/catalog.go). Required: there is no default, so a release cannot silently take the wrong zone.
+cluster: ""
+
+# Identities of people and tools (catalog `operator`: admin). Off in production: an owner-level client certificate must not sit in a cluster Secret.
+operatorCertificates: false
+
+# Certificate lifetimes. Most identities are short-lived and renewed by cert-manager at about one third of the lifetime left (docs/runbooks/certificates.md).
+# Pinned identities (peers pin their public key) live a year; their key never changes on renewal and is rotated by the runbook, at least yearly.
+duration:   { default: 72h,  pinned: 8760h }
+renewBefore: { default: 24h, pinned: 1080h } # pinned: renew 45 days ahead, so the 30-day alert QVPinnedCertExpiringSoon stays quiet
+
+# Extra DNS names per catalog name, on top of the catalog's (compose names and localhost). The names clients dial in this deployment, e.g.
+#   postgres: [qv-business-db-rw.qv.svc, qv-business-db-rw.qv.svc.cluster.local]
+#   mpc-party-b: [party-b.parties.internal.example]
+extraDNSNames: {}
+
+issuers:
+  mode: vault                 # vault (production) | ca (kind and CI only: the CA key lives in a cluster Secret made at install time)
+  # One Issuer per zone this cluster holds identities of (cert-manager Issuer, in the release namespace). The Vault PKI mount is one per zone and the Vault role
+  # is one per cluster: its allowed_uri_sans and allowed_domains list only that cluster's names (README, "Vault roles"). `path` is <mount>/sign/<role>.
+  vault:
+    business:                 # the business zone's authority (clusters: business)
+      server: ""              # https://vault.example.internal:8200
+      path: ""                # pki-business/sign/business-cluster
+      caBundle: ""            # base64 of the PEM that signs Vault's own TLS certificate (public); empty = the system roots
+      namespace: ""           # Vault Enterprise / HCP namespace, else empty
+      auth: { mountPath: /v1/auth/kubernetes, role: "", serviceAccountName: qv-certs-business }
+    signing:                  # the signing zone's authority (clusters: signing-core, party-b, party-c, broker), held in the dedicated signing PKI account
+      server: ""
+      path: ""                # pki-signing/sign/signing-core
+      caBundle: ""
+      namespace: ""
+      auth: { mountPath: /v1/auth/kubernetes, role: "", serviceAccountName: qv-certs-signing }
+    link:                     # signing clusters only: the BUSINESS authority, restricted to this cluster's link names (gateway-link, cosigner-link)
+      server: ""
+      path: ""                # pki-business/sign/link-signing-core: allowed_uri_sans exactly the link names of the cluster
+      caBundle: ""
+      namespace: ""
+      auth: { mountPath: /v1/auth/kubernetes, role: "", serviceAccountName: qv-certs-link }
+  # kind and CI (mode: ca). The authorities are made by cert-manager when the release is installed, never kept in the repository.
+  ca:
+    duration: 87600h
+    linkSecretName: qv-business-ca  # a signing cluster in mode ca needs the business CA Secret to issue its link certificates: development only
+  # cert-manager's own service account, which asks Kubernetes for a token of the Vault service account (needed for auth through `serviceAccountName`)
+  certManager: { serviceAccount: cert-manager, namespace: cert-manager }
+
+# Trust bundles: one ConfigMap per zone, key `ca.crt`, the CA certificate(s) that sign that zone (several during a CA roll). PUBLIC certificates, set per
+# deployment (--set-file trust.business=business-ca.pem). Services mount this, not cert-manager's ca.crt (README: why). A zone this cluster holds no
+# identity of gets no bundle. An empty bundle is refused unless allowEmpty (kind: the CA does not exist yet at the first install; README).
+trust:
+  business: ""
+  signing: ""
+  allowEmpty: false
