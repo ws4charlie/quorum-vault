@@ -175,6 +175,71 @@ type drainBuilder interface {
 	BuildDrain(ctx context.Context, tx pgx.Tx, d evm.DrainRequest) (chain.UnsignedTx, error)
 }
 
+// pickDrainAsset chooses the asset of the next move of a leaving generation.
+//
+// A planned drain moves the tokens first (in the order of the configured asset list) and the native asset last, because every transfer is paid in the
+// native asset from the old address.
+//
+// An emergency drain (the generation is compromised) moves the most value first: the assets with a balance are ordered by balance times the configured
+// price (price_wei), the largest first, and the native asset takes its place in that order once what it must keep for the gas of the transfers still to
+// come is set aside (one NativeReserve for each token with a balance). Where the native asset would be first but has nothing to spare, a token goes first.
+// The thief races the drain for the same balances; this is the order that leaves the least behind at every moment. The planner makes one move at a time
+// per generation (they share one nonce lane, and a second move would only queue behind the first); shards drain at the same time.
+func (s *Service) pickDrainAsset(c *Config, bal map[string]*big.Int, nativeDust *big.Int, emergency bool) (string, *big.Int) {
+	if !emergency {
+		for _, sym := range c.AssetList {
+			if sym != c.Native && bal[sym].Sign() > 0 {
+				return sym, bal[sym]
+			}
+		}
+		if bal[c.Native].Cmp(nativeDust) > 0 {
+			return c.Native, new(big.Int).Sub(bal[c.Native], nativeDust)
+		}
+		return "", new(big.Int)
+	}
+	type cand struct {
+		sym    string
+		amount *big.Int
+		value  *big.Int
+	}
+	var toks []cand
+	for _, sym := range c.AssetList {
+		if sym != c.Native && bal[sym].Sign() > 0 {
+			toks = append(toks, cand{sym: sym, amount: bal[sym], value: valueOf(c, sym, bal[sym])})
+		}
+	}
+	all := append([]cand(nil), toks...)
+	// What the native asset can move first: its balance, less the last transfer's gas and the gas of every token transfer still to make.
+	if len(toks) > 0 {
+		spare := new(big.Int).Sub(bal[c.Native], nativeDust)
+		spare.Sub(spare, new(big.Int).Mul(big.NewInt(int64(len(toks))), c.NativeReserve()))
+		if spare.Sign() > 0 {
+			all = append(all, cand{sym: c.Native, amount: spare, value: valueOf(c, c.Native, spare)})
+		}
+	} else if bal[c.Native].Cmp(nativeDust) > 0 {
+		all = append(all, cand{sym: c.Native, amount: new(big.Int).Sub(bal[c.Native], nativeDust), value: valueOf(c, c.Native, bal[c.Native])})
+	}
+	if len(all) == 0 {
+		return "", new(big.Int)
+	}
+	best := all[0]
+	for _, x := range all[1:] {
+		if x.value.Cmp(best.value) > 0 {
+			best = x
+		}
+	}
+	return best.sym, best.amount
+}
+
+// valueOf is an amount of an asset in the common unit of the price table (wei).
+func valueOf(c *Config, sym string, amount *big.Int) *big.Int {
+	p := big.NewInt(1)
+	if a, ok := c.Assets[sym]; ok && a.PriceWei != nil && a.PriceWei.Sign() > 0 {
+		p = a.PriceWei
+	}
+	return new(big.Int).Mul(amount, p)
+}
+
 // planDrain makes the next move of one leaving generation, or records why not.
 func (s *Service) planDrain(ctx context.Context, log *slog.Logger, shardIdx int, from KeysetInfo, all []KeysetInfo) (*DrainMove, error) {
 	c := s.Cfg
@@ -227,17 +292,7 @@ func (s *Service) planDrain(ctx context.Context, log *slog.Logger, shardIdx int,
 	if err != nil {
 		return wait("cannot work out the gas of the last transfer: " + err.Error())
 	}
-	// Tokens first, the native asset last.
-	asset, amount := "", new(big.Int)
-	for _, sym := range c.AssetList {
-		if sym != c.Native && bal[sym].Sign() > 0 {
-			asset, amount = sym, bal[sym]
-			break
-		}
-	}
-	if asset == "" && bal[c.Native].Cmp(nativeDust) > 0 {
-		asset, amount = c.Native, new(big.Int).Sub(bal[c.Native], nativeDust)
-	}
+	asset, amount := s.pickDrainAsset(c, bal, nativeDust, from.State == partition.StateCompromised)
 	if asset == "" {
 		err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 			return setDrainState(ctx, tx, shard, from.Generation, "drained", "", 0)

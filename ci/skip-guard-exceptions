@@ -18,3 +18,4 @@ ci/kind/install.sh	1	deploy/helm/qv-certs	same reason (kind.yml); the chart inst
 ci/kind/smoke/upgrade.sh	1	chart=deploy/helm/qv-business	same reason (kind.yml)
 ci/kind/parties.sh	1	deploy/helm	run only by .github/workflows/kind.yml (and make kind-* by people); kind.yml runs on pull requests that change deploy/**; ci.yml and the make targets of the heavy jobs never run it
 ci/kind/signing.sh	2	deploy/helm	run only by .github/workflows/kind.yml (and make kind-* by people); kind.yml runs on pull requests that change deploy/**; ci.yml and the make targets of the heavy jobs never run it
+ci/kind/teesim.sh	1	deploy/helm	run only by .github/workflows/kind.yml (and make kind-* by people); kind.yml runs on pull requests that change deploy/**; ci.yml and the make targets of the heavy jobs never run it

@@ -18,7 +18,8 @@ echo "== production values with the approval page on: template + kubeconform"
 helm template qv "$chart" --namespace qv -f "$chart/values.yaml" -f ci/helm/ci-digests.yaml --set approval.enabled=true > "$out/approval.yaml"
 kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" "$out/approval.yaml"
 "$(dirname "$0")/check-signing-core.sh"
-ci/helm/party-check.sh   # chart list: qv-party (qv-business is above)
+ci/helm/party-check.sh   # chart list: qv-party (qv-business is above), with its attested mode
+ci/helm/broker-check.sh  # deploy/helm/qv-attest-broker (task Broker-chart)
 ci/helm/certs-check.sh   # deploy/helm/qv-certs (task D5)
 ci/helm/monitoring-check.sh   # deploy/helm/qv-monitoring and the metrics parts of the other charts (task D10)
 ci/helm/policy-check.sh  # deploy/policy/qv-policy (task D9): cluster policies and their offline tests
