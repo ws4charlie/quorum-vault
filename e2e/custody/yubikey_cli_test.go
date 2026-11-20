@@ -52,6 +52,9 @@ func (s *system) cliRun(actor string, key *ctaptest.Soft, api string, args ...st
 }
 
 func TestApproverCLIWithASoftwareKey(t *testing.T) {
+	if mpcMode() {
+		t.Skip("signs with the HSM only (as approvalweb_test.go): the cosigner of mpc mode has its own guard database, to which this test does not apply the approver enrolment")
+	}
 	s, _ := funded(t, opts{approvalWeb: true, approvalTimeout: "8m"}, "c-cli", 8) // approvalWeb: operators in the zone config, and bob is not a bootstrap approver
 	key := ctaptest.New()
 	const origin = "https://approve.example.com" // a convention for a CLI: the origin it writes is the one the zone lists for bob
@@ -159,6 +162,9 @@ func TestApproverCLIWithASoftwareKey(t *testing.T) {
 func TestApproverCLILoopbackLoginWithKeycloak(t *testing.T) {
 	if !idp.Real() {
 		t.Skip("QV_E2E_KEYCLOAK_URL is not set: no Keycloak")
+	}
+	if mpcMode() {
+		t.Skip("signs with the HSM only (as approvalweb_test.go): the cosigner of mpc mode has its own guard database, to which this test does not apply the approver enrolment")
 	}
 	s, _ := funded(t, opts{approvalWeb: true, approvalTimeout: "8m"}, "c-cli-kc", 3)
 	w := s.withdraw("alice", "k-cli-kc", "c-cli-kc", "ETH", randAddr(), eth(1))
