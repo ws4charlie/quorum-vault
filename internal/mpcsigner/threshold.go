@@ -103,6 +103,23 @@ func NewThreshold(cfg ThresholdConfig) (*ThresholdSigner, error) {
 	return &ThresholdSigner{thresholdCore: core, pub: pub}, nil
 }
 
+// WithKey returns a signer for another keyset of the same parties: the connections, certificates, pins and router are shared with t (closing t closes
+// them), the keyset and its 65-byte uncompressed public key are the ones given. It is how the gateway signs from a later generation of a hot shard
+// (a key reference from an operator-signed record): the parties and links are the shard's, only the key differs.
+func (t *ThresholdSigner) WithKey(keysetID string, publicKey []byte) (*ThresholdSigner, error) {
+	if keysetID == "" {
+		return nil, errors.New("keyset id is required")
+	}
+	pub, err := signerParse(publicKey)
+	if err != nil {
+		return nil, err
+	}
+	cfg := t.cfg
+	cfg.KeysetID, cfg.PublicKey = keysetID, publicKey
+	core := &thresholdCore{cfg: cfg, log: t.log, conns: t.conns, cls: t.cls}
+	return &ThresholdSigner{thresholdCore: core, pub: pub}, nil
+}
+
 func newThresholdCore(cfg ThresholdConfig) (*thresholdCore, error) {
 	if cfg.KeysetID == "" || len(cfg.Coordinators) == 0 {
 		return nil, errors.New("keyset id and at least one coordinator are required")

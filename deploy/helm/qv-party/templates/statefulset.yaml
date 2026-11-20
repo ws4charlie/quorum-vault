@@ -1,0 +1,190 @@
+{{- include "qp.guards" . -}}
+{{- $role := include "qp.role" . -}}
+{{- $cos := ne $role "A" -}}
+{{- $soft := .Values.hsm.softhsm.enabled -}}
+{{- $pkcs := eq .Values.sealer.type "pkcs11" -}}
+{{- $v := .Values -}}
+{{- /* The pod's stop bound: the party stops sessions after limits.shutdownGraceMs; the pod gets that plus 20 s (deploy/images/README.md). The cosigner needs 30 s at most. */ -}}
+{{- $grace := max 30 (add (div (int $v.limits.shutdownGraceMs) 1000) 20) -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "qp.fullname" . }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+spec:
+  # Exactly one pod per party. replicas is fixed by the schema; there is no value that raises it.
+  replicas: 1
+  serviceName: {{ include "qp.fullname" . }}
+  # One pod, so the order never matters; OrderedReady is the policy that never starts a pod before the previous one is gone and ready.
+  podManagementPolicy: OrderedReady
+  # RollingUpdate on one replica stops the old pod, waits until it is gone, then creates the new one: two pods of one party never run at once.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: { partition: 0 }
+  # The share lives on this volume: deleting the StatefulSet or scaling it down never deletes it.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels: {{- include "qp.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "qp.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "qp.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      terminationGracePeriodSeconds: {{ $grace }}
+      securityContext: {{- include "qp.podSecurityContext" . | nindent 8 }}
+      {{- include "qp.pullSecrets" . | nindent 6 }}
+      {{- with $v.scheduling.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with $v.scheduling.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.scheduling.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.scheduling.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $soft }}
+      initContainers:
+        # Development only: makes the SoftHSM token on the data volume once (it does nothing when the token exists). The PIN and SO PIN are read from files.
+        - name: softhsm-init
+          image: {{ include "qp.image" (dict "ctx" . "k" "party") | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              mkdir -p /var/lib/qv/party/softhsm/tokens
+              if ! softhsm2-util --show-slots | grep -q "Label:[[:space:]]*${SOFTHSM_LABEL}[[:space:]]*\$"; then
+                softhsm2-util --init-token --free --label "${SOFTHSM_LABEL}" --so-pin "$(cat /etc/qv/hsm-so/so-pin)" --pin "$(cat /etc/qv/hsm-pin/pin)" >/dev/null
+              fi
+          env:
+            - { name: SOFTHSM_LABEL, value: {{ include "qp.token" . | quote }} }
+            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }
+            - { name: QV_ENV, value: dev }
+          resources: {{- toYaml $v.party.resources | nindent 12 }}
+          securityContext: {{- include "qp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/qv/party }
+            - { name: softhsm-conf, mountPath: /etc/qv/softhsm, readOnly: true }
+            - { name: hsm-pin, mountPath: /etc/qv/hsm-pin, readOnly: true }
+            - { name: hsm-so-pin, mountPath: /etc/qv/hsm-so, readOnly: true }
+      {{- end }}
+      containers:
+        - name: mpc-party
+          image: {{ include "qp.image" (dict "ctx" . "k" "party") | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          args: ["-config", "/etc/qv/config/party.json"]
+          env:
+            - { name: QV_HEALTH_LISTEN, value: {{ printf "0.0.0.0:%d" (int $v.ports.health) | quote }} }
+            {{- if $soft }}
+            - { name: QV_ENV, value: dev }
+            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }
+            {{- end }}
+          {{- include "qp.probes" (dict "port" $v.ports.health) | nindent 10 }}
+          resources: {{- toYaml $v.party.resources | nindent 12 }}
+          securityContext: {{- include "qp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: config, mountPath: /etc/qv/config, readOnly: true }
+            - { name: party-tls, mountPath: /etc/qv/party-tls, readOnly: true }
+            - { name: data, mountPath: /var/lib/qv/party }
+            {{- if $pkcs }}
+            - { name: hsm-pin, mountPath: /etc/qv/hsm-pin, readOnly: true }
+            {{- if $soft }}
+            - { name: softhsm-conf, mountPath: /etc/qv/softhsm, readOnly: true }
+            {{- else }}
+            - { name: hsm-module, mountPath: /etc/qv/hsm, readOnly: true }
+            {{- end }}
+            {{- end }}
+            {{- if $cos }}
+            - { name: socket, mountPath: /run/qv }
+            {{- end }}
+            {{- if $v.backup.outputClaim }}
+            - { name: backup-out, mountPath: /var/lib/qv/backup }
+            {{- end }}
+        {{- if $cos }}
+        - name: qv-cosigner
+          image: {{ include "qp.image" (dict "ctx" . "k" "cosigner") | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          args:
+            - -config
+            - /etc/qv/cosigner/cosigner.json
+            - -socket
+            - /run/qv/cosigner.sock
+            - -audit-source
+            - {{ default (printf "cosigner-%s" ($role | lower)) $v.cosigner.auditSource | quote }}
+          env:
+            - { name: QV_COSIGNER_GUARD_DSN, value: {{ printf "postgres://%s@%s:%d/%s?sslmode=%s&sslrootcert=/etc/qv/tls/ca.crt&sslcert=/etc/qv/tls/tls.crt&sslkey=/etc/qv/tls/tls.key" $v.cosigner.database.role $v.cosigner.database.host (int $v.cosigner.database.port) $v.cosigner.database.name $v.cosigner.database.sslmode | quote }} }
+            - { name: QV_KAFKA_BROKERS, value: {{ $v.cosigner.kafka.brokers | quote }} }
+            - { name: QV_TLS_CERT, value: /etc/qv/tls/tls.crt }
+            - { name: QV_TLS_KEY, value: /etc/qv/tls/tls.key }
+            - { name: QV_TLS_CA, value: /etc/qv/tls/ca.crt }
+            - { name: QV_TLS_RELOAD, value: {{ $v.tls.reload | quote }} }
+            - { name: QV_LINK_TLS_CERT, value: /etc/qv/link-tls/tls.crt }
+            - { name: QV_LINK_TLS_KEY, value: /etc/qv/link-tls/tls.key }
+            - { name: QV_LINK_TLS_CA, value: /etc/qv/link-tls/ca.crt }
+            - { name: QV_LINK_TLS_RELOAD, value: {{ $v.tls.reload | quote }} }
+            - { name: QV_COSIGNER_SOCKET_CERT, value: /etc/qv/socket-tls/tls.crt }
+            - { name: QV_COSIGNER_SOCKET_KEY, value: /etc/qv/socket-tls/tls.key }
+            - { name: QV_COSIGNER_PARTY_PINS, value: {{ required "roles B and C: cosigner.partyPins is required (pins of this party's certificate)" (join "," $v.cosigner.partyPins) | quote }} }
+            - { name: QV_COSIGNER_METRICS_LISTEN, value: {{ printf "127.0.0.1:%d" (int $v.ports.cosignerMetrics) | quote }} }
+            - { name: QV_HEALTH_LISTEN, value: {{ printf "0.0.0.0:%d" (int $v.ports.cosignerHealth) | quote }} }
+          {{- include "qp.probes" (dict "port" $v.ports.cosignerHealth) | nindent 10 }}
+          resources: {{- toYaml $v.cosigner.resources | nindent 12 }}
+          securityContext: {{- include "qp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: cosigner-config, mountPath: /etc/qv/cosigner, readOnly: true }
+            - { name: cosigner-tls, mountPath: /etc/qv/tls, readOnly: true }
+            - { name: cosigner-link-tls, mountPath: /etc/qv/link-tls, readOnly: true }
+            - { name: cosigner-socket-tls, mountPath: /etc/qv/socket-tls, readOnly: true }
+            - { name: socket, mountPath: /run/qv }
+        {{- end }}
+      volumes:
+        - name: config
+          configMap: { name: {{ include "qp.partyConfigName" . }}, defaultMode: 288 }
+        {{- include "qp.secretVolume" (dict "name" "party-tls" "secret" (include "qp.partySecret" .)) | nindent 8 }}
+        {{- if $pkcs }}
+        {{- include "qp.secretVolume" (dict "name" "hsm-pin" "secret" $v.hsm.pinSecret) | nindent 8 }}
+        {{- if $soft }}
+        {{- include "qp.secretVolume" (dict "name" "hsm-so-pin" "secret" $v.hsm.softhsm.soPinSecret) | nindent 8 }}
+        - name: softhsm-conf
+          configMap: { name: {{ include "qp.softhsmConfigName" . }} }
+        {{- else }}
+        - name: hsm-module
+          {{- toYaml $v.hsm.module.volume | nindent 10 }}
+        {{- end }}
+        {{- end }}
+        {{- if $cos }}
+        - name: cosigner-config
+          configMap: { name: {{ include "qp.cosignerConfigName" . }}, defaultMode: 288 }
+        {{- include "qp.secretVolume" (dict "name" "cosigner-tls" "secret" $v.tls.cosigner.secretName) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "cosigner-link-tls" "secret" $v.tls.cosignerLink.secretName) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "cosigner-socket-tls" "secret" $v.tls.cosignerSocket.secretName) | nindent 8 }}
+        # The cosigner's unix socket (mode 0600, owner only: both containers run as the same uid). In memory, empty at every start, shared by exactly these two containers.
+        - name: socket
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        {{- end }}
+        {{- with $v.backup.outputClaim }}
+        - name: backup-out
+          persistentVolumeClaim: { claimName: {{ . | quote }} }
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels: {{- include "qp.selector" . | nindent 10 }}
+      spec:
+        accessModes: {{ toJson $v.persistence.accessModes }}
+        {{- with $v.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $v.persistence.size | quote }}

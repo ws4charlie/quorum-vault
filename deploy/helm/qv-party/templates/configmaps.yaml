@@ -1,0 +1,97 @@
+{{- /*
+  Plain configuration only: public keys, pins, addresses, limits. No secret is ever rendered into a ConfigMap (the PIN is a file from a Secret, the keys are Secret volumes).
+  The names carry a hash of the content and the objects are immutable: a change is a new ConfigMap and a rollout of the pod, never an edit in place.
+*/ -}}
+{{- define "qp.partyConfig" -}}
+{{- $v := .Values -}}
+{{- $role := include "qp.role" . -}}
+{{- if not $v.callerPins }}{{ fail "callerPins is required: the certificates allowed on the caller port" }}{{ end -}}
+{{- if not $v.adminKeys }}{{ fail "adminKeys is required: the operators' Ed25519 public keys" }}{{ end -}}
+{{- $c := dict "role" $role "caller_listen" (printf "0.0.0.0:%d" (int $v.ports.caller)) "cert_file" "/etc/qv/party-tls/tls.crt" "key_file" "/etc/qv/party-tls/tls.key" "data_dir" "/var/lib/qv/party/data" "metrics_listen" (printf "127.0.0.1:%d" (int $v.ports.metrics)) "caller_pins" $v.callerPins "admin_keys" $v.adminKeys "admin_max_age_seconds" (int $v.adminMaxAgeSeconds) -}}
+{{- if eq $role "A" -}}
+{{- if not $v.peers.b.address }}{{ fail "role A: peers.b.address is required (party B's peer endpoint)" }}{{ end -}}
+{{- if not $v.peers.b.pins }}{{ fail "role A: peers.b.pins is required" }}{{ end -}}
+{{- $_ := set $c "peer_address" $v.peers.b.address -}}
+{{- $_ := set $c "peer_pins" $v.peers.b.pins -}}
+{{- end -}}
+{{- if eq $role "B" -}}
+{{- if not $v.peers.a.pins }}{{ fail "role B: peers.a.pins is required (party A's certificate)" }}{{ end -}}
+{{- $_ := set $c "peer_listen" (printf "0.0.0.0:%d" (int $v.ports.peer)) -}}
+{{- $_ := set $c "peer_pins" $v.peers.a.pins -}}
+{{- end -}}
+{{- if or (eq $role "A") (eq $role "B") -}}
+{{- if not $v.peers.c.address }}{{ fail "roles A and B: peers.c.address is required (party C's peer endpoint)" }}{{ end -}}
+{{- if not $v.peers.c.pins }}{{ fail "roles A and B: peers.c.pins is required" }}{{ end -}}
+{{- $_ := set $c "peer_c_address" $v.peers.c.address -}}
+{{- $_ := set $c "peer_c_pins" $v.peers.c.pins -}}
+{{- end -}}
+{{- if eq $role "C" -}}
+{{- if or (not $v.peers.a.pins) (not $v.peers.b.pins) }}{{ fail "role C: peers.a.pins and peers.b.pins are required (it tells A from B by the certificate)" }}{{ end -}}
+{{- $_ := set $c "peer_listen" (printf "0.0.0.0:%d" (int $v.ports.peer)) -}}
+{{- $_ := set $c "peer_a_pins" $v.peers.a.pins -}}
+{{- $_ := set $c "peer_b_pins" $v.peers.b.pins -}}
+{{- end -}}
+{{- if eq $role "A" -}}
+{{- $_ := set $c "authorizer" (dict "type" "pinned-caller") -}}
+{{- else -}}
+{{- if not $v.cosigner.socketPins }}{{ fail "roles B and C: cosigner.socketPins is required (pins of the cosigner's socket certificate)" }}{{ end -}}
+{{- $_ := set $c "authorizer" (dict "type" "cosigner" "socket" "/run/qv/cosigner.sock" "timeout_ms" (int $v.cosigner.timeoutMs) "cosigner_pins" $v.cosigner.socketPins) -}}
+{{- end -}}
+{{- if eq $v.sealer.type "pkcs11" -}}
+{{- $_ := set $c "sealer" (dict "type" "pkcs11" "token" (include "qp.token" .) "lib" $v.hsm.module.path "pin_file" "/etc/qv/hsm-pin/pin") -}}
+{{- else -}}
+{{- $_ := set $c "sealer" (merge (dict "type" $v.sealer.type) $v.sealer.attested) -}}
+{{- end -}}
+{{- $l := dict "shutdown_grace_ms" (int $v.limits.shutdownGraceMs) -}}
+{{- range $k, $j := dict "recvTimeoutMs" "recv_timeout_ms" "keygenRecvTimeoutMs" "keygen_recv_timeout_ms" "sessionTimeoutMs" "session_timeout_ms" "maxPeerSessions" "max_peer_sessions" "maxFrameBytes" "max_frame_bytes" "maxIntentBytes" "max_intent_bytes" "replayCacheSize" "replay_cache_size" -}}
+{{- if gt (int (index $v.limits $k)) 0 }}{{ $_ := set $l $j (int (index $v.limits $k)) }}{{ end -}}
+{{- end -}}
+{{- if gt (float64 $v.limits.sessionsPerSecKey) 0.0 }}{{ $_ := set $l "sessions_per_sec_key" $v.limits.sessionsPerSecKey }}{{ end -}}
+{{- $_ := set $c "limits" $l -}}
+{{ $c | toPrettyJson }}
+{{- end -}}
+
+{{- define "qp.partyConfigName" -}}{{ printf "%s-config-%s" (include "qp.fullname" .) (include "qp.partyConfig" . | sha256sum | trunc 10) | trunc 63 }}{{- end -}}
+{{- define "qp.cosignerConfigName" -}}{{ printf "%s-cosigner-config-%s" (include "qp.fullname" .) (toPrettyJson .Values.cosigner.config | sha256sum | trunc 10) | trunc 63 }}{{- end -}}
+{{- define "qp.softhsmConfigName" -}}{{ printf "%s-softhsm-%s" (include "qp.fullname" .) (include "qp.softhsmConf" . | sha256sum | trunc 10) | trunc 63 }}{{- end -}}
+{{- define "qp.softhsmConf" -}}
+directories.tokendir = /var/lib/qv/party/softhsm/tokens
+objectstore.backend = file
+log.level = INFO
+{{- end -}}
+
+{{- include "qp.guards" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "qp.partyConfigName" . }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+immutable: true
+data:
+  party.json: |
+    {{- include "qp.partyConfig" . | nindent 4 }}
+{{- if ne (include "qp.role" .) "A" }}
+{{- if not .Values.cosigner.config }}{{ fail "roles B and C: cosigner.config is required (the cosigner's own signing-zone config)" }}{{ end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "qp.cosignerConfigName" . }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+immutable: true
+data:
+  cosigner.json: |
+    {{- toPrettyJson .Values.cosigner.config | nindent 4 }}
+{{- end }}
+{{- if .Values.hsm.softhsm.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "qp.softhsmConfigName" . }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+immutable: true
+data:
+  softhsm2.conf: |
+    {{- include "qp.softhsmConf" . | nindent 4 }}
+{{- end }}

@@ -80,6 +80,7 @@ type FileStore struct {
 	dir    string
 	role   string
 	sealer Sealer
+	scoped ScopedSealer // set when the sealer keeps one key per (keyset, generation): the attested sealer
 	mu     sync.Mutex
 }
 
@@ -92,7 +93,35 @@ func NewFileStore(dir, role string, sealer Sealer) (*FileStore, error) {
 			return nil, err
 		}
 	}
-	return &FileStore{dir: dir, role: role, sealer: sealer}, nil
+	fs := &FileStore{dir: dir, role: role, sealer: sealer}
+	if ss, ok := sealer.(ScopedSealer); ok {
+		fs.scoped = ss
+	}
+	return fs, nil
+}
+
+// Sealer returns the sealer the store seals with.
+func (s *FileStore) Sealer() Sealer { return s.sealer }
+
+// seal and open go through the scoped sealer when there is one (the data key depends on keyset and generation), else through the plain one.
+func (s *FileStore) seal(ctx context.Context, id string, gen uint64, aad, pt []byte) ([]byte, error) {
+	if s.scoped != nil {
+		return s.scoped.SealScoped(ctx, SealScope{id, gen}, aad, pt)
+	}
+	return s.sealer.Seal(aad, pt)
+}
+
+func (s *FileStore) open(ctx context.Context, id string, gen uint64, aad, sealed []byte) ([]byte, error) {
+	if s.scoped != nil {
+		return s.scoped.OpenScoped(ctx, SealScope{id, gen}, aad, sealed)
+	}
+	return s.sealer.Open(aad, sealed)
+}
+
+func (s *FileStore) forget(id string, gen uint64) {
+	if s.scoped != nil {
+		s.scoped.Forget(SealScope{id, gen})
+	}
 }
 
 type keysetFile struct {
@@ -135,6 +164,9 @@ func (s *FileStore) readState(id string) (KeysetState, error) {
 	} else if err != nil {
 		return st, err
 	}
+	if raw, err = s.openLocal(context.Background(), "state", id, raw); err != nil {
+		return st, fmt.Errorf("keyset %s: state file: %w", id, err)
+	}
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return st, fmt.Errorf("keyset %s: bad state file", id)
 	}
@@ -143,6 +175,10 @@ func (s *FileStore) readState(id string) (KeysetState, error) {
 
 func (s *FileStore) writeState(id string, st KeysetState) error {
 	raw, _ := json.Marshal(st)
+	raw, err := s.sealLocal(context.Background(), "state", id, raw)
+	if err != nil {
+		return err
+	}
 	return writeAtomic(filepath.Join(s.kdir(id), "state.json"), raw)
 }
 
@@ -155,7 +191,7 @@ func (s *FileStore) State(_ context.Context, id string) (KeysetState, error) {
 	return s.readState(id)
 }
 
-func (s *FileStore) PutCandidate(_ context.Context, id string, gen uint64, ks *cbmpc.Keyset) error {
+func (s *FileStore) PutCandidate(ctx context.Context, id string, gen uint64, ks *cbmpc.Keyset) error {
 	if !validID(id) {
 		return fmt.Errorf("invalid keyset id %q", id)
 	}
@@ -164,14 +200,14 @@ func (s *FileStore) PutCandidate(_ context.Context, id string, gen uint64, ks *c
 		return err
 	}
 	defer cbmpc.WipeBytes(blob)
-	sealed, err := s.sealer.Seal(aadKeyset(s.role, id, gen, ks.Alg()), blob)
+	sealed, err := s.seal(ctx, id, gen, aadKeyset(s.role, id, gen, ks.Alg()), blob)
 	if err != nil {
 		return err
 	}
 	return s.putCandidate(id, gen, keysetFile{V: 2, Alg: ks.Alg(), Role: s.role, Gen: gen, Sealed: sealed}, 0, "")
 }
 
-func (s *FileStore) PutTCandidate(_ context.Context, id string, gen uint64, k *cbmpc.TKey) error {
+func (s *FileStore) PutTCandidate(ctx context.Context, id string, gen uint64, k *cbmpc.TKey) error {
 	if !validID(id) {
 		return fmt.Errorf("invalid keyset id %q", id)
 	}
@@ -183,7 +219,7 @@ func (s *FileStore) PutTCandidate(_ context.Context, id string, gen uint64, k *c
 		return err
 	}
 	defer cbmpc.WipeBytes(blob)
-	sealed, err := s.sealer.Seal(aadTKeyset(s.role, id, gen), blob)
+	sealed, err := s.seal(ctx, id, gen, aadTKeyset(s.role, id, gen), blob)
 	if err != nil {
 		return err
 	}
@@ -221,7 +257,7 @@ func (s *FileStore) putCandidate(id string, gen uint64, f keysetFile, scheme int
 	return s.writeState(id, st) // the candidate exists only once this write is durable
 }
 
-func (s *FileStore) GetTKey(_ context.Context, id string, gen uint64) (*cbmpc.TKey, error) {
+func (s *FileStore) GetTKey(ctx context.Context, id string, gen uint64) (*cbmpc.TKey, error) {
 	if !validID(id) {
 		return nil, fmt.Errorf("invalid keyset id %q", id)
 	}
@@ -235,14 +271,14 @@ func (s *FileStore) GetTKey(_ context.Context, id string, gen uint64) (*cbmpc.TK
 	if err := json.Unmarshal(raw, &f); err != nil || f.V != 3 || !isTScheme(f.Scheme) || f.Role != s.role || f.Gen != gen {
 		return nil, fmt.Errorf("keyset %s generation %d: bad file", id, gen)
 	}
-	blob, err := s.sealer.Open(aadTKeyset(s.role, id, gen), f.Sealed)
+	blob, err := s.open(ctx, id, gen, aadTKeyset(s.role, id, gen), f.Sealed)
 	if err != nil {
 		return nil, fmt.Errorf("keyset %s generation %d: cannot unseal: %w", id, gen, err)
 	}
 	return cbmpc.LoadTKeyAlg(schemeAlg(pb.Scheme(f.Scheme)), memberOf(s.role), blob) // wipes blob
 }
 
-func (s *FileStore) GetKeyset(_ context.Context, id string, gen uint64) (*cbmpc.Keyset, error) {
+func (s *FileStore) GetKeyset(ctx context.Context, id string, gen uint64) (*cbmpc.Keyset, error) {
 	if !validID(id) {
 		return nil, fmt.Errorf("invalid keyset id %q", id)
 	}
@@ -256,7 +292,7 @@ func (s *FileStore) GetKeyset(_ context.Context, id string, gen uint64) (*cbmpc.
 	if err := json.Unmarshal(raw, &f); err != nil || f.V != 2 || f.Role != s.role || f.Gen != gen {
 		return nil, fmt.Errorf("keyset %s generation %d: bad file", id, gen)
 	}
-	blob, err := s.sealer.Open(aadKeyset(s.role, id, gen, f.Alg), f.Sealed)
+	blob, err := s.open(ctx, id, gen, aadKeyset(s.role, id, gen, f.Alg), f.Sealed)
 	if err != nil {
 		return nil, fmt.Errorf("keyset %s generation %d: cannot unseal: %w", id, gen, err)
 	}
@@ -316,6 +352,7 @@ func (s *FileStore) DropCandidate(_ context.Context, id string) error {
 	}
 	g := st.Candidate
 	if st.Current == 0 { // an unfinished DKG: nothing of the keyset remains
+		s.forget(id, g)
 		return os.RemoveAll(s.kdir(id))
 	}
 	st.Candidate, st.Decision = 0, 0
@@ -323,6 +360,7 @@ func (s *FileStore) DropCandidate(_ context.Context, id string) error {
 		return err
 	}
 	os.Remove(filepath.Join(s.kdir(id), fmt.Sprintf("g%d.json", g)))
+	s.forget(id, g) // the candidate's data key is not needed any more
 	return nil
 }
 
@@ -337,6 +375,7 @@ func (s *FileStore) DeleteGenerationsBelow(_ context.Context, id string, gen uin
 		var g uint64
 		if n, _ := fmt.Sscanf(e.Name(), "g%d.json", &g); n == 1 && g < gen {
 			os.Remove(filepath.Join(s.kdir(id), e.Name()))
+			s.forget(id, g) // the old generation's data key is no longer held; its wrapped form went with the file
 		}
 	}
 	return nil
@@ -348,6 +387,14 @@ func (s *FileStore) RemoveKeyset(_ context.Context, id string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if ents, err := os.ReadDir(s.kdir(id)); err == nil {
+		for _, e := range ents {
+			var g uint64
+			if n, _ := fmt.Sscanf(e.Name(), "g%d.json", &g); n == 1 {
+				s.forget(id, g)
+			}
+		}
+	}
 	return os.RemoveAll(s.kdir(id))
 }
 
@@ -370,6 +417,10 @@ func (s *FileStore) PutKey(_ context.Context, m KeyMeta) error {
 		return fmt.Errorf("invalid key id %q", m.KeyID)
 	}
 	raw, _ := json.Marshal(m)
+	raw, err := s.sealLocal(context.Background(), "key", m.KeyID, raw)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return writeAtomic(filepath.Join(s.dir, "keys", m.KeyID+".json"), raw)
@@ -385,6 +436,9 @@ func (s *FileStore) GetKey(_ context.Context, keyID string) (KeyMeta, error) {
 		return m, ErrNotFound
 	} else if err != nil {
 		return m, err
+	}
+	if raw, err = s.openLocal(context.Background(), "key", keyID, raw); err != nil {
+		return m, fmt.Errorf("key %s: %w", keyID, err)
 	}
 	return m, json.Unmarshal(raw, &m)
 }
@@ -406,10 +460,12 @@ type JobStore interface {
 	PutJob(ctx context.Context, r JobRecord) error
 }
 
-func jobPath(dir, jobID string) string {
+func jobName(jobID string) string {
 	h := sha256.Sum256([]byte(jobID))
-	return filepath.Join(dir, "jobs", hex.EncodeToString(h[:])+".json")
+	return hex.EncodeToString(h[:])
 }
+
+func jobPath(dir, jobID string) string { return filepath.Join(dir, "jobs", jobName(jobID)+".json") }
 
 func (s *FileStore) GetJob(_ context.Context, jobID string) (JobRecord, error) {
 	var r JobRecord
@@ -419,6 +475,9 @@ func (s *FileStore) GetJob(_ context.Context, jobID string) (JobRecord, error) {
 	} else if err != nil {
 		return r, err
 	}
+	if raw, err = s.openLocal(context.Background(), "job", jobName(jobID), raw); err != nil {
+		return r, fmt.Errorf("job record for %q: %w", jobID, err)
+	}
 	if err := json.Unmarshal(raw, &r); err != nil || r.JobID != jobID {
 		return r, fmt.Errorf("job record for %q is corrupt", jobID)
 	}
@@ -427,6 +486,10 @@ func (s *FileStore) GetJob(_ context.Context, jobID string) (JobRecord, error) {
 
 func (s *FileStore) PutJob(_ context.Context, r JobRecord) error {
 	raw, _ := json.Marshal(r)
+	raw, err := s.sealLocal(context.Background(), "job", jobName(r.JobID), raw)
+	if err != nil {
+		return err
+	}
 	// No store-wide lock: writeExclusive is atomic by itself (hard link fails if the record exists), so concurrent
 	// signs do not queue behind each other's fsync.
 	return writeExclusive(jobPath(s.dir, r.JobID), raw)

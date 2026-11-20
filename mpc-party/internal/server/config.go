@@ -63,6 +63,53 @@ type SealerConfig struct {
 	PinEnv  string `json:"pin_env"`
 	PinFile string `json:"pin_file"`
 	KeyFile string `json:"key_file"` // devauth sealer only: hex, 32 bytes
+
+	// attested (research/TEE.md): the party holds no key of its own. At start it proves what it runs to the broker (qv-attest-broker) and gets
+	// one data key per generation back, kept in memory only.
+	BrokerURL  string   `json:"broker_url"`  // https://host:port of the broker
+	BrokerPins []string `json:"broker_pins"` // pin (SHA-256 of the SPKI) of the broker's certificate; several during a rotation
+	// BrokerCertFile and BrokerKeyFile: the party's certificate for the link to the broker (the broker pins its key and the evidence is bound to
+	// it). Default: the party's own cert_file and key_file.
+	BrokerCertFile string         `json:"broker_cert_file"`
+	BrokerKeyFile  string         `json:"broker_key_file"`
+	Attester       AttesterConfig `json:"attester"`
+}
+
+// AttesterConfig says how the party produces evidence. Type "mock" exists only in binaries built with -tags teesim; a production build has no
+// attester until the Nitro one (task TEE-T7) is built, and refuses sealer.type "attested".
+type AttesterConfig struct {
+	Type string `json:"type"`
+	// mock: the test CA directory (made by scripts/pki.sh outside the repository) and what the mock measures: the files of the binary and the
+	// config (PCR0 = their hash), or PCR0 given directly as 96 hex characters.
+	CADir         string `json:"ca_dir"`
+	MeasureBinary string `json:"measure_binary"`
+	MeasureConfig string `json:"measure_config"`
+	PCR0          string `json:"pcr0"`
+}
+
+func (c SealerConfig) validateAttested() error {
+	var errs []error
+	req := func(name, v string) {
+		if strings.TrimSpace(v) == "" {
+			errs = append(errs, fmt.Errorf("sealer.%s is required for sealer.type %q", name, AttestedSealerType))
+		}
+	}
+	req("broker_url", c.BrokerURL)
+	req("broker_cert_file", c.BrokerCertFile)
+	req("broker_key_file", c.BrokerKeyFile)
+	req("attester.type", c.Attester.Type)
+	if c.BrokerURL != "" && !strings.HasPrefix(c.BrokerURL, "https://") {
+		errs = append(errs, errors.New("sealer.broker_url must start with https://"))
+	}
+	if len(c.BrokerPins) == 0 {
+		errs = append(errs, errors.New("sealer.broker_pins: at least one pin of the broker's certificate is required"))
+	}
+	for _, p := range c.BrokerPins {
+		if _, err := ParsePin(p); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 type AuthorizerConfig struct {
@@ -241,6 +288,17 @@ func (c *Config) Validate() error {
 		c.AdminMaxAgeSeconds = 300
 	}
 	req("sealer.type", c.Sealer.Type)
+	if c.Sealer.Type == AttestedSealerType {
+		if c.Sealer.BrokerCertFile == "" {
+			c.Sealer.BrokerCertFile = c.CertFile
+		}
+		if c.Sealer.BrokerKeyFile == "" {
+			c.Sealer.BrokerKeyFile = c.KeyFile
+		}
+		if err := c.Sealer.validateAttested(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	req("authorizer.type", c.Authorizer.Type)
 	c.Limits.applyDefaults()
 	if c.Limits.MaxFrameBytes > 64<<20 {

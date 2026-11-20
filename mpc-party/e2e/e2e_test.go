@@ -45,7 +45,7 @@ func TestMain(m *testing.M) {
 		}
 		return p
 	}
-	binDev = build("mpc-party-dev", "devauth")
+	binDev = build("mpc-party-dev", "devauth"+extraTags) // + teesim in a simulation run (tags_teesim_test.go): the mock attester is compiled in
 	binProd = build("mpc-party-prod")
 	os.Exit(m.Run())
 }
@@ -107,7 +107,12 @@ type cluster struct {
 
 func newCluster(t *testing.T, tweak func(role string, c *server.Config), withProxy bool) *cluster {
 	t.Helper()
-	env := testenv.NewEnv(t)
+	return newClusterOn(t, testenv.NewEnv(t), tweak, withProxy)
+}
+
+// newClusterOn is newCluster on a given environment (certificates): the attested-sealer tests need the party certificates before the parties start.
+func newClusterOn(t *testing.T, env *testenv.Env, tweak func(role string, c *server.Config), withProxy bool) *cluster {
+	t.Helper()
 	cl := &cluster{env: env, callerA: testenv.FreeAddr(t), callerB: testenv.FreeAddr(t), peerB: testenv.FreeAddr(t)}
 	cl.peerViaProxy = cl.peerB
 	if withProxy {

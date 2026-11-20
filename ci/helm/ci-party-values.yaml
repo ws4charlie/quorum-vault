@@ -1,0 +1,23 @@
+# Made-up values for the qv-party checks: public pins, addresses, operator keys. Nothing here is a credential. Pins are lowercase hex SHA-256 values that name no real key.
+adminKeys: ["1111111111111111111111111111111111111111111111111111111111111111"]
+callerPins: ["2222222222222222222222222222222222222222222222222222222222222222"]
+peers:
+  a: { pins: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] }
+  b: { address: "party-b.endpoint.internal:7003", pins: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] }
+  c: { address: "party-c.endpoint.internal:7003", pins: ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"] }
+hsm:
+  module:
+    path: /etc/qv/hsm/libvendor-pkcs11.so
+    volume: { persistentVolumeClaim: { claimName: vendor-pkcs11, readOnly: true } }
+cosigner:
+  config: { chains: [], approvers: [] }
+  socketPins: ["dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]
+  partyPins: ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"]
+network:
+  callerIngress: { from: [{ ipBlock: { cidr: 10.20.0.0/24 } }] }
+  peerIngress: { from: [{ ipBlock: { cidr: 10.30.0.0/24 } }, { ipBlock: { cidr: 10.31.0.0/24 } }] }
+  peerEgress: { to: [{ ipBlock: { cidr: 10.30.0.0/24 } }, { ipBlock: { cidr: 10.31.0.0/24 } }] }
+  guardDatabase: { to: [{ ipBlock: { cidr: 10.40.1.0/24 } }] }
+  kafka: { to: [{ ipBlock: { cidr: 10.50.0.0/24 } }] }
+  hsm: { to: [{ ipBlock: { cidr: 10.60.0.0/24 } }], ports: [2223] }
+backup: { outputClaim: party-backups }

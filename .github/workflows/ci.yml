@@ -118,6 +118,11 @@ jobs:
       - name: go test -race (all packages but e2e)
         run: |
           ci/run-in-image.sh bash -c 'cd mpc-party && go test -race -count=1 -timeout 25m $(go list ./... | grep -v "/e2e$")'
+      # The simulated enclave (-tags teesim: mock attester and test root, never in a production build): verifier, broker, attested sealer, migration and the
+      # crash matrices with attested parties. Needs the SoftHSM tokens (QV_REQUIRE_HSM: no silent skip).
+      - name: go test -race -tags teesim (simulated enclave)
+        run: |
+          ci/run-in-image.sh bash -c 'cd mpc-party && go test -race -count=1 -timeout 25m -tags teesim ./internal/attest/... ./cmd/qv-attest-broker/... && go test -race -count=1 -timeout 25m -tags teesim -run "TestAttested|TestMigration" ./internal/server && go test -race -count=1 -timeout 25m -tags teesim -run TestAttested ./e2e'
 
   # The Prometheus rules of monitoring/: promtool check rules, check config, the rule unit tests, and the Go test that evaluates an alert on real
   # counters. promtool is pinned in the CI image; ci/promtool-tests.sh fails on a skipped test, so a broken rule or a missing promtool is red.

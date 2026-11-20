@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ws4charlie/quorum-vault/internal/audit"
 	"github.com/ws4charlie/quorum-vault/internal/domain"
@@ -71,6 +72,7 @@ const (
 	KeysetStartDraining     = "start-draining"
 	KeysetRetire            = "retire"
 	KeysetMarkCompromised   = "mark-compromised"
+	KeysetSetDrainCaps      = "set-drain-caps"
 )
 
 // EventKeysetChanged is the audit event of an applied keyset change.
@@ -96,9 +98,13 @@ type KeysetChange struct {
 	Generation int               `json:"generation"`
 	Address    string            `json:"address,omitempty"`   // register-candidate
 	Successor  int               `json:"successor,omitempty"` // start-draining, mark-compromised
-	Caps       map[string]string `json:"caps,omitempty"`      // asset -> most the drains may move in all, base units; with Successor
-	Seq        int64             `json:"seq"`                 // must be higher than the current one
-	SignedAt   int64             `json:"signed_at"`           // unix seconds
+	Caps       map[string]string `json:"caps,omitempty"`      // asset -> most the drains may move in all, base units; with Successor, and set-drain-caps
+	// KeyRef and PublicKey (register-candidate, together or not at all) tell the zone how to sign with the generation: the reference of the key in
+	// its signer (an MPC keyset ID, or an HSM key's CKA_ID in hex) and the 65-byte uncompressed secp256k1 public key in hex, which must hash to Address.
+	KeyRef    string `json:"key_ref,omitempty"`
+	PublicKey string `json:"public_key,omitempty"`
+	Seq       int64  `json:"seq"`       // must be higher than the current one
+	SignedAt  int64  `json:"signed_at"` // unix seconds
 	// Signatures of the operators over KeysetChangeMessage.
 	Signatures []OperatorSignature `json:"signatures"`
 }
@@ -113,9 +119,11 @@ func KeysetChangeMessage(c KeysetChange) []byte {
 		Address    string            `json:"address,omitempty"`
 		Successor  int               `json:"successor,omitempty"`
 		Caps       map[string]string `json:"caps,omitempty"`
+		KeyRef     string            `json:"key_ref,omitempty"`
+		PublicKey  string            `json:"public_key,omitempty"`
 		Seq        int64             `json:"seq"`
 		SignedAt   int64             `json:"signed_at"`
-	}{c.Action, c.Shard, c.Generation, c.Address, c.Successor, c.Caps, c.Seq, c.SignedAt})
+	}{c.Action, c.Shard, c.Generation, c.Address, c.Successor, c.Caps, c.KeyRef, c.PublicKey, c.Seq, c.SignedAt})
 	return append([]byte("qv-keyset-change-v1\n"), body...)
 }
 
@@ -134,7 +142,7 @@ func MergeKeysetChanges(parts ...KeysetChange) (KeysetChange, error) {
 	out.Signatures = slices.Clone(parts[0].Signatures)
 	for _, p := range parts[1:] {
 		if !bytes.Equal(KeysetChangeMessage(p), KeysetChangeMessage(out)) {
-			return KeysetChange{}, errors.New("the signatures are over different changes (action, shard, generation, address, successor, caps, seq or time differ)")
+			return KeysetChange{}, errors.New("the signatures are over different changes (action, shard, generation, address, key, successor, caps, seq or time differ)")
 		}
 		out.Signatures = append(out.Signatures, p.Signatures...)
 	}
@@ -155,22 +163,51 @@ func (c KeysetChange) shape() error {
 	switch c.Action {
 	case KeysetRegisterCandidate:
 		if c.Address == "" || c.Successor != 0 || len(c.Caps) != 0 {
-			return errors.New("register-candidate carries the address, and no successor or caps")
+			return errors.New("register-candidate carries the address (and its key reference and public key), and no successor or caps")
+		}
+		if err := c.checkKey(); err != nil {
+			return err
 		}
 	case KeysetActivate, KeysetRetire:
-		if c.Address != "" || c.Successor != 0 || len(c.Caps) != 0 {
+		if c.Address != "" || c.Successor != 0 || len(c.Caps) != 0 || c.KeyRef != "" || c.PublicKey != "" {
 			return fmt.Errorf("%s carries only the shard and the generation", c.Action)
 		}
+	case KeysetSetDrainCaps:
+		if c.Address != "" || c.Successor != 0 || len(c.Caps) == 0 || c.KeyRef != "" || c.PublicKey != "" {
+			return errors.New("set-drain-caps carries the shard, the generation and the new caps per asset, nothing else")
+		}
 	case KeysetStartDraining:
-		if c.Address != "" || c.Successor < 1 || len(c.Caps) == 0 {
+		if c.Address != "" || c.Successor < 1 || len(c.Caps) == 0 || c.KeyRef != "" || c.PublicKey != "" {
 			return errors.New("start-draining names the successor generation and the drain caps per asset, and no address")
 		}
 	case KeysetMarkCompromised:
-		if c.Address != "" || (c.Successor > 0) != (len(c.Caps) > 0) {
+		if c.Address != "" || (c.Successor > 0) != (len(c.Caps) > 0) || c.KeyRef != "" || c.PublicKey != "" {
 			return errors.New("mark-compromised names a successor generation together with its drain caps, or neither, and no address")
 		}
 	default:
-		return fmt.Errorf("action %q is none of %s, %s, %s, %s, %s", c.Action, KeysetRegisterCandidate, KeysetActivate, KeysetStartDraining, KeysetRetire, KeysetMarkCompromised)
+		return fmt.Errorf("action %q is none of %s, %s, %s, %s, %s, %s", c.Action, KeysetRegisterCandidate, KeysetActivate, KeysetStartDraining, KeysetRetire, KeysetMarkCompromised, KeysetSetDrainCaps)
+	}
+	return nil
+}
+
+// checkKey checks the key reference and public key of a register-candidate: both or neither, and the public key hashes to the address.
+func (c KeysetChange) checkKey() error {
+	if c.KeyRef == "" && c.PublicKey == "" {
+		return nil
+	}
+	if c.KeyRef == "" || c.PublicKey == "" {
+		return errors.New("a candidate's key reference and public key come together")
+	}
+	raw, err := hex.DecodeString(c.PublicKey)
+	if err != nil || len(raw) != 65 || raw[0] != 4 {
+		return errors.New("public_key is the 65-byte uncompressed secp256k1 key in hex")
+	}
+	pub, err := crypto.UnmarshalPubkey(raw)
+	if err != nil {
+		return fmt.Errorf("public_key is not a secp256k1 point: %w", err)
+	}
+	if !common.IsHexAddress(c.Address) || crypto.PubkeyToAddress(*pub) != common.HexToAddress(c.Address) {
+		return fmt.Errorf("the public key is the key of %s, not of %s", crypto.PubkeyToAddress(*pub).Hex(), c.Address)
 	}
 	return nil
 }
@@ -187,6 +224,10 @@ type KeysetEntry struct {
 	// Successor is the generation a drain from this one pays (0: none named). Caps is the most all drains of an asset from this address may move.
 	Successor int
 	Caps      map[string]*big.Int
+	// KeyRef and PublicKey say how to sign with this generation (empty for generation 1, which the signers section of the config pins, and for a
+	// candidate registered without them: it can receive, but the zone cannot sign from it).
+	KeyRef    string
+	PublicKey string
 }
 
 func (e *KeysetEntry) clone() *KeysetEntry {
@@ -375,7 +416,11 @@ func capsOf(cc *ChainConfig, in map[string]string) (map[string]*big.Int, error) 
 
 // apply puts one change into the view, or says why it does not fit. The same rules hold when a change is applied and when the log is read back; a
 // change that breaks them is refused at the first and ignored at the second. A refused change leaves the view as it was.
-func (v *KeysetView) apply(cfg *Config, c KeysetChange) error {
+//
+// fresh is true when the change is being applied now and false when it is read back from the log. The sweep destination is checked only when fresh: after
+// a replacement the operators set the config's sweep_destination to the new generation's address (the runbook's manual edit), and the record that
+// registered that very address must keep holding.
+func (v *KeysetView) apply(cfg *Config, c KeysetChange, fresh bool) error {
 	if err := c.shape(); err != nil {
 		return err
 	}
@@ -426,7 +471,7 @@ func (v *KeysetView) apply(cfg *Config, c KeysetChange) error {
 			return fmt.Errorf("the next generation of %s is %d, not %d", c.Shard, top+1, c.Generation)
 		case next.addressUsed(cc.Name, addr.Hex()):
 			return fmt.Errorf("address %s is already a generation of a shard of %s", addr.Hex(), cc.Name)
-		case addr == cc.EVM.Factory || addr == cc.EVM.SweepDestination:
+		case addr == cc.EVM.Factory || (fresh && addr == cc.EVM.SweepDestination):
 			return fmt.Errorf("address %s is the factory or the sweep destination", addr.Hex())
 		}
 		for k, cold := range cc.EVM.ColdAddresses {
@@ -434,7 +479,8 @@ func (v *KeysetView) apply(cfg *Config, c KeysetChange) error {
 				return fmt.Errorf("address %s is the cold address %q", addr.Hex(), k)
 			}
 		}
-		gens[c.Generation] = &KeysetEntry{Shard: shard, Chain: cc.Name, Generation: c.Generation, Address: addr.Hex(), State: partition.StateCandidate}
+		gens[c.Generation] = &KeysetEntry{Shard: shard, Chain: cc.Name, Generation: c.Generation, Address: addr.Hex(), State: partition.StateCandidate,
+			KeyRef: c.KeyRef, PublicKey: c.PublicKey}
 	case KeysetActivate:
 		if cur == nil || cur.State != partition.StateCandidate {
 			return illegal(partition.StateCandidate)
@@ -461,6 +507,22 @@ func (v *KeysetView) apply(cfg *Config, c KeysetChange) error {
 			return illegal(partition.StateDraining)
 		}
 		cur.State = partition.StateRetired
+	case KeysetSetDrainCaps:
+		if cur == nil || (cur.State != partition.StateDraining && cur.State != partition.StateCompromised) || cur.Successor == 0 {
+			return fmt.Errorf("%w: %s generation %d must be draining or compromised with a successor to have its drain caps set", partition.ErrIllegalTransition, c.Shard, c.Generation)
+		}
+		caps, err := capsOf(cc, c.Caps)
+		if err != nil {
+			return err
+		}
+		merged := maps.Clone(cur.Caps)
+		if merged == nil {
+			merged = map[string]*big.Int{}
+		}
+		for a, n := range caps {
+			merged[a] = n
+		}
+		cur.Caps = merged
 	case KeysetMarkCompromised:
 		if cur == nil || (cur.State != partition.StateCandidate && cur.State != partition.StateActive && cur.State != partition.StateDraining) {
 			return illegal(partition.StateCandidate + ", " + partition.StateActive + " or " + partition.StateDraining)
@@ -491,7 +553,7 @@ func (c *Config) foldKeysets(rows []KeysetChange) *KeysetView {
 			v.Ignored++
 			continue
 		}
-		if err := v.apply(c, r); err != nil {
+		if err := v.apply(c, r, false); err != nil {
 			v.Ignored++
 		}
 	}
@@ -502,7 +564,7 @@ func (c *Config) foldKeysets(rows []KeysetChange) *KeysetView {
 
 // loadKeysetRows reads the whole log, oldest first.
 func loadKeysetRows(ctx context.Context, q queryer) ([]KeysetChange, error) {
-	rows, err := q.Query(ctx, `SELECT seq, action, shard, generation, address, successor, caps, signed_at, signatures FROM keyset_changes ORDER BY seq, id`)
+	rows, err := q.Query(ctx, `SELECT seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key FROM keyset_changes ORDER BY seq, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -511,7 +573,7 @@ func loadKeysetRows(ctx context.Context, q queryer) ([]KeysetChange, error) {
 	for rows.Next() {
 		var c KeysetChange
 		var caps, sigs []byte
-		if err := rows.Scan(&c.Seq, &c.Action, &c.Shard, &c.Generation, &c.Address, &c.Successor, &caps, &c.SignedAt, &sigs); err != nil {
+		if err := rows.Scan(&c.Seq, &c.Action, &c.Shard, &c.Generation, &c.Address, &c.Successor, &caps, &c.SignedAt, &sigs, &c.KeyRef, &c.PublicKey); err != nil {
 			return nil, err
 		}
 		// A row that does not parse stays in the list as a change nothing can verify, so it is counted.
@@ -579,7 +641,7 @@ func (g *Guard) ApplyKeysetChange(ctx context.Context, cfg *Config, c KeysetChan
 		return refuse(fmt.Errorf("sequence %d is not higher than the current %d", c.Seq, cur.Seq))
 	}
 	next := cur.clone()
-	if err := next.apply(cfg, c); err != nil {
+	if err := next.apply(cfg, c, true); err != nil {
 		return refuse(err)
 	}
 	sigs, _ := json.Marshal(c.Signatures)
@@ -587,8 +649,8 @@ func (g *Guard) ApplyKeysetChange(ctx context.Context, cfg *Config, c KeysetChan
 	if len(c.Caps) > 0 {
 		caps, _ = json.Marshal(c.Caps)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO keyset_changes (seq, action, shard, generation, address, successor, caps, signed_at, signatures) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		c.Seq, c.Action, c.Shard, c.Generation, c.Address, c.Successor, caps, c.SignedAt, sigs); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO keyset_changes (seq, action, shard, generation, address, successor, caps, signed_at, signatures, key_ref, public_key) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		c.Seq, c.Action, c.Shard, c.Generation, c.Address, c.Successor, caps, c.SignedAt, sigs, c.KeyRef, c.PublicKey); err != nil {
 		return err
 	}
 	payload := map[string]any{"action": c.Action, "shard": c.Shard, "generation": c.Generation, "seq": c.Seq, "operators": operators, "signed_at": c.SignedAt,
@@ -598,6 +660,12 @@ func (g *Guard) ApplyKeysetChange(ctx context.Context, cfg *Config, c KeysetChan
 	}
 	if c.Successor > 0 {
 		payload["successor"], payload["caps"] = c.Successor, c.Caps
+	}
+	if c.Action == KeysetSetDrainCaps {
+		payload["caps"] = c.Caps
+	}
+	if c.KeyRef != "" {
+		payload["key_ref"], payload["public_key"] = c.KeyRef, c.PublicKey
 	}
 	pj, _ := json.Marshal(payload)
 	if _, err := audit.AppendTx(ctx, tx, domain.AuditEvent{Actor: actor, Type: EventKeysetChanged, Payload: pj}, ""); err != nil {
@@ -673,6 +741,30 @@ func (d *Decider) keysetRules(ctx context.Context, gt *GuardTx, kv *KeysetView, 
 	return reject(ReasonKeyset, "generation %d of %s is %s: it signs nothing", e.Generation, shard, e.State)
 }
 
+// pendingSince is how far back a reserved, unsigned drain still counts as in progress: the gateway's sign timeout (after that the signer has given up or
+// a cosigner refused). The cosigner never sees a signature, so every drain it authorised counts.
+func (d *Decider) pendingSince(now time.Time) time.Time {
+	if d.mode == ModeCosigner {
+		return time.Time{}
+	}
+	return now.Add(-d.cfg.SignTimeout)
+}
+
+// noteDrainRefusal counts a refused drain and raises an ALERT, so a storm of refusals (a broken planner, or the business zone probing) is visible although
+// refusals use up neither the rate nor the cap.
+func (d *Decider) noteDrainRefusal(job signjob.Job, reason string) {
+	i, err := parseIntent(job)
+	if err != nil || i.Kind != signjob.KindDrain {
+		return
+	}
+	n := d.guard.drainRefused.Add(1)
+	slog.Error("ALERT drain refused: the zone refused a drain; refusals do not count against the drain rate or cap, so a repeating one is a stuck planner or an attack by the business zone",
+		"intent", i.ID, "mode", d.mode.actor(), "source", i.From, "asset", i.Asset, "refused_total", n, "reason", reason)
+}
+
+// DrainRefusals is the number of drains this process refused since it started (the alert's counter).
+func (g *Guard) DrainRefusals() int64 { return g.drainRefused.Load() }
+
 // drainRule judges a drain by this zone's own view: nothing the intent says about states is believed.
 func (d *Decider) drainRule(ctx context.Context, gt *GuardTx, kv *KeysetView, cc *ChainConfig, shard partition.ShardID, i signjob.Intent, info TxInfo, amount *big.Int, known bool, now time.Time) error {
 	if d.cfg.Operators == nil {
@@ -727,14 +819,15 @@ func (d *Decider) drainRule(ctx context.Context, gt *GuardTx, kv *KeysetView, cc
 	if !ok {
 		return reject(ReasonDrainCap, "the signed record names no cap for %s on generation %d of %s", i.Asset, src.Generation, shard)
 	}
-	n, err := gt.CountSince(ctx, signjob.KindDrain, now.Add(-time.Hour))
+	pending := d.pendingSince(now)
+	n, err := gt.SignedDrainsSince(ctx, now.Add(-time.Hour), pending)
 	if err != nil {
 		return err
 	}
 	if n >= cc.DrainsPerHour {
 		return reject(ReasonDrainRate, "%d drains in the last hour, limit %d", n, cc.DrainsPerHour)
 	}
-	sum, err := gt.AmountFrom(ctx, signjob.KindDrain, info.Sender, i.Asset)
+	sum, err := gt.SignedDrainAmountFrom(ctx, info.Sender, i.Asset, pending)
 	if err != nil {
 		return err
 	}

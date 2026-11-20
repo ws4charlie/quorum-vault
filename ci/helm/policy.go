@@ -78,7 +78,7 @@ func CheckPolicy(objs []Obj, opt PolicyOptions) []string {
 				Type string `yaml:"type"`
 			}
 			_ = o.Spec.Decode(&s)
-			if s.Type != "" && s.Type != "ClusterIP" {
+			if s.Type != "" && s.Type != "ClusterIP" && !(s.Type == "LoadBalancer" && o.Metadata.Annotations["quorumvault.io/endpoint"] == "private") { // a party's private endpoint (qv-party, party_test.go checks it)
 				add("%s: Service type %s (only ClusterIP; the way in is the Ingress)", id, s.Type)
 			}
 		case "NetworkPolicy":
@@ -231,6 +231,7 @@ func checkNetworkPolicy(o Obj, opt PolicyOptions, hasDeny *bool, add func(string
 			if len(r.Ports) == 0 {
 				add("%s: the signing link must name its ports", id)
 			}
+		case "party-caller", "party-peer": // qv-party: its own test (party_test.go) checks the ports and who may come
 		default:
 			add("%s: ingress from outside the namespace that is neither the ingress controller nor the signing link", id)
 		}
