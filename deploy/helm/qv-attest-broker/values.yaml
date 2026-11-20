@@ -42,7 +42,10 @@ trustRoots:
   configMap: ""
   key: root.pem
 
-# The signed allowlist (what measurement may get which party's key, with validity), as the JSON text the operators signed:
+# The signed allowlist (what measurement may get which party's key, with validity), as the JSON text the operators signed (list v2: seq, entries with party, measurement,
+# not_before, optional not_after, version, status active|revoked, and the signatures; `qv-attest-broker allowlist new|add|expire|revoke|sign|show`, docs/runbooks/tee-broker.md).
+# The list holds the entries of THIS broker's party only, and its seq is higher than the one in force: a lower one is refused at a reload and at a restart (the highest loaded seq
+# is in the audit log on the data volume, which must persist). The chart refuses a list with an unknown field, another party's entry or a status it does not know.
 #   helm upgrade ... --set-file allowlist.file=allowlist.json
 # It becomes an immutable ConfigMap named with a hash of its content, so a new list is a new ConfigMap and a rollout of the pod (about a minute with the broker unreachable).
 # The mount is one file; the broker re-reads it by itself too (reloadInterval, SIGHUP) for installations that replace the file in place.

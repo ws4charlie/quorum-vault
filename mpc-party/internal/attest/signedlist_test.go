@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -121,5 +122,76 @@ func TestMalformedEntriesRefuseTheList(t *testing.T) {
 	l := SignAllowlist(privs[1], names[1], SignAllowlist(privs[0], names[0], SignedAllowlist{Seq: 0}))
 	if _, err := ops.Verify(l); err == nil {
 		t.Fatal("sequence 0 verified")
+	}
+}
+
+// The signature covers the release version, the status and the end date: changing any of them after signing breaks it, and an entry without an
+// end date survives a JSON round trip as one without an end date.
+func TestSignedAllowlistCoversVersionStatusAndEnd(t *testing.T) {
+	ops, privs, names := testOps(t, 2, 2)
+	l := sampleList()
+	l.Entries[0].NotAfter = time.Time{}
+	l.Entries[0].Version = "v1.0.0"
+	l = SignAllowlist(privs[1], names[1], SignAllowlist(privs[0], names[0], l))
+	if _, err := ops.Verify(l); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(l)
+	if strings.Contains(string(b), "not_after") {
+		t.Fatalf("a list without an end writes not_after: %s", b)
+	}
+	l2, err := ParseSignedAllowlist(b)
+	if err != nil || !l2.Entries[0].NotAfter.IsZero() {
+		t.Fatalf("round trip: %v %+v", err, l2.Entries)
+	}
+	if _, err := ops.Verify(l2); err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	for name, mod := range map[string]func(*SignedAllowlist){
+		"version":     func(x *SignedAllowlist) { x.Entries[0].Version = "v9.9.9" },
+		"status":      func(x *SignedAllowlist) { x.Entries[0].Status = StatusRevoked },
+		"end date":    func(x *SignedAllowlist) { x.Entries[0].NotAfter = x.Entries[0].NotBefore.Add(time.Hour) },
+		"measurement": func(x *SignedAllowlist) { x.Entries[0].Measurement = "ee" },
+	} {
+		x, _ := ParseSignedAllowlist(b)
+		mod(&x)
+		if _, err := ops.Verify(x); err == nil {
+			t.Errorf("a changed %s still verifies", name)
+		}
+	}
+	// "" and "active" are the same status
+	x, _ := ParseSignedAllowlist(b)
+	x.Entries[0].Status = StatusActive
+	if _, err := ops.Verify(x); err != nil {
+		t.Errorf("explicit active: %v", err)
+	}
+	// a list signed under the v1 domain does not verify (the message is domain tagged)
+	if !strings.HasPrefix(string(AllowlistMessage(l)), "qv-attest-allowlist-v2\n") {
+		t.Error("message domain tag")
+	}
+}
+
+// A misspelled field in an entry must not be read as its default: not_after would become "no end" and status would become active, in a list that
+// then gets signed. Unknown fields are refused at every level: the list, an entry, a signature.
+func TestUnknownFieldsAreRefusedAtEveryLevel(t *testing.T) {
+	ok := `{"seq":1,"signed_at":1,"entries":[{"party":"A","measurement":"aa","not_before":"2026-01-01T00:00:00Z","not_after":"2026-02-01T00:00:00Z","status":"revoked"}],"signatures":[]}`
+	if _, err := ParseSignedAllowlist([]byte(ok)); err != nil {
+		t.Fatalf("a good list was refused: %v", err)
+	}
+	for name, bad := range map[string]string{
+		"entry: not_atfer":   strings.Replace(ok, `"not_after"`, `"not_atfer"`, 1),
+		"entry: statuss":     strings.Replace(ok, `"status"`, `"statuss"`, 1),
+		"entry: extra field": strings.Replace(ok, `"party":"A"`, `"party":"A","note":"x"`, 1),
+		"list: extra field":  strings.Replace(ok, `"seq":1`, `"seq":1,"valid_until":"x"`, 1),
+		"signature: extra":   strings.Replace(ok, `"signatures":[]`, `"signatures":[{"operator":"a","sig":"00","extra":1}]`, 1),
+		"entry: trailing":    strings.Replace(ok, `"entries":[{`, `"entries":[{}  {`, 1),
+	} {
+		if _, err := ParseSignedAllowlist([]byte(bad)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	var e AllowEntry
+	if err := json.Unmarshal([]byte(`{"party":"A","measurement":"aa","not_before":"2026-01-01T00:00:00Z","not_atfer":"2026-02-01T00:00:00Z"}`), &e); err == nil {
+		t.Error("AllowEntry.UnmarshalJSON accepts an unknown field")
 	}
 }
