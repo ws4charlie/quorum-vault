@@ -1344,3 +1344,61 @@ func TestPartyOperatorJob(t *testing.T) {
 		}
 	}
 }
+
+// The Job's arguments are parsed by the real qv-party-admin's flag definitions (the binary is built and asked with -h), so the chart and the
+// tool cannot drift; and every command that acts on a keyset passes the expected one (the tool refuses a file for another keyset).
+func TestPartyOperatorJobFlagsMatchTheTool(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not found")
+	}
+	bin := filepath.Join(t.TempDir(), "qv-party-admin")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/qv-party-admin")
+	build.Dir = filepath.Join(partyChartDir(), "..", "..", "..", "mpc-party")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build qv-party-admin: %v\n%s", err, out)
+	}
+	known := func(cmd string) map[string]bool {
+		out, _ := exec.Command(bin, cmd, "-h").CombinedOutput() // exits 1 after printing the flags
+		m := map[string]bool{}
+		for _, l := range strings.Split(string(out), "\n") {
+			if f := strings.Fields(l); len(f) > 0 && strings.HasPrefix(f[0], "-") {
+				m[strings.TrimPrefix(f[0], "-")] = true
+			}
+		}
+		if len(m) < 4 {
+			t.Fatalf("%s -h printed no flags:\n%s", cmd, out)
+		}
+		return m
+	}
+	pin := strings.Repeat("ab", 32)
+	for _, cmd := range []string{"dkg", "refresh", "unfreeze", "status"} {
+		args := []string{"--set", "operator.job.enabled=true", "--set", "operator.job.command=" + cmd, "--set", "operator.job.keysetId=hot-0",
+			"--set", "operator.job.authConfigMap=a", "--set", "operator.job.callerCertSecret=s", "--set", "operator.job.partyPin=" + pin}
+		objs, _ := partyObjs(t, false, "A", args...)
+		pod, _ := partyFind(objs, "Job")[0].Pod()
+		a := pod.Containers[0].Args
+		if a[0] != cmd {
+			t.Fatalf("%s: first argument %q", cmd, a[0])
+		}
+		ks := known(cmd)
+		sawKeyset := false
+		for i := 1; i < len(a); i++ {
+			if !strings.HasPrefix(a[i], "-") {
+				continue
+			}
+			name := strings.TrimPrefix(a[i], "-")
+			if !ks[name] {
+				t.Errorf("%s: the Job passes -%s, which `qv-party-admin %s` does not define", cmd, name, cmd)
+			}
+			if name == "keyset" {
+				sawKeyset = true
+				if a[i+1] != "hot-0" {
+					t.Errorf("%s: -keyset is %q", cmd, a[i+1])
+				}
+			}
+		}
+		if !sawKeyset {
+			t.Errorf("%s: the Job does not pass -keyset: a file for another keyset would be accepted", cmd)
+		}
+	}
+}

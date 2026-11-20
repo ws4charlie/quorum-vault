@@ -73,6 +73,7 @@ func TestSendRefusesLocally(t *testing.T) {
 		"expired":      {append([]string{"refresh", "-auth", old}, net...), "outside the"},
 		"damaged":      {append([]string{"refresh", "-auth", damaged}, net...), "signature does not match"},
 		"no parties":   {[]string{"refresh", "-auth", good}, "-party"},
+		"other keyset": {append([]string{"refresh", "-auth", good, "-keyset", "other"}, net...), "for keyset other: nothing was sent"},
 		"missing file": {append([]string{"unfreeze", "-auth", filepath.Join(dir, "none")}, net...), "no such file"},
 	} {
 		code, msg := runCLI(c.args...)

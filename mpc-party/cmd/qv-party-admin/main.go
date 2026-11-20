@@ -2,7 +2,7 @@
 // Signing and sending are two steps on two machines, and the parties verify the signature themselves:
 //
 //	qv-party-admin sign     -key OPERATOR.key -op dkg|refresh|unfreeze -keyset ID [-out F]     on the operator's own machine; holds the only signing key
-//	qv-party-admin dkg      -auth F -party A=ADDR@PIN -party B=ADDR@PIN [-party C=...] -cert F -key F [-scheme hd|ecdsa-2of3|ed25519-2of3] [-curve secp256k1|ed25519]
+//	qv-party-admin dkg      -auth F [-keyset ID] -party A=ADDR@PIN -party B=ADDR@PIN [-party C=...] -cert F -key F [-scheme hd|ecdsa-2of3|ed25519-2of3] [-curve secp256k1|ed25519]
 //	qv-party-admin refresh  -auth F  (the same -party, -cert and -key flags)
 //	qv-party-admin unfreeze -auth F  (the same)
 //	qv-party-admin status   (the same -party, -cert and -key flags; no -auth) [-keyset ID]
@@ -396,6 +396,7 @@ func sendCmd(op string, args []string, out, errw io.Writer) error {
 	fs.SetOutput(errw)
 	var c common
 	c.flags(fs)
+	expectKeyset := fs.String("keyset", "", "the keyset this call is meant for: refused, before any call, when the authorisation file names another (a Job names it so a wrong file cannot act on another keyset)")
 	authFile := fs.String("auth", "", "the authorisation file `qv-party-admin sign` wrote for this operation (valid for the parties' window, once per party)")
 	maxAge := fs.Duration("window", admin.DefaultMaxAge, "the parties' admin_max_age_seconds: a file older than this is refused here without a call")
 	scheme := fs.String("scheme", "hd", "dkg: hd (two-party HD keyset), ecdsa-2of3 or ed25519-2of3")
@@ -415,6 +416,9 @@ func sendCmd(op string, args []string, out, errw io.Writer) error {
 	}
 	if f.Op != op {
 		return fmt.Errorf("%s is an authorisation for %s of keyset %s, not for %s", *authFile, f.Op, f.Keyset, op)
+	}
+	if *expectKeyset != "" && *expectKeyset != f.Keyset {
+		return fmt.Errorf("%s is an authorisation for keyset %s, but this call is for keyset %s: nothing was sent", *authFile, f.Keyset, *expectKeyset)
 	}
 	now := time.Now()
 	if age := f.Age(now); age > *maxAge || age < -*maxAge {
