@@ -441,13 +441,17 @@ func (a *Adapter) Reservation(ctx context.Context, q chain.Querier, ownerKind, o
 	}
 	r := chain.Reservation{Open: n > 0, Detail: fmt.Sprintf("%d outputs reserved", n)}
 	if n > 0 { // the shard address the reservation is on, for a cancel's destination
-		var part string
-		if err := q.QueryRow(ctx, `SELECT partition_id FROM btc_utxos WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved' ORDER BY txid, vout LIMIT 1`, a.cfg.Chain, ownerKind, ownerID).Scan(&part); err != nil {
+		var part, path string
+		if err := q.QueryRow(ctx, `SELECT partition_id, path FROM btc_utxos WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status='reserved' ORDER BY txid, vout LIMIT 1`, a.cfg.Chain, ownerKind, ownerID).Scan(&part, &path); err != nil {
 			return chain.Reservation{}, err
 		}
-		sh, err := a.shardOf(part)
+		gen, _, gerr := chain.SplitKeyPath(path) // a cancel pays the shard of the generation the reserved outputs are under
+		if gerr != nil {
+			return chain.Reservation{}, gerr
+		}
+		sh, err := a.shardOfGen(part, gen)
 		if err != nil && ownerKind == "sweep" && len(a.shards) > 0 {
-			sh, err = a.sinkShard(), nil // a deposit output recorded by a cell without hot shards has no partition: the sink shard takes it
+			sh, err = a.shardOfGen(a.sinkPartition(), gen) // a deposit output recorded by a cell without hot shards has no partition: the sink shard takes it
 		}
 		if err == nil {
 			r.Account = sh.address
@@ -492,7 +496,7 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 		if n == skip {
 			continue
 		}
-		sh, ok := a.byAddr[o.Address]
+		sh, ok := a.hotByAddr(ctx, tx, o.Address)
 		if !ok {
 			if _, isCold := a.cold[o.Address]; isCold { // an output on the cold address (a move to cold, a refill's change) is a cold output
 				if _, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path, cold, address) VALUES ($1,$2,$3,$4,'','',true,$5) ON CONFLICT DO NOTHING`,
@@ -503,7 +507,7 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 			continue // otherwise the payment
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-			a.cfg.Chain, txid, n, int64(o.Value), sh.partition, PathString(sh.path)); err != nil {
+			a.cfg.Chain, txid, n, int64(o.Value), sh.partition, sh.keyPath()); err != nil {
 			return err
 		}
 	}
@@ -512,12 +516,12 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 			return err
 		}
 		for n, o := range child.p.Outputs {
-			sh, ok := a.byAddr[o.Address]
+			sh, ok := a.hotByAddr(ctx, tx, o.Address)
 			if !ok {
 				return fmt.Errorf("btc: CPFP child %s pays %s, which is not a hot address of this cell", child.txid, o.Address)
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-				a.cfg.Chain, child.txid, n, int64(o.Value), sh.partition, PathString(sh.path)); err != nil {
+				a.cfg.Chain, child.txid, n, int64(o.Value), sh.partition, sh.keyPath()); err != nil {
 				return err
 			}
 		}
@@ -581,12 +585,12 @@ func (a *Adapter) RecordFunding(ctx context.Context, tx pgx.Tx, f chain.FundingO
 			a.cfg.Chain, f.TxHash, int64(f.Vout), f.Amount.Int64(), f.Address)
 		return err == nil && tag.RowsAffected() == 1, err
 	}
-	sh, ok := a.byAddr[f.Address]
+	sh, ok := a.hotByAddr(ctx, tx, f.Address)
 	if !ok {
 		return false, fmt.Errorf("btc: %s is not a hot address of this cell", f.Address)
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-		a.cfg.Chain, f.TxHash, int64(f.Vout), f.Amount.Int64(), sh.partition, PathString(sh.path))
+		a.cfg.Chain, f.TxHash, int64(f.Vout), f.Amount.Int64(), sh.partition, sh.keyPath())
 	if err != nil {
 		return false, err
 	}
