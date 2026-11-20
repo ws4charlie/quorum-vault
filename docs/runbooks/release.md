@@ -93,7 +93,7 @@ A public package cannot be made private again, and anyone may already have pulle
 
 ## Visibility facts
 
-Confirmed from GitHub's documentation ("Configuring a package's access control and visibility", "Working with the Container registry", "Deleting and restoring a package"), 2026-11-20:
+Confirmed on 2026-11-20 from GitHub's documentation (pages under https://docs.github.com/en/packages/): `learn-github-packages/configuring-a-packages-access-control-and-visibility`, `learn-github-packages/deleting-and-restoring-a-package`, `working-with-a-github-packages-registry/working-with-the-container-registry`:
 - A package first pushed to `ghcr.io` is **private** by default. Making it public is a manual step in the package's settings, and the page says: once a package is public, **it cannot be made private again**. (The lead's earlier statement was right.)
 - A **public** package can be pulled by anyone **without signing in**. Linked to a repository by the label `org.opencontainers.image.source` (the images carry it), it inherits that repository's permissions by default; the workflow's token may push because the repository has admin on a package its workflow created.
 - A version of a public package can be **deleted** only if it has **no more than 5,000 downloads**; a public package with a version above that cannot be deleted by its owner (contact GitHub Support). A deleted package or version can be restored within 30 days if the name is unused. Deleting does not recall copies already pulled.
