@@ -549,7 +549,7 @@ func TestCertsSecretNamesMatchTheBusinessChart(t *testing.T) {
 	n := 0
 	for k, x := range v.TLS {
 		m, ok := x.(map[string]any)
-		if !ok {
+		if !ok || k == "trust" { // trust names ConfigMaps (the bundles), not Secrets
 			continue
 		}
 		name, _ := m["secretName"].(string)

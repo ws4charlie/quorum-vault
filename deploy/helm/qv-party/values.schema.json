@@ -318,6 +318,14 @@
         "reload": {
           "type": "string"
         },
+        "trust": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "signing": { "type": "string", "pattern": "^(qv-trust-signing-[0-9a-f]{10})?$" },
+            "business": { "type": "string", "pattern": "^(qv-trust-business-[0-9a-f]{10})?$" }
+          }
+        },
         "party": {
           "type": "object"
         },

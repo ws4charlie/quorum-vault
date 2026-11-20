@@ -42,9 +42,23 @@ Solana is **not** in the kind lane (the validator image is 778 MB and not needed
 
 `smoke/run.sh --pending` lists what is not done. `withdraw` and `crash` drive the pods from the host through port-forwards (`tools/kindwd`); the person tokens come from the dev realm's test-only login (`qv-e2e`, as `e2e/idp`), passwords from the gitignored work dir.
 
+## Trust bundles
+
+The charts take the CA file of their certificate volumes from the `qv-certs` trust bundle (`qv-trust-<zone>-<hash>`, an immutable ConfigMap) and not from the `ca.crt` cert-manager puts into each Secret: a projected volume (`tls.crt` and `tls.key` from the Secret, `ca.crt` from the bundle). `tls.trust.<zone>` names the bundle in each chart; the lane finds the names with `trust_args` in `lib.sh`. Empty, the charts behave as before.
+
+## Measured here (a Mac, Docker VM 24 GiB, images cached)
+
+| | |
+|---|---|
+| `make kind-up`, cold (cluster, dependencies, three parties, DKGs, both charts) | 236 s |
+| `make kind-smoke` (all five cases) | 225 s |
+| Node memory with everything running | 3.9 GiB |
+
+CI prints the same numbers for the runner (`.github/workflows/kind.yml`).
+
 ## What is not done
 
-Certificate rotation, admission policies and tee-sim (marked pending). The trust-bundle switch (`qv-trust-<zone>` instead of each Secret's `ca.crt`) waits for the `qv-certs` trust change (#119). The crash and certificate cases of piece 3 (expired certificate refuses start, rotation without restart).
+Certificate rotation, admission policies and tee-sim (marked pending). The crash and certificate cases of piece 3: an expired certificate refuses start, rotation without restart. `tools/kindctl` makes the DKG calls (`qv-party-admin` needs a signed file per call and one connection per party; the lane has one port-forward and reads the public keys back in the same tool).
 
 ## What it cannot show
 

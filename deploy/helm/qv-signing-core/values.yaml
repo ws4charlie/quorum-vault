@@ -40,6 +40,9 @@ kafka:
 # --- Certificates: Secrets made by cert-manager (task D5), each with tls.crt, tls.key, ca.crt. Referenced by name. ---
 tls:
   reload: 1m
+  # The trust bundles (qv-certs, "Trust"): the names of the immutable ConfigMaps `qv-trust-<zone>-<hash>`. Set, the CA file of the volumes of that zone's certificates is the bundle; empty, it is the
+  # ca.crt cert-manager put into the Secret (development only). signing: the guard database; business: the link certificate's peers (business Postgres, Kafka).
+  trust: { signing: "", business: "" }
   gateway:     { secretName: qv-signing-gateway-tls }        # certificate name signing/gateway: the guard database login, the parties' caller ports (pinned there)
   gatewayParty: { secretName: qv-signing-gateway-party-tls }   # certificate name signing/gateway-party: the client certificate the parties pin on their caller ports (its key never rotates)
   gatewayLink: { secretName: qv-gateway-link-tls }   # certificate name business/gateway-link (business CA): business Postgres and Kafka

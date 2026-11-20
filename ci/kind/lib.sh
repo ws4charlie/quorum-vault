@@ -55,4 +55,13 @@ pf_start() {
   done
   cat "$log" >&2; rm -f "$log"; kill "$PF_PID" 2>/dev/null; return 1
 }
+# The trust bundles qv-certs made in a namespace (immutable ConfigMaps, `qv-trust-<zone>-<hash>`), as helm flags: the charts take them as the CA file of their certificate volumes.
+trust_args() {
+  local ns="$1" z n
+  for z in business signing; do
+    n="$(kn "$ns" get configmap -l "quorumvault.io/trust-bundle=$z" -o jsonpath='{.items[0].metadata.name}' 2> /dev/null || true)"
+    if [ -n "$n" ]; then printf -- '--set tls.trust.%s=%s ' "$z" "$n"; fi
+  done
+  return 0
+}
 pf_stop() { [ -n "${PF_PID:-}" ] && kill "$PF_PID" 2>/dev/null; PF_PID=""; return 0; }

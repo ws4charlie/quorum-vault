@@ -54,6 +54,9 @@ serviceAllow: "business/guardian,business/worker"   # QV_CORE_SERVICE_ALLOW
 # --- Certificates: Secrets made by cert-manager (task D5), each with tls.crt, tls.key, ca.crt. Referenced by name. ---
 tls:
   reload: 1m
+  # The trust bundle of the business zone: the name of the immutable ConfigMap qv-certs makes (`qv-trust-business-<hash>`, README of qv-certs, "Trust"). Set, the CA file of every certificate
+  # volume is that bundle; empty, it is the ca.crt cert-manager put into the Secret (development only: that file changes when the issuer's chain does).
+  trust: { business: "" }
   core:     { secretName: qv-core-tls }
   worker:   { secretName: qv-worker-tls }
   relay:    { secretName: qv-relay-tls }

@@ -43,12 +43,12 @@ spec:
             - { name: archive-tls, mountPath: /etc/qv/archive-tls, readOnly: true }
             {{- end }}
       volumes:
-        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.archiver.secretName) | nindent 8 }}
+        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.archiver.secretName "trust" .Values.tls.trust.business) | nindent 8 }}
         {{- if .Values.archive.credentialsSecret }}
         - name: archive-credentials
           secret: { secretName: {{ .Values.archive.credentialsSecret }}, defaultMode: 288 }
         {{- end }}
         {{- if .Values.archive.tls.secretName }}
-        {{- include "qv.secretVolume" (dict "name" "archive-tls" "secret" .Values.archive.tls.secretName) | nindent 8 }}
+        {{- include "qv.secretVolume" (dict "name" "archive-tls" "secret" .Values.archive.tls.secretName "trust" .Values.tls.trust.business) | nindent 8 }}
         {{- end }}
 {{- end }}

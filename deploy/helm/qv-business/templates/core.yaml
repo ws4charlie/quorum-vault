@@ -41,7 +41,7 @@ spec:
             - { name: oidc-ca, mountPath: /etc/qv/oidc, readOnly: true }
             {{- end }}
       volumes:
-        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.core.secretName) | nindent 8 }}
+        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.core.secretName "trust" .Values.tls.trust.business) | nindent 8 }}
         {{- include "qv.custodyVolume" (dict "ctx" .) | nindent 8 }}
         {{- if .Values.oidc.caSecret }}
         - name: oidc-ca

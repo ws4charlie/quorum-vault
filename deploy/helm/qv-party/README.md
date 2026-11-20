@@ -122,6 +122,7 @@ Both processes serve their metrics on **loopback only** inside the pod (`127.0.0
 | Kubernetes 1.29+ and a CNI that enforces NetworkPolicy | default deny |
 | A CSI volume class that supports `ReadWriteOncePod` and `flock` (block volumes; check NFS) | the data volume. In kind: `ReadWriteOnce` |
 | cert-manager (or the operators' own process) | the Secrets above, with long-lived pinned certificates (renewal changes the certificate; pins are over the public key, so a renewal with the same key keeps them) |
+| The qv-certs trust bundles `qv-trust-signing-<hash>` and `qv-trust-business-<hash>`, named in `tls.trust.signing` and `tls.trust.business` | the CA files of the certificate volumes (projected next to the Secret's `tls.crt` and `tls.key`, instead of cert-manager's `ca.crt`); empty is development only |
 | A guard database per cosigner, its own, never the gateway's, reached with the certificate name `cosigner` (Postgres role `qv_cosigner_guard`) | B, C |
 | The HSM with the token and the PIN Secret | production |
 | Private endpoints to the other parties, the business Kafka and the guard database | between clusters |

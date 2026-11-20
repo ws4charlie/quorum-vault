@@ -138,7 +138,7 @@ The gateway opens no port: it writes `mpc.prom` (route and party health) and `mp
 |---|---|
 | The signing config (approvers, bounds, chains, signers, `mpc_route`, party addresses and pins) | `config.signing` (JSON, `--set-file`). **No secret in it**: the keys are public keys, the pins are certificate hashes, the addresses are addresses, the signers name a token label and a key id. An **immutable ConfigMap** named `<release>-config-<hash>`: a change is a new ConfigMap and a rollout, never an edit in place. The config repo's two-person rule is the control; the other checkers (cosigners B and C) hold their own copies in their own clusters |
 | Plain settings (DSNs without password, Kafka, probe address, metrics file, TLS file paths) | immutable ConfigMap `<release>-gateway-env-<hash>` |
-| Certificates and keys | Secret volumes from cert-manager (task D5), mode 0440 with `fsGroup` 65532: `tls.gateway`, `tls.gatewayParty`, `tls.gatewayLink` |
+| Certificates and keys | Secret volumes from cert-manager (task D5), mode 0440 with `fsGroup` 65532: `tls.gateway`, `tls.gatewayParty`, `tls.gatewayLink`. `tls.trust.signing` and `tls.trust.business` name the qv-certs trust bundles: set, they are the CA files of the signing and the link certificate volumes instead of cert-manager's `ca.crt` |
 | HSM PIN | a Secret that exists already (External Secrets); mounted as a file (`QV_HSM_PIN_FILE`), never an environment variable |
 
 The chart renders no Secret. The policy test refuses a Secret object, a PEM private key, a password in a URL, a secret-named value in a ConfigMap, and an inline secret in an environment variable.

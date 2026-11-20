@@ -29,14 +29,14 @@ configs)
   jq '{cosigner:{config:.}}' "$C/cosigner.json" > "$WORK/cosigner-config.yaml"
   for r in b c; do
     ns="$NS_B"; [ "$r" = c ] && ns="$NS_C"
-    hm upgrade --install "qv-party-$r" deploy/helm/qv-party -n "$ns" --set role="$(echo $r | tr a-z A-Z)" -f deploy/helm/qv-party/values-kind.yaml -f "$WORK/party-$r.yaml" -f "$WORK/cosigner-config.yaml" --wait --timeout 6m > /dev/null &
+    hm upgrade --install "qv-party-$r" deploy/helm/qv-party -n "$ns" --set role="$(echo $r | tr a-z A-Z)" -f deploy/helm/qv-party/values-kind.yaml $(trust_args "$ns") -f "$WORK/party-$r.yaml" -f "$WORK/cosigner-config.yaml" --wait --timeout 6m > /dev/null &
   done
   wait
   ;;
 core)
   log "qv-signing-core"
   # every signer is an MPC signer: no HSM in the gateway pod (the softhsm of values-kind is for a pkcs11 signer, which the lane has none of)
-  hm upgrade --install qv-signing-core deploy/helm/qv-signing-core -n "$NS_SIGN" -f deploy/helm/qv-signing-core/values-kind.yaml --set hsm.mode=none \
+  hm upgrade --install qv-signing-core deploy/helm/qv-signing-core -n "$NS_SIGN" -f deploy/helm/qv-signing-core/values-kind.yaml $(trust_args "$NS_SIGN") --set hsm.mode=none \
     --set-file config.signing="$C/signing.json" --wait --timeout 6m > /dev/null
   ;;
 esac

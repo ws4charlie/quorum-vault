@@ -98,8 +98,8 @@ spec:
             {{- end }}
         {{- end }}
       volumes:
-        {{- include "qvs.secretVolume" (dict "name" "tls" "secret" .Values.tls.gateway.secretName) | nindent 8 }}
-        {{- include "qvs.secretVolume" (dict "name" "link-tls" "secret" .Values.tls.gatewayLink.secretName) | nindent 8 }}
+        {{- include "qvs.secretVolume" (dict "name" "tls" "secret" .Values.tls.gateway.secretName "trust" .Values.tls.trust.signing) | nindent 8 }}
+        {{- include "qvs.secretVolume" (dict "name" "link-tls" "secret" .Values.tls.gatewayLink.secretName "trust" .Values.tls.trust.business) | nindent 8 }}
         {{- include "qvs.secretVolume" (dict "name" "party-tls" "secret" .Values.tls.gatewayParty.secretName) | nindent 8 }}
         - name: config
           configMap: { name: {{ include "qvs.signingConfigName" . }} }

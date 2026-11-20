@@ -6,7 +6,7 @@ cd "$QV_KIND_ROOT"; rc=0; bad() { echo "FAIL: $*"; rc=1; }
 chart=deploy/helm/qv-business; vals=$chart/values-kind.yaml
 uids() { kn "$NS_BIZ" get pods -l app.kubernetes.io/instance=qv-business -o json | jq -r --arg c "$1" '[.items[] | select(.metadata.labels["app.kubernetes.io/component"]==$c and .metadata.deletionTimestamp==null) | .metadata.uid] | sort | join(",")'; }
 cmname() { kn "$NS_BIZ" get deploy qv-business-core -o json | jq -r '.spec.template.spec.containers[0].envFrom[0].configMapRef.name'; }
-upg() { hm upgrade qv-business $chart -n "$NS_BIZ" -f $vals "$@" --wait --timeout 5m >/dev/null; }
+upg() { hm upgrade qv-business $chart -n "$NS_BIZ" -f $vals $(trust_args "$NS_BIZ") "$@" --wait --timeout 5m >/dev/null; }
 
 core0="$(uids core)"; cm0="$(cmname)"
 upg || bad "no-change upgrade failed"
