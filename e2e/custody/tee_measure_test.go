@@ -41,9 +41,9 @@ func TestMeasureMPCSealer(t *testing.T) {
 
 	// sign latency: the coordinator's own measure of one signature (party A's log, op OP_SIGN), 40 sequential withdrawals after a warm-up one
 	s.pay(1, "c-meas", "warm")
-	skip := len(opDurations(mpc.A.Output(), "OP_SIGN"))
+	skip := len(opDurations(mpc.A.Output(), "sign"))
 	s.pay(30, "c-meas", "lat")
-	d := opDurations(mpc.A.Output(), "OP_SIGN")[skip:]
+	d := opDurations(mpc.A.Output(), "sign")[skip:]
 	sort.Float64s(d)
 	t.Logf("MEASURE mode=%s sign n=%d p50=%.0f ms p95=%.0f ms max=%.0f ms", mode, len(d), pctF(d, 0.5), pctF(d, 0.95), pctF(d, 1))
 	for _, r := range []string{"A", "B", "C"} {
@@ -87,7 +87,7 @@ func pctF(s []float64, p float64) float64 {
 	return s[int(float64(len(s)-1)*p)]
 }
 
-// opDurations are the duration_ms of every log line of the given op ("OP_SIGN") that succeeded, in order.
+// opDurations are the duration_ms of every log line of the given op ("sign") that succeeded, in order.
 func opDurations(log, op string) []float64 {
 	var out []float64
 	for _, l := range strings.Split(log, "\n") {
