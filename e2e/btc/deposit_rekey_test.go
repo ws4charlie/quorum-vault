@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,18 +66,10 @@ func (s *system) treeChange(name string, seq int, args ...string) string {
 	return f
 }
 
-// partyAuthFor is an operator's authorisation of the DKG on the parties, made right before it is used.
+// partyAuthFor is the admins' authorisation of the DKG on the parties (a v2 request signed by two of the three admin keys), made right before it is used.
 func (s *system) partyAuthFor(keyset string) string {
 	s.t.Helper()
-	key := filepath.Join(s.dir, "party-admin.key")
-	if err := os.WriteFile(key, []byte(s.mpc.AdminSeedHex()), 0o600); err != nil {
-		s.t.Fatal(err)
-	}
-	f := filepath.Join(s.dir, "party-auth.json")
-	if out, err := exec.Command(filepath.Join(binDir, "qv-keysets"), "party-auth", "-key", key, "-op", "dkg", "-keyset", keyset, "-out", f).CombinedOutput(); err != nil {
-		s.t.Fatalf("party-auth: %v\n%s", err, out)
-	}
-	return f
+	return s.mpc.Admins.DKGRequestFile(s.t, s.dir, keyset, pb.Scheme_SCHEME_UNSPECIFIED, pb.Curve_CURVE_SECP256K1)
 }
 
 func (s *system) treeKeysets() []map[string]any {

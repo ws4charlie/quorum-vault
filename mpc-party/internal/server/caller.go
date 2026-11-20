@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/status"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/cbmpc"
 )
@@ -74,7 +75,7 @@ func (s *Server) DKG(ctx context.Context, r *pb.DKGRequest) (_ *pb.DKGResponse, 
 	} else if e != nil && !errors.Is(e, ErrNotFound) {
 		return nil, fromWrapper("dkg", e)
 	}
-	if _, e := s.admin.check("dkg", r.KeysetId, r.Admin); e != nil {
+	if _, e := s.admin.check("dkg", r.KeysetId, admin.DKGBody(r.KeysetId, r.Scheme, r.Curve), r.Admin); e != nil {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "dkg", "%v", e)
 	}
 	if threshold {
@@ -101,7 +102,7 @@ func (s *Server) Refresh(ctx context.Context, r *pb.RefreshRequest) (_ *pb.Refre
 		if frozen, why := s.freeze.Frozen(r.KeysetId); frozen {
 			return nil, frozenFail("refresh", r.KeysetId, why)
 		}
-		if _, e := s.admin.check("refresh", r.KeysetId, r.Admin); e != nil {
+		if _, e := s.admin.check("refresh", r.KeysetId, admin.RefreshBody(r.KeysetId), r.Admin); e != nil {
 			return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "refresh", "%v", e)
 		}
 		res, err := s.coordinateGroup(ctx, "refresh", &pb.Open{Op: pb.Op_OP_REFRESH, KeysetId: r.KeysetId, Scheme: pb.Scheme(st.Scheme), Admin: r.Admin})
@@ -116,7 +117,7 @@ func (s *Server) Refresh(ctx context.Context, r *pb.RefreshRequest) (_ *pb.Refre
 	if frozen, why := s.freeze.Frozen(r.KeysetId); frozen {
 		return nil, frozenFail("refresh", r.KeysetId, why)
 	}
-	if _, e := s.admin.check("refresh", r.KeysetId, r.Admin); e != nil {
+	if _, e := s.admin.check("refresh", r.KeysetId, admin.RefreshBody(r.KeysetId), r.Admin); e != nil {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "refresh", "%v", e)
 	}
 	res, err := s.coordinate(ctx, "refresh", &pb.Open{Op: pb.Op_OP_REFRESH, KeysetId: r.KeysetId, Admin: r.Admin}, r.KeysetId)
@@ -353,7 +354,7 @@ func (s *Server) Unfreeze(ctx context.Context, r *pb.UnfreezeRequest) (_ *pb.Unf
 	if !validID(r.KeysetId) {
 		return nil, invalid("unfreeze", "invalid keyset id")
 	}
-	key, e := s.admin.check("unfreeze", r.KeysetId, r.Admin)
+	key, e := s.admin.check("unfreeze", r.KeysetId, admin.UnfreezeBody(r.KeysetId), r.Admin)
 	if e != nil {
 		return nil, failf(pb.ErrorKind_ERROR_KIND_REFUSED, codes.PermissionDenied, "unfreeze", "%v", e)
 	}

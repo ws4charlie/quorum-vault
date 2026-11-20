@@ -6,7 +6,6 @@ package mpcstack
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
@@ -42,7 +41,6 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
-	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 
 	"github.com/ws4charlie/quorum-vault/internal/hsm/hsmtest"
@@ -385,10 +383,8 @@ type Stack struct {
 	Bin Binaries
 
 	CertA, CertB, CertGW, CertProx Cert
-	CertCosB                       Cert // the certificate B's cosigner presents on its socket (B pins it; the cosigner pins B)
-	adminPub                       ed25519.PublicKey
-	admin                          ed25519.PrivateKey
-	adminSkew                      atomic.Int64
+	CertCosB                       Cert     // the certificate B's cosigner presents on its socket (B pins it; the cosigner pins B)
+	Admins                         AdminSet // the three admin keys; the parties are configured with them and admin_threshold 2
 
 	CallerA, CallerB, PeerB string
 	peerForA                string
@@ -424,7 +420,7 @@ func Start(t testing.TB, dir string, bin Binaries, o Opts) *Stack {
 	s := &Stack{t: t, Dir: dir, Bin: bin, KeysetID: "hot"}
 	s.CertA, s.CertB, s.CertGW, s.CertProx = NewCert(t, "party-a"), NewCert(t, "party-b"), NewCert(t, "gateway"), NewCert(t, "proxy")
 	s.CertCosB = NewCert(t, "cosigner-b")
-	s.adminPub, s.admin, _ = ed25519.GenerateKey(rand.Reader)
+	s.Admins = newAdminSet()
 	s.CallerA, s.CallerB, s.PeerB = FreeAddr(t), FreeAddr(t), FreeAddr(t)
 	s.peerForA = s.PeerB
 	s.Sock = filepath.Join(os.TempDir(), fmt.Sprintf("qvcs-%d.sock", time.Now().UnixNano()%1e9))
@@ -470,7 +466,7 @@ func (s *Stack) writeParty(role, peerPin string, o Opts) string {
 	}
 	cfg := map[string]any{
 		"role": role, "cert_file": crt, "key_file": key, "peer_pins": []string{peerPin}, "caller_pins": []string{s.CertGW.Pin},
-		"data_dir": filepath.Join(s.Dir, "data-"+role), "admin_keys": []string{hex.EncodeToString(s.adminPub)},
+		"data_dir": filepath.Join(s.Dir, "data-"+role), "admin_keys": s.Admins.PublicHex(), "admin_threshold": AdminThreshold,
 		"sealer": SealerConfig(role), "limits": lim,
 	}
 	if role == "A" {
@@ -525,20 +521,12 @@ func tail(s string) string {
 	return strings.Join(l, "\n")
 }
 
-// AdminSeedHex is the parties' admin key (the seed, hex) for a key file: `qv-keysets party-auth` makes the authorisation of a DKG from it.
-func (s *Stack) AdminSeedHex() string { return hex.EncodeToString(s.admin.Seed()) }
-
-// AdminAuth is an operator signature that has not been used before (signatures are deterministic per second).
-func (s *Stack) AdminAuth(op string) *pb.AdminAuth {
-	return admin.Sign(s.admin, op, s.KeysetID, time.Now().Add(time.Duration(s.adminSkew.Add(1))*time.Second))
-}
-
 // DKG runs the distributed key generation through A.
 func (s *Stack) DKG() {
 	s.t.Helper()
 	x, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	r, err := s.Client.DKG(x, &pb.DKGRequest{KeysetId: s.KeysetID, Curve: pb.Curve_CURVE_SECP256K1, Admin: s.AdminAuth("dkg")})
+	r, err := s.Client.DKG(x, s.Admins.DKG(&pb.DKGRequest{KeysetId: s.KeysetID, Curve: pb.Curve_CURVE_SECP256K1}))
 	if err != nil {
 		s.t.Fatalf("DKG: %v\nA: %s\nB: %s", err, tail(s.A.Output()), tail(s.B.Output()))
 	}
@@ -572,7 +560,7 @@ func (s *Stack) Derive(i int) Shard {
 func (s *Stack) Refresh() error {
 	x, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	_, err := s.Client.Refresh(x, &pb.RefreshRequest{KeysetId: s.KeysetID, Admin: s.AdminAuth("refresh")})
+	_, err := s.Client.Refresh(x, s.Admins.Refresh(&pb.RefreshRequest{KeysetId: s.KeysetID}))
 	return err
 }
 
@@ -580,7 +568,7 @@ func (s *Stack) Refresh() error {
 func (s *Stack) Unfreeze() error {
 	x, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	_, err := s.Client.Unfreeze(x, &pb.UnfreezeRequest{KeysetId: s.KeysetID, Admin: s.AdminAuth("unfreeze")})
+	_, err := s.Client.Unfreeze(x, s.Admins.Unfreeze(&pb.UnfreezeRequest{KeysetId: s.KeysetID}))
 	return err
 }
 

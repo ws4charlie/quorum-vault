@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
 
@@ -104,7 +105,7 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		if !validID(open.KeysetId) {
 			return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "invalid keyset id")
 		}
-		if _, err := s.admin.check("dkg", open.KeysetId, open.Admin); err != nil {
+		if _, err := s.admin.check("dkg", open.KeysetId, admin.DKGBody(open.KeysetId, open.Scheme, open.Curve), open.Admin); err != nil {
 			return reject(pb.ErrorKind_ERROR_KIND_REFUSED, err.Error())
 		}
 		if st, err := s.store.State(ctx, open.KeysetId); err == nil && st.Current != 0 {
@@ -134,7 +135,7 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		frozen, why := s.freeze.Frozen(open.KeysetId)
 		switch open.Op {
 		case pb.Op_OP_REFRESH:
-			if _, err := s.admin.check("refresh", open.KeysetId, open.Admin); err != nil {
+			if _, err := s.admin.check("refresh", open.KeysetId, admin.RefreshBody(open.KeysetId), open.Admin); err != nil {
 				return reject(pb.ErrorKind_ERROR_KIND_REFUSED, err.Error())
 			}
 			if frozen {
@@ -145,7 +146,7 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 				return reject(pb.ErrorKind_ERROR_KIND_FROZEN, "keyset is frozen: "+why)
 			}
 		case pb.Op_OP_UNFREEZE:
-			key, err := s.admin.check("unfreeze", open.KeysetId, open.Admin)
+			key, err := s.admin.check("unfreeze", open.KeysetId, admin.UnfreezeBody(open.KeysetId), open.Admin)
 			if err != nil {
 				return reject(pb.ErrorKind_ERROR_KIND_REFUSED, err.Error())
 			}

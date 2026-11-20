@@ -271,7 +271,7 @@ func checkPartyConfig(role string, c map[string]any) []string {
 	var v []string
 	add := func(f string, a ...any) { v = append(v, "party.json: "+fmt.Sprintf(f, a...)) }
 	known := map[string]bool{"role": true, "caller_listen": true, "peer_listen": true, "peer_address": true, "cert_file": true, "key_file": true, "peer_pins": true, "caller_pins": true,
-		"peer_c_address": true, "peer_c_pins": true, "peer_a_pins": true, "peer_b_pins": true, "data_dir": true, "metrics_listen": true, "admin_keys": true, "admin_max_age_seconds": true,
+		"peer_c_address": true, "peer_c_pins": true, "peer_a_pins": true, "peer_b_pins": true, "data_dir": true, "metrics_listen": true, "admin_keys": true, "admin_max_age_seconds": true, "admin_threshold": true, "admin_allow_v1": true, "admin_max_validity_seconds": true, "admin_domain": true,
 		"sealer": true, "authorizer": true, "limits": true}
 	for k := range c {
 		if !known[k] {
@@ -1084,6 +1084,7 @@ func TestPartyRefusals(t *testing.T) {
 		{"load balancer without source ranges", false, "B", []string{"--set", "service.peer.type=LoadBalancer", "--set", "service.peer.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-internal=true"}, "sourceRanges"},
 		{"NodePort", false, "B", []string{"--set", "service.peer.type=NodePort"}, "must be one of"},
 		{"no operator keys", false, "A", []string{"--set", "adminKeys=null"}, "adminKeys is required"},
+		{"threshold above the keys", false, "A", []string{"--set", "adminThreshold=2"}, "adminThreshold cannot be more than the number of adminKeys"},
 		{"no caller pins", false, "A", []string{"--set", "callerPins=null"}, "callerPins is required"},
 		{"A without B's endpoint", false, "A", []string{"--set", "peers.b.address="}, "peers.b.address is required"},
 		{"B without the cosigner config", false, "B", []string{"--set", "cosigner.config=null"}, "cosigner.config is required"},
@@ -1258,7 +1259,7 @@ func TestPartyOperatorJob(t *testing.T) {
 			pod, _ := jobs[0].Pod()
 			c := pod.Containers[0]
 			args := strings.Join(c.Args, " ")
-			for _, want := range []string{"refresh -auth /etc/qv/admin/auth.json", "-party " + role + "=qv-party-" + strings.ToLower(role) + "-caller:7001@" + strings.Repeat("ab", 32), "-cert /etc/qv/caller/tls.crt", "-window 300s"} {
+			for _, want := range []string{"refresh -auth /etc/qv/admin/auth.json", "-party " + role + "=qv-party-" + strings.ToLower(role) + "-caller:7001@" + strings.Repeat("ab", 32), "-cert /etc/qv/caller/tls.crt", "-window 300s", "-threshold 1", "-max-validity 3600s", "-admin-key " + strings.Repeat("1", 64)} {
 				if !strings.Contains(args, want) {
 					t.Errorf("%s %s: args lack %q: %s", role, e.name, want, args)
 				}
@@ -1266,7 +1267,7 @@ func TestPartyOperatorJob(t *testing.T) {
 			if !strings.Contains(c.Image, "qv-tools-signing") || len(c.Command) != 1 || c.Command[0] != "/usr/local/bin/qv-party-admin" {
 				t.Errorf("%s %s: image %s command %v", role, e.name, c.Image, c.Command)
 			}
-			if strings.Contains(strings.ToLower(text), "admin-key") || strings.Contains(args, "-key /etc/qv/admin") {
+			if strings.Contains(strings.ToLower(text), "admin.key") || strings.Contains(args, "-key /etc/qv/admin") {
 				t.Errorf("%s %s: the Job refers to an operator signing key", role, e.name)
 			}
 			secrets := 0

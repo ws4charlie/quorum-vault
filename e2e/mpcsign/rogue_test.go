@@ -15,6 +15,8 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
+
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/gateway/gatewaytest"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
@@ -291,6 +293,16 @@ func rogueAdminOperations(t *testing.T, to string) {
 		return o
 	}
 	_ = otherPub
+	// with signs the Open the way an admin would sign the call it stands for: the body is rebuilt from the Open's own fields, as the party does.
+	with := func(o *pb.Open, opStr string, sign func(op string, body proto.Message) *pb.AdminAuth) *pb.Open {
+		o = mk(o)
+		body, err := admin.BodyOf(opStr, o.KeysetId, o.Scheme, o.Curve)
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.Admin = sign(opStr, body)
+		return o
+	}
 	for _, op := range []struct {
 		name string
 		op   pb.Op
@@ -300,24 +312,44 @@ func rogueAdminOperations(t *testing.T, to string) {
 		if op.op == pb.Op_OP_DKG {
 			keyset = "rogue-keyset"
 		}
+		open := func() *pb.Open { return &pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1} }
+		now := time.Now()
 		t.Run(op.name+" without a signature", func(t *testing.T) {
-			r.refused(t, mk(&pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1}), pb.ErrorKind_ERROR_KIND_REFUSED, "admin authorization")
+			r.refused(t, mk(open()), pb.ErrorKind_ERROR_KIND_REFUSED, "admin authorization")
 		})
 		t.Run(op.name+" signed by a key B does not know", func(t *testing.T) {
-			r.refused(t, mk(&pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1, Admin: signWith(otherPriv, op.str, keyset, time.Now())}),
-				pb.ErrorKind_ERROR_KIND_REFUSED, "not a configured admin key")
+			r.refused(t, with(open(), op.str, func(o string, b proto.Message) *pb.AdminAuth {
+				return s.adminAuthBy(o, b, now, now.Add(10*time.Minute), s.adminKeys[0], otherPriv)
+			}), pb.ErrorKind_ERROR_KIND_REFUSED, "not a configured admin key")
 		})
-		t.Run(op.name+" with a stale timestamp", func(t *testing.T) {
-			r.refused(t, mk(&pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1, Admin: s.adminAuth(op.str, keyset, time.Now().Add(-time.Hour))}),
-				pb.ErrorKind_ERROR_KIND_REFUSED, "outside the accepted window")
+		t.Run(op.name+" signed by one admin only", func(t *testing.T) {
+			r.refused(t, with(open(), op.str, func(o string, b proto.Message) *pb.AdminAuth {
+				return s.adminAuthBy(o, b, now, now.Add(10*time.Minute), s.adminKeys[0])
+			}), pb.ErrorKind_ERROR_KIND_REFUSED, "1 signature(s), 2 needed")
+		})
+		t.Run(op.name+" expired", func(t *testing.T) {
+			r.refused(t, with(open(), op.str, func(o string, b proto.Message) *pb.AdminAuth {
+				return s.adminAuth(o, b, now.Add(-2*time.Hour), now.Add(-time.Hour))
+			}), pb.ErrorKind_ERROR_KIND_REFUSED, "expired")
 		})
 		t.Run(op.name+" with a signature for another operation", func(t *testing.T) {
 			wrong := "refresh"
 			if op.str == "refresh" {
 				wrong = "dkg"
 			}
-			r.refused(t, mk(&pb.Open{Op: op.op, KeysetId: keyset, Curve: pb.Curve_CURVE_SECP256K1, Admin: s.adminAuth(wrong, keyset, adminNow())}),
-				pb.ErrorKind_ERROR_KIND_REFUSED, "bad signature")
+			r.refused(t, with(open(), op.str, func(o string, b proto.Message) *pb.AdminAuth {
+				wb, _ := admin.BodyOf(wrong, keyset, pb.Scheme_SCHEME_ECDSA_2OF3, pb.Curve_CURVE_SECP256K1)
+				return s.freshAuth(wrong, wb)
+			}), pb.ErrorKind_ERROR_KIND_REFUSED, "does not verify")
+		})
+		t.Run(op.name+" with a field changed after signing", func(t *testing.T) {
+			// signed for the 2-of-3 ECDSA scheme the Open carries, then the Open names the Ed25519 one
+			if op.op != pb.Op_OP_DKG {
+				t.Skip("the keyset of a refresh or unfreeze is looked up before the signature (TestPartiesRefuse covers it through A)")
+			}
+			o := with(open(), op.str, func(o string, b proto.Message) *pb.AdminAuth { return s.freshAuth(o, b) })
+			o.Scheme = pb.Scheme_SCHEME_ED25519_2OF3
+			r.refused(t, o, pb.ErrorKind_ERROR_KIND_REFUSED, "does not verify")
 		})
 	}
 	// The same operations through party A's caller port are refused by A as well (A checks its own admin keys).

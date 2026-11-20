@@ -7,7 +7,11 @@
 {{- $role := include "qp.role" . -}}
 {{- if not $v.callerPins }}{{ fail "callerPins is required: the certificates allowed on the caller port" }}{{ end -}}
 {{- if not $v.adminKeys }}{{ fail "adminKeys is required: the operators' Ed25519 public keys" }}{{ end -}}
-{{- $c := dict "role" $role "caller_listen" (printf "0.0.0.0:%d" (int $v.ports.caller)) "cert_file" "/etc/qv/party-tls/tls.crt" "key_file" "/etc/qv/party-tls/tls.key" "data_dir" "/var/lib/qv/party/data" "metrics_listen" (printf "127.0.0.1:%d" (int $v.ports.metrics)) "caller_pins" $v.callerPins "admin_keys" $v.adminKeys "admin_max_age_seconds" (int $v.adminMaxAgeSeconds) -}}
+{{- $c := dict "role" $role "caller_listen" (printf "0.0.0.0:%d" (int $v.ports.caller)) "cert_file" "/etc/qv/party-tls/tls.crt" "key_file" "/etc/qv/party-tls/tls.key" "data_dir" "/var/lib/qv/party/data" "metrics_listen" (printf "127.0.0.1:%d" (int $v.ports.metrics)) "caller_pins" $v.callerPins "admin_keys" $v.adminKeys "admin_max_age_seconds" (int $v.adminMaxAgeSeconds) "admin_max_validity_seconds" (int $v.adminMaxValiditySeconds) -}}
+{{- if gt (int $v.adminThreshold) (len $v.adminKeys) }}{{ fail "adminThreshold cannot be more than the number of adminKeys" }}{{ end -}}
+{{- if gt (int $v.adminThreshold) 0 }}{{- $_ := set $c "admin_threshold" (int $v.adminThreshold) -}}{{- end -}}
+{{- if not (kindIs "invalid" $v.adminAllowV1) }}{{- $_ := set $c "admin_allow_v1" $v.adminAllowV1 -}}{{- end -}}
+{{- if $v.adminDomain }}{{- $_ := set $c "admin_domain" $v.adminDomain -}}{{- end -}}
 {{- if eq $role "A" -}}
 {{- if not $v.peers.b.address }}{{ fail "role A: peers.b.address is required (party B's peer endpoint)" }}{{ end -}}
 {{- if not $v.peers.b.pins }}{{ fail "role A: peers.b.pins is required" }}{{ end -}}

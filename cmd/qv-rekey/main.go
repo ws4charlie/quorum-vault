@@ -2,7 +2,7 @@
 // (docs/runbooks/key-replacement.md).
 //
 //	qv-rekey open       -shard S -mode mpc|hsm -reason TEXT   check the shard and write the plan
-//	qv-rekey dkg        [-admin-auth F]                      make the new key: mpc: a DKG on the parties (an operator's `qv-keysets party-auth` file); hsm: a key in the token
+//	qv-rekey dkg        [-admin-auth F]                      make the new key: mpc: a DKG on the parties (a request file the admins signed with `qv-party-admin`); hsm: a key in the token
 //	qv-rekey candidate  [-change F]                          register the new generation in the zone (signed record) and the core
 //	qv-rekey drain-start -cap ASSET=N ... [-compromised] [-change F]   the old generation drains into the new one (-compromised: marked compromised instead)
 //	qv-rekey activate   [-change F]                          the new generation is active; prints the cold ceremony to do
@@ -86,7 +86,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	shard := fs.String("shard", "", "open: the shard ID, entity/chain/pool/number")
 	mode := fs.String("mode", "", "open: mpc (2-of-3 keyset on the parties) or hsm (a key in the token)")
 	reason := fs.String("reason", "", "open: why the key is replaced")
-	adminAuth := fs.String("admin-auth", "", "dkg (mpc): the operator's `qv-keysets party-auth -op dkg -keyset ID` file")
+	adminAuth := fs.String("admin-auth", "", "dkg (mpc): a request file signed by the admins: `qv-party-admin request -op dkg -keyset ID ...` then `sign` by each")
 	rpc := fs.String("rpc", "", "status, activate: the chain's RPC URL, to read the factory's destination")
 	window := fs.Int64("window", 0, "drain-start of a deposit tree: seconds its old deposit addresses stay swept before the old generation may retire (the signed record carries it)")
 	factory := fs.String("factory", "", "status, activate: the forwarder factory's address")
@@ -450,33 +450,15 @@ func (k *mpcKeys) New(ctx context.Context, p *Plan) (string, string, error) {
 		return id, pub, err
 	}
 	if k.adminAuth == "" {
-		return "", "", fmt.Errorf("-admin-auth is required: an operator's file from `qv-keysets party-auth -op dkg -keyset %s` (valid for a few minutes, make it right before)", id)
+		return "", "", fmt.Errorf("-admin-auth is required: a request file the admins signed: `qv-party-admin request -op dkg -keyset %s ...`, then `qv-party-admin sign` by each admin (valid for the time it was made for)", id)
 	}
-	raw, err := os.ReadFile(k.adminAuth)
+	auth, err := readDKGAuth(k.adminAuth, id, pb.Scheme_SCHEME_ECDSA_2OF3, pb.Curve_CURVE_UNSPECIFIED)
 	if err != nil {
 		return "", "", err
 	}
-	var f struct {
-		Op        string `json:"op"`
-		Keyset    string `json:"keyset"`
-		Unix      int64  `json:"unix_seconds"`
-		PublicKey string `json:"public_key"`
-		Signature string `json:"signature"`
-	}
-	if err := json.Unmarshal(raw, &f); err != nil {
-		return "", "", err
-	}
-	if f.Op != "dkg" || f.Keyset != id {
-		return "", "", fmt.Errorf("%s is for %s of keyset %q, this step needs dkg of %q", k.adminAuth, f.Op, f.Keyset, id)
-	}
-	pub, err1 := hex.DecodeString(f.PublicKey)
-	sig, err2 := hex.DecodeString(f.Signature)
-	if err1 != nil || err2 != nil {
-		return "", "", errors.New("the admin-auth file is not hex")
-	}
 	x, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
-	r, err := a.DKG(x, &pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: &pb.AdminAuth{UnixSeconds: f.Unix, PublicKey: pub, Signature: sig}})
+	r, err := a.DKG(x, &pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: auth})
 	if err != nil {
 		// The DKG may have finished on the parties although the answer was lost: look again before reporting.
 		if st, e2 := keyset(ctx, a, id); e2 == nil && st != nil {

@@ -256,7 +256,7 @@ func ed25519DKG(t *testing.T, m *mpcstack.Stack, id string) {
 	m.KeysetID = id
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if _, err := m.Client.DKG(ctx, &pb.DKGRequest{KeysetId: id, Curve: pb.Curve_CURVE_ED25519, Admin: m.AdminAuth("dkg")}); err != nil {
+	if _, err := m.Client.DKG(ctx, m.Admins.DKG(&pb.DKGRequest{KeysetId: id, Curve: pb.Curve_CURVE_ED25519})); err != nil {
 		t.Fatalf("Ed25519 DKG: %v", err)
 	}
 }

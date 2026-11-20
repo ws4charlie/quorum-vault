@@ -34,8 +34,12 @@ peers:
   b: { address: "", pins: [] }          # A: B's peer endpoint host:port; C: B's certificate (pins only)
   c: { address: "", pins: [] }          # A and B: C's peer endpoint host:port
 callerPins: []                          # certificates allowed on the caller port: the gateway (A; B and C for health), the operators' tool
-adminKeys: []                           # operators' Ed25519 public keys (64 hex): DKG, refresh, freeze and unfreeze need a signature by one of them
-adminMaxAgeSeconds: 300
+adminKeys: []                           # admins' Ed25519 public keys (64 hex): DKG, refresh and unfreeze need the signatures of adminThreshold of them (no key twice)
+adminMaxAgeSeconds: 300                 # clock skew the party tolerates for an authorization's issue time (and the age of an old v1 signature)
+adminThreshold: 0                       # 0 = unset: one signature is enough and the old v1 format is still accepted (roll-over); 1 or more: that many distinct admins, v1 refused
+adminAllowV1: null                      # null = follow adminThreshold; true only during the roll-over with adminThreshold set (each v1 acceptance is logged and counted)
+adminMaxValiditySeconds: 3600           # the longest an authorization may be valid (a request travels between admins to be signed)
+adminDomain: ""                         # the deployment's name, signed into every authorization: the same on all three parties
 limits:
   recvTimeoutMs: 0                      # 0 = the binary's default (5000)
   keygenRecvTimeoutMs: 0

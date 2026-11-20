@@ -3,6 +3,7 @@
 package testenv
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -27,7 +28,9 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/proto"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/server"
 )
@@ -117,15 +120,35 @@ type Env struct {
 	SealKeyFile                     string
 	mu                              sync.Mutex
 	n                               int
-	AdminPriv                       ed25519.PrivateKey
-	AdminPub                        ed25519.PublicKey
+	// AdminKeys is the admin set the parties are configured with: three keys, two of them needed (admin_threshold 2). AdminPriv/AdminPub are the first.
+	AdminKeys []ed25519.PrivateKey
+	AdminPriv ed25519.PrivateKey
+	AdminPub  ed25519.PublicKey
+	pending   map[string][]ed25519.PrivateKey // nonce of a placeholder authorization -> who signs it
+}
+
+// AdminThreshold is the admin_threshold every test party is configured with.
+const AdminThreshold = 2
+
+func (e *Env) adminKeyHex() []string {
+	var l []string
+	for _, k := range e.AdminKeys {
+		l = append(l, hex.EncodeToString(k.Public().(ed25519.PublicKey)))
+	}
+	return l
 }
 
 func NewEnv(t testing.TB) *Env {
 	t.Helper()
 	dir := t.TempDir()
-	apub, apriv, _ := ed25519.GenerateKey(rand.Reader)
-	e := &Env{AdminPriv: apriv, AdminPub: apub, Dir: dir, CertA: NewCert(t, "party-a"), CertB: NewCert(t, "party-b"), CertC: NewCert(t, "party-c"), CertCaller: NewCert(t, "caller"), Stranger: NewCert(t, "stranger")}
+	var keys []ed25519.PrivateKey
+	for range 3 {
+		_, k, _ := ed25519.GenerateKey(rand.Reader)
+		keys = append(keys, k)
+	}
+	apriv := keys[0]
+	apub := apriv.Public().(ed25519.PublicKey)
+	e := &Env{AdminKeys: keys, pending: map[string][]ed25519.PrivateKey{}, AdminPriv: apriv, AdminPub: apub, Dir: dir, CertA: NewCert(t, "party-a"), CertB: NewCert(t, "party-b"), CertC: NewCert(t, "party-c"), CertCaller: NewCert(t, "caller"), Stranger: NewCert(t, "stranger")}
 	e.SealKeyFile = filepath.Join(dir, "seal.key")
 	key := make([]byte, 32)
 	rand.Read(key)
@@ -144,7 +167,7 @@ func (e *Env) Config(t testing.TB, role string, peerAddr string, callerAddr, pee
 	}
 	crt, key := own.Write(t, e.Dir)
 	c := &server.Config{Role: role, CallerListen: callerAddr, CertFile: crt, KeyFile: key,
-		PeerPins: []string{other.Pin}, CallerPins: []string{e.CertCaller.Pin}, AdminKeys: []string{hex.EncodeToString(e.AdminPub)},
+		PeerPins: []string{other.Pin}, CallerPins: []string{e.CertCaller.Pin}, AdminKeys: e.adminKeyHex(), AdminThreshold: AdminThreshold,
 		DataDir:    filepath.Join(e.Dir, "data-"+role),
 		Sealer:     server.SealerConfig{Type: server.InsecureSealerType, KeyFile: e.SealKeyFile},
 		Authorizer: server.AuthorizerConfig{Type: "dev-allow-all", AcceptRisk: server.DevAllowAllRiskPhrase}}
@@ -174,7 +197,7 @@ func (e *Env) Config3(t testing.TB, role string, a Addrs, dialB, dialC string) *
 	own := map[string]Cert{"A": e.CertA, "B": e.CertB, "C": e.CertC}[role]
 	crt, key := own.Write(t, e.Dir)
 	c := &server.Config{Role: role, CertFile: crt, KeyFile: key, CallerPins: []string{e.CertCaller.Pin},
-		AdminKeys:  []string{hex.EncodeToString(e.AdminPub)},
+		AdminKeys: e.adminKeyHex(), AdminThreshold: AdminThreshold,
 		DataDir:    filepath.Join(e.Dir, "data-"+role),
 		Sealer:     server.SealerConfig{Type: server.InsecureSealerType, KeyFile: e.SealKeyFile},
 		Authorizer: server.AuthorizerConfig{Type: "dev-allow-all", AcceptRisk: server.DevAllowAllRiskPhrase}}
@@ -210,7 +233,27 @@ func Dial(t testing.TB, addr string, client Cert, serverPin string) (pb.MpcParty
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(server.ClientTLS(client.TLS, pins))))
+	return dialWith(t, addr, client, pins, nil)
+}
+
+// DialAs is Dial for a test that signs admin calls: a request whose Admin comes from Env.Admin or Env.AdminBy is signed here, over the request
+// as it goes out, so the test does not repeat the request body to sign it.
+func (e *Env) DialAs(t testing.TB, addr string, client Cert, serverPin string) (pb.MpcPartyClient, *grpc.ClientConn) {
+	t.Helper()
+	pins, err := parse(serverPin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dialWith(t, addr, client, pins, e.signInterceptor())
+}
+
+func dialWith(t testing.TB, addr string, client Cert, pins map[server.Pin]bool, ic grpc.UnaryClientInterceptor) (pb.MpcPartyClient, *grpc.ClientConn) {
+	t.Helper()
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(credentials.NewTLS(server.ClientTLS(client.TLS, pins)))}
+	if ic != nil {
+		opts = append(opts, grpc.WithUnaryInterceptor(ic))
+	}
+	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,15 +269,63 @@ func parse(pin string) (map[server.Pin]bool, error) {
 	return map[server.Pin]bool{p: true}, nil
 }
 
-// Admin signs an operator authorization for (op, keyset) with the environment's admin key.
-// Each call uses a timestamp one second later than the previous: Ed25519 signatures are deterministic and an admin
-// signature is accepted only once.
+// Admin is a placeholder authorization for the admin call it is put into (op and keysetID only name it for the reader): the client made by
+// DialAs signs it with the first AdminThreshold admin keys over that request's body, with a fresh nonce, valid for ten minutes. Sending the same
+// request object twice replays the signed authorization, as a captured request would be.
 func (e *Env) Admin(op, keysetID string) *pb.AdminAuth {
+	return e.AdminBy(e.AdminKeys[:AdminThreshold]...)
+}
+
+// AdminBy is Admin signed by exactly these keys (a stranger, one key too few, the same key twice ...).
+func (e *Env) AdminBy(keys ...ed25519.PrivateKey) *pb.AdminAuth {
+	var nonce [admin.NonceSize]byte
+	rand.Read(nonce[:])
 	e.mu.Lock()
-	e.n++
-	n := e.n
+	e.pending[string(nonce[:])] = keys
 	e.mu.Unlock()
-	return server.SignAdmin(e.AdminPriv, op, keysetID, time.Now().Add(time.Duration(n)*time.Second))
+	now := time.Now()
+	return &pb.AdminAuth{V2: &pb.AdminAuthV2{IssuedUnix: now.Unix(), ExpiresUnix: now.Add(10 * time.Minute).Unix(), Nonce: nonce[:]}}
+}
+
+// SignAuth completes an authorization for (op, req) with keys, as the CLI flow would: the body hash comes from req itself.
+func SignAuth(op string, req proto.Message, domain string, issued, expires time.Time, nonce []byte, keys ...ed25519.PrivateKey) (*pb.AdminAuth, error) {
+	if d, ok := req.(*pb.DKGRequest); ok {
+		req = admin.DKGBody(d.KeysetId, d.Scheme, d.Curve)
+	}
+	hash, err := admin.BodyHash(op, req)
+	if err != nil {
+		return nil, err
+	}
+	return admin.AuthorizeWithNonce(op, req, domain, issued, expires, nonce, hash, keys...), nil
+}
+
+func (e *Env) signInterceptor() grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, inv grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		var op string
+		var a **pb.AdminAuth
+		switch r := req.(type) {
+		case *pb.DKGRequest:
+			op, a = admin.OpDKG, &r.Admin
+		case *pb.RefreshRequest:
+			op, a = admin.OpRefresh, &r.Admin
+		case *pb.UnfreezeRequest:
+			op, a = admin.OpUnfreeze, &r.Admin
+		}
+		if a != nil && (*a).GetV2() != nil && len((*a).V2.Signatures) == 0 {
+			v := (*a).V2
+			e.mu.Lock()
+			keys, ok := e.pending[string(v.Nonce)]
+			e.mu.Unlock()
+			if ok {
+				signed, err := SignAuth(op, req.(proto.Message), v.Domain, time.Unix(v.IssuedUnix, 0), time.Unix(v.ExpiresUnix, 0), v.Nonce, keys...)
+				if err != nil {
+					return err
+				}
+				*a = signed
+			}
+		}
+		return inv(ctx, method, req, reply, cc, opts...)
+	}
 }
 
 // CertCallerKey returns an Ed25519 key that is NOT a configured admin key (for refusal tests).

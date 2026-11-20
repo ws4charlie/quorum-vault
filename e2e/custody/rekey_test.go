@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"math/big"
 	"os"
 	"os/exec"
@@ -113,18 +114,10 @@ func (s *system) rekeyPlan(dir string) rekeyPlan {
 	return rekeyPlan{raw.Address, raw.KeyRef, raw.PublicKey, raw.From, raw.To}
 }
 
-// partyAuth is an operator's authorisation of the DKG on the parties (qv-keysets party-auth), made right before it is used.
+// partyAuth is the admins' authorisation of the DKG on the parties (a v2 request signed by two of the three admin keys), made right before it is used.
 func (s *system) partyAuth(keyset string) string {
 	s.t.Helper()
-	key := filepath.Join(s.dir, "party-admin.key")
-	if err := os.WriteFile(key, []byte(s.mpc.AdminSeedHex()), 0o600); err != nil {
-		s.t.Fatal(err)
-	}
-	f := filepath.Join(s.dir, "party-auth.json")
-	if out, err := exec.Command(filepath.Join(binDir, "qv-keysets"), "party-auth", "-key", key, "-op", "dkg", "-keyset", keyset, "-out", f).CombinedOutput(); err != nil {
-		s.t.Fatalf("party-auth: %v\n%s", err, out)
-	}
-	return f
+	return s.mpc.Admins.DKGRequestFile(s.t, s.dir, keyset, pb.Scheme_SCHEME_ECDSA_2OF3, pb.Curve_CURVE_UNSPECIFIED)
 }
 
 // dkg is the dkg step in either mode.

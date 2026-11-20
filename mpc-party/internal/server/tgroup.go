@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/cbmpc"
 )
@@ -342,7 +343,7 @@ func (s *Server) groupPrecheck(ctx context.Context, open *pb.Open) (kind pb.Erro
 	}
 	switch open.Op {
 	case pb.Op_OP_DKG:
-		if _, err := s.admin.check("dkg", id, open.Admin); err != nil {
+		if _, err := s.admin.check("dkg", id, admin.DKGBody(id, open.Scheme, open.Curve), open.Admin); err != nil {
 			return pb.ErrorKind_ERROR_KIND_REFUSED, err.Error(), false
 		}
 		if st, err := s.store.State(ctx, id); err == nil && st.Current != 0 {
@@ -369,7 +370,7 @@ func (s *Server) groupPrecheck(ctx context.Context, open *pb.Open) (kind pb.Erro
 		if frozen, why := s.freeze.Frozen(id); frozen {
 			return pb.ErrorKind_ERROR_KIND_FROZEN, "keyset is frozen: " + why, false
 		}
-		if _, err := s.admin.check("refresh", id, open.Admin); err != nil {
+		if _, err := s.admin.check("refresh", id, admin.RefreshBody(id), open.Admin); err != nil {
 			return pb.ErrorKind_ERROR_KIND_REFUSED, err.Error(), false
 		}
 	default:
@@ -523,7 +524,7 @@ func (s *Server) unfreezeFollow(ctx context.Context, stream pb.Peer_SessionServe
 	if st, err := s.store.State(ctx, open.KeysetId); err != nil || !isTScheme(st.Scheme) || st.Scheme != int32(open.Scheme) {
 		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "unknown 2-of-3 keyset on this party")
 	}
-	key, err := s.admin.check("unfreeze", open.KeysetId, open.Admin)
+	key, err := s.admin.check("unfreeze", open.KeysetId, admin.UnfreezeBody(open.KeysetId), open.Admin)
 	if err != nil {
 		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, err.Error())
 	}

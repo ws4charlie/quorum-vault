@@ -10,11 +10,21 @@ import (
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
-	"github.com/ws4charlie/quorum-vault/mpc-party/internal/server"
 )
 
 // An admin request is accepted once, also across a restart of the party (admin.go: durable seen set + start-time rule).
+
+// refreshAuth is a v2 authorization of a refresh of keyset k, signed by two admins, issued at the given time and valid for ten minutes after it.
+func refreshAuth(t *testing.T, cl *cluster, issued time.Time) *pb.AdminAuth {
+	t.Helper()
+	a, err := admin.Authorize("refresh", &pb.RefreshRequest{KeysetId: "k"}, "", issued, issued.Add(10*time.Minute), cl.env.AdminKeys[0], cl.env.AdminKeys[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
 
 func adminReplayCluster(t *testing.T) (*cluster, string) {
 	cl := newCluster(t, nil, false)
@@ -40,7 +50,7 @@ func wantAdminRefused(t *testing.T, what string, err error, contains string) {
 func TestAdminReplayAfterRestart(t *testing.T) {
 	cl, seen := adminReplayCluster(t)
 	x := ctx(t, 3*time.Minute)
-	req := &pb.RefreshRequest{KeysetId: "k", Admin: server.SignAdmin(cl.env.AdminPriv, "refresh", "k", time.Now().Add(2*time.Minute))}
+	req := &pb.RefreshRequest{KeysetId: "k", Admin: refreshAuth(t, cl, time.Now().Add(2*time.Minute))}
 	if _, err := cl.client.Refresh(x, req); err != nil {
 		t.Fatalf("first refresh: %v", err)
 	}
@@ -75,7 +85,7 @@ func TestAdminReplayAfterRestart(t *testing.T) {
 func TestAdminReplayRolledBackDataDir(t *testing.T) {
 	cl, seen := adminReplayCluster(t)
 	x := ctx(t, 3*time.Minute)
-	req := &pb.RefreshRequest{KeysetId: "k", Admin: server.SignAdmin(cl.env.AdminPriv, "refresh", "k", time.Now())}
+	req := &pb.RefreshRequest{KeysetId: "k", Admin: refreshAuth(t, cl, time.Now())}
 	if _, err := cl.client.Refresh(x, req); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +97,7 @@ func TestAdminReplayRolledBackDataDir(t *testing.T) {
 	cl.restartA(t)
 	cl.waitReady(t)
 	_, err := cl.client.Refresh(x, req)
-	wantAdminRefused(t, "rolled-back data directory", err, "older than this party's start")
+	wantAdminRefused(t, "rolled-back data directory", err, "before this party's start")
 	retry(t, 30*time.Second, func() error {
 		_, err := cl.client.Refresh(x, &pb.RefreshRequest{KeysetId: "k", Admin: cl.env.Admin("refresh", "k")})
 		return err
@@ -99,7 +109,7 @@ func TestAdminReplayRolledBackDataDir(t *testing.T) {
 func TestAdminReplayOneForgetfulParty(t *testing.T) {
 	cl, seen := adminReplayCluster(t)
 	x := ctx(t, 3*time.Minute)
-	req := &pb.RefreshRequest{KeysetId: "k", Admin: server.SignAdmin(cl.env.AdminPriv, "refresh", "k", time.Now().Add(2*time.Minute))}
+	req := &pb.RefreshRequest{KeysetId: "k", Admin: refreshAuth(t, cl, time.Now().Add(2*time.Minute))}
 	if _, err := cl.client.Refresh(x, req); err != nil {
 		t.Fatal(err)
 	}
