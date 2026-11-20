@@ -1,0 +1,21 @@
+# qv-business on the AWS business cluster (roots/business).
+archive:
+  bucket: <audit.audit_heads_bucket>          # Object Lock COMPLIANCE, in the audit account
+  region: <region>
+  retention: 61320h                                   # 2555 days: must not exceed the lock of the bucket (audit_heads_retention_days)
+  credentialsSecret: ""                               # empty: the archiver uses its role, no key anywhere
+archiver:
+  serviceAccount:
+    automountToken: true                              # IRSA needs the token
+    annotations:
+      eks.amazonaws.com/role-arn: <business.archiver_role_arn>
+# CHART GAP: signingLink opens ONE port per dependency (Postgres 5432, Kafka network.kafka.port = 9092); brokers also listen on 9093 and 9094. Needs network.kafka.ports in the chart.
+database:
+  host: qv-business-db-rw                             # CloudNativePG in this cluster; backups: <business.database_backups.ledger>
+network:
+  # PrivateLink traffic reaches the pods from the NLB nodes, which sit in the private subnets: a NetworkPolicy sees these addresses, not the signing VPCs.
+  signingLink:
+    from:
+      - ipBlock: { cidr: <business.private_subnet_cidrs.0> }
+      - ipBlock: { cidr: <business.private_subnet_cidrs.1> }
+      - ipBlock: { cidr: <business.private_subnet_cidrs.2> }   # drop the line when the footprint has two zones

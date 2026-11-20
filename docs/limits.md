@@ -49,4 +49,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 **Audit**
 - **The write-once store used in tests has no independent compliance assessment.** It proves our code against the storage interface, not a regulatory claim; production is meant to use AWS S3 Object Lock ([spike note](spikes/audit-worm.md)).
 
+**Deployment**
+- **The AWS reference deployment has never been applied.** It is code checked without an account (format, validation, a mocked test of the isolation rules, lint and a scan). Its first real run, its costs and what only an account can show are in the [runbook](runbooks/aws-first-deploy.md).
+
 [DESIGN_SCALE.md](../DESIGN_SCALE.md) works out what scaling would need.
