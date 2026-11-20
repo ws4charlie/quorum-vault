@@ -33,14 +33,14 @@ The endpoint services need load balancers that the charts create, so each root i
 | 3 | `roots/audit` | set `archiver_role_exists = true`, apply. Now the archiver role of the business account may put and read, and is denied everything else |
 | 4 | each cluster | through the ops host (below): install what the charts assume: the AWS Load Balancer Controller (role in the output `lb_controller_role_arn`), External Secrets (`eso_role_arn`), CloudNativePG, cert-manager, then the charts with `deploy/cloud/aws/values/*.yaml` |
 | 5 | `roots/business`, `roots/party-b`, `roots/party-c` | set `nlb_services` to the `namespace/service` of the `LoadBalancer` Services the charts made, apply. Output `endpoint_services` |
-| 6 | the provider's account | accept each connection request (`aws ec2 describe-vpc-endpoint-connections`, then `accept-vpc-endpoint-connections`): a person reads the consumer's account number first |
-| 7 | `roots/signing-core`, `roots/party-b`, `roots/party-c` | copy the service names into `endpoint_service_names` (path id → name), apply. Outputs `endpoint_ips` |
-| 8 | charts | put the endpoint addresses and the HSM addresses into the NetworkPolicy values (`values/*.yaml`), upgrade |
+| 6 | `roots/signing-core`, `roots/party-b`, `roots/party-c` | copy the service names into `endpoint_service_names` (path id → name), apply. This creates the consumer endpoints, which send connection requests (output `endpoint_ips`) |
+| 7 | the provider's account | accept each pending request (`aws ec2 describe-vpc-endpoint-connections`, then `accept-vpc-endpoint-connections`): a person reads the consumer's account number first. Until accepted, the endpoint stays `pendingAcceptance` and nothing connects |
+| 8 | charts | put **every** endpoint address (one per zone) and the HSM addresses into the NetworkPolicy values (`values/*.yaml`; the test `values/render_test.py` shows the shape), upgrade |
 | 9 | party accounts, only if `enable_cloudhsm` | initialise the CloudHSM by hand (cluster certificate, crypto officer, crypto user for the sealer); the PIN goes into Secrets Manager under `qv/<domain>/`, never into Terraform |
 
 **Reaching a private cluster.** Set `enable_ops_host = true` and apply. An operator starts a Session Manager port forward to the cluster endpoint
 (`aws ssm start-session --target <ops_host_instance_id> --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters host=<endpoint host>,portNumber=443,localPortNumber=8443`),
-points kubectl at `https://localhost:8443` with the cluster's name as TLS server name, and uses their own Identity Center login. Turn the host off when nobody needs it.
+points kubectl at `https://localhost:8443` with `--tls-server-name` set to the host name of the API endpoint (the output `cluster_endpoint`, without `https://`: the API certificate names that host, not the cluster), and uses their own Identity Center login. Turn the host off when nobody needs it.
 
 ## 3. What it costs to leave running
 
@@ -91,3 +91,20 @@ Order matters: nothing may be deleted while something still uses it.
 - EKS add-on versions are the cluster's defaults; the Kubernetes version default is 1.32 (the charts need 1.30 or later). Check what EKS offers when you apply.
 - The control-plane (API-server audit) logs stay in a CloudWatch log group of the workload account. They are not yet copied to the audit account.
 - CloudHSM: the sealer change (D12) is not merged; the HSM addresses and ports are right for the client library, the rest is by hand and untested.
+
+## 7. Check at first apply
+
+Claims about AWS behaviour that no account has shown yet. Each has the documentation read (2026-11-20) and what stays open.
+
+| Claim | Documentation | Stays unverified until the first apply |
+|---|---|---|
+| EBS CSI role: deletes only volumes and snapshots with the driver's ownership tag; tags added only at creation | [AmazonEBSCSIDriverPolicy v15](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonEBSCSIDriverPolicy.html): the role copies its statements, drops `CopyVolumes`, `LockSnapshot`, `EnableFastSnapshotRestores`, and limits `DeleteTags` to tagged resources | That the driver version you install creates volumes with `ebs.csi.aws.com/cluster` or `CSIVolumeName`, and works without the dropped actions |
+| ECR repository creation role needed for a template with a customer key | [repository creation templates](https://docs.aws.amazon.com/AmazonECR/latest/userguide/repository-creation-templates.html): "must be provided when using repository tags and/or KMS" | The trust principal (`ecr.amazonaws.com`) and the role's permissions: the pages read state neither. Expect to adjust on the first failed pull |
+| Load balancer controller policy covers NLBs, including tagging a new security group | upstream `iam_policy.json` (main branch, no version in the file); see `modules/irsa/policies/README.md` | The version you install; run one `LoadBalancer` Service and read the controller log for denied calls |
+| Kafka through one NLB with a listener per broker | none read | Redpanda's advertised addresses; and the two chart gaps below |
+| ECR cache serves the signatures that Kyverno verifies | none read | an image pull with admission on |
+| PrivateLink: the target sees NLB addresses | [PrivateLink concepts](https://docs.aws.amazon.com/vpc/latest/privatelink/concepts.html) not re-read for this round | the source addresses in the pod's connection log; the NetworkPolicy values rest on it |
+| EKS API certificate names the endpoint host | [EKS cluster endpoint access](https://docs.aws.amazon.com/eks/latest/userguide/cluster-endpoint.html) not re-read for this round | `kubectl` through the port forward with `--tls-server-name` |
+
+**Chart changes the lead must schedule** (found by `values/render_test.py`, listed in its `KNOWN_GAPS`; the test fails when one closes): `qv-signing-core` `network.kafka` and `qv-business` `network.kafka`
+take one port, but Redpanda brokers listen on 9092, 9093 and 9094 behind the endpoint (a list `ports` is needed in both); until then only the first broker is reachable.

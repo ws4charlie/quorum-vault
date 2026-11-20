@@ -85,3 +85,20 @@ run "a_cluster_nobody_can_use_is_refused" {
   }
   expect_failures = [var.access_entries]
 }
+
+run "ebs_csi_driver_can_delete_only_what_it_owns" {
+  assert {
+    condition = alltrue([
+      for st in jsondecode(output.policies.ebs_csi).Statement :
+      !anytrue([for a in flatten([st.Action]) : contains(["ec2:DeleteVolume", "ec2:DeleteSnapshot", "ec2:DeleteTags"], a)]) || can(st.Condition)
+    ])
+    error_message = "every delete (volume, snapshot, tag) needs an ownership-tag condition"
+  }
+  assert {
+    condition = alltrue([
+      for st in jsondecode(output.policies.ebs_csi).Statement :
+      !contains(flatten([st.Action]), "ec2:CreateTags") || (can(st.Condition.StringEquals["ec2:CreateAction"]) && st.Effect == "Allow")
+    ])
+    error_message = "ownership tags can be added only in the call that creates the volume or snapshot"
+  }
+}

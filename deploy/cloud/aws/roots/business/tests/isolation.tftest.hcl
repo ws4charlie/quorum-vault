@@ -98,3 +98,13 @@ run "archiver_may_only_put_and_read_and_never_delete" {
     error_message = "the archiver is allowed to put and read, and explicitly denied everything that deletes or shortens retention"
   }
 }
+
+run "lb_controller_can_tag_a_security_group_it_creates" {
+  assert {
+    condition = anytrue([
+      for st in jsondecode(output.policies["lb_controller"]).Statement :
+      contains(flatten([st.Action]), "ec2:CreateTags") && try(st.Condition.StringEquals["ec2:CreateAction"], "") == "CreateSecurityGroup" && try(st.Condition.Null["aws:RequestTag/elbv2.k8s.aws/cluster"], "") == "false"
+    ])
+    error_message = "creation-time tagging of a new security group needs its own statement (request tag present, create action CreateSecurityGroup)"
+  }
+}

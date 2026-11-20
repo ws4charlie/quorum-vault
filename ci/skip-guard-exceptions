@@ -16,3 +16,4 @@ mpc-party/cmd/mpc-party/tlsinit.go	1	docs/runbooks/tee-broker.md	a line inside t
 ci/kind/charts.sh	1	deploy/helm/qv-business	run only by .github/workflows/kind.yml (and make kind-* by people); kind.yml runs on pull requests that change deploy/** (the guard checks that it covers every allowlisted chart path); ci.yml and the make targets it calls never run ci/kind
 ci/kind/install.sh	1	deploy/helm/qv-certs	same reason (kind.yml); the chart installed here is qv-certs, which is not even on the allowlist
 ci/kind/smoke/upgrade.sh	1	chart=deploy/helm/qv-business	same reason (kind.yml)
+.github/workflows/terraform.yml	7	*	whole file, bounded by count: its own workflow (not a job of ci.yml) whose paths filter names the charts and CI inputs that deploy/cloud/aws/values/render_test.py renders (helm template), so a chart change that breaks the AWS values fails there. Not part of ci.yml.

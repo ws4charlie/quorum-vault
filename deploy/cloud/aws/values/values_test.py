@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """Every key in the AWS values files must exist in the chart's own values.yaml (a typo would otherwise be ignored by Helm). Run: python3 values_test.py"""
 import pathlib, sys
-try:
-    import yaml
-except ImportError:
-    print("values_test: PyYAML missing, skipped"); sys.exit(0)
+import yaml  # required: a missing PyYAML is an error, never a pass (pinned in ../requirements.txt)
 here = pathlib.Path(__file__).parent
 charts = here / "../../../helm"
 pairs = {"business": "qv-business", "signing-core": "qv-signing-core", "party-a": "qv-party", "party-b": "qv-party", "party-c": "qv-party"}

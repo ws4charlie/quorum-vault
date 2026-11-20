@@ -9,6 +9,7 @@ archiver:
     automountToken: true                              # IRSA needs the token
     annotations:
       eks.amazonaws.com/role-arn: <business.archiver_role_arn>
+# CHART GAP: signingLink opens ONE port per dependency (Postgres 5432, Kafka network.kafka.port = 9092); brokers also listen on 9093 and 9094. Needs network.kafka.ports in the chart.
 database:
   host: qv-business-db-rw                             # CloudNativePG in this cluster; backups: <business.database_backups.ledger>
 network:

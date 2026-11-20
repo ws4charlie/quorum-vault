@@ -227,15 +227,90 @@ module "ebs_csi" {
   oidc_issuer_url   = aws_eks_cluster.this.identity[0].oidc[0].issuer
   namespace         = "kube-system"
   service_account   = "ebs-csi-controller-sa"
+  # Follows AWS's managed policy AmazonEBSCSIDriverPolicy (v15, read 2026-11-20: https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonEBSCSIDriverPolicy.html),
+  # written out here and NOT attached, because of these differences:
+  #   - dropped: ec2:CopyVolumes, ec2:LockSnapshot, ec2:EnableFastSnapshotRestores (not used by the charts);
+  #   - ec2:DeleteTags only on volumes and snapshots that carry the driver's ownership tag (the managed policy allows it on every volume and snapshot);
+  #   - the kms statement (the managed policy has none; this key is the only one the driver may use).
+  # Delete calls need an ownership tag; the tag can be added only in the call that creates the volume or snapshot (ec2:CreateAction), never later,
+  # so the driver cannot claim an existing volume of another workload and then delete it.
   policy_statements = [
     {
       Effect = "Allow"
       Action = [
-        "ec2:AttachVolume", "ec2:DetachVolume", "ec2:CreateVolume", "ec2:DeleteVolume", "ec2:CreateSnapshot", "ec2:DeleteSnapshot",
-        "ec2:CreateTags", "ec2:DeleteTags", "ec2:ModifyVolume",
-        "ec2:DescribeAvailabilityZones", "ec2:DescribeInstances", "ec2:DescribeSnapshots", "ec2:DescribeTags", "ec2:DescribeVolumes", "ec2:DescribeVolumesModifications",
+        "ec2:DescribeAvailabilityZones", "ec2:DescribeInstances", "ec2:DescribeInstanceTypes", "ec2:DescribeSnapshots", "ec2:DescribeTags",
+        "ec2:DescribeVolumes", "ec2:DescribeVolumesModifications", "ec2:DescribeVolumeStatus",
       ]
       Resource = "*"
+    },
+    { Effect = "Allow", Action = ["ec2:CreateSnapshot", "ec2:ModifyVolume"], Resource = "arn:aws:ec2:*:*:volume/*" },
+    { Effect = "Allow", Action = ["ec2:AttachVolume", "ec2:DetachVolume"], Resource = ["arn:aws:ec2:*:*:volume/*", "arn:aws:ec2:*:*:instance/*"] },
+    { Effect = "Allow", Action = ["ec2:CreateVolume", "ec2:EnableFastSnapshotRestores"], Resource = "arn:aws:ec2:*:*:snapshot/*" },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:CreateTags"]
+      Resource  = ["arn:aws:ec2:*:*:volume/*", "arn:aws:ec2:*:*:snapshot/*"]
+      Condition = { StringEquals = { "ec2:CreateAction" = ["CreateVolume", "CreateSnapshot"] } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:DeleteTags"]
+      Resource  = ["arn:aws:ec2:*:*:volume/*", "arn:aws:ec2:*:*:snapshot/*"]
+      Condition = { StringLike = { "ec2:ResourceTag/ebs.csi.aws.com/cluster" = "true" } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:CreateVolume"]
+      Resource  = "arn:aws:ec2:*:*:volume/*"
+      Condition = { StringLike = { "aws:RequestTag/ebs.csi.aws.com/cluster" = "true" } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:CreateVolume"]
+      Resource  = "arn:aws:ec2:*:*:volume/*"
+      Condition = { StringLike = { "aws:RequestTag/CSIVolumeName" = "*" } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:DeleteVolume"]
+      Resource  = "arn:aws:ec2:*:*:volume/*"
+      Condition = { StringLike = { "ec2:ResourceTag/ebs.csi.aws.com/cluster" = "true" } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:DeleteVolume"]
+      Resource  = "arn:aws:ec2:*:*:volume/*"
+      Condition = { StringLike = { "ec2:ResourceTag/CSIVolumeName" = "*" } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:DeleteVolume"]
+      Resource  = "arn:aws:ec2:*:*:volume/*"
+      Condition = { StringLike = { "ec2:ResourceTag/kubernetes.io/created-for/pvc/name" = "*" } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:CreateSnapshot"]
+      Resource  = "arn:aws:ec2:*:*:snapshot/*"
+      Condition = { StringLike = { "aws:RequestTag/CSIVolumeSnapshotName" = "*" } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:CreateSnapshot"]
+      Resource  = "arn:aws:ec2:*:*:snapshot/*"
+      Condition = { StringLike = { "aws:RequestTag/ebs.csi.aws.com/cluster" = "true" } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:DeleteSnapshot"]
+      Resource  = "arn:aws:ec2:*:*:snapshot/*"
+      Condition = { StringLike = { "ec2:ResourceTag/CSIVolumeSnapshotName" = "*" } }
+    },
+    {
+      Effect    = "Allow"
+      Action    = ["ec2:DeleteSnapshot"]
+      Resource  = "arn:aws:ec2:*:*:snapshot/*"
+      Condition = { StringLike = { "ec2:ResourceTag/ebs.csi.aws.com/cluster" = "true" } }
     },
     {
       Effect   = "Allow"

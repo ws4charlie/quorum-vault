@@ -77,9 +77,9 @@ variable "log_retention_days" {
 }
 
 variable "namespace_database" {
-  description = "Namespace of the guard database (CloudNativePG cluster qv-guard)."
+  description = "Namespace of the guard database (CloudNativePG cluster qv-guard): the SAME namespace as the release that uses it (the charts' NetworkPolicies select the database pods in their own namespace)."
   type        = string
-  default     = "qv-data"
+  default     = "qv-party-c"
 }
 
 variable "endpoint_service_names" {

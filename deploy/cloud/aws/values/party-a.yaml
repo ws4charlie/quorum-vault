@@ -1,13 +1,22 @@
-# qv-party, role A, in the signing-core cluster. A dials B and C through endpoints of this VPC.
+# qv-party, role A, in the signing-core cluster (namespace qv-signing). A dials B and C through endpoints of this VPC (all interfaces, one per subnet).
 role: A
 persistence:
   storageClassName: qv-gp3-encrypted                  # StorageClass with kmsKeyId = <signing-core.kms_keys.ebs>, volumeBindingMode WaitForFirstConsumer
 serviceAccount: { annotations: {} }                   # the party needs no AWS API: the HSM is reached on the network
 network:
+  # The gateway is in the same cluster and calls A's caller port: its pods, same namespace.
+  callerIngress:
+    from: [{ podSelector: { matchLabels: { app.kubernetes.io/name: qv-signing-core, app.kubernetes.io/component: gateway } } }]
   peerEgress:
     to:
       - ipBlock: { cidr: <signing-core.endpoint_ips.a-party-b-peer.0>/32 }
+      - ipBlock: { cidr: <signing-core.endpoint_ips.a-party-b-peer.1>/32 }
+      - ipBlock: { cidr: <signing-core.endpoint_ips.a-party-b-peer.2>/32 }
       - ipBlock: { cidr: <signing-core.endpoint_ips.a-party-c-peer.0>/32 }
+      - ipBlock: { cidr: <signing-core.endpoint_ips.a-party-c-peer.1>/32 }
+      - ipBlock: { cidr: <signing-core.endpoint_ips.a-party-c-peer.2>/32 }
   hsm:                                                # only while enable_cloudhsm = true
-    to: [{ ipBlock: { cidr: <signing-core.hsm.ips.0>/32 } }]
+    to:
+      - ipBlock: { cidr: <signing-core.hsm.ips.0>/32 }
+      - ipBlock: { cidr: <signing-core.hsm.ips.1>/32 }
     ports: [2223, 2224, 2225]

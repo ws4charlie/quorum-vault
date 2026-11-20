@@ -44,9 +44,50 @@
   {
     "Effect": "Allow",
     "Action": [
-      "ec2:CreateSecurityGroup",
+      "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:RevokeSecurityGroupIngress"
+    ],
+    "Resource": "*"
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
+      "ec2:CreateSecurityGroup"
+    ],
+    "Resource": "*"
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
+      "ec2:CreateTags"
+    ],
+    "Resource": "arn:aws:ec2:*:*:security-group/*",
+    "Condition": {
+      "StringEquals": {
+        "ec2:CreateAction": "CreateSecurityGroup"
+      },
+      "Null": {
+        "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
+      }
+    }
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
       "ec2:CreateTags",
-      "ec2:DeleteTags",
+      "ec2:DeleteTags"
+    ],
+    "Resource": "arn:aws:ec2:*:*:security-group/*",
+    "Condition": {
+      "Null": {
+        "aws:RequestTag/elbv2.k8s.aws/cluster": "true",
+        "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+      }
+    }
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
       "ec2:AuthorizeSecurityGroupIngress",
       "ec2:RevokeSecurityGroupIngress",
       "ec2:DeleteSecurityGroup"
@@ -62,21 +103,63 @@
     "Effect": "Allow",
     "Action": [
       "elasticloadbalancing:CreateLoadBalancer",
-      "elasticloadbalancing:CreateTargetGroup",
+      "elasticloadbalancing:CreateTargetGroup"
+    ],
+    "Resource": "*",
+    "Condition": {
+      "Null": {
+        "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
+      }
+    }
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
       "elasticloadbalancing:CreateListener",
       "elasticloadbalancing:DeleteListener",
-      "elasticloadbalancing:DeleteLoadBalancer",
-      "elasticloadbalancing:DeleteTargetGroup",
-      "elasticloadbalancing:ModifyLoadBalancerAttributes",
-      "elasticloadbalancing:ModifyTargetGroup",
-      "elasticloadbalancing:ModifyTargetGroupAttributes",
-      "elasticloadbalancing:ModifyListener",
-      "elasticloadbalancing:RegisterTargets",
-      "elasticloadbalancing:DeregisterTargets",
-      "elasticloadbalancing:SetSubnets",
-      "elasticloadbalancing:SetSecurityGroups",
+      "elasticloadbalancing:ModifyListener"
+    ],
+    "Resource": "*"
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
       "elasticloadbalancing:AddTags",
       "elasticloadbalancing:RemoveTags"
+    ],
+    "Resource": [
+      "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*",
+      "arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*"
+    ],
+    "Condition": {
+      "Null": {
+        "aws:RequestTag/elbv2.k8s.aws/cluster": "true",
+        "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+      }
+    }
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
+      "elasticloadbalancing:AddTags",
+      "elasticloadbalancing:RemoveTags"
+    ],
+    "Resource": [
+      "arn:aws:elasticloadbalancing:*:*:listener/net/*/*/*"
+    ]
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
+      "elasticloadbalancing:ModifyLoadBalancerAttributes",
+      "elasticloadbalancing:SetIpAddressType",
+      "elasticloadbalancing:SetSecurityGroups",
+      "elasticloadbalancing:SetSubnets",
+      "elasticloadbalancing:DeleteLoadBalancer",
+      "elasticloadbalancing:ModifyTargetGroup",
+      "elasticloadbalancing:ModifyTargetGroupAttributes",
+      "elasticloadbalancing:DeleteTargetGroup",
+      "elasticloadbalancing:ModifyListenerAttributes"
     ],
     "Resource": "*",
     "Condition": {
@@ -88,15 +171,30 @@
   {
     "Effect": "Allow",
     "Action": [
-      "elasticloadbalancing:CreateLoadBalancer",
-      "elasticloadbalancing:CreateTargetGroup",
-      "ec2:CreateSecurityGroup"
+      "elasticloadbalancing:AddTags"
     ],
-    "Resource": "*",
+    "Resource": [
+      "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*",
+      "arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*"
+    ],
     "Condition": {
+      "StringEquals": {
+        "elasticloadbalancing:CreateAction": [
+          "CreateTargetGroup",
+          "CreateLoadBalancer"
+        ]
+      },
       "Null": {
         "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
       }
     }
+  },
+  {
+    "Effect": "Allow",
+    "Action": [
+      "elasticloadbalancing:RegisterTargets",
+      "elasticloadbalancing:DeregisterTargets"
+    ],
+    "Resource": "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*"
   }
 ]

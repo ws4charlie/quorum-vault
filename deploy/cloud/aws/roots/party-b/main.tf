@@ -96,6 +96,8 @@ module "cluster" {
 
 module "registry" {
   source                  = "../../modules/registry"
+  region                  = var.region
+  account_id              = local.account
   upstream_credential_arn = var.ecr_upstream_credential_arn
   kms_key_arn             = module.kms_backup.arn
 }

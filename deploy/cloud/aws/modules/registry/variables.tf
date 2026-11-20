@@ -17,3 +17,11 @@ variable "upstream_credential_arn" {
 variable "kms_key_arn" {
   type = string
 }
+
+variable "region" {
+  type = string
+}
+
+variable "account_id" {
+  type = string
+}

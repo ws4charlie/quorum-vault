@@ -8,6 +8,14 @@ on:
     paths:
       - "deploy/cloud/**"
       - ".github/workflows/terraform.yml"
+      # the values test renders these charts with the AWS values and the CI inputs
+      - "deploy/helm/qv-business/**"
+      - "deploy/helm/qv-signing-core/**"
+      - "deploy/helm/qv-party/**"
+      - "ci/helm/ci-digests.yaml"
+      - "ci/helm/ci-party-values.yaml"
+      - "ci/helm/ci-party-digests.yaml"
+      - "ci/helm/signing-core-ci.yaml"
   workflow_dispatch:
 
 permissions:
@@ -45,6 +53,13 @@ jobs:
         with:
           path: ~/.terraform.d/plugin-cache
           key: tf-plugins-${{ hashFiles('deploy/cloud/aws/roots/*/.terraform.lock.hcl', 'deploy/cloud/aws/modules/*/versions.tf') }}
+      - name: PyYAML (pinned) for the values tests; helm comes with the runner image and the check fails without it
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --disable-pip-version-check -r deploy/cloud/aws/requirements.txt
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          helm version --short
       - name: Plugin cache and tflint plugin
         run: |
           set -euo pipefail

@@ -2,7 +2,7 @@
 # Every check of the AWS reference deployment that needs no account, no credentials and no network call to AWS. CI (.github/workflows/terraform.yml) and people run the same file.
 #   deploy/cloud/aws/check.sh            all checks
 #   deploy/cloud/aws/check.sh fmt        one step: fmt | validate | test | lint | scan | values | creds
-# Needs on PATH: terraform (the version pinned in the workflow), tflint (with `tflint --init` done), trivy. The provider is downloaded from the public registry by `init`; nothing talks to AWS.
+# Needs on PATH: helm, python3 with PyYAML (requirements.txt), terraform (the version pinned in the workflow), tflint (with `tflint --init` done), trivy. The provider is downloaded from the public registry by `init`; nothing talks to AWS.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 cd "$here" || exit 2
@@ -42,7 +42,8 @@ fi
 if want test; then
   echo "== terraform test (mocked provider, no account)"
   for d in $modules $roots; do
-    [ -d "$d/tests" ] || continue
+    # a module or root without tests is a failure, never a pass
+    [ -n "$(find "$d/tests" -name '*.tftest.hcl' 2>/dev/null | head -1)" ] || { fail "no terraform test in $d"; continue; }
     init_dir "$d" || continue
     (cd "$d" && terraform test -no-color) || fail "terraform test $d"
   done
@@ -61,8 +62,12 @@ if want scan; then
 fi
 
 if want values; then
-  echo "== chart values for the AWS shape: every key exists in the chart"
-  python3 values/values_test.py || fail "values"
+  echo "== chart values for the AWS shape: keys exist, and the rendered NetworkPolicies cover every path of paths.json and nothing else"
+  # helm and PyYAML are required: a missing tool is a failure (the workflow installs PyYAML from requirements.txt, pinned)
+  command -v helm >/dev/null || { fail "helm is not installed"; }
+  python3 -c 'import yaml' 2>/dev/null || { fail "PyYAML is not installed (pip install -r deploy/cloud/aws/requirements.txt)"; }
+  python3 values/values_test.py || fail "values (keys exist in the charts)"
+  python3 values/render_test.py || fail "values (rendered NetworkPolicies match paths.json)"
 fi
 
 if want creds; then

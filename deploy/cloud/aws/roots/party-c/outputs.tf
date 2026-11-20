@@ -81,3 +81,8 @@ output "provides" {
 output "consumes" {
   value = module.paths.consumes
 }
+
+output "private_subnet_cidrs" {
+  description = "The NLB nodes (PrivateLink traffic) sit in these subnets: they are the sources a NetworkPolicy sees on the caller and peer ports (chart values network.callerIngress.from and network.peerIngress.from)."
+  value       = module.network.private_subnet_cidrs
+}
