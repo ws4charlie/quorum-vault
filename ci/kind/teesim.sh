@@ -62,17 +62,21 @@ for r in $roles; do
   kn "$bns" create configmap "$ROOTCM" --from-file=root.pem="$T/ca/root.crt" --dry-run=client -o json | jq '. + {immutable: true}' | k apply -f - >/dev/null
 done
 
-# ---- the brokers and their allowlists: the sequence number rises with each list; two of three operators sign
-SEQ=0
+# ---- the brokers and their allowlists (signed list v2: version, status, optional end): the sequence number rises with each list; two of three operators sign.
+# A broker holds the entries of its own party only. REVOKED is "ROLE:measurement-hex" of builds that must stay refused: they are listed with status revoked, not just left out
+# (a revoked entry beats any other and cannot be undone by a later overlap; docs/runbooks/tee-broker.md, "Revoke").
+SEQ=0; REVOKED=(); VER=enrol
 install_brokers() { # entries "ROLE:measurement-hex"; a role without an entry gets the "nothing allowed" measurement
-  SEQ=$((SEQ+1)); local r m e nb na
+  SEQ=$((SEQ+1)); local r m e nb na ea=()
   nb="$(date -u -v-1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)"
   na="$(date -u -v+2d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+2 days' +%Y-%m-%dT%H:%M:%SZ)"
   for r in $roles; do
     m="$(printf '11%.0s' $(seq 48))"
     for e in "$@"; do if [ "${e%%:*}" = "$(upper $r)" ]; then m="${e#*:}"; fi; done
+    ea=(-entry "$(upper $r),$m,$nb,$na,$VER")
+    for e in ${REVOKED[@]+"${REVOKED[@]}"}; do if [ "${e%%:*}" = "$(upper $r)" ]; then ea+=(-entry "$(upper $r),${e#*:},$nb,$na,enrol,revoked"); fi; done
     rm -f "$T/list-$r.json"
-    dk --entrypoint /usr/local/bin/qv-attest-broker "$BROKER_IMG" allowlist new -seq "$SEQ" -out "/w/list-$r.json" -entry "$(upper $r),$m,$nb,$na" >/dev/null
+    dk --entrypoint /usr/local/bin/qv-attest-broker "$BROKER_IMG" allowlist new -seq "$SEQ" -out "/w/list-$r.json" "${ea[@]}" >/dev/null
     for n in alice bob; do dk --entrypoint /usr/local/bin/qv-attest-broker "$BROKER_IMG" allowlist sign -in "/w/list-$r.json" -key "/w/op-$n.key" -operator "$n" >/dev/null; done
     cat > "$T/broker-$r.yaml" <<Y
 party: { role: $(upper $r), callerPins: ["$(vv LPIN $r)"] }
@@ -183,7 +187,8 @@ for r in $roles; do
   tmpl_file "$r" party.json "party-$r.json" "${extra[@]}"
   RUN+=("$(upper $r):$(measure "party-$r.json")")
 done
-install_brokers "${RUN[@]}"        # the enrolment entries are revoked: only the running measurements are allowed now
+REVOKED=("${ENT[@]}"); VER=v-sim
+install_brokers "${RUN[@]}"        # the enrolment entries are REVOKED (status revoked in the list): only the running measurements are allowed now
 for r in $roles; do
   extra=(-f "$T/run-$r.yaml" $(trust_args "$(ns_of $r)")); if [ "$r" != a ]; then extra+=(-f "$T/cosigner-config.yaml"); fi
   # shellcheck disable=SC2046

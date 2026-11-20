@@ -82,21 +82,31 @@ type canonEntry struct {
 	Party       string `json:"party"`
 	Measurement string `json:"measurement"`
 	NotBefore   int64  `json:"not_before"`
-	NotAfter    int64  `json:"not_after"`
+	NotAfter    int64  `json:"not_after"` // 0: no end
+	Version     string `json:"version"`
+	Status      string `json:"status"` // "active" or "revoked" ("" is signed as "active")
 }
 
 // AllowlistMessage is what the operators sign.
 func AllowlistMessage(l SignedAllowlist) []byte {
 	es := make([]canonEntry, len(l.Entries))
 	for i, e := range l.Entries {
-		es[i] = canonEntry{e.Party, strings.ToLower(e.Measurement), e.NotBefore.Unix(), e.NotAfter.Unix()}
+		var na int64
+		if !e.NotAfter.IsZero() {
+			na = e.NotAfter.Unix()
+		}
+		st := e.Status
+		if st == "" {
+			st = StatusActive
+		}
+		es[i] = canonEntry{e.Party, strings.ToLower(e.Measurement), e.NotBefore.Unix(), na, e.Version, st}
 	}
 	body, _ := json.Marshal(struct {
 		Seq      int64        `json:"seq"`
 		SignedAt int64        `json:"signed_at"`
 		Entries  []canonEntry `json:"entries"`
 	}{l.Seq, l.SignedAt, es})
-	return append([]byte("qv-attest-allowlist-v1\n"), body...)
+	return append([]byte("qv-attest-allowlist-v2\n"), body...)
 }
 
 // SignAllowlist adds (or replaces) one operator's signature over l.
@@ -119,8 +129,7 @@ func ValidEntries(entries []AllowEntry) error {
 		return fmt.Errorf("attest: allowlist has %d entries, at most %d", len(entries), MaxAllowEntries)
 	}
 	for i, e := range entries {
-		m, err := hex.DecodeString(e.Measurement)
-		if !partyRE.MatchString(e.Party) || err != nil || len(m) == 0 || e.NotBefore.IsZero() || e.NotAfter.IsZero() || e.NotAfter.Before(e.NotBefore) {
+		if _, ok := validEntry(e, partyRE.MatchString); !ok {
 			return fmt.Errorf("attest: allowlist entry %d is malformed", i)
 		}
 	}
@@ -202,5 +211,24 @@ func ParseOperatorKey(s string) (ed25519.PrivateKey, error) {
 
 // Window formats an entry's validity for display.
 func (e AllowEntry) Window() string {
-	return e.NotBefore.UTC().Format(time.RFC3339) + " .. " + e.NotAfter.UTC().Format(time.RFC3339)
+	until := "no end"
+	if !e.NotAfter.IsZero() {
+		until = e.NotAfter.UTC().Format(time.RFC3339)
+	}
+	return e.NotBefore.UTC().Format(time.RFC3339) + " .. " + until
+}
+
+// Counts splits the entries at time now: allowing now, outside their window, and revoked.
+func (l SignedAllowlist) Counts(now time.Time) (active, expiredOrFuture, revoked int) {
+	for _, e := range l.Entries {
+		switch {
+		case e.Revoked():
+			revoked++
+		case now.Before(e.NotBefore) || (!e.NotAfter.IsZero() && now.After(e.NotAfter)):
+			expiredOrFuture++
+		default:
+			active++
+		}
+	}
+	return
 }

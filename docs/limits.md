@@ -17,6 +17,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **SoftHSM, not hardware.** The tokens are software with no tamper resistance. The structure is what a real HSM would need, but it is not one.
 - **M-of-N is simulated.** The cold signer checks operator signatures in software; a hardware HSM would enforce it itself.
 - **The enclave is simulated.** A stand-in produces the proof, so nobody has shown that real hardware measures what the stand-in measures ([Enclaves](enclaves.md)).
+- **Revoking a program does not stop it at once.** A running party keeps its key in memory until it restarts, and nothing makes it ask again. To cut one off now, the operator stops it as well ([Enclaves](enclaves.md)).
 - **Nothing has run the enclave charts on a real cluster.** The broker chart and the party's enclave mode are checked by tests and, later, a local cluster with the simulated enclave. There is no production attester yet, so the chart refuses an enclave party outside development and test.
 - **Service identity is simulated.** The two certificate authorities are made by a script on a developer's machine, and their keys sit in a file. Production must bring its own PKI and a certificate manager ([certificate runbook](runbooks/certificates.md)). Metrics are plain http, reachable on the local machine only.
 - **All parties run on one machine, run by one team.** The cryptographic separation is real. The operational separation is not.
@@ -47,5 +48,8 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 
 **Audit**
 - **The write-once store used in tests has no independent compliance assessment.** It proves our code against the storage interface, not a regulatory claim; production is meant to use AWS S3 Object Lock ([spike note](spikes/audit-worm.md)).
+
+**Deployment**
+- **The AWS reference deployment has never been applied.** It is code checked without an account (format, validation, a mocked test of the isolation rules, lint and a scan). Its first real run, its costs and what only an account can show are in the [runbook](runbooks/aws-first-deploy.md).
 
 [DESIGN_SCALE.md](../DESIGN_SCALE.md) works out what scaling would need.

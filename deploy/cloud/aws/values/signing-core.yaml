@@ -1,0 +1,34 @@
+# qv-signing-core on the AWS signing-core cluster (roots/signing-core). Release namespace: qv-signing; the guard database (CloudNativePG cluster qv-guard) is in the SAME namespace.
+# Every endpoint has one interface per subnet: list ALL of them (output endpoint_ips lists them). Three zones shown; drop the .2 lines with two zones.
+guard:
+  host: qv-guard-rw
+jobs:
+  host: business-postgres.qv.internal                 # private zone name made by the private-link module; the business certificate must carry it as a DNS name
+kafka:
+  brokers: business-kafka.qv.internal:9092,business-kafka.qv.internal:9093,business-kafka.qv.internal:9094
+network:
+  jobsDb:
+    peers:
+      - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-jobs-db.0>/32 }
+      - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-jobs-db.1>/32 }
+      - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-jobs-db.2>/32 }
+  # CHART GAP: the chart opens ONE Kafka port (network.kafka.port, default 9092) but three brokers listen on 9092, 9093, 9094. Until the chart takes a list (network.kafka.ports),
+  # the gateway can reach the broker on 9092 only. See the lead's list in the report; ../values/render_test.py tracks it (KNOWN_GAPS).
+  kafka:
+    peers:
+      - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-heads.0>/32 }
+      - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-heads.1>/32 }
+      - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-heads.2>/32 }
+  parties:
+    b:
+      peers:
+        - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-party-b-caller.0>/32 }
+        - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-party-b-caller.1>/32 }
+        - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-party-b-caller.2>/32 }
+      port: 7002
+    c:
+      peers:
+        - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-party-c-caller.0>/32 }
+        - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-party-c-caller.1>/32 }
+        - ipBlock: { cidr: <signing-core.endpoint_ips.gateway-party-c-caller.2>/32 }
+      port: 7003

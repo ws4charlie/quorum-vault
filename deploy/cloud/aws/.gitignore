@@ -1,0 +1,12 @@
+# Terraform working files. Lock files of the ROOTS are committed (they pin provider hashes); module lock files are not.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfplan
+# Real values (account ids, endpoint names) live in the operators' own config repo, never here. Only the *.example files are tracked.
+*.tfvars
+*.tfvars.json
+backend.hcl
+!*.tfvars.example
+modules/**/.terraform.lock.hcl

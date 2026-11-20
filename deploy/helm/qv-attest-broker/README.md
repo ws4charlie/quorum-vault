@@ -22,10 +22,12 @@ Its own trust zone: a cluster that neither this party's operators nor the busine
 - Image by digest (the all-zero placeholder is refused); `env` empty in production. `env: dev|test` needs an image by tag.
 - SoftHSM (`hsm.softhsm.enabled`) and `simulation: true` (the tee-sim image, which accepts a TEST ONLY evidence root) only with `env` dev or test and an image by tag. Neither can be rendered with production values.
 - No PIN or key in a ConfigMap or environment variable.
-- The PIN path: production mounts the Secret at `/etc/qv/hsm-pin/pin`. **The broker refuses a PIN file with a group bit and kubelet adds one under `fsGroup`**, so this needs `ReadPIN` to accept 0440 (as the gateway does; the broker's owner, T6). Development stages a 0400 copy with an init container.
+- The PIN path: production mounts the Secret at `/etc/qv/hsm-pin/pin`. kubelet gives the file a group bit under `fsGroup`; the broker's `ReadPIN` now accepts it (mode 0440 or 0640: the owner or the group reads, nobody else, no group write) like the party's. Development still stages a 0400 copy with an init container; **that copy is no longer needed** (see "Not yet removed" below).
+- The allowlist: signed list v2. The chart checks its shape (a `seq` of at least 1, entries of this party only, known fields, status `active` or `revoked`); the broker checks the signatures and every other rule.
 
 ## Operating
-- **Allowlist change:** a new `allowlist.file` is a new ConfigMap and a rollout (about a minute without a broker; running parties keep signing). Whoever can upgrade the release can install an older signed list: signatures stop forgery, not rollback.
+- **Allowlist change:** a new `allowlist.file` is a new ConfigMap and a rollout (about a minute without a broker; running parties keep signing). The new list needs a higher `seq`. An older signed list is refused: by a running broker at a reload, and at a restart against the highest `seq` the audit log on the data volume records as loaded. That floor is lost if the volume is replaced or the log cut, so the volume must persist (`persistence`). The upgrade order and the revoke rules are in `docs/runbooks/tee-broker.md` ("The allowlist").
+- **Not yet removed (now unneeded):** the PIN staging in the dev init container: the `cat ... > /run/qv/pin/pin; chmod 0400` lines, the `pin-staged` memory volume and its two mounts, and the config's `pin_file` pointing at `/run/qv/pin/pin` instead of `/etc/qv/hsm-pin/pin`. The init container is still needed to make the SoftHSM token. Left in place on purpose: this change only teaches the broker the mode; removing the copy is a chart change of its own.
 - **Drain a node:** check no party is restarting or in a DKG, then delete the pod yourself.
 - **Lost volume / HSM:** see the runbook ("Key storage").
 - Metrics (`/metrics`) are on the health port, plain http, not published by the Service; `network.metricsIngress.from` names a scraper (policy purpose `metrics-scrape`).

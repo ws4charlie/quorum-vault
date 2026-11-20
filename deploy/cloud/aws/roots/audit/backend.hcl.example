@@ -1,0 +1,5 @@
+# Copy to backend.hcl (git-ignored) and fill in. The bucket is made by hand, in THIS account, before the first init (runbook aws-first-deploy.md).
+bucket     = "ORG-qv-tfstate-audit"
+key        = "audit/terraform.tfstate"
+region     = "eu-central-1"
+kms_key_id = "alias/qv-tfstate"
