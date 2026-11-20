@@ -1,0 +1,44 @@
+# The audit archive stand-in: SeaweedFS with S3 and Object Lock, https with a client certificate of the business authority (as compose). The access keys are generated
+# per cluster into the Secret seaweedfs-env (up.sh). The bucket is made by the archive-bucket Job below with Object Lock; the archiver refuses a bucket without it.
+apiVersion: v1
+kind: Service
+metadata: { name: seaweedfs, namespace: qv }
+spec:
+  selector: { app: seaweedfs }
+  ports: [{ name: s3, port: 8333, targetPort: 8333 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: seaweedfs, namespace: qv }
+spec:
+  serviceName: seaweedfs
+  replicas: 1
+  selector: { matchLabels: { app: seaweedfs } }
+  template:
+    metadata: { labels: { app: seaweedfs } }
+    spec:
+      containers:
+        - name: seaweedfs
+          image: chrislusf/seaweedfs:4.53
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              printf '{"identities":[{"name":"root","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]},{"name":"archiver","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Read","Write","List","Admin"]}]}' "$ROOT_AK" "$ROOT_SK" "$ARC_AK" "$ARC_SK" > /tmp/s3.json
+              exec /entrypoint.sh server -dir=/data -s3 -s3.config=/tmp/s3.json -s3.port=0 -s3.port.https=8333 -s3.cert.file=/pki/tls.crt -s3.key.file=/pki/tls.key -s3.cacert.file=/pki/ca.crt -s3.tlsVerifyClientCert -master.volumeSizeLimitMB=256 -ip.bind=0.0.0.0
+          envFrom: [{ secretRef: { name: seaweedfs-env } }]
+          ports: [{ containerPort: 8333 }]
+          readinessProbe:
+            exec: { command: ["/bin/sh", "-c", "wget -q -O /dev/null --spider http://127.0.0.1:8333/ ; [ $? -ne 4 ]"] }
+            periodSeconds: 3
+            failureThreshold: 40
+          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 768Mi } }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: pki, mountPath: /pki, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: data, emptyDir: {} }
+        - { name: pki, secret: { secretName: qv-seaweedfs-tls } }
+        - { name: tmp, emptyDir: {} }

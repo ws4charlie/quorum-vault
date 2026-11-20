@@ -1,0 +1,85 @@
+{{- $v := .Values -}}
+{{- $prod := eq (include "qvp.prod" .) "true" -}}
+{{- $sign := eq (include "qvp.signing" .) "true" -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: qv-pods
+  labels: {{- include "qvp.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: [CREATE, UPDATE]
+        resources: [pods, pods/ephemeralcontainers]
+  variables:
+    - name: containers
+      expression: |-
+        object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : []) + (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : [])
+  validations:
+    - reason: Forbidden
+      message: "hostNetwork, hostPID and hostIPC are not allowed"
+      expression: |-
+        !(has(object.spec.hostNetwork) && object.spec.hostNetwork) && !(has(object.spec.hostPID) && object.spec.hostPID) && !(has(object.spec.hostIPC) && object.spec.hostIPC)
+    - reason: Forbidden
+      message: "hostPath volumes are not allowed"
+      expression: |-
+        !has(object.spec.volumes) || object.spec.volumes.all(v, !has(v.hostPath))
+    - reason: Forbidden
+      message: "privileged containers are not allowed"
+      expression: |-
+        variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.privileged) || !c.securityContext.privileged)
+    - reason: Forbidden
+      message: "added Linux capabilities are not allowed (drop ALL, add nothing)"
+      expression: |-
+        variables.containers.all(c, !has(c.securityContext) || !has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)
+    - reason: Forbidden
+      message: "every container must run as non-root: runAsNonRoot true (container or pod) and runAsUser not 0"
+      expression: |-
+        variables.containers.all(c, (has(c.securityContext) && has(c.securityContext.runAsNonRoot) ? c.securityContext.runAsNonRoot : (has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) && object.spec.securityContext.runAsNonRoot)) && !(has(c.securityContext) && has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0) && !(!(has(c.securityContext) && has(c.securityContext.runAsUser)) && has(object.spec.securityContext) && has(object.spec.securityContext.runAsUser) && object.spec.securityContext.runAsUser == 0))
+    - reason: Forbidden
+      message: "every container must set allowPrivilegeEscalation: false"
+      expression: |-
+        variables.containers.all(c, has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation)
+    - reason: Forbidden
+      message: {{ printf "images must come from %s" $v.registry | quote }}
+      expression: |-
+        variables.containers.all(c, c.image.startsWith({{ include "qvp.lit" (printf "%s/" $v.registry) }}))
+    {{- if $v.requireDigest }}
+    - reason: Forbidden
+      message: "images must be referenced by digest (@sha256:<64 hex>), not by tag"
+      expression: |-
+        variables.containers.all(c, c.image.matches('@sha256:[0-9a-f]{64}$'))
+    {{- end }}
+    {{- if $prod }}
+    - reason: Forbidden
+      message: "a development image (-dev) is not allowed in a production cluster"
+      expression: |-
+        variables.containers.all(c, !c.image.matches('/[^/@:]+-dev([@:]|$)'))
+    - reason: Forbidden
+      message: "development switches are not allowed in a production cluster: a development variable, QV_ENV other than the production values (prodEnvValues), a valueFrom for QV_ENV or QV_PKCS11_LIB, SoftHSM"
+      expression: |-
+        variables.containers.all(c, !has(c.env) || c.env.all(e, !(e.name in {{ include "qvp.list" $v.devSwitches }}) && !(e.name in ['QV_ENV', 'QV_PKCS11_LIB'] && has(e.valueFrom)) && !(e.name == 'QV_ENV' && !((has(e.value) ? e.value : '').trim().lowerAscii() in {{ include "qvp.list" $v.prodEnvValues }})) && !(has(e.value) && e.value.lowerAscii().contains('softhsm'))))
+    - reason: Forbidden
+      message: "envFrom may only name a ConfigMap on the envFromConfigMaps allowlist, with no prefix and no Secret (a Secret or a prefix can set a development switch unseen)"
+      expression: |-
+        variables.containers.all(c, !has(c.envFrom) || c.envFrom.all(f, !has(f.secretRef) && !(has(f.prefix) && f.prefix != '') && has(f.configMapRef) && {{ include "qvp.list" $v.envFromConfigMaps }}.exists(p, f.configMapRef.name.matches(p))))
+    - reason: Forbidden
+      message: "a development flag on the command line is not allowed in a production cluster"
+      expression: |-
+        variables.containers.all(c, (!has(c.command) || c.command.all(a, !a.matches({{ include "qvp.lit" (printf "^--?(%s)(=|$)" (join "|" $v.devFlags)) }}))) && (!has(c.args) || c.args.all(a, !a.matches({{ include "qvp.lit" (printf "^--?(%s)(=|$)" (join "|" $v.devFlags)) }}))))
+    {{- end }}
+    {{- if $sign }}
+    - reason: Forbidden
+      message: "a pod may use only ConfigMaps whose name ends in a 10-character content hash (the charts' immutable ConfigMaps)"
+      expression: |-
+        (!has(object.spec.volumes) || object.spec.volumes.all(v, (!has(v.configMap) || v.configMap.name.matches({{ include "qvp.lit" (include "qvp.hashName" .) }}) || v.configMap.name in {{ include "qvp.list" $v.exemptConfigMaps }}) && (!has(v.projected) || v.projected.sources.all(s, !has(s.configMap) || s.configMap.name.matches({{ include "qvp.lit" (include "qvp.hashName" .) }}) || s.configMap.name in {{ include "qvp.list" $v.exemptConfigMaps }})))) && variables.containers.all(c, (!has(c.envFrom) || c.envFrom.all(f, !has(f.configMapRef) || f.configMapRef.name.matches({{ include "qvp.lit" (include "qvp.hashName" .) }}))) && (!has(c.env) || c.env.all(e, !has(e.valueFrom) || !has(e.valueFrom.configMapKeyRef) || e.valueFrom.configMapKeyRef.name.matches({{ include "qvp.lit" (include "qvp.hashName" .) }}))))
+    - reason: Forbidden
+      message: "a signing-cluster pod gets no ServiceAccount token unless its ServiceAccount is listed in serviceAccountTokenAllowed"
+      expression: |-
+        (has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken && !(has(object.spec.volumes) && object.spec.volumes.exists(v, has(v.projected) && v.projected.sources.exists(s, has(s.serviceAccountToken))))) || (has(object.spec.serviceAccountName) && object.spec.serviceAccountName in {{ include "qvp.list" $v.serviceAccountTokenAllowed }})
+    {{- end }}
+---
+{{ include "qvp.binding" (dict "ctx" . "name" "qv-pods") }}

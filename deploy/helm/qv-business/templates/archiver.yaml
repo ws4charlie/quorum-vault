@@ -28,9 +28,9 @@ spec:
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           args: ["-retention", {{ .Values.archive.retention | quote }}]
           envFrom:
-            - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "archiver-env") }} }
+            - configMapRef: { name: {{ include "qv.cmName" (dict "ctx" . "c" "archiver-env" "data" (include "qv.env.archiver" .)) }} }
           {{- if ne .Values.archiver.probes.mode "none" }}
-          {{- include "qv.probes" (dict "probes" .Values.archiver.probes "port" .Values.archiver.probes.healthPort) | nindent 10 }}
+          {{- include "qv.probes" (dict "probes" .Values.archiver.probes) | nindent 10 }}
           {{- end }}
           resources: {{- toYaml .Values.archiver.resources | nindent 12 }}
           securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}

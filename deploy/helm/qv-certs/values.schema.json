@@ -45,7 +45,7 @@
           "required": ["business", "signing", "link"],
           "properties": { "business": { "$ref": "#/definitions/vault" }, "signing": { "$ref": "#/definitions/vault" }, "link": { "$ref": "#/definitions/vault" } }
         },
-        "ca": { "type": "object", "additionalProperties": false, "properties": { "duration": { "$ref": "#/definitions/interval" }, "linkSecretName": { "type": "string" } } },
+        "ca": { "type": "object", "additionalProperties": false, "properties": { "duration": { "$ref": "#/definitions/interval" }, "linkSecretName": { "type": "string" }, "existing": { "type": "boolean" } } },
         "certManager": { "type": "object", "additionalProperties": false, "required": ["serviceAccount", "namespace"], "properties": { "serviceAccount": { "type": "string" }, "namespace": { "type": "string" } } }
       }
     },

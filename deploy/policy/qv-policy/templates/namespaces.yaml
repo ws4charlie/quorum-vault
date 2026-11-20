@@ -1,0 +1,20 @@
+{{- include "qvp.check" . -}}
+{{- /* Pod Security Admission (the API server's own check, no controller) and the label every binding selects on. keep: `helm uninstall` must never delete a namespace that holds workloads. */ -}}
+{{- range $ns := .Values.namespaces }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "qvp.labels" $ | nindent 4 }}
+    quorumvault.io/policy: enforced
+    pod-security.kubernetes.io/enforce: {{ $.Values.pss.level }}
+    pod-security.kubernetes.io/enforce-version: {{ $.Values.pss.version }}
+    pod-security.kubernetes.io/audit: {{ $.Values.pss.level }}
+    pod-security.kubernetes.io/audit-version: {{ $.Values.pss.version }}
+    pod-security.kubernetes.io/warn: {{ $.Values.pss.level }}
+    pod-security.kubernetes.io/warn-version: {{ $.Values.pss.version }}
+{{- end }}

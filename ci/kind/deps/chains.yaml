@@ -1,0 +1,65 @@
+# The chains of the kind lane: anvil (EVM, chain id 11155111, as compose) and bitcoind in regtest. Both carry the label `app: chain-stub`, which the business chart's egress
+# rule (values-kind: network.chain) names. bitcoind's RPC user and password are generated per cluster into the Secret chain-credentials (up.sh); the same pair is in the
+# custody config Secret. Solana is not in the kind lane (README: memory).
+apiVersion: v1
+kind: Service
+metadata: { name: anvil, namespace: qv }
+spec:
+  selector: { app: chain-stub, chain: anvil }
+  ports: [{ name: rpc, port: 8545, targetPort: 8545 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: anvil, namespace: qv }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: chain-stub, chain: anvil } }
+  template:
+    metadata: { labels: { app: chain-stub, chain: anvil } }
+    spec:
+      containers:
+        - name: anvil
+          image: ghcr.io/foundry-rs/foundry:v1.8.5
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c", "exec anvil --host 0.0.0.0 --chain-id 11155111"]
+          ports: [{ containerPort: 8545 }]
+          readinessProbe: { exec: { command: ["cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"] }, periodSeconds: 2, failureThreshold: 60 }
+          resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 384Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bitcoind, namespace: qv }
+spec:
+  selector: { app: chain-stub, chain: bitcoind }
+  ports: [{ name: rpc, port: 18443, targetPort: 18443 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: bitcoind, namespace: qv }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: chain-stub, chain: bitcoind } }
+  template:
+    metadata: { labels: { app: chain-stub, chain: bitcoind } }
+    spec:
+      containers:
+        - name: bitcoind
+          image: bitcoin/bitcoin:29.0
+          imagePullPolicy: IfNotPresent
+          envFrom: [{ secretRef: { name: chain-credentials } }]
+          args:
+            - -regtest=1
+            - -server=1
+            - -rpcbind=0.0.0.0
+            - -rpcallowip=0.0.0.0/0
+            - -rpcport=18443
+            - -rpcuser=$(BTC_RPC_USER)
+            - -rpcpassword=$(BTC_RPC_PASSWORD)
+            - -fallbackfee=0.0002
+            - -txindex=1
+            - -persistmempool=0
+          ports: [{ containerPort: 18443 }]
+          readinessProbe: { exec: { command: ["/bin/sh", "-c", "bitcoin-cli -regtest -rpcport=18443 -rpcuser=$BTC_RPC_USER -rpcpassword=$BTC_RPC_PASSWORD getblockcount"] }, periodSeconds: 3, failureThreshold: 40 }
+          resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { memory: 512Mi } }
