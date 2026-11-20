@@ -29,6 +29,7 @@ type Adapter struct {
 
 	view *FeeCapsView // the fee caps in force: the configured ones, or the newest signed change (feecaps.go)
 
+	gs       genShards
 	waitMu   sync.Mutex
 	sweepWhy string // why sweeps are waiting now ("" when they are not), to log a change once
 	// consolidateWhy is the same for consolidation.
@@ -41,6 +42,7 @@ type shard struct {
 	address   string // canonical
 	path      []uint32
 	script    []byte
+	gen       int // the generation of the account key it derives from (0 and 1: the configured one)
 }
 
 var _ chain.Adapter = (*Adapter)(nil)

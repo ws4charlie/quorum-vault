@@ -6,10 +6,7 @@
 *.test
 coverage.out
 .DS_Store
-/qv-worker
-/qv-core
-/qv-gateway
-/qv-relay
-/qv-cosigner
-/qv-guardian
-/qv-cold
+# binaries of `go build ./cmd/<name>` run in the repository root or in mpc-party: never commit a binary
+/qv-*
+/mpc-party/qv-*
+/mpc-party/mpc-party

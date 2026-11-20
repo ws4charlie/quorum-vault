@@ -18,15 +18,6 @@ var ErrFeeTooHigh = errors.New("btc: fee above the cap")
 
 const minRelayRate = 1 // satoshis per virtual byte
 
-func (a *Adapter) shardOf(partitionID string) (shard, error) {
-	for _, s := range a.shards {
-		if s.partition == partitionID {
-			return s, nil
-		}
-	}
-	return shard{}, fmt.Errorf("btc: partition %q has no hot shard", partitionID)
-}
-
 // feeRate is the fee rate for a withdrawal in satoshis per virtual byte: the node's estimate for confirmation in a couple of blocks, the
 // configured fallback when it has none, never above the configured ceiling (which is below the signing zone's) and never below the relay minimum.
 func (a *Adapter) feeRate(ctx context.Context) uint64 {
@@ -68,8 +59,12 @@ type utxo struct {
 // oldestCannotCarry reports whether the oldest max_inputs available outputs of the partition cannot pay the amount, the fee and the fee-bump reserve (no prefix of them
 // does) while the partition holds more outputs than that, so that taking the largest ones is the only way to pay. Nothing is locked or reserved.
 func (a *Adapter) oldestCannotCarry(ctx context.Context, tx pgx.Tx, partitionID string, amount uint64, destScript, changeScript []byte, rate uint64) (bool, error) {
-	rows, err := tx.Query(ctx, `SELECT value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit
-		ORDER BY created_at, txid, vout LIMIT $3`, a.cfg.Chain, partitionID, a.cfg.MaxInputs+1)
+	sh, err := a.shardOf(ctx, tx, partitionID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := tx.Query(ctx, `SELECT value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND path=$4
+		ORDER BY created_at, txid, vout LIMIT $3`, a.cfg.Chain, partitionID, a.cfg.MaxInputs+1, sh.keyPath())
 	if err != nil {
 		return false, err
 	}
@@ -111,7 +106,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 	if kind != "withdrawal" && kind != "to-cold" { // a hot-to-cold move is built like a withdrawal: the shard's inputs, change back to the shard
 		return chain.UnsignedTx{}, errLater
 	}
-	sh, err := a.shardOf(w.PartitionID)
+	sh, err := a.shardOf(ctx, tx, w.PartitionID)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
@@ -181,8 +176,8 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 		}
 		var u utxo
 		var v int64
-		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit
-			ORDER BY `+order+` LIMIT 1 FOR UPDATE SKIP LOCKED`, a.cfg.Chain, w.PartitionID).Scan(&u.txid, &u.vout, &v)
+		err := tx.QueryRow(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND partition_id=$2 AND status='available' AND NOT deposit AND path=$3
+			ORDER BY `+order+` LIMIT 1 FOR UPDATE SKIP LOCKED`, a.cfg.Chain, w.PartitionID, sh.keyPath()).Scan(&u.txid, &u.vout, &v)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return chain.UnsignedTx{}, short(len(picked), sum, fmt.Sprintf("%d sats available in %s, %d needed plus fee", sum, w.PartitionID, amount))
 		}
@@ -200,7 +195,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 
 	p := Payload{Version: PayloadVersion}
 	for _, u := range picked {
-		p.Inputs = append(p.Inputs, PayloadInput{TxID: u.txid, Vout: u.vout, Value: u.value, Path: sh.path, Sequence: SequenceRBF})
+		p.Inputs = append(p.Inputs, PayloadInput{TxID: u.txid, Vout: u.vout, Value: u.value, Path: sh.path, Sequence: SequenceRBF, Gen: sh.payloadGen()})
 	}
 	p.Outputs = []PayloadOutput{{Address: dest.Canonical, Value: amount}}
 	// The selection guarantees change of at least the dust limit above today's fee: a withdrawal always has a change output to bump from.
@@ -223,7 +218,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 		a.cfg.Chain, built.TxID, w.ID, string(raw), int64(fee), kind); err != nil {
 		return chain.UnsignedTx{}, fmt.Errorf("btc: record attempt: %w", err)
 	}
-	ref := chain.KeyRef{PartitionID: w.PartitionID, Path: PathString(sh.path)}
+	ref := chain.KeyRef{PartitionID: w.PartitionID, Path: sh.keyPath()}
 	u := chain.UnsignedTx{Chain: a.cfg.Chain, Digest: built.Digests[0], Payload: raw, KeyRef: ref}
 	for _, d := range built.Digests[1:] {
 		u.More = append(u.More, chain.SigInput{Digest: d, KeyRef: ref})

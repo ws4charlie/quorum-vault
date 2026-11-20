@@ -14,24 +14,22 @@
 ## 架构
 
 <p align="center">
-<img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"><br/>
-<img src="docs/images/zh/arch-a.png" width="24%" alt=""><br/>
+<a href="docs/zh/people.md"><img src="docs/images/zh/arch-operators.png" width="24%" alt="运营和审批人"></a><br/>
+<picture><img src="docs/images/zh/arch-a.png" width="24%" alt=""></picture><br/>
 <a href="docs/zh/identity.md"><img src="docs/images/zh/arch-identity.png" width="24%" alt="身份"></a><br/>
-<img src="docs/images/zh/arch-b.png" width="24%" alt=""><br/>
-<img src="docs/images/zh/arch-api.png" width="24%" alt="核心 API"><br/>
-<img src="docs/images/zh/arch-down.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-b.png" width="24%" alt=""></picture><br/>
+<a href="docs/zh/api.md"><img src="docs/images/zh/arch-api.png" width="24%" alt="核心 API"></a><br/>
+<picture><img src="docs/images/zh/arch-down.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/workflows.md"><img src="docs/images/zh/arch-workflows.png" width="24%" alt="工作流"></a><a href="docs/zh/ledger.md"><img src="docs/images/zh/arch-ledger.png" width="24%" alt="账本"></a><a href="docs/zh/audit.md"><img src="docs/images/zh/arch-audit.png" width="24%" alt="审计记录"></a><br/>
-<img src="docs/images/zh/arch-merge.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-merge.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/tiers.md"><img src="docs/images/zh/arch-tiers.png" width="24%" alt="冷热钱包"></a><br/>
-<img src="docs/images/zh/arch-merge2.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-merge2.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/signing-zone.md"><img src="docs/images/zh/arch-zone.png" width="48%" alt="签名区"></a><br/>
-<img src="docs/images/zh/arch-down2.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-down2.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/mpc.md"><img src="docs/images/zh/arch-mpc.png" width="72%" alt="MPC 参与方"></a><br/>
-<img src="docs/images/zh/arch-split.png" width="72%" alt=""><br/>
+<picture><img src="docs/images/zh/arch-split.png" width="72%" alt=""></picture><br/>
 <a href="docs/zh/evm.md"><img src="docs/images/zh/arch-evm.png" width="24%" alt="EVM"></a><a href="docs/zh/bitcoin.md"><img src="docs/images/zh/arch-bitcoin.png" width="24%" alt="Bitcoin"></a><a href="docs/zh/solana.md"><img src="docs/images/zh/arch-solana.png" width="24%" alt="Solana"></a>
 </p>
-
-点击方框可打开对应页面。
 
 ## 怎么运作
 
@@ -39,6 +37,8 @@
 
 | 部分 | 作用 |
 |---|---|
+| [人员](docs/zh/people.md) | 谁发起、谁批准、谁运营，各自怎么证明身份 |
+| [核心 API](docs/zh/api.md) | 唯一入口：核对请求者、记录请求、把工作交出去 |
 | [账本](docs/zh/ledger.md) | 每一枚币都用复式记账，并和链上对账 |
 | [工作流](docs/zh/workflows.md) | 保证每笔存款、归集、提现在崩溃后也能走完 |
 | [签名区](docs/zh/signing-zone.md) | 每笔付款签名前都要核对 |

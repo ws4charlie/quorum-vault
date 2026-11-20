@@ -49,8 +49,14 @@ type KeysetView struct {
 // keysetShard checks that shardID is a hot shard of this EVM chain and returns it.
 func (s *Service) keysetShard(shardID string) (partition.ShardID, error) {
 	c := s.Cfg
+	if partition.ShardID(shardID).IsDepositTree() {
+		if !s.isDepositTree(shardID) {
+			return "", fmt.Errorf("%w: %s is not the deposit tree of chain %s", ErrNotFound, shardID, c.Chain)
+		}
+		return partition.ShardID(shardID), nil
+	}
 	if c.Family != FamilyEVM && c.Family != "" {
-		return "", fmt.Errorf("%w: key replacement is built for EVM hot shards; the shards of a %s chain stay generation 1", ErrInvalid, c.Family)
+		return "", fmt.Errorf("%w: the hot shards of a %s chain are replaced with its deposit tree: name %s", ErrInvalid, c.Family, func() string { id, _ := c.depositTreeID(); return string(id) }())
 	}
 	id, err := partition.ParseShardID(shardID)
 	if err != nil {
@@ -67,6 +73,23 @@ func (s *Service) keysetShard(shardID string) (partition.ShardID, error) {
 // ListKeysets lists every generation of every shard of this chain, with what the drain planner last found for the ones that are leaving.
 func (s *Service) ListKeysets(ctx context.Context) ([]KeysetView, error) {
 	var out []KeysetView
+	if s.Cfg.Family == FamilyBTC || s.Cfg.Family == FamilySOL {
+		id, err := s.Cfg.depositTreeID()
+		if err != nil {
+			return nil, err
+		}
+		ks, err := shardKeysets(ctx, s.Pool, id)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range ks {
+			v := KeysetView{ShardID: string(k.ShardID), Generation: k.Generation, Address: k.Address, KeyRef: k.KeyRef, State: k.State, Successor: k.Successor}
+			if v.Drain, err = s.treeDrainView(ctx, k.Generation); err != nil {
+				return nil, err
+			}
+			out = append(out, v)
+		}
+	}
 	for i := 0; i < s.Cfg.shardCount(); i++ {
 		ks, err := shardKeysets(ctx, s.Pool, s.Cfg.shardIDOf(i))
 		if err != nil {
@@ -94,6 +117,9 @@ func (s *Service) RegisterKeysetCandidate(ctx context.Context, shardID, address,
 	shard, err := s.keysetShard(shardID)
 	if err != nil {
 		return KeysetInfo{}, err
+	}
+	if s.isDepositTree(shardID) {
+		return s.registerTreeCandidate(ctx, shard, address, keyRef)
 	}
 	if !common.IsHexAddress(address) || common.HexToAddress(address) == (common.Address{}) {
 		return KeysetInfo{}, fmt.Errorf("%w: address %q is not an EVM address", ErrInvalid, address)
@@ -266,9 +292,18 @@ func (s *Service) dustOf(ctx context.Context, asset string) (*big.Int, error) {
 // is in flight, and no drain is open. What is left of the native asset (below the dust line) is written off as a cost, so the shard's ledger account
 // and the addresses still watched agree. A generation that is compromised is never retired: it stays in the watch list.
 func (s *Service) RetireKeyset(ctx context.Context, shardID string, gen int) (KeysetInfo, error) {
+	return s.RetireKeysetAfter(ctx, shardID, gen, 0)
+}
+
+// RetireKeysetAfter is RetireKeyset for a deposit tree with the window (seconds) its signed draining record names: the generation must have been draining
+// that long. The signing zone enforces the same window from its own record; this is the core's check before it mirrors the retirement.
+func (s *Service) RetireKeysetAfter(ctx context.Context, shardID string, gen int, windowSeconds int64) (KeysetInfo, error) {
 	shard, err := s.keysetShard(shardID)
 	if err != nil {
 		return KeysetInfo{}, err
+	}
+	if s.isDepositTree(shardID) {
+		return s.retireTree(ctx, shard, gen, windowSeconds)
 	}
 	var cur KeysetInfo
 	if cur, err = scanKeysetInfo(s.Pool.QueryRow(ctx, `SELECT `+keysetInfoCols+` FROM keysets WHERE shard_id=$1 AND generation=$2`, string(shard), gen)); err != nil {
@@ -407,6 +442,8 @@ type keysetRef struct {
 	ShardID    string `json:"shard_id"`
 	Generation int    `json:"generation"`
 	Successor  int    `json:"successor"`
+	// WindowSeconds (retire of a deposit tree): the window of the signed draining record.
+	WindowSeconds int64 `json:"window_seconds,omitempty"`
 }
 
 func (a *API) activateKeyset(w http.ResponseWriter, r *http.Request) {
@@ -443,7 +480,7 @@ func (a *API) retireKeyset(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, err)
 		return
 	}
-	k, err := a.svc.RetireKeyset(r.Context(), body.ShardID, body.Generation)
+	k, err := a.svc.RetireKeysetAfter(r.Context(), body.ShardID, body.Generation, body.WindowSeconds)
 	if err != nil {
 		a.keysetFail(w, err)
 		return

@@ -54,7 +54,7 @@ func (c *SOLCodec) DecodeFor(u chain.UnsignedTx, i signjob.Intent) (TxInfo, erro
 	if err != nil {
 		return TxInfo{}, fmt.Errorf("gateway: decode sol payload: %w", err)
 	}
-	return TxInfo{Sender: in.Sender, Destination: in.Destination, Claims: in.Claims, SignerKey: in.SignerKey, Fees: in.Fees}, nil
+	return TxInfo{Sender: in.Sender, Destination: in.Destination, Claims: in.Claims, SignerKey: in.SignerKey, Fees: in.Fees, DepositGens: in.DepositGens}, nil
 }
 
 // CheckSigner implements ChainCodec: a Solana key is never a secp256k1 key.
@@ -96,11 +96,27 @@ func (c *SOLCodec) GuardKey(u chain.UnsignedTx, info TxInfo) []byte {
 
 // SignerFor implements MessageCodec: the hot shard's key, or the deposit key at a path below the account.
 func (c *SOLCodec) SignerFor(keyRef string) (deposit bool, path []uint32, err error) {
-	dep, idx, err := sol.ParseKeyPath(keyRef)
+	deposit, _, path, err = c.SignerForGen(keyRef)
+	return deposit, path, err
+}
+
+// SignerForGen is SignerFor with the generation of the deposit tree the key reference names (1 without a prefix).
+func (c *SOLCodec) SignerForGen(keyRef string) (deposit bool, gen uint32, path []uint32, err error) {
+	dep, gen, idx, err := sol.ParseKeyRef(keyRef)
 	if err != nil || !dep {
-		return false, nil, err
+		return false, 0, nil, err
 	}
-	return true, []uint32{sol.BranchExternal, idx}, nil
+	return true, gen, []uint32{sol.BranchExternal, idx}, nil
+}
+
+// GenMessageCodec is implemented by a MessageCodec whose deposit keys come in generations.
+type GenMessageCodec interface {
+	SignerForGen(keyRef string) (deposit bool, gen uint32, path []uint32, err error)
+}
+
+// GenKeyPathCodec is implemented by a KeyPathCodec whose key references name a generation of the key tree (Bitcoin).
+type GenKeyPathCodec interface {
+	KeyPathGen(keyRef string) (gen uint32, path []uint32, err error)
 }
 
 // EdSignerCodec is implemented by codecs whose jobs are signed with Ed25519 keys.

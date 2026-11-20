@@ -70,6 +70,12 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// The token PIN is read once, here, before anything is opened: from the file named by QV_HSM_PIN_FILE (the same mode rule as the party's
+	// pin_file). The environment form QV_HSM_PIN is refused unless QV_ENV is dev or test. Neither the PIN nor its file's content is ever logged.
+	hsmPIN, err := hsmServicePIN(cfg)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	probe := health.New(log)
@@ -152,16 +158,7 @@ func run(log *slog.Logger) error {
 	signers := map[string]signer.Signer{}
 	genSigners := []gateway.GenerationSigner{gateway.MPCGenerationSigner()} // the keys of later generations of a shard (docs/runbooks/key-replacement.md)
 	if gateway.HasHSMSigners(cfg) {
-		lib, err := hsm.LoadLib(hsm.DefaultLibPath())
-		if err != nil {
-			return fmt.Errorf("load pkcs11: %w", err)
-		}
-		defer lib.Close()
-		// SoftHSM is for development and tests: a production start (QV_ENV unset, or not dev or test) refuses it.
-		if err := hsm.RefuseSoftHSM(lib, auth.EnvironmentFromEnv() == auth.Production); err != nil {
-			return err
-		}
-		hs, hsmGen, closeSigners, err := gateway.HSMSignersWithGenerations(cfg, lib, os.Getenv("QV_HSM_PIN"))
+		hs, hsmGen, closeSigners, err := openHSMSigners(cfg, hsmPIN)
 		if err != nil {
 			return err
 		}
@@ -263,4 +260,32 @@ func writeMetrics(ctx context.Context, path string, r *mpcsigner.Router, m *mpcs
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// openHSMSigners loads the PKCS#11 module, refuses SoftHSM in production and logs in to the tokens of the config's HSM signers with pin.
+// Its errors never carry the PIN (the PKCS#11 wrapper's errors name the token and the return code only).
+func openHSMSigners(cfg *gateway.Config, pin string) (map[string]signer.Signer, gateway.GenerationSigner, func(), error) {
+	lib, err := hsm.LoadLib(hsm.DefaultLibPath())
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load pkcs11: %w", err)
+	}
+	// SoftHSM is for development and tests: a production start (QV_ENV unset, or not dev or test) refuses it.
+	if err := hsm.RefuseSoftHSM(lib, auth.EnvironmentFromEnv() == auth.Production); err != nil {
+		lib.Close()
+		return nil, nil, nil, err
+	}
+	hs, hsmGen, closeSigners, err := gateway.HSMSignersWithGenerations(cfg, lib, pin)
+	if err != nil {
+		lib.Close()
+		return nil, nil, nil, err
+	}
+	return hs, hsmGen, func() { closeSigners(); lib.Close() }, nil
+}
+
+// hsmServicePIN is the token PIN for a zone with HSM signers; a zone with MPC signers only needs none.
+func hsmServicePIN(cfg *gateway.Config) (string, error) {
+	if !gateway.HasHSMSigners(cfg) {
+		return "", nil
+	}
+	return hsm.ServicePIN()
 }

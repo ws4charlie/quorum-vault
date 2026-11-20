@@ -87,8 +87,8 @@ type SigningConfig struct {
 type Payload struct {
 	Message        []byte   `json:"message"`
 	DepositIndices []uint32 `json:"deposit_indices,omitempty"`
-	// DepositGens is the generation of the deposit tree of each key of DepositIndices, in the same order. Absent: all generation 1 (K5). The signing
-	// zone ignores it until K6, and then refuses a transaction whose key is not the one it derives, so a later generation fails closed.
+	// DepositGens is the generation of the deposit tree of each key of DepositIndices, in the same order. Absent: all generation 1 (K5). The zone derives
+	// each key under the generation named, from the account node its signed keyset records give for it; a generation it does not know is refused.
 	DepositGens []uint32 `json:"deposit_gens,omitempty"`
 }
 
@@ -123,6 +123,25 @@ func ParseKeyPath(s string) (deposit bool, index uint32, err error) {
 	return true, uint32(v), nil
 }
 
+// ParseKeyRef is ParseKeyPath with the generation prefix of chain.KeyPathAt: "d/<index>" is generation 1, "g<N>/d/<index>" generation N.
+func ParseKeyRef(s string) (deposit bool, gen, index uint32, err error) {
+	g, rest, err := chain.SplitKeyPath(s)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	if g == 1 && rest != s {
+		return false, 0, 0, fmt.Errorf("key reference %q names generation 1 with a prefix", s)
+	}
+	deposit, index, err = ParseKeyPath(rest)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	if g > 1 && !deposit {
+		return false, 0, 0, fmt.Errorf("key reference %q: a generation prefix is for deposit keys only", s)
+	}
+	return deposit, uint32(g), index, nil
+}
+
 // Verifier implements chain.TxVerifier from SigningConfig alone.
 type Verifier struct {
 	cfg  SigningConfig
@@ -138,6 +157,8 @@ type Verifier struct {
 	rent [32]byte // Rent sysvar
 	// nonces maps a hot shard key to the index of each account of its pool.
 	nonces map[[32]byte]map[[32]byte]int
+	// gens are the account nodes of the later generations of the deposit tree this verifier knows (WithGenerations); generation 1 is the configured one.
+	gens   map[uint32]Node
 	cold   map[string][32]byte          // pool -> cold address
 	hotOf  map[string]map[[32]byte]bool // pool -> the hot shard keys of the pool
 }
@@ -241,8 +262,42 @@ func (v *Verifier) HotKey(partitionID string) ([32]byte, bool) {
 }
 
 // DepositKey is the key of the deposit address at index, derived from the zone's own account node.
-func (v *Verifier) DepositKey(index uint32) ([32]byte, error) {
-	c, err := v.node.Derive(BranchExternal, index)
+func (v *Verifier) DepositKey(index uint32) ([32]byte, error) { return v.DepositKeyAt(1, index) }
+
+// DepositNode is a later generation of the deposit tree's account node as the zone's signed records give it.
+type DepositNode struct {
+	Gen  uint32
+	Node Node
+}
+
+// WithGenerations returns a copy of v that also derives deposit keys under the given generations (2 and up). A payload that names a generation v does
+// not know is refused. v itself is not changed.
+func (v *Verifier) WithGenerations(ns []DepositNode) (*Verifier, error) {
+	nv := *v
+	nv.gens = map[uint32]Node{}
+	for _, n := range ns {
+		if n.Gen < 2 {
+			return nil, fmt.Errorf("sol: generation %d: the configured node is generation 1", n.Gen)
+		}
+		if _, dup := nv.gens[n.Gen]; dup {
+			return nil, fmt.Errorf("sol: generation %d given twice", n.Gen)
+		}
+		nv.gens[n.Gen] = n.Node
+	}
+	return &nv, nil
+}
+
+// DepositKeyAt is DepositKey under generation gen of the deposit tree (0 and 1: the configured node).
+func (v *Verifier) DepositKeyAt(gen, index uint32) ([32]byte, error) {
+	node := v.node
+	if gen > 1 {
+		n, ok := v.gens[gen]
+		if !ok {
+			return [32]byte{}, fmt.Errorf("this zone knows no deposit node for generation %d", gen)
+		}
+		node = n
+	}
+	c, err := node.Derive(BranchExternal, index)
 	return c.PublicKey, err
 }
 
@@ -253,6 +308,8 @@ type Info struct {
 	// SignerKey is the key that must sign THIS job: the hot shard's, or the derived deposit key.
 	SignerKey []byte
 	Claims    []string
+	// DepositGens is the generation of each deposit key a sweep spends, in the order of its signatures (nil: not a sweep).
+	DepositGens []uint32
 	// Fee is the most the transaction can cost in lamports: base fee for its signatures plus the priority fee.
 	Fee *big.Int
 	// Fees are what the guard compares between versions of one intent: [price, limit] for a nonce message (a version may raise the price and
@@ -281,6 +338,7 @@ type shape struct {
 	kind      string
 	deposits  [][32]byte // sweep: the deposit keys in the order of their signatures
 	depIdx    []uint32
+	depGen    []uint32 // sweep: the generation of each deposit key (1 when the payload names none)
 	feeLamp   *big.Int
 	amount    uint64
 	asset     string
@@ -428,7 +486,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 			return nil, err
 		}
 	case "sweep":
-		if err := v.sweep(s, rest, i, p.DepositIndices); err != nil {
+		if err := v.sweep(s, rest, i, p.DepositIndices, p.DepositGens); err != nil {
 			return nil, err
 		}
 		wantSigners = 1 + len(s.deposits)
@@ -467,7 +525,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 	}
 
 	// Which key does THIS job ask for?
-	dep, di, err := ParseKeyPath(u.KeyRef.Path)
+	dep, dg, di, err := ParseKeyRef(u.KeyRef.Path)
 	if err != nil {
 		return nil, reject("%v", err)
 	}
@@ -476,7 +534,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 	} else {
 		found := false
 		for k, ix := range s.depIdx {
-			if ix == di {
+			if ix == di && s.depGen[k] == dg {
 				s.signerKey, found = s.deposits[k], true
 			}
 		}
@@ -650,22 +708,37 @@ func (v *Verifier) withdrawal(s *shape, rest []MsgInstruction, i signjob.Intent,
 	return nil
 }
 
-func (v *Verifier) sweep(s *shape, rest []MsgInstruction, i signjob.Intent, idxs []uint32) error {
+func (v *Verifier) sweep(s *shape, rest []MsgInstruction, i signjob.Intent, idxs, gens []uint32) error {
 	if len(idxs) == 0 || len(idxs) > MaxSweepLegs {
 		return reject("a sweep names 1 to %d deposit indices in its payload, not %d", MaxSweepLegs, len(idxs))
 	}
-	seen := map[uint32]bool{}
+	if len(gens) != 0 && len(gens) != len(idxs) {
+		return reject("the payload names %d deposit generations for %d deposit indices", len(gens), len(idxs))
+	}
+	type legKey struct{ gen, idx uint32 }
+	seen := map[legKey]bool{}
 	var from []string
-	for _, ix := range idxs {
-		if seen[ix] {
-			return reject("deposit index %d appears twice", ix)
+	for k, ix := range idxs {
+		gen := uint32(1)
+		if len(gens) != 0 {
+			gen = gens[k]
+			if gen == 1 {
+				return reject("deposit generation 1 is written as no generation")
+			}
+			if gen == 0 {
+				return reject("deposit generation 0")
+			}
 		}
-		seen[ix] = true
-		dk, err := v.DepositKey(ix)
+		if seen[legKey{gen, ix}] {
+			return reject("deposit index %d of generation %d appears twice", ix, gen)
+		}
+		seen[legKey{gen, ix}] = true
+		dk, err := v.DepositKeyAt(gen, ix)
 		if err != nil {
-			return reject("deposit index %d: %v", ix, err)
+			return reject("deposit index %d of generation %d: %v", ix, gen, err)
 		}
 		s.deposits = append(s.deposits, dk)
+		s.depGen = append(s.depGen, gen)
 		from = append(from, Address(dk))
 	}
 	s.depIdx = idxs
@@ -761,5 +834,5 @@ func (v *Verifier) Decode(u chain.UnsignedTx, i signjob.Intent) (Info, error) {
 	}
 	claims := s.claims
 	return Info{Sender: s.hotAddr, Destination: s.dest, SignerKey: append([]byte(nil), s.signerKey[:]...),
-		Claims: claims, Fee: s.feeLamp, Fees: s.fees}, nil
+		Claims: claims, DepositGens: s.depGen, Fee: s.feeLamp, Fees: s.fees}, nil
 }

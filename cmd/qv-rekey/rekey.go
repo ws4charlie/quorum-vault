@@ -45,6 +45,8 @@ type Plan struct {
 	KeyRef    string `json:"key_ref,omitempty"`    // MPC keyset ID, or HSM CKA_ID in hex
 	PublicKey string `json:"public_key,omitempty"` // 65-byte uncompressed, hex
 	Address   string `json:"address,omitempty"`
+	// Window (a deposit tree, seconds) is the one the signed draining record carries; retire passes it to the core.
+	Window int64 `json:"window_seconds,omitempty"`
 }
 
 var slug = regexp.MustCompile(`[^a-z0-9]+`)
@@ -151,6 +153,8 @@ type Env struct {
 	Caps []string
 	// FactoryDestination, if set, reads the factory's destination on chain (the status check of the cold ceremony).
 	FactoryDestination func(ctx context.Context) (string, error)
+	// Window is the deposit-tree window of drain-start, seconds.
+	Window int64
 	// Compromised makes drain-start the emergency step: the old generation is marked compromised (with its successor and caps in the same record)
 	// instead of draining. A compromised generation signs only its drain and is never retired.
 	Compromised bool
@@ -276,8 +280,12 @@ func (e *Env) Open(ctx context.Context, shard, mode, reason string) error {
 	if mode != "mpc" && mode != "hsm" {
 		return errors.New("-mode is mpc or hsm")
 	}
-	if _, err := partition.ParseShardID(shard); err != nil {
-		return err
+	if !isTreePlan(shard) {
+		if _, err := partition.ParseShardID(shard); err != nil {
+			return err
+		}
+	} else if mode != "mpc" {
+		return errors.New("a deposit tree's new key is an MPC keyset: -mode mpc")
 	}
 	if reason == "" {
 		return errors.New("-reason is required: it is the record of why the key is replaced")
@@ -357,9 +365,11 @@ func (e *Env) DKG(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		addr, err := addressOf(pub)
-		if err != nil {
-			return err
+		addr := pub // a deposit tree has no address: its identity (xpub, node) stands for it
+		if !isTreePlan(p.Shard) {
+			if addr, err = addressOf(pub); err != nil {
+				return err
+			}
 		}
 		p.KeyRef, p.PublicKey, p.Address = ref, pub, addr
 		if err := savePlan(e.Dir, p); err != nil {
@@ -483,6 +493,10 @@ func (e *Env) Candidate(ctx context.Context) error {
 	}
 	want := gateway.KeysetChange{Action: gateway.KeysetRegisterCandidate, Shard: p.Shard, Generation: p.To, Address: p.Address, KeyRef: p.KeyRef, PublicKey: p.PublicKey}
 	flags := fmt.Sprintf("-action register-candidate -generation %d -address %s -key-ref %s -public-key %s", p.To, p.Address, p.KeyRef, p.PublicKey)
+	if isTreePlan(p.Shard) { // the record of a deposit tree carries the identity as its public key and no address
+		want.Address = ""
+		flags = fmt.Sprintf("-action register-candidate -generation %d -key-ref %s -public-key %s", p.To, p.KeyRef, p.PublicKey)
+	}
 	if err := e.zoneThenCore(ctx, p, StepCandidate, p.To, "", partition.StateCandidate, want, "candidate", flags,
 		"candidates", map[string]any{"shard_id": p.Shard, "address": p.Address, "key_ref": p.KeyRef}); err != nil {
 		return err
@@ -498,7 +512,8 @@ func (e *Env) DrainStart(ctx context.Context) error {
 		return err
 	}
 	caps, err := parseCaps(e.Caps)
-	if err != nil || len(caps) == 0 {
+	tree := isTreePlan(p.Shard)
+	if err != nil || (len(caps) == 0 && !tree) {
 		return errors.New("-cap ASSET=BASE_UNITS is required (the most all drains of that asset from the old key may move: the zone's bound, since it cannot read the chain)")
 	}
 	action, post, route := gateway.KeysetStartDraining, partition.StateDraining, "drains"
@@ -506,7 +521,20 @@ func (e *Env) DrainStart(ctx context.Context) error {
 		action, post, route = gateway.KeysetMarkCompromised, partition.StateCompromised, "compromises"
 	}
 	want := gateway.KeysetChange{Action: action, Shard: p.Shard, Generation: p.From, Successor: p.To, Caps: caps}
+	if len(caps) == 0 {
+		want.Caps = nil
+	}
+	if tree && !e.Compromised && e.Window > 0 {
+		want.Window = e.Window
+		p.Window = e.Window
+		if err := savePlan(e.Dir, p); err != nil {
+			return err
+		}
+	}
 	flags := fmt.Sprintf("-action %s -generation %d -successor %d", action, p.From, p.To)
+	if want.Window > 0 {
+		flags += fmt.Sprintf(" -window %d", want.Window)
+	}
 	for _, k := range sortedCaps(caps) {
 		flags += fmt.Sprintf(" -cap %s=%s", k, caps[k])
 	}
@@ -553,6 +581,10 @@ func (e *Env) Activate(ctx context.Context) error {
 		return err
 	}
 	if stepState(z, c, p.To, partition.StateActive) != "done" {
+		return nil
+	}
+	if isTreePlan(p.Shard) {
+		e.printf("%s", treeNoticeText(p))
 		return nil
 	}
 	e.printf("%s", ceremonyText(p))
@@ -635,7 +667,7 @@ func (e *Env) Retire(ctx context.Context) error {
 			if k.State != partition.StateDraining && k.State != partition.StateCompromised {
 				return fmt.Errorf("generation %d is %s in the core: it is not draining", p.From, k.State)
 			}
-			if k.Drain == nil || k.Drain.State != "drained" {
+			if (k.Drain == nil && !isTreePlan(p.Shard)) || (k.Drain != nil && k.Drain.State != "drained") {
 				st := "not started"
 				if k.Drain != nil {
 					st = k.Drain.State + " " + k.Drain.Reason
@@ -646,7 +678,7 @@ func (e *Env) Retire(ctx context.Context) error {
 	}
 	want := gateway.KeysetChange{Action: gateway.KeysetRetire, Shard: p.Shard, Generation: p.From}
 	if err := e.zoneThenCore(ctx, p, StepRetire, p.From, partition.StateDraining, partition.StateRetired, want, "retire",
-		fmt.Sprintf("-action retire -generation %d", p.From), "retirements", map[string]any{"shard_id": p.Shard, "generation": p.From}); err != nil {
+		fmt.Sprintf("-action retire -generation %d", p.From), "retirements", map[string]any{"shard_id": p.Shard, "generation": p.From, "window_seconds": p.Window}); err != nil {
 		return err
 	}
 	e.printf("generation %d is retired. Keep its backups and shares until the window in the runbook ends; do not destroy them here.\n", p.From)
@@ -713,8 +745,12 @@ func (e *Env) Status(ctx context.Context) error {
 		}
 	}
 	if done(p.To, partition.StateActive) {
-		e.printf("%s", ceremonyText(p))
-		_ = e.factoryCheck(ctx, p)
+		if isTreePlan(p.Shard) {
+			e.printf("%s", treeNoticeText(p))
+		} else {
+			e.printf("%s", ceremonyText(p))
+			_ = e.factoryCheck(ctx, p)
+		}
 	}
 	return derr
 }
@@ -749,4 +785,13 @@ func sortedCoreGens(m map[int]CoreGen) []int {
 	}
 	slices.Sort(o)
 	return o
+}
+
+// treeNoticeText is what follows the activation of a new deposit key: an operational step, no ceremony.
+func treeNoticeText(p *Plan) string {
+	return fmt.Sprintf(`generation %d is active: new customers and every customer who asks again get an address of it, and the old addresses of generation %d are still watched and
+swept (to the new hot shard) until generation %d is retired. Operational steps outside this tool (docs/runbooks/key-replacement.md, "Deposit keys"):
+  1. tell customers to use the new address, and that the old one is retired on a date (this window: %d seconds from drain-start).
+  2. keep the old keyset on both parties and its backups until the window has passed and status says the old generation is drained; do not destroy them here.
+`, p.To, p.From, p.From, p.Window)
 }
