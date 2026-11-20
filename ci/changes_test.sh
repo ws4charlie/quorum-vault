@@ -258,25 +258,29 @@ fin() { # fin <want true|false> <description> <classify outcome> <classify skip>
   ok; [ "$(sed -n 's/^skip=//p' "$tmp/fout")" = "$want" ] || bad "final.sh: $desc: want skip=$want, got '$(sed -n 's/^skip=//p' "$tmp/fout")'"
   [ "$(grep -c '^skip=' "$tmp/fout")" = 1 ] || bad "final.sh: $desc: skip must be written exactly once"
 }
-fin true  "verdict skip and every guard green"            success true success success success
-fin false "verdict skip, the guard failed (Greptile 1)"    success true success success failure
-fin false "verdict skip, the guard test failed"           success true success failure success
-fin false "verdict skip, the classifier test failed"      success true failure success success
-fin false "verdict skip, a guard was cancelled"           success true success cancelled success
-fin false "verdict skip, a guard was skipped"             success true success skipped success
-fin false "verdict skip, a guard timed out"               success true success success timed_out
-fin false "verdict skip, the guard outcome is empty"      success true success success ""
+G="success success success success success"
+fin true  "verdict skip and every guard green"            success true $G
+fin false "verdict skip, the guard failed (Greptile 1)"    success true success success failure success success
+fin false "verdict skip, the guard test failed"           success true success failure success success success
+fin false "verdict skip, the classifier test failed"      success true failure success success success success
+fin false "verdict skip, the tracked-files check failed"  success true success success success success failure
+fin false "verdict skip, the tracked-files test failed"   success true success success success failure success
+fin false "verdict skip, a guard was cancelled"           success true success cancelled success success success
+fin false "verdict skip, a guard was skipped"             success true success success success skipped success
+fin false "verdict skip, a guard timed out"               success true success success timed_out success success
+fin false "verdict skip, a guard outcome is empty"        success true success success "" success success
+fin false "verdict skip, only four guard outcomes"        success true success success success success
 fin false "verdict skip, only two guard outcomes"         success true success success
 fin false "verdict skip, no guard outcomes at all"        success true
-fin false "classifier step failed (continue-on-error)"    failure true success success success
-fin false "classifier step cancelled"                     cancelled true success success success
-fin false "classifier outcome missing"                    "" true success success success
-fin false "verdict false, guards green"                   success false success success success
-fin false "verdict empty, guards green"                   success "" success success success
-fin false "verdict 'True' (not the exact token)"          success True success success success
-fin false "verdict 'true ' (trailing space)"              success "true " success success success
-fin false "verdict 'skip'"                                success skip success success success
-fin true  "four green guards still skip"                  success true success success success success
+fin false "classifier step failed (continue-on-error)"    failure true $G
+fin false "classifier step cancelled"                     cancelled true $G
+fin false "classifier outcome missing"                    "" true $G
+fin false "verdict false, guards green"                   success false $G
+fin false "verdict empty, guards green"                   success "" $G
+fin false "verdict 'True' (not the exact token)"          success True $G
+fin false "verdict 'true ' (trailing space)"              success "true " $G
+fin false "verdict 'skip'"                                success skip $G
+fin true  "six green guards still skip"                   success true $G success
 
 # the workflow keeps its side of the bargain (a text check; the full run on a real pull request is the proof)
 wf="$here/../.github/workflows/ci.yml"
@@ -286,12 +290,13 @@ chk "if: \${{ !cancelled() }}" "the test job must run even when changes failed"
 chk "continue-on-error: true" "the classify step must not fail the job"
 chk "run: ci/changes.sh" "ci.yml does not run ci/changes.sh"
 chk "run: ci/skip-guard.sh" "ci.yml does not run the guard"
+chk "run: ci/tracked-files.sh" "ci.yml does not run the tracked-files check"
 chk "run: ci/final.sh" "ci.yml does not publish the decision through ci/final.sh"
 chk "skip: \${{ steps.final.outputs.skip }}" "the job output must come from the final step only"
 ok; grep -qF "steps.classify.outputs.skip }}" "$wf" && ! grep -qE "^      skip: .*steps.classify" "$wf" || bad "the job output skip must not come from the classify step"
 # order: the guards are steps before the classifier; the final step is last in the job
-ok; awk '/^  changes:/{c=1} /^  # The CI image/{c=0} c&&/^        id: /{ids=ids" "$2} END{exit !(ids==" t_changes t_guard guard classify final")}' "$wf" || bad "changes job: steps must be t_changes t_guard guard classify final, in this order"
-chk "steps.t_changes.outcome }} \${{ steps.t_guard.outcome }} \${{ steps.guard.outcome }}" "final step must receive the outcomes of every guard and test step"
+ok; awk '/^  changes:/{c=1} /^  # The CI image/{c=0} c&&/^        id: /{ids=ids" "$2} END{exit !(ids==" t_changes t_guard guard t_files files classify final")}' "$wf" || bad "changes job: steps must be t_changes t_guard guard t_files files classify final, in this order"
+chk "steps.t_changes.outcome }} \${{ steps.t_guard.outcome }} \${{ steps.guard.outcome }} \${{ steps.t_files.outcome }} \${{ steps.files.outcome }}" "final step must receive the outcomes of every guard and test step"
 chk "needs.changes.result == 'success' && needs.changes.outputs.skip == 'true'" "test and image must refuse a skip when the changes job did not succeed"
 ok; ! grep -qE "skip *== *'false'|skip *!= *'false'" "$wf" || bad "ci.yml compares skip with 'false': only the exact value true may skip"
 n_steps="$(awk '/^  test:/{t=1} /^  # cb-mpc wrapper/{t=0} t&&/^      - /{n++} END{print n}' "$wf")"

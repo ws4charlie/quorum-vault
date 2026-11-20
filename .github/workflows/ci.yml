@@ -47,6 +47,13 @@ jobs:
       - name: The allowlist guard
         id: guard
         run: ci/skip-guard.sh
+      # A build output or a huge file in git (a 29 MB Mach-O binary once got in with a feature PR): found by magic bytes and size, on every run.
+      - name: Tests of the tracked-files check
+        id: t_files
+        run: ci/tracked-files_test.sh
+      - name: No compiled binary or oversized file is tracked
+        id: files
+        run: ci/tracked-files.sh
       # Fails open by itself: its EXIT trap writes skip=false, and continue-on-error keeps even a crash from failing the job (the verdict is then not success).
       - name: Classify the changed files
         id: classify
@@ -61,7 +68,7 @@ jobs:
           QV_CLASSIFY_OUTCOME: ${{ steps.classify.outcome }}
           QV_CLASSIFY_SKIP: ${{ steps.classify.outputs.skip }}
           QV_CLASSIFY_TEXT: ${{ steps.classify.outputs.text }}
-          QV_GUARD_OUTCOMES: ${{ steps.t_changes.outcome }} ${{ steps.t_guard.outcome }} ${{ steps.guard.outcome }}
+          QV_GUARD_OUTCOMES: ${{ steps.t_changes.outcome }} ${{ steps.t_guard.outcome }} ${{ steps.guard.outcome }} ${{ steps.t_files.outcome }} ${{ steps.files.outcome }}
         run: ci/final.sh
 
   # The CI image (ci/qv-ci.Dockerfile): clang-20, cb-mpc, SoftHSM2 and Go, tagged by a hash of its inputs (ci/image-tag.sh). Almost always the tag
