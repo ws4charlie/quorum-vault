@@ -5,10 +5,32 @@ here="$(cd "$(dirname "$0")" && pwd)"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 fails=0; total=0
 r="$tmp/r"; git init -q "$r"; mkdir -p "$r/ci" "$r/.github/workflows"
-cp "$here/skip-guard.sh" "$here/skip-allowlist" "$r/ci/"; : > "$r/ci/skip-guard-exceptions"
+cp "$here/skip-guard.sh" "$here/skip-allowlist" "$here/skip-module-exceptions" "$r/ci/"; : > "$r/ci/skip-guard-exceptions"
 echo 'name: ci' > "$r/.github/workflows/ci.yml"
+# one tracked file per allowlist pattern (the guard refuses a pattern that matches nothing), the root module, and the reviewed own module ci/helm
+while IFS= read -r l; do
+  case "$l" in ''|'#'*) continue ;; esac
+  read -r _ p _ <<<"$l"; f="${p//\*/x}"; mkdir -p "$r/$(dirname "$f")"; echo seed > "$r/$f"
+done < "$here/skip-allowlist"
+printf 'module root\n' > "$r/go.mod"; printf 'module helmcheck\n' > "$r/ci/helm/go.mod"
+mkdir -p "$r/internal/real"; echo 'package real' > "$r/internal/real/real.go"
 git -C "$r" -c user.email=t@t -c user.name=t add -A >/dev/null; git -C "$r" -c user.email=t@t -c user.name=t commit -qm base
 
+# more than one file: with_files <ok|fail> <description> <file> <content> [<file> <content>]...   (ALLOW: a replacement ci/skip-allowlist; RM: files to delete)
+with_files() {
+  local want="$1" desc="$2" out rc f; shift 2; local made=()
+  while [ $# -ge 2 ]; do mkdir -p "$(dirname "$r/$1")"; printf '%s\n' "$2" > "$r/$1"; made+=("$1"); shift 2; done
+  [ -z "${ALLOW:-}" ] || { cp "$r/ci/skip-allowlist" "$tmp/allow.keep"; printf '%b' "$ALLOW" > "$r/ci/skip-allowlist"; }
+  for f in ${RM:-}; do mv "$r/$f" "$tmp/rm.$(basename "$f")"; done
+  git -C "$r" add -A; out="$(cd "$r" && ci/skip-guard.sh 2>&1)"; rc=$?
+  total=$((total + 1))
+  if [ "$want" = ok ] && [ "$rc" != 0 ]; then fails=$((fails + 1)); echo "FAIL: $desc: guard failed: $out"; fi
+  if [ "$want" = fail ] && [ "$rc" = 0 ]; then fails=$((fails + 1)); echo "FAIL: $desc: guard passed but must fail"; fi
+  for f in ${RM:-}; do mv "$tmp/rm.$(basename "$f")" "$r/$f"; done
+  [ -z "${ALLOW:-}" ] || cp "$tmp/allow.keep" "$r/ci/skip-allowlist"
+  for f in "${made[@]}"; do git -C "$r" rm -q -f --cached "$f" >/dev/null 2>&1; rm -f "$r/$f"; done
+  git -C "$r" add -A; ALLOW=""; RM=""
+}
 # case <expect ok|fail> <description> <file> <content>   (exceptions: EXC env)
 case_() {
   local want="$1" desc="$2" file="$3" content="$4" out rc
@@ -46,6 +68,30 @@ EXC='internal/x/a_test.go\t*\tchecked\n' case_ ok   "a reviewed exception" inter
 EXC='internal/x/a_test.go\tdocs/\tchecked\n' case_ fail "an exception for another needle" internal/x/a_test.go 'b, _ := os.ReadFile("../../README.md")'
 EXC='internal/gone/a_test.go\tdocs/\tnobody reads it\n' case_ fail "a stale exception (no reader left)" x/none.txt 'nothing'
 EXC='x/none.txt\t*\tnothing\n' case_ fail "a stale wildcard exception" x/none.txt 'nothing'
+
+# the allowlist against the tree (fix1): empty patterns, executable kinds, module boundaries, the reviewed own-module exception
+with_files ok   "baseline: seeds, root module, ci/helm as an own module" x/none.txt nothing
+ALLOW='docs docs/*.md\nchart ci/kind/*\n' with_files fail "a pattern for a tree that is not in the repository (ci/kind/*)" x/none.txt nothing
+ALLOW='docs docs/*.md\ndocs docs/*.png\ndocs docs/*.txt\n' with_files fail "a pattern that matches no tracked file" x/none.txt nothing
+with_files fail ".go under an allowlisted chart" deploy/helm/qv-business/tool.go 'package main'
+with_files fail ".sh under an allowlisted chart" deploy/helm/qv-business/check.sh '#!/bin/sh'
+with_files fail "go.mod under an allowlisted chart (an own module with no reviewed exception)" deploy/helm/qv-party/go.mod 'module x' deploy/helm/qv-party/tool.go 'package main'
+with_files fail "Makefile under an allowlisted chart" deploy/helm/qv-business/Makefile 'all:'
+with_files fail "Dockerfile under an allowlisted chart" deploy/helm/qv-business/Dockerfile 'FROM x'
+with_files fail ".sql under an allowlisted chart" deploy/helm/qv-business/q.sql 'select 1;'
+with_files fail "a root-module Go package next to a doc (the mkbucket mistake, on a docs path)" docs/pkg/main.go 'package main' docs/pkg/notes.md 'x'
+with_files fail "a Go file in docs/ itself (docs/*.png sits in the package directory)" docs/z.go 'package docs'
+with_files fail "a doc below a root-module Go package directory (go:embed can reach it)" docs/pkg/main.go 'package main' docs/pkg/sub/deep.png 'x'
+with_files ok   "a doc next to an own module that ci.yml does not enter" docs/tools/go.mod 'module t' docs/tools/main.go 'package main' docs/tools/README.md 'x'
+with_files ok   "ci/helm keeps Go and shell files (reviewed own module)" ci/helm/x_test.go 'package helmcheck' ci/helm/new.sh '#!/bin/sh'
+with_files fail "the reviewed tree is entered by ci.yml" .github/workflows/ci.yml '      - run: cd ci/helm && go test ./...'
+echo 'name: ci' > "$r/.github/workflows/ci.yml"; git -C "$r" add -A
+RM=ci/helm/go.mod with_files fail "the reviewed tree has no go.mod: it is not a module" x/none.txt nothing
+with_files fail "a make target that ci.yml calls enters the reviewed tree" Makefile $'all:\n\tcd ci/helm && go test ./...' .github/workflows/ci.yml '      - run: make all'
+echo 'name: ci' > "$r/.github/workflows/ci.yml"; git -C "$r" rm -q -f --cached Makefile >/dev/null 2>&1; rm -f "$r/Makefile"; git -C "$r" add -A
+printf 'Makefile\t*\treviewed\n' > "$r/ci/skip-guard-exceptions"
+with_files ok   "a make target that ci.yml does not call may name ci/helm (reviewed as a reader)" Makefile $'helm-check:\n\tci/helm/check.sh'
+: > "$r/ci/skip-guard-exceptions"
 
 # the real repository passes, and the guard really looks at it
 total=$((total + 1)); (cd "$here/.." && ci/skip-guard.sh >/dev/null 2>&1) || { fails=$((fails + 1)); echo "FAIL: the repository itself does not pass the guard"; (cd "$here/.." && ci/skip-guard.sh | head); }

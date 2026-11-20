@@ -12,12 +12,13 @@ docs CONTRIBUTING.md
 docs DESIGN_SCALE.md
 docs docs/*.md
 docs docs/*.png
-# chart: three Helm charts and the test trees of the charts. ci.yml never runs helm; ci/helm is a separate Go module (not in `go test ./...` of the root
-# module) that only .github/workflows/helm.yml and `make helm-check` run, and ci/kind is the same kind of tree.
+# chart: three Helm charts and the test tree ci/helm. ci.yml never runs helm; ci/helm is a separate Go module (not in `go test ./...` of the root
+# module) that only .github/workflows/helm.yml and `make helm-check` run (the reviewed exception in ci/skip-module-exceptions).
+# ci/kind is NOT here: a tree that is not in the repository cannot be proven safe, and the guard refuses a pattern that matches no tracked file. The kind
+# lane's ci/kind/tools has Go code of the root module, which the `test` job compiles. Add a line for it, with evidence, in the pull request that has the files.
 # deploy/helm/qv-certs is NOT listed: its catalog.json is read by a test of the root module (internal/pki/catalog_chart_test.go, the `test` job).
 # Not a glob over deploy/helm/*: a new chart does not skip anything until someone checks it and adds it here.
 chart deploy/helm/qv-business/*
 chart deploy/helm/qv-party/*
 chart deploy/helm/qv-signing-core/*
 chart ci/helm/*
-chart ci/kind/*

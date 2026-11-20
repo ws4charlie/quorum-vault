@@ -24,6 +24,14 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$allow"
 [ "${#pats[@]}" -gt 0 ] || all "empty allowlist"
 
+# trees that may be skipped although their files have a risky extension (ci/skip-module-exceptions, checked by ci/skip-guard.sh)
+trees=()
+if [ -r "$here/skip-module-exceptions" ]; then
+  while IFS=$'\t' read -r t _ || [ -n "$t" ]; do
+    case "$t" in ''|'#'*) continue ;; */) trees+=("$t") ;; *) all "bad module exception" ;; esac
+  done < "$here/skip-module-exceptions"
+fi
+
 n=0; docs=0; chart=0
 while IFS= read -r -d '' meta; do
   IFS= read -r -d '' path || all "truncated change list"
@@ -46,6 +54,12 @@ while IFS= read -r -d '' meta; do
     case "$path" in ${pats[$i]}) hit="${classes[$i]}"; break ;; esac
   done
   [ -n "$hit" ] || all "not on the allowlist: $path"
+  # belt and braces: a file a job compiles or runs is never skipped, whatever the list says, unless its tree is a reviewed own-module exception
+  case "${path##*/}" in
+    *.go|go.mod|go.sum|*.sh|*.bash|*.py|*.sql|*.proto|*.mk|*.js|Makefile|Dockerfile*|*.Dockerfile)
+      ok=0; for t in "${trees[@]+"${trees[@]}"}"; do case "$path" in "$t"*) ok=1 ;; esac; done
+      [ "$ok" = 1 ] || all "a file that a job compiles or runs is never skipped: $path" ;;
+  esac
   case "$hit" in docs) docs=1 ;; chart) chart=1 ;; esac
 done
 [ -z "${meta:-}" ] || all "truncated change list"

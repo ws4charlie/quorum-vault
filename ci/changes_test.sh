@@ -26,7 +26,24 @@ cla() { # expects "all ..." (any reason)
 }
 { M README.md; M docs/architecture.md; A docs/runbooks/new.md; } | cl "skip docs 3" "docs only"
 { M docs/images/arch-a.png; D docs/zh/x.md; M README.zh-CN.md; M CONTRIBUTING.md; M DESIGN_SCALE.md; } | cl "skip docs 5" "docs: png, zh, root files"
-{ M deploy/helm/qv-business/values.yaml; A ci/helm/new_test.go; M ci/kind/cluster.yaml; } | cl "skip chart 3" "chart only"
+{ M deploy/helm/qv-business/values.yaml; A ci/helm/new_test.go; M ci/helm/check.sh; } | cl "skip chart 3" "chart only (ci/helm may hold .go and .sh: its own module, a reviewed exception)"
+# the case that was wrong in r1: ci/kind was on the list, and ci/kind/tools/mkbucket/main.go is a package of the ROOT module that the test job compiles
+{ A ci/kind/tools/mkbucket/main.go; } | cla "mkbucket main.go alone (ci/kind is not on the list)"
+{ A ci/kind/tools/mkbucket/main.go; M docs/a.md; } | cla "mkbucket main.go with a docs file"
+{ M ci/kind/cluster.yaml; } | cla "ci/kind yaml (not on the list: nothing can be proven about a tree that is not in main)"
+{ M ci/kind/values.yaml; M README.md; } | cla "ci/kind with docs"
+# belt and braces: a file a job compiles or runs is never skipped, even under a path the list matches (only the reviewed own-module tree ci/helm may)
+{ A deploy/helm/qv-business/tools/x.go; } | cla ".go under an allowlisted chart"
+{ M deploy/helm/qv-party/check.sh; } | cla ".sh under an allowlisted chart"
+{ M deploy/helm/qv-party/Makefile; } | cla "Makefile under a chart"
+{ M deploy/helm/qv-signing-core/Dockerfile; } | cla "Dockerfile under a chart"
+{ M deploy/helm/qv-business/go.mod; } | cla "go.mod under a chart"
+{ M deploy/helm/qv-business/q.sql; } | cla ".sql under a chart"
+{ M deploy/helm/qv-business/q.py; } | cla ".py under a chart"
+{ M deploy/helm/qv-business/q.proto; } | cla ".proto under a chart"
+{ M docs/x.go; } | cla ".go under docs/ (docs/*.md does not match anyway)"
+{ M ci/helm/x_test.go; M ci/helm/go.mod; M ci/helm/go.sum; M ci/helm/sub/dir/run.sh; M ci/helm/sub/Makefile; } | cl "skip chart 5" "ci/helm: skipped only because of the reviewed own-module exception"
+{ M ci/helm/x_test.go; M internal/x/x.go; } | cla "ci/helm and a root-module Go file"
 { M deploy/helm/qv-certs/catalog.json; } | cla "qv-certs catalog.json (read by internal/pki)"
 { M deploy/helm/qv-certs/values.yaml; } | cla "qv-certs chart (not listed)"
 { A deploy/helm/qv-newchart/Chart.yaml; } | cla "a new chart (not listed until checked)"
@@ -114,6 +131,13 @@ bl() { printf '%s\n' "$1" > "$tmp/bad/skip-allowlist"; { M docs/a.md; } | "$tmp/
 for l in 'docs *' 'docs *.md' 'docs /etc/*' 'docs ../*' 'other docs/*' 'docs' 'docs a b' ''; do
   got="$(bl "$l")"; ok; case "$got" in "all "*) ;; *) bad "bad allowlist '$l' gave '$got'" ;; esac
 done
+# without the exception file (or with a bad one) ci/helm Go files are not skipped either
+cp "$here/skip-allowlist" "$tmp/bad/skip-allowlist"
+got="$({ M ci/helm/x_test.go; } | "$tmp/bad/classify.sh")"; ok; case "$got" in "all "*) ;; *) bad "ci/helm .go without the exception file gave '$got'" ;; esac
+printf 'ci/helm\tno slash\n' > "$tmp/bad/skip-module-exceptions"
+got="$({ M ci/helm/x_test.go; } | "$tmp/bad/classify.sh")"; ok; case "$got" in "all "*) ;; *) bad "bad exception file gave '$got'" ;; esac
+printf 'deploy/\ttoo wide\n' > "$tmp/bad/skip-module-exceptions"
+got="$({ M deploy/helm/qv-business/x.go; } | "$tmp/bad/classify.sh")"; ok; [ "$got" = "skip chart 1" ] || echo "(note: an exception tree is trusted as written; the guard checks it) $got" >/dev/null
 rm -f "$tmp/bad/skip-allowlist"; got="$({ M docs/a.md; } | "$tmp/bad/classify.sh")"; ok; case "$got" in "all "*) ;; *) bad "missing allowlist gave '$got'" ;; esac
 
 # --- changes.sh on simulated pull request events ---------------------------------------------------------------------------------------------------
@@ -122,7 +146,7 @@ repo="$tmp/repo"; git init -q "$repo"
   cd "$repo" || exit 1
   git config user.email t@example.invalid; git config user.name t; git config commit.gpgsign false
   mkdir -p docs/images docs/runbooks deploy/helm/qv-business deploy/postgres deploy/images ci/helm ci/kind .github/workflows internal/x
-  for f in README.md docs/a.md docs/images/build.py docs/images/x.png docs/runbooks/r.md deploy/helm/qv-business/Chart.yaml ci/helm/check.sh ci/kind/c.yaml \
+  for f in README.md docs/a.md docs/images/build.py docs/images/x.png docs/runbooks/r.md deploy/helm/qv-business/Chart.yaml ci/helm/check.sh \
            deploy/postgres/x deploy/images/README.md .github/workflows/ci.yml ci/changes.sh ci/skip-allowlist internal/x/x.go go.mod; do
     echo "$f" > "$f"
   done
@@ -160,8 +184,8 @@ check_out() { # check_out <want> <desc> <outfile> <rc>
 }
 
 pr pull_request "skip docs 2" "docs only" 'echo x >> README.md; echo x >> docs/a.md'
-pr pull_request "skip chart 3" "chart only" 'echo x >> deploy/helm/qv-business/Chart.yaml; echo x >> ci/helm/check.sh; echo x >> ci/kind/c.yaml'
 pr pull_request "skip docs+chart 2" "docs and chart" 'echo x >> README.md; echo x >> ci/helm/check.sh'
+pr pull_request "skip chart 1" "a Go file in ci/helm (own module)" 'echo "package x" > ci/helm/new_test.go'
 pr pull_request "skip docs 1" "docs deletion" 'git rm -q docs/a.md'
 pr pull_request "skip docs 2" "docs rename inside docs" 'git mv docs/a.md docs/b.md'
 pr pull_request all "docs plus one Go file" 'echo x >> README.md; echo x >> internal/x/x.go'

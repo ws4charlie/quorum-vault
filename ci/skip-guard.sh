@@ -28,11 +28,110 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$allow"
 [ "${#pats[@]}" -gt 0 ] || { echo "skip-guard: empty allowlist"; exit 2; }
 
+# ---- the allowlist against the tree (every run) -------------------------------------------------------------------------------------------------------
+bad=0
+tracked="$(mktemp)"; allowed="$(mktemp)"; corpus="$(mktemp)"; godirs="$(mktemp)"
+git ls-files > "$tracked"
+matches() { # matches <path>: is it on the allowlist?
+  local f="$1" p
+  for p in "${pats[@]}"; do
+    # shellcheck disable=SC2254
+    case "$f" in $p) return 0 ;; esac
+  done
+  return 1
+}
+# 1. no pre-approval of trees that do not exist: every pattern must match a tracked file
+for p in "${pats[@]}"; do
+  found=0
+  while IFS= read -r f; do
+    # shellcheck disable=SC2254
+    case "$f" in $p) found=1; break ;; esac
+  done < "$tracked"
+  [ "$found" = 1 ] || { bad=1; echo "EMPTY pattern: '$p' of ci/skip-allowlist matches no tracked file. A pattern for files that are not in the repository cannot be proven safe: remove it, and add it in the pull request that brings the files."; }
+done
+while IFS= read -r f; do matches "$f" && printf '%s\n' "$f"; done < "$tracked" > "$allowed"
+
+# reviewed own-module trees (ci/skip-module-exceptions): <tree/><TAB><reason>
+modexc="$here/skip-module-exceptions"; trees=()
+if [ -r "$modexc" ]; then
+  while IFS=$'\t' read -r t _ || [ -n "$t" ]; do
+    case "$t" in ''|'#'*) continue ;; */) trees+=("$t") ;; *) bad=1; echo "BAD module exception '$t': it must be a directory ending in /" ;; esac
+  done < "$modexc"
+fi
+
+# nearest Go module directory of a tracked path ("." = the root module); empty when there is none
+nearest_module() {
+  local d; d="$(dirname "$1")"
+  while :; do
+    if [ "$d" = . ]; then grep -qxF go.mod "$tracked" && echo . ; return; fi
+    if grep -qxF "$d/go.mod" "$tracked"; then echo "$d"; return; fi
+    d="$(dirname "$d")"
+  done
+}
+# the Go modules that ci.yml builds or tests: the root, and every module directory named by ci.yml, .github/actions, the make targets they call (with their
+# prerequisites) and the scripts those name. Found from the files, not listed here.
+cat .github/workflows/ci.yml .github/actions/*/action.yml 2>/dev/null > "$corpus"
+targets="$(grep -ohE 'make +[A-Za-z0-9_.-]+' "$corpus" | awk '{print $2}' | sort -u | tr '\n' ' ')"
+if [ -r Makefile ] && [ -n "$targets" ]; then
+  awk -v roots="$targets" '
+    BEGIN { n = split(roots, r, " "); for (i = 1; i <= n; i++) want[r[i]] = 1 }
+    /^[A-Za-z0-9_.-]+:/ && !/^\./ { t = $0; sub(/:.*/, "", t); cur = t; pre = $0; sub(/^[^:]*:/, "", pre); sub(/#.*/, "", pre); prereq[t] = pre; next }
+    /^\t/ { if (cur != "") recipe[cur] = recipe[cur] "\n" $0; next }
+    /^[^\t]/ { cur = "" }
+    END {
+      do { changed = 0
+        for (t in want) { m = split(prereq[t], ps, " "); for (j = 1; j <= m; j++) if (!(ps[j] in want) && ps[j] in prereq) { want[ps[j]] = 1; changed = 1 } }
+      } while (changed)
+      for (t in want) print recipe[t]
+    }' Makefile >> "$corpus"
+fi
+for _ in 1 2 3; do # scripts named in the corpus, then the scripts they name
+  while IFS= read -r f; do
+    case "$f" in ci/changes*.sh|ci/classify.sh|ci/skip-guard*.sh) continue ;; *.sh) grep -qF -- "$f" "$corpus" && cat "$f" >> "$corpus" ;; esac
+  done < "$tracked"
+done
+grep -vE '^[[:space:]]*#' "$corpus" > "$corpus.nc" && mv "$corpus.nc" "$corpus"   # comments name things without running them
+entered() { # entered <module dir>
+  [ "$1" = . ] && return 0
+  grep -qF -- "$1/" "$corpus" || grep -qE -- "cd +$1( |&|;|$)" "$corpus"
+}
+grep -E '\.go$' "$tracked" | while IFS= read -r f; do dirname "$f"; done | sort -u > "$godirs"
+
+while IFS= read -r f; do
+  # 2. an extension that a job compiles or runs: only inside a reviewed own-module tree that no ci.yml job enters
+  case "${f##*/}" in
+    *.go|go.mod|go.sum|*.sh|*.bash|*.py|*.sql|*.proto|*.mk|*.js|Makefile|Dockerfile*|*.Dockerfile)
+      inside=""; for t in "${trees[@]+"${trees[@]}"}"; do case "$f" in "$t"*) inside="$t" ;; esac; done
+      if [ -z "$inside" ]; then bad=1; echo "EXECUTABLE: $f is on the allowlist but a job compiles or runs files of this kind. Narrow the pattern."; continue; fi
+      if ! grep -qxF "${inside}go.mod" "$tracked"; then bad=1; echo "EXCEPTION: $inside has no go.mod of its own: it is not a separate module"; continue; fi
+      ;;
+  esac
+  # 3. module boundary: no allowlisted file may sit in a package directory (or below one) of a module that ci.yml builds or tests
+  m="$(nearest_module "$f")"
+  [ -n "$m" ] || continue
+  entered "$m" || continue
+  d="$(dirname "$f")"
+  while :; do
+    if grep -qxF "$d" "$godirs" && [ "$(nearest_module "$d/x")" = "$m" ]; then
+      bad=1; echo "MODULE: $f is on the allowlist but lies in/under the Go package directory $d of the module '$m', which ci.yml builds or tests (go:embed, testdata, a build input). Narrow the pattern."; break
+    fi
+    [ "$d" = "$m" ] && break
+    [ "$d" = . ] && break
+    d="$(dirname "$d")"
+  done
+done < "$allowed"
+# a reviewed tree must really be a module that ci.yml does not enter
+for t in "${trees[@]+"${trees[@]}"}"; do
+  grep -qxF "${t}go.mod" "$tracked" || { bad=1; echo "EXCEPTION: ${t} has no go.mod of its own: it is not a separate module"; }
+  if entered "${t%/}"; then bad=1; echo "EXCEPTION: ci.yml (or something it calls) names ${t%/}: the module is run by a ci.yml job, so ${t} cannot be skipped"; fi
+done
+rm -f "$tracked" "$allowed" "$corpus" "$godirs"
+
 # the files to read: tracked, not on the allowlist, not the machinery of this guard
 files="$(mktemp)"; hits="$(mktemp)"; trap 'rm -f "$files" "$hits"' EXIT
 git ls-files -z | while IFS= read -r -d '' f; do
   skip=0
-  case "$f" in ci/changes.sh|ci/changes_test.sh|ci/classify.sh|ci/skip-allowlist|ci/skip-guard.sh|ci/skip-guard_test.sh|ci/skip-guard-exceptions) skip=1 ;; esac
+  case "$f" in ci/changes.sh|ci/changes_test.sh|ci/classify.sh|ci/skip-allowlist|ci/skip-guard.sh|ci/skip-guard_test.sh|ci/skip-guard-exceptions|ci/skip-module-exceptions) skip=1 ;; esac
   for p in "${pats[@]}"; do
     # shellcheck disable=SC2254
     case "$f" in $p) skip=1 ;; esac
@@ -88,7 +187,6 @@ awk -F'\t' '
     }
     print file "\t" needle "\t" lineno "\t" text
   }' "$hits" | sort -u > "$filtered"
-bad=0
 while IFS=$'\t' read -r file needle lineno text; do
   if [ -r "$exc" ] && awk -F'\t' -v f="$file" -v n="$needle" 'BEGIN{r=1} $0 !~ /^#/ && NF>=3 && $1==f && ($2==n || $2=="*") {r=0} END{exit r}' "$exc"; then continue; fi
   bad=1; echo "READER: $file:$lineno names '$needle' (on the allowlist): $text"
