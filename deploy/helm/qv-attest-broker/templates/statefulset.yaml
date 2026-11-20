@@ -1,0 +1,146 @@
+{{- include "qab.guards" . -}}
+{{- $v := .Values -}}
+{{- $soft := $v.hsm.softhsm.enabled -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "qab.fullname" . }}
+  labels: {{- include "qab.labels" . | nindent 4 }}
+spec:
+  # Exactly one pod (the schema accepts only 1): single writer of the audit chain, nonces in memory (a second replica would refuse the first one's challenges).
+  replicas: 1
+  serviceName: {{ include "qab.fullname" . }}
+  podManagementPolicy: OrderedReady
+  # RollingUpdate on one replica stops the old pod, waits until it is gone, then creates the new one: two brokers never run at once, never two appenders on the audit log.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: { partition: 0 }
+  # The audit log lives on this volume: deleting the StatefulSet or scaling it down never deletes it.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels: {{- include "qab.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "qab.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "qab.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      # SIGTERM drains; the broker has no long calls.
+      terminationGracePeriodSeconds: 30
+      securityContext: {{- include "qab.podSecurityContext" . | nindent 8 }}
+      {{- include "qab.pullSecrets" . | nindent 6 }}
+      {{- with $v.scheduling.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with $v.scheduling.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.scheduling.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.scheduling.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $soft }}
+      initContainers:
+        # Development only: makes the SoftHSM token on the data volume once (nothing happens when it exists) and stages a copy of the PIN that only this uid can read,
+        # because the broker refuses a PIN file with a group bit and kubelet adds one under fsGroup (README, "PIN file").
+        - name: softhsm-init
+          image: {{ include "qab.image" . | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              mkdir -p /var/lib/qv/broker/softhsm/tokens
+              if ! softhsm2-util --show-slots | grep -q "Label:[[:space:]]*${SOFTHSM_LABEL}[[:space:]]*\$"; then
+                softhsm2-util --init-token --free --label "${SOFTHSM_LABEL}" --so-pin "$(cat /etc/qv/hsm-so/so-pin)" --pin "$(cat /etc/qv/hsm-pin/pin)" >/dev/null
+              fi
+              umask 077
+              cat /etc/qv/hsm-pin/pin > /run/qv/pin/pin
+              chmod 0400 /run/qv/pin/pin
+          env:
+            - { name: SOFTHSM_LABEL, value: {{ include "qab.token" . | quote }} }
+            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }
+            - { name: QV_ENV, value: {{ $v.env | quote }} }
+          resources: {{- toYaml $v.resources | nindent 12 }}
+          securityContext: {{- include "qab.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/qv/broker }
+            - { name: softhsm-conf, mountPath: /etc/qv/softhsm, readOnly: true }
+            - { name: hsm-pin, mountPath: /etc/qv/hsm-pin, readOnly: true }
+            - { name: hsm-so-pin, mountPath: /etc/qv/hsm-so, readOnly: true }
+            - { name: pin-staged, mountPath: /run/qv/pin }
+      {{- end }}
+      containers:
+        - name: qv-attest-broker
+          image: {{ include "qab.image" . | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          args: ["serve", "-config", "/etc/qv/config/broker.json"]
+          {{- if $v.env }}
+          env:
+            - { name: QV_ENV, value: {{ $v.env | quote }} }
+            {{- if $soft }}
+            - { name: SOFTHSM2_CONF, value: /etc/qv/softhsm/softhsm2.conf }
+            {{- end }}
+          {{- end }}
+          ports:
+            - { name: mtls, containerPort: {{ $v.ports.mtls }}, protocol: TCP }
+            - { name: health, containerPort: {{ $v.ports.health }}, protocol: TCP }
+          # /healthz: the allowlist is loaded and the token answers (no data, no auth). Plain http on the pod address, not published by the Service.
+          startupProbe: { httpGet: { path: /healthz, port: health }, periodSeconds: 5, failureThreshold: 60 }
+          readinessProbe: { httpGet: { path: /healthz, port: health }, periodSeconds: 10, failureThreshold: 3 }
+          livenessProbe: { httpGet: { path: /healthz, port: health }, periodSeconds: 20, failureThreshold: 6 }
+          resources: {{- toYaml $v.resources | nindent 12 }}
+          securityContext: {{- include "qab.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: config, mountPath: /etc/qv/config, readOnly: true }
+            - { name: allowlist, mountPath: /etc/qv/allowlist, readOnly: true }
+            - { name: trust, mountPath: /etc/qv/trust, readOnly: true }
+            - { name: tls, mountPath: /etc/qv/tls, readOnly: true }
+            - { name: data, mountPath: /var/lib/qv/broker }
+            {{- if $soft }}
+            - { name: softhsm-conf, mountPath: /etc/qv/softhsm, readOnly: true }
+            - { name: pin-staged, mountPath: /run/qv/pin, readOnly: true }
+            {{- else }}
+            - { name: hsm-pin, mountPath: /etc/qv/hsm-pin, readOnly: true }
+            - { name: hsm-module, mountPath: /etc/qv/hsm, readOnly: true }
+            {{- end }}
+      volumes:
+        - name: config
+          configMap: { name: {{ include "qab.configName" . }}, defaultMode: 288 }
+        - name: allowlist
+          configMap: { name: {{ include "qab.allowlistName" . }}, defaultMode: 288 }
+        - name: trust
+          configMap: { name: {{ $v.trustRoots.configMap | quote }}, items: [{ key: {{ $v.trustRoots.key | quote }}, path: {{ $v.trustRoots.key | quote }} }] }
+        {{- include "qab.secretVolume" (dict "name" "tls" "secret" (include "qab.tlsSecret" .)) | nindent 8 }}
+        {{- include "qab.secretVolume" (dict "name" "hsm-pin" "secret" $v.hsm.pinSecret) | nindent 8 }}
+        {{- if $soft }}
+        {{- include "qab.secretVolume" (dict "name" "hsm-so-pin" "secret" $v.hsm.softhsm.soPinSecret) | nindent 8 }}
+        - name: softhsm-conf
+          configMap: { name: {{ include "qab.softhsmName" . }} }
+        # The staged PIN copy: in memory, empty at every start.
+        - name: pin-staged
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        {{- else }}
+        - name: hsm-module
+          {{- toYaml $v.hsm.module.volume | nindent 10 }}
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels: {{- include "qab.selector" . | nindent 10 }}
+      spec:
+        accessModes: {{ toJson $v.persistence.accessModes }}
+        {{- with $v.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $v.persistence.size | quote }}

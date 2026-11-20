@@ -127,7 +127,7 @@ func (s *system) dkg(dir string, gen int) string {
 		return s.rekey(dir, "dkg")
 	}
 	// Without the operator's authorisation the tool says what to make and stops.
-	if out, err := s.rekeyErr(dir, "dkg"); err == nil || !strings.Contains(out+err.Error(), "party-auth") {
+	if out, err := s.rekeyErr(dir, "dkg"); err == nil || !strings.Contains(out+err.Error(), "qv-party-admin request") {
 		s.t.Fatalf("dkg without an authorisation: %v\n%s", err, out)
 	}
 	out := s.rekey(dir, "dkg", "-admin-auth", s.partyAuth(s.newKeysetID(gen)))

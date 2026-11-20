@@ -7,7 +7,13 @@
 {{- $role := include "qp.role" . -}}
 {{- if not $v.callerPins }}{{ fail "callerPins is required: the certificates allowed on the caller port" }}{{ end -}}
 {{- if not $v.adminKeys }}{{ fail "adminKeys is required: the operators' Ed25519 public keys" }}{{ end -}}
-{{- $c := dict "role" $role "caller_listen" (printf "0.0.0.0:%d" (int $v.ports.caller)) "cert_file" "/etc/qv/party-tls/tls.crt" "key_file" "/etc/qv/party-tls/tls.key" "data_dir" "/var/lib/qv/party/data" "metrics_listen" (printf "127.0.0.1:%d" (int $v.ports.metrics)) "caller_pins" $v.callerPins "admin_keys" $v.adminKeys "admin_max_age_seconds" (int $v.adminMaxAgeSeconds) "admin_max_validity_seconds" (int $v.adminMaxValiditySeconds) -}}
+{{- $c := dict "role" $role "caller_listen" (printf "0.0.0.0:%d" (int $v.ports.caller)) "data_dir" "/var/lib/qv/party/data" "metrics_listen" (printf "127.0.0.1:%d" (int $v.ports.metrics)) "caller_pins" $v.callerPins "admin_keys" $v.adminKeys "admin_max_age_seconds" (int $v.adminMaxAgeSeconds) "admin_max_validity_seconds" (int $v.adminMaxValiditySeconds) -}}
+{{- if include "qp.sealedTLS" . -}}
+{{- $_ := set $c "tls_sealed" true -}}
+{{- else -}}
+{{- $_ := set $c "cert_file" "/etc/qv/party-tls/tls.crt" -}}
+{{- $_ := set $c "key_file" "/etc/qv/party-tls/tls.key" -}}
+{{- end -}}
 {{- if gt (int $v.adminThreshold) (len $v.adminKeys) }}{{ fail "adminThreshold cannot be more than the number of adminKeys" }}{{ end -}}
 {{- if gt (int $v.adminThreshold) 0 }}{{- $_ := set $c "admin_threshold" (int $v.adminThreshold) -}}{{- end -}}
 {{- if not (kindIs "invalid" $v.adminAllowV1) }}{{- $_ := set $c "admin_allow_v1" $v.adminAllowV1 -}}{{- end -}}
@@ -41,11 +47,7 @@
 {{- if not $v.cosigner.socketPins }}{{ fail "roles B and C: cosigner.socketPins is required (pins of the cosigner's socket certificate)" }}{{ end -}}
 {{- $_ := set $c "authorizer" (dict "type" "cosigner" "socket" "/run/qv/cosigner.sock" "timeout_ms" (int $v.cosigner.timeoutMs) "cosigner_pins" $v.cosigner.socketPins) -}}
 {{- end -}}
-{{- if eq $v.sealer.type "pkcs11" -}}
-{{- $_ := set $c "sealer" (dict "type" "pkcs11" "token" (include "qp.token" .) "lib" $v.hsm.module.path "pin_file" "/etc/qv/hsm-pin/pin") -}}
-{{- else -}}
-{{- $_ := set $c "sealer" (merge (dict "type" $v.sealer.type) $v.sealer.attested) -}}
-{{- end -}}
+{{- $_ := set $c "sealer" (include "qp.sealerBlock" . | fromJson) -}}
 {{- $l := dict "shutdown_grace_ms" (int $v.limits.shutdownGraceMs) -}}
 {{- range $k, $j := dict "recvTimeoutMs" "recv_timeout_ms" "keygenRecvTimeoutMs" "keygen_recv_timeout_ms" "sessionTimeoutMs" "session_timeout_ms" "maxPeerSessions" "max_peer_sessions" "maxFrameBytes" "max_frame_bytes" "maxIntentBytes" "max_intent_bytes" "replayCacheSize" "replay_cache_size" -}}
 {{- if gt (int (index $v.limits $k)) 0 }}{{ $_ := set $l $j (int (index $v.limits $k)) }}{{ end -}}
@@ -65,6 +67,8 @@ log.level = INFO
 {{- end -}}
 
 {{- include "qp.guards" . -}}
+{{- $phase := include "qp.phase" . -}}
+{{- if ne $phase "enrol" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -109,4 +113,31 @@ immutable: true
 data:
   softhsm2.conf: |
     {{- include "qp.softhsmConf" . | nindent 4 }}
+{{- end }}
+{{- end }}
+{{- if eq $phase "enrol" }}
+---
+{{/* Phase enrol: the enrolment config (role, data_dir, tls_sealed, sealer) and nothing else; the pins of the peers do not exist yet. Its bytes are what the operators measure. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "qp.enrolConfigName" . }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+immutable: true
+data:
+  enroll.json: |
+    {{- include "qp.enrolConfig" . | nindent 4 }}
+{{- end }}
+{{- if eq $phase "migrate" }}
+---
+{{/* Phase migrate: the config the party ran with before (sealer pkcs11), the -from of migrate-seal. The -to is the running party.json above. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "qp.fromConfigName" . }}
+  labels: {{- include "qp.labels" . | nindent 4 }}
+immutable: true
+data:
+  party-pkcs11.json: |
+    {{- include "qp.fromConfig" . | nindent 4 }}
 {{- end }}

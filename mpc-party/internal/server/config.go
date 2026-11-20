@@ -75,11 +75,13 @@ type SealerConfig struct {
 	Type string `json:"type"`
 	// pkcs11: Token is the token label (A: qv-party-1, B: qv-party-2), Lib the module path (default: SoftHSM2). The PIN is
 	// never in this file: PinEnv names an environment variable, or PinFile a file readable only by its owner.
-	Token   string `json:"token"`
-	Lib     string `json:"lib"`
-	PinEnv  string `json:"pin_env"`
-	PinFile string `json:"pin_file"`
-	KeyFile string `json:"key_file"` // devauth sealer only: hex, 32 bytes
+	Token string `json:"token"`
+	Lib   string `json:"lib"`
+	// Provider selects the behaviour set for the module: "softhsm" (default) or "cloudhsm" (AWS CloudHSM: HSM-made IV, size limit, "user:password" PIN from pin_file only).
+	Provider string `json:"provider"`
+	PinEnv   string `json:"pin_env"`
+	PinFile  string `json:"pin_file"`
+	KeyFile  string `json:"key_file"` // devauth sealer only: hex, 32 bytes
 
 	// attested (research/TEE.md): the party holds no key of its own. At start it proves what it runs to the broker (qv-attest-broker) and gets
 	// one data key per generation back, kept in memory only.

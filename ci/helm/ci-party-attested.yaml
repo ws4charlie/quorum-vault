@@ -1,0 +1,6 @@
+# Made-up values for the attested-mode checks of qv-party (layered after values-kind.yaml and values-kind-teesim.yaml): the broker, its pin, the Secret that holds the TEST CA. Nothing here is a credential.
+attested:
+  broker: { url: "https://qv-attest-b.brk.svc:8443", pins: ["9999999999999999999999999999999999999999999999999999999999999999"] }
+  attester: { mock: { caSecret: tee-test-ca } }
+network:
+  broker: { to: [{ ipBlock: { cidr: 10.80.0.0/24 } }] }
