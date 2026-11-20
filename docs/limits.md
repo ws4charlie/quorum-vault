@@ -13,6 +13,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **Restore is drilled on one machine,** not across sites.
 
 **Simulated parts**
+- **CloudHSM support is untested on hardware.** The party's sealer has a profile for AWS CloudHSM, proven against its documentation and a test double. Nobody has run it on a real cluster; the first run follows [a checklist](runbooks/cloudhsm-sealer.md).
 - **SoftHSM, not hardware.** The tokens are software with no tamper resistance. The structure is what a real HSM would need, but it is not one.
 - **M-of-N is simulated.** The cold signer checks operator signatures in software; a hardware HSM would enforce it itself.
 - **The enclave is simulated.** A stand-in produces the proof, so nobody has shown that real hardware measures what the stand-in measures ([Enclaves](enclaves.md)).
