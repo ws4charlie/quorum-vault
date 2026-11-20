@@ -19,11 +19,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
+      - uses: docker/setup-buildx-action@v3   # the images are built with the same builder as images.yml (rewrite-timestamp needs it)
       - name: kind and helm
         run: |
           curl -sSLo kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 && chmod +x kind && sudo mv kind /usr/local/bin/
           helm version
       - name: up
+        shell: bash
         run: /usr/bin/time -v make kind-up 2>&1 | tee /tmp/up.log | tail -40
       - name: memory and time
         if: always()
