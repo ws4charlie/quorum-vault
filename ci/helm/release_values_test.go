@@ -442,3 +442,45 @@ func TestVerifyReleaseScript(t *testing.T) {
 		}
 	})
 }
+
+// publish.sh's tag lookup: only the registry's explicit "not found" lets a release go on. Found and every other failure stop it, so a temporary registry
+// error can never lead to a push over an existing version.
+func TestPublishTagState(t *testing.T) {
+	dir := t.TempDir()
+	ref := "ghcr.io/ws4charlie/quorum-vault/qv-core:v1.2.3"
+	good := "sha256:" + strings.Repeat("a", 64)
+	cases := []struct {
+		name, body string
+		wantRC     int
+		wantOut    string
+	}{
+		{"not found", `echo "ERROR: ` + ref + `: not found" >&2; exit 1`, 0, "absent"},
+		{"not found on a port-5xx name", `echo "ERROR: localhost:5077/x:v1: not found" >&2; exit 1`, 0, "absent"},
+		{"manifest unknown code", `echo 'ERROR: MANIFEST_UNKNOWN: manifest unknown' >&2; exit 1`, 0, "absent"},
+		{"found", `printf '` + good + `'`, 10, "exists:" + good},
+		{"timeout", `echo 'ERROR: failed to do request: Head "https://ghcr.io/v2/x": context deadline exceeded' >&2; exit 1`, 11, "error"},
+		{"server error", `echo 'ERROR: unexpected status 503 Service Unavailable' >&2; exit 1`, 11, "error"},
+		{"unauthorized", `echo 'ERROR: unauthorized: authentication required' >&2; exit 1`, 11, "error"},
+		{"rate limited", `echo 'ERROR: 429 Too Many Requests' >&2; exit 1`, 11, "error"},
+		{"not found among other lines", `printf 'proxy error\nERROR: x: not found\n' >&2; exit 1`, 11, "error"},
+		{"silent failure", `exit 1`, 11, "error"},
+		{"success with garbage", `echo hello`, 11, "error"},
+	}
+	for _, c := range cases {
+		d := filepath.Join(dir, strings.ReplaceAll(c.name, " ", "_"))
+		os.MkdirAll(d, 0o755)
+		stubBin(t, d, "docker", c.body)
+		cmd := exec.Command(filepath.Join(imagesDir(), "publish.sh"), "--tag-state", ref)
+		cmd.Env = append(os.Environ(), "PATH="+d+string(os.PathListSeparator)+os.Getenv("PATH"))
+		out, err := cmd.Output()
+		rc := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			rc = ee.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if rc != c.wantRC || !strings.HasPrefix(strings.TrimSpace(string(out)), c.wantOut) {
+			t.Errorf("%s: want rc=%d out=%q, got rc=%d out=%q", c.name, c.wantRC, c.wantOut, rc, out)
+		}
+	}
+}

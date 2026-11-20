@@ -20,6 +20,20 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=images.sh
 . deploy/images/images.sh
+
+# tag_state <ref>: the registry's own answer for a tag. Prints and returns: absent (0: the registry said "not found"), exists:<digest> (10), error (11: ANY
+# other failure: network, auth, rate limit, a 5xx). Only an explicit "not found" counts as absent; everything else stops the release, because pushing after
+# a failed lookup could overwrite a published version.
+tag_state() {
+  local out rc=0
+  out="$(docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>&1)" || rc=$?
+  if [ "$rc" = 0 ] && [[ "$out" =~ ^sha256:[0-9a-f]{64}$ ]]; then echo "exists:$out"; return 10; fi
+  # "not found" only as buildx prints it for a 404 (a single line ending in ": not found"), or the registry's own error codes. A message that merely
+  # mentions it among others (a proxy page, a timeout) is an error.
+  if [ "$rc" != 0 ] && { [ "$(wc -l <<<"$out")" -le 1 ] && grep -qE '^ERROR: .*: not found$' <<<"$out" || grep -qE 'MANIFEST_UNKNOWN|NAME_UNKNOWN' <<<"$out"; }; then echo absent; return 0; fi
+  echo "error: ${out:-no output}" | head -3; return 11
+}
+if [ "${1:-}" = --tag-state ]; then tag_state "${2:?ref}"; exit $?; fi   # for the tests
 : "${VERSION:?VERSION, e.g. v1.2.3}"
 : "${COMMIT:=$(git rev-parse HEAD)}"
 : "${GITHUB_REPOSITORY:=ws4charlie/quorum-vault}"
@@ -65,8 +79,16 @@ PY
 for name in $images; do
   echo "== $name" >&2
   ref="$REGISTRY/$name:$VERSION"
-  # A published version is immutable: never push over an existing tag (a second run of the same tag, or a tag that was moved). Not found = fine.
-  if [ "$PUBLISH" = 1 ] && docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then echo "publish.sh: $ref already exists: versions are never overwritten (publish a new patch version)" >&2; exit 1; fi
+  # A published version is immutable: never push over an existing tag. Only the registry's explicit "not found" lets the push go on; an existing tag
+  # (same digest or not: this run has not built it yet, and a half-published release is cleaned up, not resumed) and any other answer stop the release.
+  if [ "$PUBLISH" = 1 ]; then
+    rc=0; st="$(tag_state "$ref")" || rc=$?
+    case "$rc" in
+      0) ;;
+      10) echo "publish.sh: $ref already exists (${st#exists:}): versions are never overwritten; publish a new patch version, or clean up a half-published release (docs/runbooks/release.md)" >&2; exit 1 ;;
+      *) echo "publish.sh: cannot tell whether $ref exists, not pushing: $st" >&2; exit 1 ;;
+    esac
+  fi
   common=(--file deploy/images/Dockerfile --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" --target "$name" --sbom=true --provenance=mode=max
           --label "org.opencontainers.image.title=$name" --label "org.opencontainers.image.source=$SOURCE_URL" --label "org.opencontainers.image.revision=$COMMIT" --label "org.opencontainers.image.version=$VERSION"
           --metadata-file "$OUT/$name.metadata.json")

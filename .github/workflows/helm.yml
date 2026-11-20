@@ -12,6 +12,8 @@ on:
       - "deploy/images/images.sh"
       - "deploy/images/manifest-values.py"   # release_values_test.go renders its output with each chart
       - "deploy/images/release-gate.sh"      # and checks the version rule
+      - "deploy/images/publish.sh"           # and the tag-state check of the release script
+      - "deploy/images/verify-release.sh"    # and the verifier
       - "deploy/images/Dockerfile"
       - ".github/workflows/helm.yml"
   workflow_dispatch:

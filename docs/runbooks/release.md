@@ -116,5 +116,6 @@ Confirmed on 2026-11-20 from GitHub's documentation (pages under https://docs.gi
 | `gate`: `not on main` | tag points at a commit `main` does not contain | merge, tag the merge commit |
 | `gate`: `no successful ci.yml run on main` | CI still running or red for this commit | wait, or fix on `main` and tag the new commit |
 | `publish.sh: … already exists` | this version was published (or half published) | new patch version; for a half-published one see "A bad image was published" |
+| `publish.sh: cannot tell whether … exists, not pushing` | the registry answered something other than "not found" (network, auth, rate limit) | nothing was pushed for that image; start the workflow again (images already pushed in this run are listed in `pushed.tsv`: see "A release failed half way") |
 | `check-secrets.sh` FAIL before the push | a secret-looking file, another zone's binary or root in an image | fix the image build; nothing was pushed |
 | `verify-release.sh` FAIL after the push | the pushed result does not match | treat as a bad image until explained |
