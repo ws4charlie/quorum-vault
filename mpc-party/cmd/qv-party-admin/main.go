@@ -246,6 +246,9 @@ func compare(vs []view, want string) []string {
 			}
 			k := keysetMap(v.health)[id]
 			if k == nil {
+				if v.health.Role == "C" && hdKeyset(vs, id) {
+					continue // a two-party HD keyset lives on A and B only
+				}
 				if ref != nil || hasKeyset(vs, id) {
 					bad = append(bad, fmt.Sprintf("keyset %s: party %s does not have it", id, v.name))
 				}
@@ -273,6 +276,17 @@ func compare(vs []view, want string) []string {
 		}
 	}
 	return bad
+}
+
+func hdKeyset(vs []view, id string) bool {
+	for _, v := range vs {
+		if v.err == nil {
+			if k := keysetMap(v.health)[id]; k != nil && k.Scheme == pb.Scheme_SCHEME_UNSPECIFIED {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hasKeyset(vs []view, id string) bool {

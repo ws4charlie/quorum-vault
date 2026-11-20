@@ -1,0 +1,99 @@
+{{- if .Values.operator.job.enabled }}
+{{- include "qp.guards" . -}}
+{{- $v := .Values -}}
+{{- $j := $v.operator.job -}}
+{{- if not (has $j.command (list "dkg" "refresh" "unfreeze" "status")) }}{{ fail "operator.job.command must be dkg, refresh, unfreeze or status" }}{{ end -}}
+{{- if not $j.partyPin }}{{ fail "operator.job.partyPin is required: the pin (SHA-256 of the public key) of this party's certificate" }}{{ end -}}
+{{- if not (regexMatch "^[0-9a-f]{64}$" $j.partyPin) }}{{ fail "operator.job.partyPin must be 64 lowercase hex characters" }}{{ end -}}
+{{- if not $j.callerCertSecret }}{{ fail "operator.job.callerCertSecret is required: a Secret (tls.crt, tls.key) with the caller certificate this party pins, made for the ceremony" }}{{ end -}}
+{{- $signed := ne $j.command "status" -}}
+{{- if $signed }}
+{{- if not $j.authConfigMap }}{{ fail "operator.job.authConfigMap is required: a ConfigMap whose key auth.json is the file `qv-party-admin sign` wrote on the operator's machine" }}{{ end -}}
+{{- end }}
+{{- if and (eq $j.command "dkg") (not (has $j.scheme (list "hd" "ecdsa-2of3" "ed25519-2of3"))) }}{{ fail "operator.job.scheme must be hd, ecdsa-2of3 or ed25519-2of3" }}{{ end -}}
+{{- if and (ne $j.command "status") (not $j.keysetId) }}{{ fail "operator.job.keysetId is required" }}{{ end -}}
+{{- /*
+  The operator's tool, in this party's cluster, for ONE call: `qv-party-admin <command>` against this party's caller Service. `send` holds no signing key: the signature was made on the
+  operator's machine and arrives as a ConfigMap (public data, valid for the parties' admin window and once per party: create it right before the Job). The caller certificate is a
+  Secret made for the ceremony and deleted after it. The pod carries the operator label, not the party's labels: the policies admit it to the caller port, nothing routes to it.
+  Run it in the cluster of each party that takes part (A coordinates dkg, refresh and unfreeze; `status` in B's and C's clusters shows what they see).
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "qp.child" (dict "ctx" . "c" (printf "admin-%s" $j.name)) }}
+  labels: {{- include "qp.jobLabels" . | nindent 4 }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add $j.timeoutSeconds 60 }}
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "qp.jobLabels" . | nindent 8 }}
+        {{- toYaml $v.operator.podLabel | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "qp.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      securityContext: {{- include "qp.podSecurityContext" . | nindent 8 }}
+      {{- include "qp.pullSecrets" . | nindent 6 }}
+      {{- with $v.scheduling.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.scheduling.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: party-admin
+          image: {{ include "qp.image" (dict "ctx" . "k" "tools") | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          command: ["/usr/local/bin/qv-party-admin"]
+          args:
+            - {{ $j.command }}
+            {{- if $signed }}
+            - -auth
+            - /etc/qv/admin/auth.json
+            {{- end }}
+            - -party
+            - {{ printf "%s=%s:%d@%s" (include "qp.role" .) (include "qp.child" (dict "ctx" . "c" "caller")) (int $v.ports.caller) $j.partyPin | quote }}
+            - -cert
+            - /etc/qv/caller/tls.crt
+            - -key
+            - /etc/qv/caller/tls.key
+            - -timeout
+            - {{ printf "%ds" (int $j.timeoutSeconds) | quote }}
+            - -window
+            - {{ printf "%ds" (int $v.adminMaxAgeSeconds) | quote }}
+            {{- if $j.keysetId }}
+            {{- if eq $j.command "status" }}
+            - -keyset
+            - {{ $j.keysetId | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if eq $j.command "dkg" }}
+            - -scheme
+            - {{ $j.scheme }}
+            {{- if eq $j.scheme "hd" }}
+            - -curve
+            - {{ $j.curve }}
+            {{- end }}
+            {{- end }}
+          resources: {{- toYaml $j.resources | nindent 12 }}
+          securityContext: {{- include "qp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: caller-cert, mountPath: /etc/qv/caller, readOnly: true }
+            {{- if $signed }}
+            - { name: auth, mountPath: /etc/qv/admin, readOnly: true }
+            {{- end }}
+      volumes:
+        {{- include "qp.secretVolume" (dict "name" "caller-cert" "secret" $j.callerCertSecret) | nindent 8 }}
+        {{- if $signed }}
+        - name: auth
+          configMap: { name: {{ $j.authConfigMap | quote }} }
+        {{- end }}
+{{- end }}
