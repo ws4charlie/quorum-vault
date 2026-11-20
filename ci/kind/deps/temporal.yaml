@@ -121,7 +121,7 @@ spec:
   replicas: 1
   selector: { matchLabels: { app: temporal-gate } }
   template:
-    metadata: { labels: { app: temporal-gate } }
+    metadata: { labels: { app: temporal-gate, app.kubernetes.io/name: temporal-gate } }   # the label the business chart's network policy names
     spec:
       containers:
         - name: gate

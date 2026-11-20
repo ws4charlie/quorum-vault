@@ -230,3 +230,51 @@ func anyContains(l []string, s string) bool {
 	}
 	return false
 }
+
+// Every component probes the health listener of PR #97 (plain http, /readyz for start-up and readiness, /livez for liveness), and the listener is switched on by the
+// same value that points the probe at it: the probe port is the port in QV_HEALTH_LISTEN. A TCP probe on core's TLS port (the old default) made every probe a failed
+// TLS handshake in the log, and the other three components had no probe at all.
+func TestProbesUseTheHealthListener(t *testing.T) {
+	comps := []string{"core", "worker", "relay", "archiver"}
+	for _, vf := range valuesFiles {
+		objs := render(t, vf.file)
+		for _, c := range comps {
+			var dep, env *Obj
+			for i, o := range objs {
+				if o.Component() == c && o.Kind == "Deployment" {
+					dep = &objs[i]
+				}
+				if o.Kind == "ConfigMap" && strings.HasSuffix(o.Metadata.Name, c+"-env") {
+					env = &objs[i]
+				}
+			}
+			if dep == nil || env == nil {
+				t.Fatalf("%s: %s: no Deployment or env ConfigMap", vf.file, c)
+			}
+			listen, _ := env.Data["QV_HEALTH_LISTEN"].(string)
+			if listen != "0.0.0.0:9100" {
+				t.Errorf("%s: %s: QV_HEALTH_LISTEN = %q, want 0.0.0.0:9100", vf.file, c, listen)
+			}
+			for _, want := range []string{"path: /readyz, port: 9100", "path: /livez, port: 9100"} {
+				if !strings.Contains(dep.Raw, want) {
+					t.Errorf("%s: %s: no probe %q", vf.file, c, want)
+				}
+			}
+			if strings.Contains(dep.Raw, "tcpSocket") {
+				t.Errorf("%s: %s: a TCP probe", vf.file, c)
+			}
+		}
+		// a component with probes off opens no health listener (nothing would use it)
+		off := render(t, vf.file, "--set", "worker.probes.mode=none")
+		for _, o := range off {
+			if o.Kind == "ConfigMap" && strings.HasSuffix(o.Metadata.Name, "worker-env") {
+				if _, ok := o.Data["QV_HEALTH_LISTEN"]; ok {
+					t.Errorf("%s: probes.mode=none still sets QV_HEALTH_LISTEN", vf.file)
+				}
+			}
+			if o.Kind == "Deployment" && o.Component() == "worker" && strings.Contains(o.Raw, "Probe") {
+				t.Errorf("%s: probes.mode=none still renders a probe", vf.file)
+			}
+		}
+	}
+}

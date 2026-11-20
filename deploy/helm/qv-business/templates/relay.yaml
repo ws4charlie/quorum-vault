@@ -30,7 +30,7 @@ spec:
           envFrom:
             - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "relay-env") }} }
           {{- if ne .Values.relay.probes.mode "none" }}
-          {{- include "qv.probes" (dict "probes" .Values.relay.probes "port" .Values.relay.probes.healthPort) | nindent 10 }}
+          {{- include "qv.probes" (dict "probes" .Values.relay.probes) | nindent 10 }}
           {{- end }}
           resources: {{- toYaml .Values.relay.resources | nindent 12 }}
           securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}

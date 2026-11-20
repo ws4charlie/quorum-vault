@@ -138,13 +138,16 @@ Y
 phase_deps() {
   log "dependencies: Postgres (CloudNativePG), Redpanda, Temporal + gate, Keycloak, SeaweedFS, anvil, bitcoind"
   # databases
-  { pg_cluster "$NS_BIZ" qv-business-db quorumvault qv qv-postgres-tls qv-business deploy/postgres/business.pg_ident.conf
+  { pg_cluster "$NS_BIZ" qv-business-db quorumvault qv qv-postgres-tls qv-business deploy/postgres/business.pg_ident.conf "ALTER ROLE qv CREATEROLE CREATEDB"
     echo ---
     pg_cluster "$NS_BIZ" qv-temporal-db temporal temporal qv-temporal-db-tls qv-business deploy/postgres/temporal.pg_ident.conf "ALTER ROLE temporal CREATEDB"
   } | k apply -f - >/dev/null
   for ns in $NS_SIGN $NS_B $NS_C; do
-    pg_cluster "$ns" qv-guard qv_signing qv qv-signing-signing-db-tls qv-signing deploy/postgres/signing.pg_ident.conf | k apply -f - >/dev/null
+    pg_cluster "$ns" qv-guard qv_signing qv qv-signing-signing-db-tls qv-signing deploy/postgres/signing.pg_ident.conf "ALTER ROLE qv CREATEROLE CREATEDB" | k apply -f - >/dev/null
   done
+  # the rules the dependency pods need in default-deny namespaces (ci/kind/deps/netpol.sh)
+  bash "$KDIR/deps/netpol.sh" "$(docker inspect "$QV_KIND_NAME-control-plane" --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}')" 6443 \
+    "$(k -n default get service kubernetes -o jsonpath='{.spec.clusterIP}')" | k apply -f - >/dev/null
   # configuration that is the repository's own files, unchanged
   kn "$NS_BIZ" create configmap redpanda-cfg --from-file=start.sh=deploy/redpanda/start.sh --from-file=acl.sh=deploy/redpanda/acl.sh --dry-run=client -o yaml | k apply -f - >/dev/null
   kn "$NS_BIZ" create configmap temporal-gate-cfg --from-file=start.sh=deploy/temporal-gate/start.sh --dry-run=client -o yaml | k apply -f - >/dev/null

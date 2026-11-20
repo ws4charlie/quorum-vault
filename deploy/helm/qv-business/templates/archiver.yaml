@@ -30,7 +30,7 @@ spec:
           envFrom:
             - configMapRef: { name: {{ include "qv.fullname" (dict "ctx" . "c" "archiver-env") }} }
           {{- if ne .Values.archiver.probes.mode "none" }}
-          {{- include "qv.probes" (dict "probes" .Values.archiver.probes "port" .Values.archiver.probes.healthPort) | nindent 10 }}
+          {{- include "qv.probes" (dict "probes" .Values.archiver.probes) | nindent 10 }}
           {{- end }}
           resources: {{- toYaml .Values.archiver.resources | nindent 12 }}
           securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}
