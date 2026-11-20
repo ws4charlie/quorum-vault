@@ -145,7 +145,7 @@ spec:
           configMap: { name: {{ include "qp.fromConfigName" . }}, defaultMode: 288 }
         - name: data
           persistentVolumeClaim: { claimName: {{ printf "data-%s-0" (include "qp.fullname" .) | quote }} }
-        {{- include "qp.secretVolume" (dict "name" "party-tls" "secret" (include "qp.partySecret" .)) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "party-tls" "secret" (include "qp.partySecret" .) "trust" $v.tls.trust.signing) | nindent 8 }}
         {{- include "qp.secretVolume" (dict "name" "attester-ca" "secret" $v.attested.attester.mock.caSecret) | nindent 8 }}
         {{- include "qp.secretVolume" (dict "name" "hsm-pin" "secret" $v.hsm.pinSecret) | nindent 8 }}
         {{- if $soft }}

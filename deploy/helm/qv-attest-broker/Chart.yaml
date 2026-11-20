@@ -4,4 +4,4 @@ description: The attestation release broker (qv-attest-broker) of ONE MPC party,
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
-kubeVersion: ">=1.29.0-0"
+kubeVersion: ">=1.30.0-0"
