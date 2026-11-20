@@ -165,7 +165,12 @@ func (a *Adapter) NextDrainStep(ctx context.Context, shardPart, oldAddr, succAdd
 		if err != nil {
 			return nil, rep, err
 		}
-		need := uint64(len(missing))*a.cfg.NonceRent + 4*DrainFee + 20_000
+		// the new address must stay rent-exempt after it pays for the accounts and the fee, or the creation fails on the chain
+		floor, err := a.rpc.MinimumRent(ctx, 0)
+		if err != nil {
+			return nil, rep, err
+		}
+		need := uint64(len(missing))*a.cfg.NonceRent + floor + 4*DrainFee + 20_000
 		keep := uint64(a.cfg.NoncePool+1) * DrainFee // what the old key still pays for: a withdrawal of each pool account and the last transfer
 		if have < need {
 			give := need - have

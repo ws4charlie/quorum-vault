@@ -181,6 +181,10 @@ func TestSwFlowsHotKeyReplacementDrivenByTheTool(t *testing.T) {
 		t.Fatal("the old key's token account is still open")
 	}
 	s.reconcileClean("tokens drained, the pool is next")
+	// crash safety: the worker dies in the middle of the drain, and the tool is run again at steps already done (each is skipped)
+	s.restartWorker()
+	s.rekeyMust(dir, "activate", "-change", s.hotChange(ops, "act", 3, "-action", "activate", "-generation", "2"))
+	s.rekeyMust(dir, "status")
 
 	// a new withdrawal waits (no pool); the operator creates the new key's pool; it goes out from the new key
 	dest2 := s.freshAddr()
