@@ -29,13 +29,25 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
-      skip: ${{ steps.classify.outputs.skip }}
-      text: ${{ steps.classify.outputs.text }}
+      # Published by the LAST step only, which runs only when every earlier step succeeded (a failed guard or test leaves these empty) and then checks again
+      # (ci/final.sh). Everything but the exact value `true` means: run everything.
+      skip: ${{ steps.final.outputs.skip }}
+      text: ${{ steps.final.outputs.text }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Fails open by itself: its EXIT trap writes skip=false, and continue-on-error keeps even a crash from failing the job before the tests below.
+      # The guards run FIRST and are plain steps: if one fails, the job fails and nothing below publishes a skip.
+      - name: Tests of the classifier
+        id: t_changes
+        run: ci/changes_test.sh
+      - name: Tests of the allowlist guard
+        id: t_guard
+        run: ci/skip-guard_test.sh
+      - name: The allowlist guard
+        id: guard
+        run: ci/skip-guard.sh
+      # Fails open by itself: its EXIT trap writes skip=false, and continue-on-error keeps even a crash from failing the job (the verdict is then not success).
       - name: Classify the changed files
         id: classify
         continue-on-error: true
@@ -43,18 +55,21 @@ jobs:
           QV_EVENT_NAME: ${{ github.event_name }}
           QV_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: ci/changes.sh
-      - name: Tests of the classifier and of the allowlist guard
-        run: |
-          ci/changes_test.sh
-          ci/skip-guard_test.sh
-          ci/skip-guard.sh
+      - name: Publish the decision
+        id: final
+        env:
+          QV_CLASSIFY_OUTCOME: ${{ steps.classify.outcome }}
+          QV_CLASSIFY_SKIP: ${{ steps.classify.outputs.skip }}
+          QV_CLASSIFY_TEXT: ${{ steps.classify.outputs.text }}
+          QV_GUARD_OUTCOMES: ${{ steps.t_changes.outcome }} ${{ steps.t_guard.outcome }} ${{ steps.guard.outcome }}
+        run: ci/final.sh
 
   # The CI image (ci/qv-ci.Dockerfile): clang-20, cb-mpc, SoftHSM2 and Go, tagged by a hash of its inputs (ci/image-tag.sh). Almost always the tag
   # exists already and this job is a no-op of a few seconds; when an input changed it builds the image and pushes it, and the jobs below wait for it.
   # Fork pull requests cannot push: their jobs pull the tag if main has it, else build it themselves (ci/ensure-image.sh use).
   image:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' }}   # a skipped `image` skips every job that needs it
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}   # a skipped `image` skips every job that needs it
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -99,7 +114,7 @@ jobs:
       QV_REQUIRE_HSM: "1"
     steps:
       - name: "Skipped: nothing here reads the changed files"
-        if: ${{ needs.changes.outputs.skip == 'true' }}
+        if: ${{ needs.changes.result == 'success' && needs.changes.outputs.skip == 'true' }}
         env:
           TEXT: ${{ needs.changes.outputs.text }}
         run: |
@@ -107,33 +122,33 @@ jobs:
           echo "### test: $TEXT" >> "$GITHUB_STEP_SUMMARY"
           echo "The tests did NOT run: every changed file is on ci/skip-allowlist (CONTRIBUTING.md). Add [ci full] to a commit message to run everything."
       - uses: actions/checkout@v4
-        if: ${{ needs.changes.outputs.skip != 'true' }}
+        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
       - uses: actions/setup-go@v5
-        if: ${{ needs.changes.outputs.skip != 'true' }}
+        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
         with:
           go-version-file: go.mod
       - name: Install SoftHSM2
-        if: ${{ needs.changes.outputs.skip != 'true' }}
+        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
         run: sudo apt-get update && sudo apt-get install -y softhsm2
       # one private CA per trust zone, fresh for this job, and the two Postgres servers (TLS, client certificates) that read them
       - name: Make the TLS certificates and start Postgres
-        if: ${{ needs.changes.outputs.skip != 'true' }}
+        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
         run: |
           scripts/pki.sh
           ci/infra.sh start --postgres
           ci/infra.sh wait
       - name: Set up tokens
-        if: ${{ needs.changes.outputs.skip != 'true' }}
+        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
         run: |
           ./scripts/dev-env.sh
           ./scripts/setup-softhsm.sh
       - run: go vet ./...
-        if: ${{ needs.changes.outputs.skip != 'true' }}
+        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
       # -p 1: test binaries share the SoftHSM token files; a process that
       # C_Initialize's while another writes a token object can miss that
       # token for its whole lifetime (seen as "token not found").
       - run: go test -short -count=1 -p 1 ./...
-        if: ${{ needs.changes.outputs.skip != 'true' }}
+        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
 
   # cb-mpc wrapper (C++ via cgo). Separate Go module in mpc-party/: the jobs above never see C++.
   # The tests that were one `go test -race ./...` of one job run as five jobs, so the pull request waits for the slowest, not for the sum

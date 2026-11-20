@@ -55,6 +55,9 @@ while IFS= read -r -d '' meta; do
   done
   [ -n "$hit" ] || all "not on the allowlist: $path"
   # belt and braces: a file a job compiles or runs is never skipped, whatever the list says, unless its tree is a reviewed own-module exception
+  # the module boundary an exception rests on: go.mod and go.sum of an exception tree are never skipped (deleting go.mod turns a module into a package of
+  # the root module)
+  case "${path##*/}" in go.mod|go.sum) all "go.mod/go.sum is never skipped: $path" ;; esac
   case "${path##*/}" in
     *.go|go.mod|go.sum|*.sh|*.bash|*.py|*.sql|*.proto|*.mk|*.js|Makefile|Dockerfile*|*.Dockerfile)
       ok=0; for t in "${trees[@]+"${trees[@]}"}"; do case "$path" in "$t"*) ok=1 ;; esac; done

@@ -42,7 +42,15 @@ cla() { # expects "all ..." (any reason)
 { M deploy/helm/qv-business/q.py; } | cla ".py under a chart"
 { M deploy/helm/qv-business/q.proto; } | cla ".proto under a chart"
 { M docs/x.go; } | cla ".go under docs/ (docs/*.md does not match anyway)"
-{ M ci/helm/x_test.go; M ci/helm/go.mod; M ci/helm/go.sum; M ci/helm/sub/dir/run.sh; M ci/helm/sub/Makefile; } | cl "skip chart 5" "ci/helm: skipped only because of the reviewed own-module exception"
+{ M ci/helm/x_test.go; M ci/helm/sub/dir/run.sh; M ci/helm/sub/Makefile; M ci/helm/values.yaml; A ci/helm/y.go; } | cl "skip chart 5" "ci/helm: skipped only because of the reviewed own-module exception"
+# the module boundary an exception rests on: go.mod / go.sum of the exception tree are never skipped (a deletion makes ci/helm a package of the root module)
+{ D ci/helm/go.mod; } | cla "deleting ci/helm/go.mod"
+{ M ci/helm/go.mod; } | cla "changing ci/helm/go.mod"
+{ M ci/helm/go.sum; } | cla "changing ci/helm/go.sum"
+{ A ci/helm/go.mod; } | cla "adding ci/helm/go.mod"
+{ D ci/helm/go.mod; D ci/helm/go.sum; M ci/helm/x_test.go; } | cla "deleting go.mod and go.sum of ci/helm with other chart files"
+{ M ci/helm/sub/go.mod; } | cla "a go.mod below ci/helm"
+{ D ci/helm/go.mod; M docs/a.md; } | cla "deleting ci/helm/go.mod with docs"
 { M ci/helm/x_test.go; M internal/x/x.go; } | cla "ci/helm and a root-module Go file"
 { M deploy/helm/qv-certs/catalog.json; } | cla "qv-certs catalog.json (read by internal/pki)"
 { M deploy/helm/qv-certs/values.yaml; } | cla "qv-certs chart (not listed)"
@@ -146,7 +154,7 @@ repo="$tmp/repo"; git init -q "$repo"
   cd "$repo" || exit 1
   git config user.email t@example.invalid; git config user.name t; git config commit.gpgsign false
   mkdir -p docs/images docs/runbooks deploy/helm/qv-business deploy/postgres deploy/images ci/helm ci/kind .github/workflows internal/x
-  for f in README.md docs/a.md docs/images/build.py docs/images/x.png docs/runbooks/r.md deploy/helm/qv-business/Chart.yaml ci/helm/check.sh \
+  for f in README.md docs/a.md docs/images/build.py docs/images/x.png docs/runbooks/r.md deploy/helm/qv-business/Chart.yaml ci/helm/check.sh ci/helm/go.mod \
            deploy/postgres/x deploy/images/README.md .github/workflows/ci.yml ci/changes.sh ci/skip-allowlist internal/x/x.go go.mod; do
     echo "$f" > "$f"
   done
@@ -243,17 +251,51 @@ check_out "skip docs 1" "control: the real classifier on the same event" "$tmp/o
 # the log line and the summary say what was skipped
 grep -q 'skipped: documentation-only change (1 files' "$tmp/log" || bad "the log does not say 'skipped: documentation-only change'"; ok
 
+# composition: ci/final.sh turns the classifier verdict and the outcomes of the guards into the one published value
+fin() { # fin <want true|false> <description> <classify outcome> <classify skip> <guard outcomes...>
+  local want="$1" desc="$2" co="$3" cs="$4"; shift 4
+  : > "$tmp/fout"; QV_CLASSIFY_OUTCOME="$co" QV_CLASSIFY_SKIP="$cs" QV_CLASSIFY_TEXT="skipped: docs" QV_GUARD_OUTCOMES="$*" GITHUB_OUTPUT="$tmp/fout" "$here/final.sh" > /dev/null 2>&1
+  ok; [ "$(sed -n 's/^skip=//p' "$tmp/fout")" = "$want" ] || bad "final.sh: $desc: want skip=$want, got '$(sed -n 's/^skip=//p' "$tmp/fout")'"
+  [ "$(grep -c '^skip=' "$tmp/fout")" = 1 ] || bad "final.sh: $desc: skip must be written exactly once"
+}
+fin true  "verdict skip and every guard green"            success true success success success
+fin false "verdict skip, the guard failed (Greptile 1)"    success true success success failure
+fin false "verdict skip, the guard test failed"           success true success failure success
+fin false "verdict skip, the classifier test failed"      success true failure success success
+fin false "verdict skip, a guard was cancelled"           success true success cancelled success
+fin false "verdict skip, a guard was skipped"             success true success skipped success
+fin false "verdict skip, a guard timed out"               success true success success timed_out
+fin false "verdict skip, the guard outcome is empty"      success true success success ""
+fin false "verdict skip, only two guard outcomes"         success true success success
+fin false "verdict skip, no guard outcomes at all"        success true
+fin false "classifier step failed (continue-on-error)"    failure true success success success
+fin false "classifier step cancelled"                     cancelled true success success success
+fin false "classifier outcome missing"                    "" true success success success
+fin false "verdict false, guards green"                   success false success success success
+fin false "verdict empty, guards green"                   success "" success success success
+fin false "verdict 'True' (not the exact token)"          success True success success success
+fin false "verdict 'true ' (trailing space)"              success "true " success success success
+fin false "verdict 'skip'"                                success skip success success success
+fin true  "four green guards still skip"                  success true success success success success
+
 # the workflow keeps its side of the bargain (a text check; the full run on a real pull request is the proof)
 wf="$here/../.github/workflows/ci.yml"
 chk() { ok; grep -qF -- "$1" "$wf" || bad "ci.yml: $2"; }
-chk "if: \${{ !cancelled() && needs.changes.outputs.skip != 'true' }}" "the image job must run unless skip is exactly 'true' (and run when changes failed)"
+chk "if: \${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}" "the image job must run unless skip is exactly 'true' (and run when changes failed)"
 chk "if: \${{ !cancelled() }}" "the test job must run even when changes failed"
 chk "continue-on-error: true" "the classify step must not fail the job"
 chk "run: ci/changes.sh" "ci.yml does not run ci/changes.sh"
-chk "ci/skip-guard.sh" "ci.yml does not run the guard"
+chk "run: ci/skip-guard.sh" "ci.yml does not run the guard"
+chk "run: ci/final.sh" "ci.yml does not publish the decision through ci/final.sh"
+chk "skip: \${{ steps.final.outputs.skip }}" "the job output must come from the final step only"
+ok; grep -qF "steps.classify.outputs.skip }}" "$wf" && ! grep -qE "^      skip: .*steps.classify" "$wf" || bad "the job output skip must not come from the classify step"
+# order: the guards are steps before the classifier; the final step is last in the job
+ok; awk '/^  changes:/{c=1} /^  # The CI image/{c=0} c&&/^        id: /{ids=ids" "$2} END{exit !(ids==" t_changes t_guard guard classify final")}' "$wf" || bad "changes job: steps must be t_changes t_guard guard classify final, in this order"
+chk "steps.t_changes.outcome }} \${{ steps.t_guard.outcome }} \${{ steps.guard.outcome }}" "final step must receive the outcomes of every guard and test step"
+chk "needs.changes.result == 'success' && needs.changes.outputs.skip == 'true'" "test and image must refuse a skip when the changes job did not succeed"
 ok; ! grep -qE "skip *== *'false'|skip *!= *'false'" "$wf" || bad "ci.yml compares skip with 'false': only the exact value true may skip"
 n_steps="$(awk '/^  test:/{t=1} /^  # cb-mpc wrapper/{t=0} t&&/^      - /{n++} END{print n}' "$wf")"
-n_if="$(awk '/^  test:/{t=1} /^  # cb-mpc wrapper/{t=0} t&&/^        if: \$\{\{ needs.changes.outputs.skip/{c++} END{print c}' "$wf")"
+n_if="$(awk '/^  test:/{t=1} /^  # cb-mpc wrapper/{t=0} t&&/^        if: \$\{\{ .*needs.changes.outputs.skip/{c++} END{print c}' "$wf")"
 ok; [ "$n_steps" = "$n_if" ] || bad "ci.yml: every step of the test job needs the skip condition ($n_steps steps, $n_if conditions)"
 
 total="$(wc -l < "$tmp/n" | tr -d ' ')"; fails="$(wc -l < "$tmp/f" | tr -d ' ')"

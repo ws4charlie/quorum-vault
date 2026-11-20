@@ -64,10 +64,10 @@ case_ ok   "a shell echo that names a doc" scripts/x.sh 'echo "see docs/runbooks
 case_ ok   "a Markdown file that names a doc (not a reader)" notes/x.md 'see docs/runbooks/x.md and README.md'
 case_ ok   "a JSON file that names a doc (data)" config/x.json '{"c": "docs/x.md"}'
 case_ ok   "a path outside the list" internal/x/a_test.go 'os.ReadFile("../../docker-compose.yml")'
-EXC='internal/x/a_test.go\t*\tchecked\n' case_ ok   "a reviewed exception" internal/x/a_test.go 'const p = "docs/x.md"'
-EXC='internal/x/a_test.go\tdocs/\tchecked\n' case_ fail "an exception for another needle" internal/x/a_test.go 'b, _ := os.ReadFile("../../README.md")'
-EXC='internal/gone/a_test.go\tdocs/\tnobody reads it\n' case_ fail "a stale exception (no reader left)" x/none.txt 'nothing'
-EXC='x/none.txt\t*\tnothing\n' case_ fail "a stale wildcard exception" x/none.txt 'nothing'
+EXC='internal/x/a_test.go\t1\tdocs/x.md\tchecked\n' case_ ok   "a reviewed exception (the exact line)" internal/x/a_test.go 'const p = "docs/x.md"'
+EXC='internal/x/a_test.go\t1\tdocs/x.md\tchecked\n' case_ fail "an exception for other text" internal/x/a_test.go 'b, _ := os.ReadFile("../../README.md")'
+EXC='internal/gone/a_test.go\t1\tdocs/\tnobody reads it\n' case_ fail "a stale exception (no reader left)" x/none.txt 'nothing'
+EXC='x/none.txt\t1\t*\tnothing\n' case_ fail "a stale wildcard exception" x/none.txt 'nothing'
 
 # the allowlist against the tree (fix1): empty patterns, executable kinds, module boundaries, the reviewed own-module exception
 with_files ok   "baseline: seeds, root module, ci/helm as an own module" x/none.txt nothing
@@ -89,8 +89,26 @@ echo 'name: ci' > "$r/.github/workflows/ci.yml"; git -C "$r" add -A
 RM=ci/helm/go.mod with_files fail "the reviewed tree has no go.mod: it is not a module" x/none.txt nothing
 with_files fail "a make target that ci.yml calls enters the reviewed tree" Makefile $'all:\n\tcd ci/helm && go test ./...' .github/workflows/ci.yml '      - run: make all'
 echo 'name: ci' > "$r/.github/workflows/ci.yml"; git -C "$r" rm -q -f --cached Makefile >/dev/null 2>&1; rm -f "$r/Makefile"; git -C "$r" add -A
-printf 'Makefile\t*\treviewed\n' > "$r/ci/skip-guard-exceptions"
+printf 'Makefile\t1\tci/helm/check.sh\treviewed\n' > "$r/ci/skip-guard-exceptions"
 with_files ok   "a make target that ci.yml does not call may name ci/helm (reviewed as a reader)" Makefile $'helm-check:\n\tci/helm/check.sh'
+: > "$r/ci/skip-guard-exceptions"
+
+# fix2: an exception names the exact reviewed occurrence; a new reader in an excepted file is not hidden
+X='internal/pki/catalog_chart_test.go'; L='const chartCatalog = "../../deploy/helm/qv-certs/catalog.json"'
+printf '%s\t1\t../../deploy/helm/qv-certs/catalog.json\treviewed\n' "$X" > "$r/ci/skip-guard-exceptions"
+with_files ok   "the excepted file with exactly the reviewed line" "$X" "$L"
+with_files fail "the excepted file gains a documentation read" "$X" "$L"$'\n''b, _ := os.ReadFile("../../docs/architecture.md")'
+with_files fail "the excepted file gains a README read" "$X" "$L"$'\n''os.ReadFile("../../README.md")'
+with_files fail "the excepted file gains a second chart read (count exceeded)" "$X" "$L"$'\n''const other = "../../deploy/helm/qv-certs/catalog.json"'
+with_files fail "the reviewed line changed" "$X" 'const chartCatalog = "../../deploy/helm/qv-business/values.yaml"'
+with_files fail "the reviewed line vanished (the exception is stale)" "$X" 'package x'
+printf '%s\t6\t*\twhole file, bounded\n' ".github/workflows/helm.yml" > "$r/ci/skip-guard-exceptions"
+six=$'on:\n  - "deploy/helm/**"\n  - "ci/helm/**"\n  - "deploy/images/README.md"\n  x: ci/helm/go.mod\n  y: ci/helm/go.sum\n  run: ci/helm/check.sh'
+with_files ok   "a whole-file exception with the reviewed count" .github/workflows/helm.yml "$six"
+with_files fail "a whole-file exception: a seventh line" .github/workflows/helm.yml "$six"$'\n  also: deploy/helm/qv-business'
+: > "$r/ci/skip-guard-exceptions"
+printf 'x\tmany\ttext\treason\n' > "$r/ci/skip-guard-exceptions"
+with_files fail "an exception line with no number" x/none.txt nothing
 : > "$r/ci/skip-guard-exceptions"
 
 # the real repository passes, and the guard really looks at it

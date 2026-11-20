@@ -186,27 +186,43 @@ awk -F'\t' '
       if (kind == "F" ? index(t2, needle) == 0 : t2 !~ needle) next
     }
     print file "\t" needle "\t" lineno "\t" text
-  }' "$hits" | sort -u > "$filtered"
+  }' "$hits" | sort -u | awk -F'\t' '!seen[$1 SUBSEP $3]++' > "$filtered"   # one hit per line, whatever needles matched it
+# Exceptions name the exact reviewed occurrence: <file><TAB><count><TAB><text><TAB><reason>. <count> lines of <file> that contain <text> (`*` = any line, for a
+# file that is meant to name the paths, such as the workflow helm.yml) are reviewed. A line beyond the count, a line the text does not describe, or fewer
+# lines than the count (the reviewed text changed or went) fails: a new reader in an excepted file is never hidden.
+ex_file=(); ex_count=(); ex_text=(); ex_used=()
+if [ -r "$exc" ]; then
+  while IFS=$'\t' read -r f c t _ || [ -n "$f" ]; do
+    case "$f" in ''|'#'*) continue ;; esac
+    case "$c" in ''|*[!0-9]*) bad=1; echo "BAD exception line for $f: the second field must be the number of reviewed lines"; continue ;; esac
+    [ -n "$t" ] || { bad=1; echo "BAD exception line for $f: the third field is the reviewed text, or *"; continue; }
+    ex_file+=("$f"); ex_count+=("$c"); ex_text+=("$t"); ex_used+=(0)
+  done < "$exc"
+fi
 while IFS=$'\t' read -r file needle lineno text; do
-  if [ -r "$exc" ] && awk -F'\t' -v f="$file" -v n="$needle" 'BEGIN{r=1} $0 !~ /^#/ && NF>=3 && $1==f && ($2==n || $2=="*") {r=0} END{exit r}' "$exc"; then continue; fi
-  bad=1; echo "READER: $file:$lineno names '$needle' (on the allowlist): $text"
+  matched=0
+  for i in "${!ex_file[@]}"; do
+    [ "${ex_file[$i]}" = "$file" ] || continue
+    if [ "${ex_text[$i]}" = '*' ] || [[ "$text" == *"${ex_text[$i]}"* ]]; then
+      if [ "${ex_used[$i]}" -lt "${ex_count[$i]}" ]; then ex_used[$i]=$((ex_used[$i] + 1)); matched=1; break; fi
+    fi
+  done
+  [ "$matched" = 1 ] || { bad=1; echo "READER: $file:$lineno names '$needle' (on the allowlist), and no reviewed exception covers this line: $text"; }
 done < "$filtered"
+for i in "${!ex_file[@]}"; do
+  if [ "${ex_used[$i]}" != "${ex_count[$i]}" ]; then
+    bad=1; echo "EXCEPTION changed: ${ex_file[$i]} is reviewed for ${ex_count[$i]} line(s) with '${ex_text[$i]}', found ${ex_used[$i]}: update the line after reviewing the file"
+  fi
+done
 
 # the one reader a text search cannot see: a make target. ci.yml must never call the chart check (it reads deploy/helm and ci/helm)
 if grep -qE 'helm-check' .github/workflows/ci.yml; then bad=1; echo "READER: .github/workflows/ci.yml calls make helm-check (reads deploy/helm and ci/helm)"; fi
 
-# an exception nobody needs any more is removed, so the list stays short and true
-if [ -r "$exc" ]; then
-  while IFS=$'\t' read -r f n _; do
-    case "$f" in ''|'#'*) continue ;; esac
-    if ! awk -F'\t' -v f="$f" -v n="$n" '$1==f && (n=="*" || $2==n) {r=1} END{exit !r}' "$filtered"; then
-      bad=1; echo "STALE exception: $f $n matches no reader any more: delete the line"
-    fi
-  done < "$exc"
-fi
+# an exception for a file that is gone
+for f in "${ex_file[@]+"${ex_file[@]}"}"; do [ -e "$f" ] || { bad=1; echo "STALE exception: $f does not exist"; }; done
 if [ "$bad" = 1 ]; then
   echo "skip-guard: a file outside ci/skip-allowlist reads something the allowlist says no job reads. Remove that pattern from ci/skip-allowlist, or, when the line is harmless, add"
-  echo "  <file><TAB><needle or *><TAB><reason>   to ci/skip-guard-exceptions (reviewed)."
+  echo "  <file><TAB><number of lines><TAB><text of the line, or *><TAB><reason>   to ci/skip-guard-exceptions (reviewed: the exact occurrence)."
   exit 1
 fi
 echo "skip-guard: ok (${#pats[@]} patterns, no unexplained reader)"

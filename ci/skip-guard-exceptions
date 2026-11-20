@@ -1,10 +1,12 @@
-# <file><TAB><needle or *><TAB><reason>. A reviewed claim per line: this file reads nothing the allowlist covers (ci/skip-guard.sh explains the search). Stale lines fail the guard.
-.github/workflows/helm.yml	*	its own workflow with its own paths filter, not a job of ci.yml; it runs ci/helm and lists deploy/helm and deploy/images/README.md on purpose
-Makefile	*	the helm-check target (ci/helm/check.sh); ci.yml must not call it: the guard fails when ci.yml names helm-check
-docs/images/build.py	*	draws docs/images by hand (python3 build.py); no job runs it
-cmd/qv-core/tls_test.go	*	asserts that an error message names docs/runbooks/certificates.md: a string compare, no file is opened
-internal/pki/pki_test.go	*	asserts that an error message names docs/runbooks/certificates.md: a string compare, no file is opened
-internal/pki/services_test.go	*	asserts that an error message names docs/runbooks/certificates.md: a string compare, no file is opened
-internal/pki/catalog_chart_test.go	*	reads deploy/helm/qv-certs/catalog.json: that chart is deliberately NOT on the allowlist (this reader is why)
-internal/pki/chart.go	*	go:generate line and comments for deploy/helm/qv-certs/catalog.json: the chart that is not on the allowlist
-mpc-party/internal/cbmpc/measure_test.go	.md	r.md() is a method that formats a markdown table for the log; no file is opened
+# <file><TAB><number of lines><TAB><text the line contains, or *><TAB><reason>
+# Each line names the exact reviewed occurrence: that many lines of the file contain that text, and nothing else in the file names an allowlisted path.
+# A further line, a changed line or a vanished one fails ci/skip-guard.sh, so a new reader in these files is never hidden (it is reviewed, then this list is updated).
+.github/workflows/helm.yml	6	*	whole file, bounded by count: its own workflow (not a job of ci.yml) with its own paths filter; it exists to name deploy/helm, ci/helm and deploy/images/README.md. Not part of ci.yml.
+Makefile	1	ci/helm/check.sh	the helm-check target; ci.yml must not call it (the guard fails when ci.yml names helm-check)
+docs/images/build.py	1	docs/images/	comment-like docstring text of a script that draws docs/images by hand; no job runs it
+cmd/qv-core/tls_test.go	1	docs/runbooks/certificates.md	asserts that an error message names this runbook: a string compare, no file is opened
+internal/pki/pki_test.go	1	docs/runbooks/certificates.md	asserts that an error message names this runbook: a string compare, no file is opened
+internal/pki/services_test.go	1	docs/runbooks/certificates.md	asserts that an error message names this runbook: a string compare, no file is opened
+internal/pki/catalog_chart_test.go	1	../../deploy/helm/qv-certs/catalog.json	reads qv-certs catalog.json: that chart is deliberately NOT on the allowlist (this reader is why)
+internal/pki/chart.go	1	//go:generate go run ./gen -o ../../deploy/helm/qv-certs/catalog.json	go:generate of the same qv-certs file: the chart that is not on the allowlist
+mpc-party/internal/cbmpc/measure_test.go	1	emit(r.md())	r.md() formats a markdown table for the log; no file is opened
