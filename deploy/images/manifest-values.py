@@ -22,7 +22,7 @@ import argparse, json, os, re, subprocess, sys
 CHARTS = {
     "qv-business": {"core": "qv-core", "worker": "qv-worker", "relay": "qv-relay", "archiver": "qv-anchor-archiver",
                     "migrate": "qv-migrate", "approval": "qv-approval-web"},
-    "qv-party": {"party": "mpc-party", "cosigner": "qv-cosigner"},
+    "qv-party": {"party": "mpc-party", "cosigner": "qv-cosigner", "tools": "qv-tools-signing"},
     "qv-signing-core": {"gateway": "qv-gateway", "tools": "qv-tools-signing"},
 }
 REPO = "ws4charlie/quorum-vault"

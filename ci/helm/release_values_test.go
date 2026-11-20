@@ -244,15 +244,15 @@ func TestManifestValuesRenderWithCharts(t *testing.T) {
 	cases := []tc{
 		{"qv-business", []string{"-f", filepath.Join(chartDir("qv-business"), "values.yaml"), "--set", "approval.enabled=true", "-f", filepath.Join(dir, "images-qv-business.yaml")},
 			map[string]string{"core": "qv-core", "worker": "qv-worker", "relay": "qv-relay", "archiver": "qv-anchor-archiver", "migrate": "qv-migrate", "approval": "qv-approval-web"}},
-		{"qv-signing-core", []string{"-f", "signing-core-ci.yaml", "--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x", "--set-json", `signedSettings.job.files=["a.json"]`, "-f", filepath.Join(dir, "images-qv-signing-core.yaml")},
+		{"qv-signing-core", []string{"-f", "signing-core-ci.yaml", "--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=signed-a1b2c3d4e5", "--set-json", `signedSettings.job.files=["a.json"]`, "-f", filepath.Join(dir, "images-qv-signing-core.yaml")},
 			map[string]string{"gateway": "qv-gateway", "tools": "qv-tools-signing"}},
 	}
 	for _, role := range []string{"A", "B", "C"} {
-		keys := map[string]string{"party": "mpc-party", "cosigner": "qv-cosigner"}
+		keys := map[string]string{"party": "mpc-party", "cosigner": "qv-cosigner", "tools": "qv-tools-signing"}
 		if role == "A" {
 			delete(keys, "cosigner") // party A authorizes by pinned caller: no cosigner container
 		}
-		cases = append(cases, tc{"qv-party", []string{"--set", "role=" + role, "-f", filepath.Join(chartDir("qv-party"), "values.yaml"), "-f", "ci-party-values.yaml", "-f", filepath.Join(dir, "images-qv-party.yaml")}, keys})
+		cases = append(cases, tc{"qv-party", []string{"--set", "role=" + role, "--set", "operator.job.enabled=true", "--set", "operator.job.command=status", "--set", "operator.job.partyPin=" + strings.Repeat("ab", 32), "--set", "operator.job.callerCertSecret=ceremony-caller", "-f", filepath.Join(chartDir("qv-party"), "values.yaml"), "-f", "ci-party-values.yaml", "-f", filepath.Join(dir, "images-qv-party.yaml")}, keys})
 	}
 	for _, c := range cases {
 		rendered := helmRender(t, c.chart, c.args...)
@@ -282,7 +282,7 @@ func TestManifestValuesMirror(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, eb)
 	}
-	for _, n := range []string{"mpc-party", "qv-cosigner"} {
+	for _, n := range []string{"mpc-party", "qv-cosigner", "qv-tools-signing"} {
 		if !strings.Contains(out, "registry.internal:5000/qv/"+n+",") || !strings.Contains(out, digests[n]) {
 			t.Errorf("mirror output wrong for %s:\n%s", n, out)
 		}
