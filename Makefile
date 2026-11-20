@@ -350,3 +350,12 @@ images:
 # Business-zone chart checks (deploy/helm/qv-business): lint, render, Kubernetes schemas, policy and image-contract tests. Needs helm and kubeconform (brew install helm kubeconform).
 helm-check:
 	ci/helm/check.sh
+
+# The kind lane (ci/kind/README.md): a local cluster for THIS checkout with the dependencies and the charts installed; `kind-smoke` runs the checks against it; `kind-down` removes it.
+.PHONY: kind-up kind-smoke kind-down
+kind-up:
+	ci/kind/up.sh
+kind-smoke:
+	ci/kind/smoke/run.sh
+kind-down:
+	ci/kind/down.sh

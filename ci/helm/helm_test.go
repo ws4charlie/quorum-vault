@@ -3,6 +3,7 @@ package helmcheck
 import (
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -229,4 +230,141 @@ func anyContains(l []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// Every component probes the health listener of PR #97 (plain http, /readyz for start-up and readiness, /livez for liveness), and the listener is switched on by the
+// same value that points the probe at it: the probe port is the port in QV_HEALTH_LISTEN. A TCP probe on core's TLS port (the old default) made every probe a failed
+// TLS handshake in the log, and the other three components had no probe at all.
+func TestProbesUseTheHealthListener(t *testing.T) {
+	comps := []string{"core", "worker", "relay", "archiver"}
+	for _, vf := range valuesFiles {
+		objs := render(t, vf.file)
+		for _, c := range comps {
+			var dep, env *Obj
+			for i, o := range objs {
+				if o.Component() == c && o.Kind == "Deployment" {
+					dep = &objs[i]
+				}
+				if o.Kind == "ConfigMap" && strings.Contains(o.Metadata.Name, "-"+c+"-env-") {
+					env = &objs[i]
+				}
+			}
+			if dep == nil || env == nil {
+				t.Fatalf("%s: %s: no Deployment or env ConfigMap", vf.file, c)
+			}
+			listen, _ := env.Data["QV_HEALTH_LISTEN"].(string)
+			if listen != "0.0.0.0:9100" {
+				t.Errorf("%s: %s: QV_HEALTH_LISTEN = %q, want 0.0.0.0:9100", vf.file, c, listen)
+			}
+			for _, want := range []string{"path: /readyz, port: 9100", "path: /livez, port: 9100"} {
+				if !strings.Contains(dep.Raw, want) {
+					t.Errorf("%s: %s: no probe %q", vf.file, c, want)
+				}
+			}
+			if strings.Contains(dep.Raw, "tcpSocket") {
+				t.Errorf("%s: %s: a TCP probe", vf.file, c)
+			}
+		}
+		// a component with probes off opens no health listener (nothing would use it)
+		off := render(t, vf.file, "--set", "worker.probes.mode=none")
+		for _, o := range off {
+			if o.Kind == "ConfigMap" && strings.Contains(o.Metadata.Name, "-worker-env-") {
+				if _, ok := o.Data["QV_HEALTH_LISTEN"]; ok {
+					t.Errorf("%s: probes.mode=none still sets QV_HEALTH_LISTEN", vf.file)
+				}
+			}
+			if o.Kind == "Deployment" && o.Component() == "worker" && strings.Contains(o.Raw, "Probe") {
+				t.Errorf("%s: probes.mode=none still renders a probe", vf.file)
+			}
+		}
+	}
+}
+
+// The migration job is a pre-install hook: on a first install nothing else of the chart exists yet. So every network rule it needs must be a hook too, on BOTH sides:
+// its own egress, and the ingress of the database pods it connects to. Without the second, a database that is already isolated (default deny, or any operator policy)
+// refuses the job and the first install hangs (found by the kind lane).
+func TestMigrationHookHasBothNetworkRules(t *testing.T) {
+	for _, vf := range valuesFiles {
+		var egress, ingress bool
+		for _, o := range render(t, vf.file) {
+			if o.Kind != "NetworkPolicy" || !strings.Contains(o.Raw, "helm.sh/hook: pre-install") {
+				continue
+			}
+			if strings.HasSuffix(o.Metadata.Name, "-migrate-egress") {
+				egress = true
+			}
+			if strings.HasSuffix(o.Metadata.Name, "-migrate-postgres-in") && strings.Contains(o.Raw, "component: migrate") && strings.Contains(o.Raw, "port: 5432") {
+				ingress = true
+			}
+		}
+		if !egress || !ingress {
+			t.Errorf("%s: hook policies: migrate egress %v, postgres ingress for the job %v", vf.file, egress, ingress)
+		}
+	}
+	// the rule is part of the dependency policies: with them off, the chart renders none of them
+	for _, o := range render(t, "values-kind.yaml", "--set", "network.dependencyPolicies.enabled=false") {
+		if strings.HasSuffix(o.Metadata.Name, "-migrate-postgres-in") {
+			t.Errorf("dependencyPolicies off still renders %s", o.Metadata.Name)
+		}
+	}
+}
+
+// The policy chart's rule, as the signing-core and party charts already keep it: every ConfigMap is immutable and its name carries a hash of its content, so a change of
+// content is a new object and a new pod template (a rollout), never an edit in place. Each Deployment reads the ConfigMap that exists in the render.
+func TestConfigMapsAreImmutableAndHashed(t *testing.T) {
+	hashed := regexp.MustCompile(`-[0-9a-f]{10}$`)
+	names := func(objs []Obj) map[string]string {
+		m := map[string]string{}
+		for _, o := range objs {
+			if o.Kind != "ConfigMap" {
+				continue
+			}
+			if !strings.Contains(o.Raw, "immutable: true") {
+				t.Errorf("ConfigMap %s is not immutable", o.Metadata.Name)
+			}
+			if !hashed.MatchString(o.Metadata.Name) {
+				t.Errorf("ConfigMap %s has no content hash in its name", o.Metadata.Name)
+			}
+			m[o.Metadata.Name] = o.Raw
+		}
+		return m
+	}
+	for _, vf := range valuesFiles {
+		before := render(t, vf.file, "--set", "approval.enabled=true", "--set", "ingress.public.host=a.example.test", "--set", "approval.ingress.host=b.example.test")
+		cms := names(before)
+		if len(cms) < 5 {
+			t.Errorf("%s: only %d ConfigMaps", vf.file, len(cms))
+		}
+		for _, o := range before {
+			if pod, ok := o.Pod(); ok {
+				for _, ref := range regexp.MustCompile(`configMapRef:\s*\{?\s*\n?\s*name: (\S+?)\s*\}?\n`).FindAllStringSubmatch(o.Raw, -1) {
+					if _, ok := cms[strings.Trim(ref[1], `"{} `)]; !ok {
+						t.Errorf("%s/%s reads ConfigMap %q, which the chart does not render", vf.file, o.Metadata.Name, ref[1])
+					}
+				}
+				_ = pod
+			}
+		}
+		// a content change renames the core's ConfigMap and the Deployment follows it (new pod template, so a rollout)
+		after := render(t, vf.file, "--set", "oidc.audience=another-audience")
+		var nb, na string
+		for n := range cms {
+			if strings.Contains(n, "-core-env-") {
+				nb = n
+			}
+		}
+		for n := range names(after) {
+			if strings.Contains(n, "-core-env-") {
+				na = n
+			}
+		}
+		if nb == "" || na == "" || nb == na {
+			t.Errorf("%s: a changed value did not rename the core ConfigMap (%q -> %q)", vf.file, nb, na)
+		}
+		for _, o := range after {
+			if o.Kind == "Deployment" && o.Component() == "core" && !strings.Contains(o.Raw, na) {
+				t.Errorf("%s: core's Deployment does not read %s", vf.file, na)
+			}
+		}
+	}
 }
