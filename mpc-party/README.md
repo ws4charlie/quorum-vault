@@ -235,6 +235,12 @@ duration, outcome, kind); no secrets.
   (`data_dir/freeze`). A frozen keyset refuses `Sign`, `Derive` and `Refresh` with kind `FROZEN`; `Unfreeze` needs an operator
   signature checked by both parties and is logged as `AUDIT keyset unfrozen`. A malicious A can freeze a keyset by sending
   garbage (denial of service, not theft); that is the price of failing closed.
+- **Admin replay memory**: each party accepts an admin signature once and remembers it in `data_dir/admin-seen.json` (written and fsynced before
+  the operation runs, sealed under the attested sealer, dropped when the timestamp is two `admin_max_age_seconds` old), so a restart does not
+  reopen the window. Also, a request signed before the party's process started is refused, which covers a rolled-back or deleted file; an
+  operator clock ahead of the party's by more than the gap between signing and restart is the one case only the file catches. A crash after
+  the record and before the operation leaves the request spent: sign a new one. If the file cannot be read (`seen set unreadable`), remove it
+  and restart the party. Each party keeps its own memory: a replay that one party has forgotten is refused by the others, as a whole operation.
 - Log lines to alert on: `ALERT keyset frozen after a cryptographic failure`, `ALERT cannot persist keyset freeze`.
 
 ## Sealing, generations, backup
