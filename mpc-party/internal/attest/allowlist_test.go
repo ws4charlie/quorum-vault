@@ -37,6 +37,15 @@ func TestAllowlist(t *testing.T) {
 		{"no PCR0", &Claims{Measurements: map[int][]byte{1: pcr0}}, []AllowEntry{entry("A", m, -time.Hour, time.Hour)}, ReasonNoMeasure},
 		{"bad hex refuses the whole list", claims, []AllowEntry{entry("A", m, -time.Hour, time.Hour), entry("A", "zz", -time.Hour, time.Hour)}, ReasonBadEntry},
 		{"zero time bound is bad", claims, []AllowEntry{{Party: "A", Measurement: m}}, ReasonBadEntry},
+		{"no end date (zero not_after) allows", claims, []AllowEntry{{Party: "A", Measurement: m, NotBefore: now.Add(-time.Hour)}}, ""},
+		{"no end date, not yet started", claims, []AllowEntry{{Party: "A", Measurement: m, NotBefore: now.Add(time.Hour)}}, ReasonNotYetValid},
+		{"revoked entry refuses", claims, []AllowEntry{{Party: "A", Measurement: m, NotBefore: now.Add(-time.Hour), Status: StatusRevoked}}, ReasonRevoked},
+		{"revocation wins over an active overlap", claims, []AllowEntry{entry("A", m, -time.Hour, time.Hour), {Party: "A", Measurement: m, NotBefore: now, Status: StatusRevoked}}, ReasonRevoked},
+		{"revocation of another measurement does not matter", claims, []AllowEntry{entry("A", m, -time.Hour, time.Hour), {Party: "A", Measurement: "00" + m[2:], NotBefore: now, Status: StatusRevoked}}, ""},
+		{"revocation for another party does not matter", claims, []AllowEntry{entry("A", m, -time.Hour, time.Hour), {Party: "B", Measurement: m, NotBefore: now, Status: StatusRevoked}}, ""},
+		{"unknown status is bad", claims, []AllowEntry{{Party: "A", Measurement: m, NotBefore: now, Status: "maybe"}}, ReasonBadEntry},
+		{"bad version is bad", claims, []AllowEntry{{Party: "A", Measurement: m, NotBefore: now, Version: "v 1"}}, ReasonBadEntry},
+		{"end before start is bad", claims, []AllowEntry{entry("A", m, time.Hour, -time.Hour)}, ReasonBadEntry},
 		{"empty party is bad", claims, []AllowEntry{entry("", m, -time.Hour, time.Hour)}, ReasonBadEntry},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

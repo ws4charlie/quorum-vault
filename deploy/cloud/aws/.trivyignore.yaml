@@ -1,0 +1,18 @@
+# Every suppression says why. Anything not listed here fails the scan (trivy config, severity LOW and above, see .github/workflows/terraform.yml).
+misconfigurations:
+  - id: AWS-0015
+    paths: ["modules/baseline/main.tf"]
+    statement: >-
+      CloudTrail is encrypted, by the AUDIT account's key: the trail has no key of its own on purpose. The audit bucket's default encryption (a customer key in the audit
+      account) applies to what the trail writes. A key owned by the workload account could be scheduled for deletion by that account's administrators, which would make
+      the log unreadable: the log must not depend on a key the logged party controls. Checked by tests in roots/audit (the log buckets use kms_logs).
+  - id: AWS-0162
+    paths: ["modules/baseline/main.tf"]
+    statement: >-
+      No CloudWatch Logs copy of CloudTrail: a log group lives in the workload account, where its administrators can delete it. The copy in the audit account's Object Lock
+      bucket is the record. Alerting on CloudTrail events is a later task (backlog: central detection).
+  - id: AWS-0089
+    paths: ["modules/bucket/main.tf"]
+    statement: >-
+      S3 server access logging is not on in this first version (LOW). Writes to the buckets are CloudTrail management events only, no data events yet. Backlog: an access-log
+      bucket in the audit account and data events for the audit-head bucket.

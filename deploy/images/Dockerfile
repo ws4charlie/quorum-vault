@@ -111,6 +111,8 @@ FROM scratch AS bins
 COPY --from=gobin-static /out/ /
 COPY --from=gobin-cgo /out/ /
 COPY --from=gobin-party /out/ /
+# the simulated-enclave party under another name (never an image of the release set): build.sh repro checks that two builders get the same bytes, so the same simulated measurement
+COPY --from=gobin-teesim /out/mpc-party /mpc-party-teesim
 COPY --from=gobin-broker /out/ /
 COPY --from=gobin-partyadmin /out/ /
 
