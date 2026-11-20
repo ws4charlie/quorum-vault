@@ -1,0 +1,667 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "role": {
+      "enum": [
+        "",
+        "A",
+        "B",
+        "C"
+      ]
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "replicas": {
+      "const": 1,
+      "description": "exactly one pod per party; cannot be raised"
+    },
+    "imagePullPolicy": {
+      "enum": [
+        "Always",
+        "IfNotPresent",
+        "Never"
+      ]
+    },
+    "imagePullSecrets": {
+      "type": "array"
+    },
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "party",
+        "cosigner"
+      ],
+      "properties": {
+        "party": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[0-9a-f]{64})?$"
+            },
+            "tag": {
+              "type": "string"
+            }
+          }
+        },
+        "cosigner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[0-9a-f]{64})?$"
+            },
+            "tag": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "runAsUser": {
+      "type": "integer",
+      "const": 65532
+    },
+    "ports": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "caller": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "peer": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "health": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "cosignerHealth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "metrics": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "cosignerMetrics": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "peers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "a": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pins": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "b": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "pins": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "c": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "pins": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "callerPins": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "adminKeys": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "adminMaxAgeSeconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "recvTimeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keygenRecvTimeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sessionTimeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxPeerSessions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxFrameBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxIntentBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replayCacheSize": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "shutdownGraceMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000
+        },
+        "sessionsPerSecKey": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "sealer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "pkcs11",
+            "attested"
+          ]
+        },
+        "attested": {
+          "type": "object"
+        }
+      }
+    },
+    "attestBroker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "hsm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "module": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "volume": {
+              "type": "object"
+            }
+          }
+        },
+        "pinSecret": {
+          "type": "string",
+          "minLength": 1
+        },
+        "softhsm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "soPinSecret": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reload": {
+          "type": "string"
+        },
+        "party": {
+          "type": "object"
+        },
+        "cosigner": {
+          "type": "object"
+        },
+        "cosignerLink": {
+          "type": "object"
+        },
+        "cosignerSocket": {
+          "type": "object"
+        }
+      }
+    },
+    "cosigner": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "config": {
+          "type": "object"
+        },
+        "socketPins": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "partyPins": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "auditSource": {
+          "type": "string"
+        },
+        "database": {
+          "type": "object"
+        },
+        "kafka": {
+          "type": "object"
+        },
+        "resources": {
+          "type": "object",
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "properties": {
+            "requests": {
+              "type": "object"
+            },
+            "limits": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "party": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resources": {
+          "type": "object",
+          "required": [
+            "requests",
+            "limits"
+          ],
+          "properties": {
+            "requests": {
+              "type": "object"
+            },
+            "limits": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "size": {
+          "type": "string"
+        },
+        "storageClassName": {
+          "type": "string"
+        },
+        "accessModes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "ReadWriteOncePod",
+              "ReadWriteOnce"
+            ]
+          }
+        }
+      }
+    },
+    "scheduling": {
+      "type": "object"
+    },
+    "serviceAccount": {
+      "type": "object"
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "caller": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "ClusterIP",
+                "LoadBalancer"
+              ]
+            },
+            "annotations": {
+              "type": "object"
+            },
+            "sourceRanges": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "peer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "ClusterIP",
+                "LoadBalancer"
+              ]
+            },
+            "annotations": {
+              "type": "object"
+            },
+            "sourceRanges": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dns": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
+        },
+        "peerIngress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
+        },
+        "callerIngress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
+        },
+        "peerEgress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
+        },
+        "guardDatabase": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
+        },
+        "kafka": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
+        },
+        "hsm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              }
+            }
+          }
+        }
+      }
+    },
+    "operator": {
+      "type": "object"
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outputClaim": {
+          "type": "string"
+        },
+        "job": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

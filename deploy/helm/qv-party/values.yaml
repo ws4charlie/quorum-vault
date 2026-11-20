@@ -1,0 +1,132 @@
+# qv-party: production defaults. One release = ONE party. values-kind.yaml overrides what differs on a local cluster.
+# Required per release (the chart refuses to render without them): role, images (digests), adminKeys, callerPins, the peers this party talks to,
+# and for roles B and C the cosigner block. See README.md, "Values you must set".
+
+# The party this release runs: "A" (coordinator, dials B and C, in the signing-core cluster), "B" or "C" (listen for the parties that dial them, ask their own cosigner).
+role: ""
+nameOverride: ""
+
+# Exactly one pod per party, always. The schema accepts only 1 (a second pod would be refused by the data-directory lock, and a share must never be in two places).
+replicas: 1
+
+imagePullPolicy: IfNotPresent
+imagePullSecrets: []
+# Images are referenced by DIGEST in production (the policy test refuses a tag there). The all-zero digests are placeholders: the chart refuses to render them.
+images:
+  party:    { repository: ghcr.io/ws4charlie/quorum-vault/mpc-party,   digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  cosigner: { repository: ghcr.io/ws4charlie/quorum-vault/qv-cosigner, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+
+# The uid/gid every image runs as. Both containers of the pod use the SAME uid: the cosigner's socket is mode 0600, owner only (deploy/images/README.md).
+runAsUser: 65532
+
+# Ports. caller: gateway and operators (mutual TLS, callers pinned). peer: the other parties (roles B and C only; A dials out). health: kubelet probes (plain http, nothing else on it).
+# metrics and cosignerMetrics are loopback only: a scraper outside the pod cannot reach them (signing clusters take no inbound scrape; see README "Metrics").
+ports: { caller: 7001, peer: 7003, health: 9100, cosignerHealth: 9101, metrics: 9102, cosignerMetrics: 9104 }
+
+# --- The party's own config (rendered into an immutable ConfigMap; public keys and pins only, no secrets) ---
+# Pins are lowercase hex SHA-256 of the certificate's public key (SPKI). The peer lists are what the party trusts and, for A and B, where it dials.
+peers:
+  a: { pins: [] }                       # B and C: party A's certificate
+  b: { address: "", pins: [] }          # A: B's peer endpoint host:port; C: B's certificate (pins only)
+  c: { address: "", pins: [] }          # A and B: C's peer endpoint host:port
+callerPins: []                          # certificates allowed on the caller port: the gateway (A; B and C for health), the operators' tool
+adminKeys: []                           # operators' Ed25519 public keys (64 hex): DKG, refresh, freeze and unfreeze need a signature by one of them
+adminMaxAgeSeconds: 300
+limits:
+  recvTimeoutMs: 0                      # 0 = the binary's default (5000)
+  keygenRecvTimeoutMs: 0
+  sessionTimeoutMs: 0                   # default 30000
+  maxPeerSessions: 0                    # default 2 x cores
+  maxFrameBytes: 0                      # default 1 MiB
+  sessionsPerSecKey: 0                  # default 200
+  maxIntentBytes: 0
+  shutdownGraceMs: 10000                # the stop bound: terminationGracePeriodSeconds is this + 20 s (deploy/images/README.md)
+  replayCacheSize: 0
+
+# --- Sealer and HSM ---
+sealer:
+  type: pkcs11                          # pkcs11 | attested (EXTENSION POINT, see below)
+  # attested is built by the TEE tasks (attested sealer, attestation broker). Whatever you put here is merged into the sealer block of the party config as is, once that
+  # sealer exists. Until then the chart refuses sealer.type=attested: it would start a pod that cannot unseal.
+  attested: {}
+attestBroker:
+  enabled: false                        # EXTENSION POINT: the attestation broker is not part of this chart yet; true is refused
+hsm:
+  token: ""                             # PKCS#11 token label; empty = qv-party-1, -2, -3 for A, B, C
+  # Production: the vendor's PKCS#11 module comes from a volume you name (the image has none). It is mounted read-only at /etc/qv/hsm; module.path must lie under it.
+  module:
+    path: ""                            # e.g. /etc/qv/hsm/libcloudhsm_pkcs11.so
+    volume: {}                          # a Kubernetes volume source, e.g. { persistentVolumeClaim: { claimName: vendor-pkcs11 } } or { configMap: { name: ... } }
+  # The PIN: a Secret with the key `pin`, mounted as a file (mode 0440, group = fsGroup). Never an environment variable, never in values.
+  pinSecret: qv-party-hsm-pin
+  # Development and kind ONLY: SoftHSM on the data volume. Needs the -dev image (referenced by tag) and sets QV_ENV=dev; the chart refuses it with an image
+  # referenced by digest, and the policy test refuses it in production values.
+  softhsm:
+    enabled: false
+    soPinSecret: qv-party-hsm-so-pin    # key `so-pin`; used only by the token-making init container
+
+# --- Certificates: Secrets made by cert-manager (task D5), each with tls.crt, tls.key, ca.crt. Referenced by name. ---
+tls:
+  reload: 1m
+  party:         { secretName: "" }     # empty = mpc-party-<role>-tls (catalog name mpc-party-a|b|c; pinned by the other parties, long-lived)
+  cosigner:      { secretName: qv-cosigner-tls }          # signing identity of the cosigner (guard database client)
+  cosignerLink:  { secretName: qv-cosigner-link-tls }     # business-CA link certificate, publishes audit heads
+  cosignerSocket: { secretName: qv-cosigner-socket-tls }  # the certificate the cosigner presents to its party on the socket (pinned by the party)
+
+# --- The cosigner (roles B and C only; ignored for A) ---
+cosigner:
+  # The cosigner's signing-zone config (approver keys, bounds, chain verifier settings; internal/gateway/config.go), public data. It is its OWN copy: never the gateway's.
+  config: {}
+  socketPins: []                        # pins of the cosigner's socket certificate: the party checks them (authorizer.cosigner_pins)
+  partyPins: []                         # pins of this party's certificate: the cosigner answers nobody else (-party-pins)
+  timeoutMs: 5000
+  auditSource: ""                       # empty = cosigner-<role in lower case>
+  database:                             # the cosigner's OWN guard database (never the gateway's), certificate name `cosigner` maps to this role
+    host: qv-signing-db-rw
+    port: 5432
+    name: qv_cosigner_guard
+    role: qv_cosigner_guard
+    sslmode: verify-full
+  kafka: { brokers: "redpanda.business.example.invalid:9092" }  # the business Kafka, over the explicit link; PLACEHOLDER
+  resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { cpu: "1", memory: 512Mi } }
+
+# --- Workload ---
+party:
+  resources: { requests: { cpu: "1", memory: 1Gi }, limits: { cpu: "2", memory: 2Gi } }
+persistence:
+  size: 5Gi
+  storageClassName: ""                  # empty = the cluster default
+  accessModes: [ReadWriteOncePod]       # one pod, one volume: a second pod can never mount it (Kubernetes 1.29+)
+scheduling: { nodeSelector: {}, tolerations: [], affinity: {}, priorityClassName: "" }
+serviceAccount: { annotations: {} }     # workload identity for a cloud HSM, if any; the token is never mounted
+
+# --- Services ---
+# caller and peer ports are reached by other clusters through PRIVATE endpoints. type LoadBalancer is accepted only with an internal-load-balancer annotation
+# and sourceRanges (the chart refuses otherwise): see README "Network". Inside one cluster (party A's caller port) keep ClusterIP.
+service:
+  caller: { type: ClusterIP, annotations: {}, sourceRanges: [] }
+  peer:   { type: ClusterIP, annotations: {}, sourceRanges: [] }
+
+# --- Network policies: default deny, then one allow per path. Every list is empty by default = no rule. Peers are raw NetworkPolicy peers (ipBlock, podSelector, namespaceSelector). ---
+network:
+  dns: { to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }, podSelector: { matchLabels: { k8s-app: kube-dns } } }] }
+  peerIngress: { from: [] }             # B, C: the private-endpoint addresses of the parties that dial this one (A, and B for C), peer port only
+  callerIngress: { from: [] }           # the gateway (A: its namespace; B and C: its private endpoint) and nothing else outside the namespace
+  peerEgress: { to: [] }                # A: the endpoints of B and C; B: the endpoint of C; C: none (dials nobody)
+  guardDatabase: { to: [], ports: [5432] }   # B, C: the cosigner's guard database
+  kafka: { to: [], ports: [9092] }           # B, C: the business Kafka over the explicit link (outward only)
+  hsm: { to: [], ports: [] }            # a network HSM (CloudHSM, Luna): its addresses and ports; empty for an HSM reached some other way
+operator:
+  # Pods with this label (in this namespace) may reach the caller port: the in-cluster admin Job or bastion pod of that party's operators (README "Operators").
+  podLabel: { quorumvault.io/party-operator: "true" }
+
+# --- Backup (README "Backup and restore"). The export writes a PVE-encrypted file; only the recovery PUBLIC key is needed. ---
+backup:
+  # Optional volume for the output, mounted in the party pod at /var/lib/qv/backup so `kubectl exec ... mpc-party backup export -out /var/lib/qv/backup/...` works while the party runs.
+  outputClaim: ""
+  job:
+    enabled: false                      # disabled by default. A Job needs the data volume, which only ONE pod can mount: run it with the party pod stopped (README)
+    name: manual                        # part of the Job name; change it for each run
+    keysetId: ""
+    outputFile: ""                      # file name under /var/lib/qv/backup
+    recoveryPublicConfigMap: ""         # ConfigMap holding recovery.public (public data)

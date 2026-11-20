@@ -1,7 +1,7 @@
 {
   "_comment": "Machine-readable form of the run-time contract in README.md (flags, environment, mounts, ports, user), for the chart drift test in ci/helm. Edit it in the same change as the README table. `flags` are written without the leading dash. `requiredAny` lists groups of which at least one member (a flag or an environment variable) must be set. `pathEnv` and `pathFlags` hold file paths that must sit on a volume mount. `dsnRole` is the Postgres role the DSN's user must be (the certificate name picks it).",
   "user": 65532,
-  "mountRoots": ["/etc/qv", "/run/qv", "/var/lib/qv/metrics"],
+  "mountRoots": ["/etc/qv", "/run/qv", "/var/lib/qv/metrics", "/var/lib/qv/party", "/var/lib/qv/backup"],
   "forbiddenEnv": ["QV_ALLOW_PLAINTEXT", "QV_DEV_ACTOR_HEADER", "QV_OIDC_TEST_JWKS"],
   "tlsEnv": ["QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA", "QV_TLS_RELOAD"],
   "images": {
@@ -65,6 +65,50 @@
       "noTLSEnv": true,
       "flagValues": { "zone": ["business"] },
       "flagOnlyIn": { "enable-login": "enable-login" }
+    },
+    "qv-cosigner": {
+      "zone": "signing",
+      "flags": ["config", "socket", "audit-source", "guard-dsn", "gateway-guard-dsn", "brokers", "anchor-interval", "socket-cert", "socket-key", "party-pins", "metrics-listen", "health-listen", "tls-cert", "tls-key", "tls-ca", "tls-reload", "link-tls-cert", "link-tls-key", "link-tls-ca", "link-tls-reload"],
+      "env": ["QV_COSIGNER_GUARD_DSN", "QV_GATEWAY_GUARD_DSN", "QV_KAFKA_BROKERS", "QV_COSIGNER_SOCKET_CERT", "QV_COSIGNER_SOCKET_KEY", "QV_COSIGNER_PARTY_PINS", "QV_COSIGNER_METRICS_LISTEN", "QV_HEALTH_LISTEN", "QV_LINK_TLS_CERT", "QV_LINK_TLS_KEY", "QV_LINK_TLS_CA", "QV_LINK_TLS_RELOAD"],
+      "requiredFlags": ["config", "socket"],
+      "requiredAny": [["guard-dsn", "QV_COSIGNER_GUARD_DSN"], ["brokers", "QV_KAFKA_BROKERS"], ["tls-cert", "QV_TLS_CERT"], ["link-tls-cert", "QV_LINK_TLS_CERT"], ["socket-cert", "QV_COSIGNER_SOCKET_CERT"], ["party-pins", "QV_COSIGNER_PARTY_PINS"]],
+      "pathFlags": ["config", "socket", "tls-cert", "tls-key", "tls-ca", "link-tls-cert", "link-tls-key", "link-tls-ca", "socket-cert", "socket-key"],
+      "pathEnv": ["QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA", "QV_LINK_TLS_CERT", "QV_LINK_TLS_KEY", "QV_LINK_TLS_CA", "QV_COSIGNER_SOCKET_CERT", "QV_COSIGNER_SOCKET_KEY"],
+      "listen": { "ports": 0 },
+      "loopbackOnly": ["metrics-listen", "QV_COSIGNER_METRICS_LISTEN"]
+    },
+    "mpc-party": {
+      "zone": "signing",
+      "flags": ["config", "health-listen"],
+      "env": ["QV_HEALTH_LISTEN"],
+      "requiredFlags": ["config"],
+      "requiredAny": [],
+      "pathFlags": ["config"],
+      "pathEnv": [],
+      "listen": { "ports": 0 },
+      "noTLSEnv": true
+    },
+    "qv-cosigner-dev": {
+      "zone": "signing",
+      "flags": ["config", "socket", "audit-source", "guard-dsn", "gateway-guard-dsn", "brokers", "anchor-interval", "socket-cert", "socket-key", "party-pins", "metrics-listen", "health-listen", "tls-cert", "tls-key", "tls-ca", "tls-reload", "link-tls-cert", "link-tls-key", "link-tls-ca", "link-tls-reload"],
+      "env": ["QV_COSIGNER_GUARD_DSN", "QV_GATEWAY_GUARD_DSN", "QV_KAFKA_BROKERS", "QV_COSIGNER_SOCKET_CERT", "QV_COSIGNER_SOCKET_KEY", "QV_COSIGNER_PARTY_PINS", "QV_COSIGNER_METRICS_LISTEN", "QV_HEALTH_LISTEN", "QV_LINK_TLS_CERT", "QV_LINK_TLS_KEY", "QV_LINK_TLS_CA", "QV_LINK_TLS_RELOAD"],
+      "requiredFlags": ["config", "socket"],
+      "requiredAny": [["guard-dsn", "QV_COSIGNER_GUARD_DSN"], ["brokers", "QV_KAFKA_BROKERS"], ["tls-cert", "QV_TLS_CERT"], ["link-tls-cert", "QV_LINK_TLS_CERT"], ["socket-cert", "QV_COSIGNER_SOCKET_CERT"], ["party-pins", "QV_COSIGNER_PARTY_PINS"]],
+      "pathFlags": ["config", "socket", "tls-cert", "tls-key", "tls-ca", "link-tls-cert", "link-tls-key", "link-tls-ca", "socket-cert", "socket-key"],
+      "pathEnv": ["QV_TLS_CERT", "QV_TLS_KEY", "QV_TLS_CA", "QV_LINK_TLS_CERT", "QV_LINK_TLS_KEY", "QV_LINK_TLS_CA", "QV_COSIGNER_SOCKET_CERT", "QV_COSIGNER_SOCKET_KEY"],
+      "listen": { "ports": 0 },
+      "loopbackOnly": ["metrics-listen", "QV_COSIGNER_METRICS_LISTEN"]
+    },
+    "mpc-party-dev": {
+      "zone": "signing",
+      "flags": ["config", "health-listen"],
+      "env": ["QV_HEALTH_LISTEN", "QV_ENV", "SOFTHSM2_CONF"],
+      "requiredFlags": ["config"],
+      "requiredAny": [],
+      "pathFlags": ["config"],
+      "pathEnv": ["SOFTHSM2_CONF"],
+      "listen": { "ports": 0 },
+      "noTLSEnv": true
     }
   },
   "externalImages": {}
