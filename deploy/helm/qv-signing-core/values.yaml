@@ -99,7 +99,7 @@ signedSettings:
     tool: route                  # route | fee-caps | approvers | keysets
     action: apply                # show | apply
     revision: "1"                # the Job name carries it: a new change is a new revision (Jobs are immutable)
-    configMap: ""                # REQUIRED when enabled: a ConfigMap holding the signed change files, created with kubectl create configmap --from-file
+    configMap: ""                # REQUIRED when enabled: an IMMUTABLE ConfigMap holding the signed change files, its name ending in -<10 hex hash of the files> (README "Signed settings")
     files: []                    # the file names in that ConfigMap, passed to the tool in this order (apply)
     extraArgs: []                # e.g. ["-chain", "btc-main"] for fee-caps
     activeDeadlineSeconds: 300

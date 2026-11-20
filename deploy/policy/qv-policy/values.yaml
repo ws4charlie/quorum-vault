@@ -1,0 +1,70 @@
+# qv-policy: production defaults. One release per cluster, installed by that cluster's own operators (not by the application charts' pipeline).
+# Required (the chart refuses to render without them): clusterKind, namespaces, registry, and for the signing kinds configWriters. See README.md.
+
+# Which cluster this is: business | signing-core | party | broker. "party" is the cluster of ONE party (B or C); "signing-core" is the gateway and party A.
+clusterKind: ""
+# production | kind. kind relaxes exactly what a local cluster cannot meet: digests, signatures, the SoftHSM/dev switches, the config-writer list. Nothing else.
+environment: production
+
+# The namespaces that hold QuorumVault workloads. The chart creates (or adopts) them and labels them: Pod Security `restricted` (enforced) and
+# `quorumvault.io/policy: enforced`, which is what every binding below selects on. A party or broker cluster has exactly ONE; signing-core at most two (gateway, party A).
+namespaces: []
+
+# Image rules. Every container (init and ephemeral too) must come from this registry prefix, by digest in production.
+registry: ""
+requireDigest: true
+
+# Pod Security Admission. The version is pinned so a Kubernetes upgrade cannot change what `restricted` means without a values change.
+pss: { level: restricted, version: v1.31 }
+
+# Deny = refuse. Warn = admit and warn + audit (for a trial run of a new rule set; production must be Deny).
+enforcement: Deny
+
+# Image signatures (cosign, checked by Kyverno at admission: ValidatingAdmissionPolicy cannot reach a registry). Images are signed keyless by the manual publish job of
+# .github/workflows/images.yml (GitHub OIDC): the identity below is that workflow. mode "key" is for a signing key you hold (cosign public key).
+signature:
+  enabled: true
+  mode: keyless
+  keyless:
+    issuer: https://token.actions.githubusercontent.com
+    subjectRegExp: '^https://github\.com/ws4charlie/quorum-vault/\.github/workflows/images\.yml@refs/heads/main$'
+    rekorUrl: https://rekor.sigstore.dev
+  key:
+    publicKey: ""
+    rekorUrl: https://rekor.sigstore.dev
+  webhookTimeoutSeconds: 15
+
+# Who may create, change or delete a ConfigMap in our namespaces (signing kinds). Usernames and groups as the API server sees them, e.g. the GitOps controller's
+# service account `system:serviceaccount:flux-system:kustomize-controller`. Empty = nobody (the chart refuses empty in production for a signing kind).
+configWriters: { users: [], groups: [] }
+# ConfigMaps the rules ignore (created by the control plane, never mounted by our pods).
+exemptConfigMaps: [kube-root-ca.crt]
+
+# Signing kinds: a pod gets no ServiceAccount token unless its ServiceAccount is listed here (none of our charts need one).
+serviceAccountTokenAllowed: []
+
+# Who may exec, attach, port-forward and add ephemeral (debug) containers in a signing cluster: members of this group only. The group is mapped from cloud IAM
+# by the two-person break-glass procedure (docs/runbooks/break-glass.md). Admission checks the group; RBAC decides who is in it.
+breakGlass:
+  group: "qv:break-glass"
+  subjects: []            # who gets the break-glass role in our namespaces. Empty = bound to nobody (the default; the chart renders no binding)
+readers:
+  groups: ["qv:readers"]  # read-only access in our namespaces (no Secrets, no exec)
+
+# Development switches (production only). The binaries treat QV_ENV after trim + lower-case, and anything but dev/test as production; this chart is stricter: QV_ENV may be
+# absent or one of prodEnvValues, so a spelling the binary reads as "dev" can never slip through. devSwitches = every variable the binaries read that loosens a check
+# (QV_ALLOW_PLAINTEXT, QV_DEV_ACTOR_HEADER, QV_OIDC_TEST_JWKS, SOFTHSM2_CONF, QV_FAILPOINT): refused in any env, ConfigMap key or value source. devFlags = their command-line twins.
+prodEnvValues: ["", "production", "prod"]
+devSwitches: [QV_ALLOW_PLAINTEXT, QV_DEV_ACTOR_HEADER, QV_OIDC_TEST_JWKS, SOFTHSM2_CONF, QV_FAILPOINT]
+devFlags: [dev-actor-header, oidc-test-jwks]
+# envFrom may name only ConfigMaps whose name matches one of these (the env ConfigMaps the charts render: <release>-<component>-env, with a hash in signing clusters).
+# Their contents are checked by qv-configmaps. Secrets and prefixes are never allowed in envFrom.
+envFromConfigMaps: ['^[a-z0-9.-]+-env(-[0-9a-f]{10})?$']
+
+# LoadBalancer Services: refused unless they carry quorumvault.io/endpoint: private AND every annotation listed here (the cloud's "internal" switch). A list, so another
+# cloud replaces it whole instead of merging with the AWS default. AWS (Load Balancer Controller): type external makes it honour the scheme; without it the in-tree
+# provider ignores the scheme annotation and the load balancer is public. Empty list = no LoadBalancer allowed at all.
+loadBalancer:
+  internalAnnotations:
+    - { key: service.beta.kubernetes.io/aws-load-balancer-type, value: external }
+    - { key: service.beta.kubernetes.io/aws-load-balancer-scheme, value: internal }

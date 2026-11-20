@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -516,7 +517,7 @@ func TestCertsTrustBundles(t *testing.T) {
 		var got []string
 		for _, o := range mustRender(t, "values.yaml", "--set", "cluster="+c, "--set-file", "trust.business="+pemFile, "--set-file", "trust.signing="+pemFile) {
 			if o.Kind == "ConfigMap" {
-				got = append(got, o.Metadata.Name)
+				got = append(got, regexp.MustCompile(`-[0-9a-f]{10}$`).ReplaceAllString(o.Metadata.Name, "")) // the name ends in a content hash
 				if s, _ := o.Data["ca.crt"].(string); !strings.HasPrefix(s, "-----BEGIN CERTIFICATE-----") {
 					t.Errorf("%s: %s has no ca.crt", c, o.Metadata.Name)
 				}
