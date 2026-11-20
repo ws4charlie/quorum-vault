@@ -65,6 +65,10 @@ make test-e2e-all
 
 The first command builds the MPC library once, which takes a few minutes. The second runs every test group CI runs, on local chains, in about ten minutes. Developer setup is in [CONTRIBUTING.md](CONTRIBUTING.md); runbooks are in [docs/runbooks](docs/runbooks) and measured numbers in [docs/measurements](docs/measurements).
 
+## Releases
+
+QuorumVault ships as container images, one per binary, public on `ghcr.io`. A release is manual: a version tag on `main`, a workflow run, a signed manifest of image digests that the Helm charts use. The steps, the checks and the rollback are in [docs/runbooks/release.md](docs/runbooks/release.md).
+
 ## Status
 
 | Verified | How |
