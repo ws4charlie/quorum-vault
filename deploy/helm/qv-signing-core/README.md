@@ -82,7 +82,7 @@ The gateway reads the job queue from the **business Postgres** (role `qv_gateway
 
 The gateway reaches the **caller port** of party A (this cluster), of party B, and, for the route monitor, of party C: `network.parties.{a,b,c}` (peers and port). B and C are private endpoint addresses. Their addresses and pins are in the signing config (`signers.*.coordinators`, `mpc_route.parties`); the gateway's client certificate and key paths in that file point at `/etc/qv/tls/tls.crt` and `tls.key`.
 
-**What the party chart (D7) must provide** so that A accepts the gateway: pods labelled `app.kubernetes.io/name: qv-party` and `quorumvault.io/party: a` (the default of `network.parties.a.peers`; change it if the labels differ), and an ingress rule that admits pods labelled `app.kubernetes.io/component: gateway` and `quorumvault.io/zone: signing` on the caller port. This chart adds only the gateway's egress; the namespace default deny means A's ingress is A's chart's job. Both charts may render a default-deny policy: two identical policies are harmless.
+**What the party chart (D7) must provide** so that A accepts the gateway: pods labelled `app.kubernetes.io/name: qv-party` and `quorumvault.io/party: "A"` (the default of `network.parties.a.peers`; change it if the labels differ), and an ingress rule that admits pods labelled `app.kubernetes.io/component: gateway` and `quorumvault.io/zone: signing` on the caller port (the party chart takes this from `network.callerIngress.from`, which the operator sets; A's caller port is 7001 by default). This chart adds only the gateway's egress; the namespace default deny means A's ingress is A's chart's job. Both charts may render a default-deny policy: two identical policies are harmless.
 
 ## Signed settings
 

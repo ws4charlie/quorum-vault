@@ -1,0 +1,4 @@
+# Made-up digests so the production values render in the checks (the shipped all-zero ones are refused by the chart).
+images:
+  party:    { digest: "sha256:3333333333333333333333333333333333333333333333333333333333333333" }
+  cosigner: { digest: "sha256:4444444444444444444444444444444444444444444444444444444444444444" }

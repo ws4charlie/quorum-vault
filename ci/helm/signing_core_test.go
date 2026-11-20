@@ -85,7 +85,7 @@ func dig(v any, path ...string) any {
 
 func list(v any) []any { l, _ := v.([]any); return l }
 
-func str(v any) string { s, _ := v.(string); return s }
+func scStr(v any) string { s, _ := v.(string); return s }
 
 // ---- the checks of this chart ----
 
@@ -133,7 +133,7 @@ func checkSigning(objs []Obj, op scOpts) []string {
 					add("%s: an egress rule with no ports admits every port", id)
 				}
 				for _, to := range list(dig(r, "to")) {
-					if c := str(dig(to, "ipBlock", "cidr")); c == "0.0.0.0/0" || c == "::/0" {
+					if c := scStr(dig(to, "ipBlock", "cidr")); c == "0.0.0.0/0" || c == "::/0" {
 						add("%s: egress to %s (no internet egress from a signing cluster)", id, c)
 					}
 				}
@@ -471,7 +471,7 @@ func TestSigningCoreRollout(t *testing.T) {
 			}
 		}
 		m := asMap(dep)
-		typ := str(dig(m, "strategy", "type"))
+		typ := scStr(dig(m, "strategy", "type"))
 		replicas := dig(m, "replicas")
 		if vf.kind {
 			if typ != "Recreate" || replicas != 1 || pdb {
@@ -495,7 +495,7 @@ func TestSigningCoreProbesAndShutdown(t *testing.T) {
 			m := asMap(o)
 			gw := list(dig(m, "template", "spec", "containers"))[0]
 			for probe, path := range map[string]string{"startupProbe": "/readyz", "readinessProbe": "/readyz", "livenessProbe": "/livez"} {
-				if str(dig(gw, probe, "httpGet", "path")) != path || str(dig(gw, probe, "httpGet", "port")) != "health" {
+				if scStr(dig(gw, probe, "httpGet", "path")) != path || scStr(dig(gw, probe, "httpGet", "port")) != "health" {
 					t.Errorf("%s %s: want httpGet %s on the health port", vf.name, probe, path)
 				}
 			}

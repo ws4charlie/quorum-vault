@@ -90,6 +90,9 @@ type Options struct {
 	// signer and the signer of the deposit key tree. ECDSA chains use the signers argument of New.
 	MessageSigners map[string]signer.MessageSigner
 	DepositSigners map[string]signer.MessageDeriver
+	// Generations builds the signer of a generation of an EVM hot shard other than the first (gensigners.go). Nil: the zone signs from the configured
+	// key of each partition only.
+	Generations GenerationSigner
 }
 
 // Gateway claims sign jobs and signs the ones it independently approves.
@@ -101,6 +104,7 @@ type Gateway struct {
 	dec     *Decider
 	jobs    *pgxpool.Pool // business database, role qv_gateway
 	opt     Options
+	gens    *genSigners // nil without Options.Generations
 
 	inflight sync.WaitGroup // signer calls still running, abandoned ones included
 
@@ -135,7 +139,11 @@ func New(cfg *Config, codecs map[string]ChainCodec, signers map[string]signer.Si
 		opt.Now = time.Now
 	}
 	dec := NewDecider(cfg, codecs, guard, ModeGateway, opt.Now)
-	return &Gateway{cfg: cfg, codecs: codecs, signers: signers, guard: guard, dec: dec, jobs: jobs, opt: opt}, nil
+	g := &Gateway{cfg: cfg, codecs: codecs, signers: signers, guard: guard, dec: dec, jobs: jobs, opt: opt}
+	if opt.Generations != nil {
+		g.gens = &genSigners{build: opt.Generations}
+	}
+	return g, nil
 }
 
 type discard struct{}
@@ -240,6 +248,12 @@ func (g *Gateway) evaluate(ctx context.Context, job signjob.Job) (sig []byte, re
 	}
 	var pub *ecdsa.PublicKey
 	s := g.signers[job.PartitionID]
+	if s != nil {
+		var err error
+		if s, err = g.signerFor(ctx, job, s); err != nil {
+			return nil, false, err
+		}
+	}
 	if d, ok := s.(signer.Deriver); ok {
 		// A signer for a key tree: the job names its key by path, and that key is the one that would sign.
 		kp, ok := g.codecs[job.Chain].(KeyPathCodec)

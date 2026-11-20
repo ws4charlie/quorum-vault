@@ -15,6 +15,13 @@ import (
 // signers section. P5 replaces this backend; the Gateway only sees signer.Signer.
 // Every hot partition in the chain configs must have a signer.
 func HSMSigners(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer, func(), error) {
+	out, _, closeAll, err := HSMSignersWithGenerations(cfg, lib, pin)
+	return out, closeAll, err
+}
+
+// HSMSignersWithGenerations is HSMSigners that also returns the builder of the signers of later generations of a shard (gensigners.go), which opens
+// their keys in the tokens this call opened.
+func HSMSignersWithGenerations(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer, GenerationSigner, func(), error) {
 	tokens := map[string]*hsm.Token{}
 	closeAll := func() {
 		for _, t := range tokens {
@@ -37,7 +44,7 @@ func HSMSigners(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer
 			t, err := lib.OpenToken(sf.Token, pin)
 			if err != nil {
 				closeAll()
-				return nil, nil, fmt.Errorf("gateway: open token %q: %w", sf.Token, err)
+				return nil, nil, nil, fmt.Errorf("gateway: open token %q: %w", sf.Token, err)
 			}
 			tokens[sf.Token], tok = t, t
 		}
@@ -45,12 +52,12 @@ func HSMSigners(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer
 		pub, err2 := hex.DecodeString(sf.PublicKey)
 		if err1 != nil || err2 != nil || len(id) == 0 {
 			closeAll()
-			return nil, nil, fmt.Errorf("gateway: signer %q: key_id and public_key must be hex", p)
+			return nil, nil, nil, fmt.Errorf("gateway: signer %q: key_id and public_key must be hex", p)
 		}
 		s, err := hsmsigner.New(tok, domain.Key{ID: p, Backend: domain.BackendHSM, Curve: domain.CurveSecp256k1, HSMKeyID: id, PublicKey: pub})
 		if err != nil {
 			closeAll()
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		out[p] = s
 	}
@@ -58,18 +65,18 @@ func HSMSigners(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer
 		for p := range cc.EVM.HotAddresses {
 			if out[p] == nil && cfg.Signers[p].Backend != "mpc" {
 				closeAll()
-				return nil, nil, fmt.Errorf("gateway: chain %q: hot partition %q has no signer", name, p)
+				return nil, nil, nil, fmt.Errorf("gateway: chain %q: hot partition %q has no signer", name, p)
 			}
 			if out[p] == nil {
 				continue
 			}
 			if err := (&EVMCodec{}).CheckSigner(TxInfo{Sender: cc.EVM.HotAddresses[p].Hex()}, out[p].PublicKey()); err != nil {
 				closeAll()
-				return nil, nil, fmt.Errorf("gateway: partition %q: %w", p, err)
+				return nil, nil, nil, fmt.Errorf("gateway: partition %q: %w", p, err)
 			}
 		}
 	}
-	return out, closeAll, nil
+	return out, HSMGenerationSigner(cfg, tokens), closeAll, nil
 }
 
 // HasHSMSigners reports whether any partition uses the HSM backend (the PKCS#11 library is only loaded then).

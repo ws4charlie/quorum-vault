@@ -117,7 +117,7 @@ network:
   kafka:  { peers: [], port: 9092 }                # REQUIRED
   # The parties' caller ports. A: this cluster (chart qv-party). B and C: private endpoints. C is optional (the route monitor probes it).
   parties:
-    a: { peers: [{ podSelector: { matchLabels: { app.kubernetes.io/name: qv-party, quorumvault.io/party: a } } }], port: 7001 }
+    a: { peers: [{ podSelector: { matchLabels: { app.kubernetes.io/name: qv-party, quorumvault.io/party: "A" } } }], port: 7001 }
     b: { peers: [], port: 7002 }                   # REQUIRED
     c: { peers: [], port: 7003 }
   metricsRemoteWrite: { peers: [], ports: [443] }  # REQUIRED when metrics.agent.enabled

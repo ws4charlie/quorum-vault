@@ -194,6 +194,10 @@ CREATE TABLE IF NOT EXISTS keyset_changes (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- How to sign with a candidate generation (see KeysetChange): empty when the change names none.
+ALTER TABLE keyset_changes ADD COLUMN IF NOT EXISTS key_ref text NOT NULL DEFAULT '';
+ALTER TABLE keyset_changes ADD COLUMN IF NOT EXISTS public_key text NOT NULL DEFAULT '';
+
 CREATE OR REPLACE TRIGGER keyset_changes_no_update_delete
     BEFORE UPDATE OR DELETE ON keyset_changes
     FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();

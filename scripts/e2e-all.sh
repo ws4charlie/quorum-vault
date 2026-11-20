@@ -8,13 +8,15 @@
 # its own anvil and/or bitcoind (tests mine, reorg, restart and fund), and its own SoftHSM token store. Temporal and Redpanda are one
 # shared pair: the tests name their task queues, databases and audit sources with random suffixes. A lane runs its groups one after
 # another; lanes run at the same time. Nothing the single targets use is touched: every port is in a separate range
-# (QV_E2E_PORT_BASE, default 41000), every container is in a compose project named qve2e-*, and the Makefile targets run as they are.
+# (this checkout's block of 100 from scripts/e2e-lane.sh; QV_E2E_PORT_BASE moves it), every container is in a compose project named qve2e-<checkout>-*
+# (two worktrees can run at the same time; scripts/e2e-lane.sh limits how many lanes run at once on the machine), and the Makefile targets run as they are.
 #
 # Needs what the single targets need: `make softhsm mpc-build`, Docker, softhsm2-util, Go. Logs: data/e2e-all/<time>/<group>.log.
 # Exit code: 0 only if every group passed. Ctrl-C stops the groups and removes every container it started.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
+. "$ROOT/scripts/e2e-lane.sh" # this checkout's project name and port block, and the machine-wide limit on running lanes
 
 # name|services|weight (seconds in a CI run, for balancing)|QV_E2E_TIMEOUT_SCALE (CI's value)|command
 # services: p postgres, a anvil, b bitcoind, s solana-test-validator, i Temporal and Redpanda, k Keycloak (one, shared like Temporal). Ordered by weight, heaviest first.
@@ -53,8 +55,8 @@ mpc-signing|pa|74|1|make test-mpc
 ALL_GROUPS="$(printf '%s\n' "$GROUP_TABLE" | grep '|' | sort -t'|' -k3,3 -rn | cut -d'|' -f1 | tr '\n' ' ')"
 
 LANES="${LANES:-8}"
-BASE="${QV_E2E_PORT_BASE:-41000}"
-PROJ="qve2e"
+BASE="$(lane_port_base)"
+PROJ="${COMPOSE_PROJECT_NAME:-$(lane_project)}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="${QV_E2E_OUT:-$ROOT/data/e2e-all/$STAMP}"
 
@@ -92,6 +94,7 @@ field() { # field <group> <n>: the n-th |-separated field of the group's table l
 ngroups=$(printf '%s\n' $selected | wc -l | tr -d ' ')
 [ "$LANES" -gt "$ngroups" ] && LANES="$ngroups"
 [ "$LANES" -ge 1 ] || die "LANES must be at least 1"
+[ "$LANES" -le 8 ] || die "LANES is at most 8 (each lane has ten ports in the checkout's block)"
 
 # ---- lanes: heaviest group first, each to the lane with the least weight so far ----
 # The Solana validator is the heaviest container (an x86_64 binary, emulated on Apple silicon: ~1.3 GB and over one core each), so only the first
@@ -203,8 +206,8 @@ cleanup() {
   say "stopping the services this run started..."
   down_all
 }
-trap 'cleanup; exit 130' INT TERM
-trap 'cleanup' EXIT
+trap 'cleanup; lane_release; exit 130' INT TERM
+trap 'cleanup; lane_release' EXIT
 set -m # each lane in its own process group, so one kill reaches the group's go test, make and children
 
 # ---- go ----
@@ -217,6 +220,7 @@ mkdir -p "$OUT"
 # Fresh certificate authorities (one per trust zone) and short-lived certificates for this run; every group's processes and the Postgres servers use them.
 export QV_PKI_DIR="$OUT/pki"
 ./scripts/pki.sh >"$OUT/pki.log" 2>&1 || die "making the TLS certificates failed (see $OUT/pki.log)"
+lane_acquire "$LANES" "e2e-all:$(printf '%s' $selected | tr ' ' ',')" || die "no lane slot"
 check_ports
 started=1
 say "e2e-all: $ngroups groups on $LANES lanes; logs and results in $OUT"

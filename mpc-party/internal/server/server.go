@@ -59,6 +59,8 @@ type Server struct {
 	linksUp    map[string]bool
 	kick       chan struct{}
 	loopCancel context.CancelFunc
+	gate       *sealerGate // attested sealer: the party is not ready until it holds its data keys (nil for the other sealers)
+	gateCancel context.CancelFunc
 	stats      frameStats
 	fails      *failStats // failed sessions by side, op, suspected peer and kind (read-only metrics)
 	metricsLn  net.Listener
@@ -128,7 +130,7 @@ func New(o Options) (srv *Server, err error) {
 	}
 	st := o.Store
 	if st == nil {
-		sealer, err := NewSealer(c.Sealer)
+		sealer, err := NewSealerForRole(c.Role, c.Sealer)
 		if err != nil {
 			return nil, err
 		}
@@ -145,11 +147,16 @@ func New(o Options) (srv *Server, err error) {
 	if err != nil {
 		return nil, err
 	}
-	fz, err := newFileFreeze(c.DataDir)
+	var fz *fileFreeze
+	if fs, ok := st.(*FileStore); ok {
+		fz, err = newFileFreezeOn(fs)
+	} else {
+		fz, err = newFileFreeze(c.DataDir)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return &Server{dataLock: lock, cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
+	return &Server{gate: newSealerGate(st, c.Role, lg), dataLock: lock, cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
 		fails: newFailStats(c.Role), cache: newKeyCache(), tcache: newTKeyCache(), rts: map[string]*ksRT{}, kick: make(chan struct{}, 1), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
 		replay: newReplayCache(c.Limits.ReplayCacheSize), inflight: map[string]*flight{}}, nil
 }
@@ -193,6 +200,11 @@ func (s *Server) Start() error {
 
 	if err := s.startMetrics(); err != nil {
 		return err
+	}
+	if s.gate != nil { // the attested sealer: fetch the data keys in the background; the party is not ready until they are here
+		gctx, gcancel := context.WithCancel(context.Background())
+		s.gateCancel = gcancel
+		go s.gate.run(gctx)
 	}
 	s.callerLn, err = net.Listen("tcp", c.CallerListen)
 	if err != nil {
@@ -307,6 +319,9 @@ func (s *Server) Shutdown(ctx context.Context) {
 	if s.loopCancel != nil {
 		s.loopCancel()
 	}
+	if s.gateCancel != nil {
+		s.gateCancel()
+	}
 	s.stopMu.Lock()
 	if s.stopped {
 		s.stopMu.Unlock()
@@ -344,6 +359,9 @@ func (s *Server) Shutdown(ctx context.Context) {
 	s.stopMetrics()
 	s.cache.wipeAll()
 	s.tcache.wipeAll()
+	if s.gate != nil {
+		s.gate.as.Close() // wipes every data key
+	}
 	s.dataLock.release() // last: nothing writes to the directory after this
 	s.log.Info("stopped, keysets wiped")
 }

@@ -5,9 +5,13 @@
 //	                 | -action activate | retire
 //	                 | -action start-draining -successor H -cap ASSET=BASE_UNITS [-cap ...]
 //	                 | -action mark-compromised [-successor H -cap ASSET=BASE_UNITS ...]
+//	                 | -action set-drain-caps -cap ASSET=BASE_UNITS [-cap ...]     (the new total each named asset's drains may move)
+//	                 register-candidate also takes -key-ref REF -public-key HEX (how the zone signs from the new key)
 //	                 [-signed-at UNIX] [-out F]       (on the operator's machine; no database)
 //	qv-keysets sign  -operator NAME -key FILE -join F [-out F]    add this operator's signature to a change file another operator wrote
 //	qv-keysets apply -config C -guard-dsn ... F...    join the signature files of one change and apply it to every guard database
+//	qv-keysets party-auth -key FILE -op dkg|refresh|unfreeze -keyset ID [-out F]   an operator's admin authorisation for the MPC parties (valid for minutes;
+//	                 qv-rekey dkg takes the file)
 //
 // The keyset state of a hot shard decides what the zone signs for it, drains included. Only operators (a key set of their own in the zone config's
 // "operators" section, never the approvers) change it: min_operators distinct operators per change. A change goes into the guard database of the gateway
@@ -29,6 +33,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/internal/db"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 )
 
 func main() {
@@ -45,6 +50,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "sign":
 		return sign(args[1:])
+	case "party-auth":
+		return partyAuth(args[1:])
 	case "show", "apply":
 		return withGuards(args[0], args[1:])
 	}
@@ -77,10 +84,12 @@ func sign(args []string) error {
 	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
 	operator := fs.String("operator", "", "operator name in the zone config")
 	keyFile := fs.String("key", "", "file with the operator's Ed25519 private key, hex")
-	action := fs.String("action", "", "register-candidate, activate, start-draining, retire or mark-compromised")
+	action := fs.String("action", "", "register-candidate, activate, start-draining, retire, mark-compromised or set-drain-caps")
 	shard := fs.String("shard", "", "the shard ID, entity/chain/pool/number (not a partition ID)")
 	gen := fs.Int("generation", 0, "the generation the action is about")
 	address := fs.String("address", "", "register-candidate: the new generation's address")
+	keyRef := fs.String("key-ref", "", "register-candidate: the key's reference in the zone's signer (MPC keyset ID, or HSM CKA_ID in hex)")
+	publicKey := fs.String("public-key", "", "register-candidate: the key's 65-byte uncompressed secp256k1 public key, hex (must hash to -address)")
 	successor := fs.Int("successor", 0, "start-draining, mark-compromised: the generation a drain pays")
 	var caps listFlag
 	fs.Var(&caps, "cap", "start-draining, mark-compromised with a successor: ASSET=BASE_UNITS, the most all drains of that asset from this generation may move (repeat)")
@@ -112,7 +121,7 @@ func sign(args []string) error {
 		if *action == "" || *shard == "" || *gen < 1 || *seq < 1 {
 			return fmt.Errorf("-action, -shard, -generation and -seq are required")
 		}
-		c = gateway.KeysetChange{Action: *action, Shard: *shard, Generation: *gen, Address: *address, Successor: *successor, Seq: *seq, SignedAt: *signedAt}
+		c = gateway.KeysetChange{Action: *action, Shard: *shard, Generation: *gen, Address: *address, KeyRef: *keyRef, PublicKey: *publicKey, Successor: *successor, Seq: *seq, SignedAt: *signedAt}
 		if c.SignedAt == 0 {
 			c.SignedAt = time.Now().Unix()
 		}
@@ -143,8 +152,13 @@ func describe(c gateway.KeysetChange) string {
 	if c.Address != "" {
 		s += ", address " + c.Address
 	}
+	if c.KeyRef != "" {
+		s += ", key " + c.KeyRef
+	}
 	if c.Successor > 0 {
 		s += fmt.Sprintf(", successor generation %d, caps %v", c.Successor, c.Caps)
+	} else if len(c.Caps) > 0 {
+		s += fmt.Sprintf(", caps %v", c.Caps)
 	}
 	return s
 }
@@ -228,6 +242,9 @@ func show(ctx context.Context, cfg *gateway.Config, stores []store) error {
 		for _, shard := range v.Shards() {
 			for _, e := range v.Generations(shard) {
 				line := fmt.Sprintf("%-12s %s generation %d  %-11s %s", "", shard, e.Generation, e.State, e.Address)
+				if e.KeyRef != "" {
+					line += "  key " + e.KeyRef
+				}
 				if e.Successor > 0 {
 					line += fmt.Sprintf("  drains into generation %d", e.Successor)
 					for a, c := range e.Caps {
@@ -263,4 +280,32 @@ func apply(ctx context.Context, cfg *gateway.Config, stores []store, c gateway.K
 		return fmt.Errorf("not applied to %s: until it is applied to all, a drain waits; fix the cause and run apply again", strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// partyAuth writes an operator's authorisation for one admin call on the MPC parties (api/admin: an Ed25519 signature over operation, keyset and time). The
+// parties accept it for a few minutes and once: make it right before qv-rekey dkg needs it.
+func partyAuth(args []string) error {
+	fs := flag.NewFlagSet("party-auth", flag.ContinueOnError)
+	keyFile := fs.String("key", "", "file with the operator's Ed25519 private key, hex")
+	op := fs.String("op", "dkg", "dkg, refresh or unfreeze")
+	keyset := fs.String("keyset", "", "the keyset ID")
+	out := fs.String("out", "", "write the file here (default stdout)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *keyFile == "" || *keyset == "" {
+		return fmt.Errorf("-key and -keyset are required")
+	}
+	priv, err := readKey(*keyFile)
+	if err != nil {
+		return err
+	}
+	a := admin.Sign(priv, *op, *keyset, time.Now())
+	j, _ := json.MarshalIndent(map[string]any{"op": *op, "keyset": *keyset, "unix_seconds": a.UnixSeconds,
+		"public_key": hex.EncodeToString(a.PublicKey), "signature": hex.EncodeToString(a.Signature)}, "", "  ")
+	if *out == "" {
+		fmt.Println(string(j))
+		return nil
+	}
+	return os.WriteFile(*out, j, 0o600)
 }

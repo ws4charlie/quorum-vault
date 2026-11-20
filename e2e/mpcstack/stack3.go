@@ -255,6 +255,9 @@ func (s *Stack3) ready(all bool) bool {
 	return true
 }
 
+// AdminSeedHex is the operator's admin key (the seed, hex) for a key file: `qv-keysets party-auth` makes the authorisation of a DKG from it.
+func (s *Stack3) AdminSeedHex() string { return hex.EncodeToString(s.admin.Seed()) }
+
 func (s *Stack3) AdminAuth(op, keyset string) *pb.AdminAuth {
 	return admin.Sign(s.admin, op, keyset, time.Now().Add(time.Duration(s.adminSkew.Add(1))*time.Second))
 }
