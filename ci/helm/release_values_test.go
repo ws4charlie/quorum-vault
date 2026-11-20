@@ -36,6 +36,25 @@ func releaseSet(t *testing.T) map[string]string {
 	return set
 }
 
+func TestMain(m *testing.M) {
+	// Every manifest-values run in this package verifies the manifest signature with a stub cosign that succeeds, unless a test sets mvCosign itself.
+	d, err := os.MkdirTemp("", "qv-cosign-stub")
+	if err != nil {
+		panic(err)
+	}
+	p := filepath.Join(d, "cosign")
+	if err := os.WriteFile(p, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o755); err != nil {
+		panic(err)
+	}
+	defaultCosign = p
+	mvCosign = p
+	code := m.Run()
+	os.RemoveAll(d)
+	os.Exit(code)
+}
+
+var defaultCosign string
+
 func TestReleaseSetHasNoDev(t *testing.T) {
 	for n := range releaseSet(t) {
 		if regexp.MustCompile(`-dev($|-)|tee-?sim|softhsm`).MatchString(n) {
@@ -105,6 +124,9 @@ func fakeManifest(t *testing.T, mutate func(relManifest)) (string, map[string]st
 	if err := os.WriteFile(p, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(p+".sigstore.json", []byte("{}"), 0o600); err != nil { // content is irrelevant: the stub cosign decides
+		t.Fatal(err)
+	}
 	return p, digests
 }
 
@@ -116,8 +138,33 @@ func sortStrings(s []string) {
 	}
 }
 
+// stubBin writes an executable shell script and returns its path.
+func stubBin(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("#!/usr/bin/env bash\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// cosignStub stands in for cosign: it logs its arguments to <dir>/cosign.log and succeeds, or fails when failing is set.
+func cosignStub(t *testing.T, dir string, failing bool) string {
+	rc := "0"
+	if failing {
+		rc = "1"
+	}
+	return stubBin(t, dir, "cosign", `echo "$@" >> "`+filepath.Join(dir, "cosign.log")+`"; [ "$1" = verify-blob ] && echo "stub: signature check" >&2; exit `+rc)
+}
+
+var mvCosign string // the stub mvRun uses; set per test by mvWithCosign
+
 func mvRun(args ...string) (string, string, error) {
 	cmd := exec.Command("python3", append([]string{"-I", filepath.Join(imagesDir(), "manifest-values.py")}, args...)...)
+	cmd.Env = os.Environ()
+	if mvCosign != "" {
+		cmd.Env = append(cmd.Env, "QV_COSIGN="+mvCosign)
+	}
 	var ob, eb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &ob, &eb
 	err := cmd.Run()
@@ -243,4 +290,155 @@ func TestManifestValuesMirror(t *testing.T) {
 	if strings.Contains(out, "ghcr.io") {
 		t.Errorf("mirror output still names ghcr.io:\n%s", out)
 	}
+}
+
+// The signature is the root of trust: no bundle, a failing verification, or a manifest naming another repository is refused before anything is used.
+func TestManifestValuesSignatureFailClosed(t *testing.T) {
+	defer func() { mvCosign = defaultCosign }()
+	// missing bundle
+	p, _ := fakeManifest(t, nil)
+	os.Remove(p + ".sigstore.json")
+	if _, eb, err := mvRun(p, "--chart", "qv-party"); err == nil || !strings.Contains(eb, "no signature bundle") {
+		t.Errorf("missing bundle: want refusal, got err=%v stderr=%q", err, eb)
+	}
+	// verification fails
+	p, _ = fakeManifest(t, nil)
+	mvCosign = cosignStub(t, t.TempDir(), true)
+	if out, eb, err := mvRun(p, "--chart", "qv-party"); err == nil || !strings.Contains(eb, "does not verify") || out != "" {
+		t.Errorf("failing cosign: want refusal and no output, got err=%v out=%q stderr=%q", err, out, eb)
+	}
+	// the identity cosign is asked for is built from the constant repository and the version, whatever the manifest says about itself
+	dir := t.TempDir()
+	mvCosign = cosignStub(t, dir, false)
+	p, _ = fakeManifest(t, func(m relManifest) {
+		m["signer"].(map[string]any)["identity"] = "https://github.com/evil/repo/.github/workflows/images.yml@refs/tags/v1.2.3"
+	})
+	if _, eb, err := mvRun(p, "--chart", "qv-party"); err != nil {
+		t.Fatalf("%v %s", err, eb)
+	}
+	log, _ := os.ReadFile(filepath.Join(dir, "cosign.log"))
+	if !strings.Contains(string(log), "--certificate-identity https://github.com/ws4charlie/quorum-vault/.github/workflows/images.yml@refs/tags/v1.2.3 ") ||
+		!strings.Contains(string(log), "--certificate-oidc-issuer https://token.actions.githubusercontent.com") || strings.Contains(string(log), "evil") {
+		t.Errorf("cosign was not asked for the constant identity: %s", log)
+	}
+	// a manifest naming another repository or another registry path
+	for name, mut := range map[string]func(relManifest){
+		"source repository": func(m relManifest) { m["source"].(map[string]any)["repository"] = "https://github.com/evil/repo" },
+		"image repository": func(m relManifest) {
+			m["images"].(map[string]any)["mpc-party"].(map[string]any)["repository"] = "ghcr.io/evil/repo/mpc-party"
+		},
+	} {
+		p, _ := fakeManifest(t, mut)
+		if _, eb, err := mvRun(p, "--chart", "qv-party"); err == nil || !strings.Contains(eb, "repository") {
+			t.Errorf("%s: want refusal, got err=%v stderr=%q", name, err, eb)
+		}
+	}
+}
+
+// verifyEnv builds a fake registry for verify-release.sh: stub cosign (always verifies unless failing) and stub docker answering from a table. It returns the
+// environment and the log of cosign calls.
+func verifyEnv(t *testing.T, digests map[string]string, swap [2]string) ([]string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	reg := "ghcr.io/ws4charlie/quorum-vault/"
+	var tb strings.Builder
+	for n, d := range digests {
+		fmt.Fprintf(&tb, "tag\t%s%s:v1.2.3\t%s\n", reg, n, d)
+		title := n
+		if swap[0] != "" && n == swap[0] {
+			title = swap[1]
+		} else if swap[0] != "" && n == swap[1] {
+			title = swap[0]
+		}
+		fmt.Fprintf(&tb, "title\t%s%s@%s\t%s\n", reg, n, d, title)
+	}
+	table := filepath.Join(dir, "table.tsv")
+	if err := os.WriteFile(table, []byte(tb.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cosignStub(t, dir, false)
+	stubBin(t, dir, "docker", `ref="$4"; fmt="$6"
+case "$fmt" in
+  *Manifest.Digest*) awk -F'\t' -v r="$ref" '$1=="tag" && $2==r {printf "%s", $3}' "$STUB_TABLE" ;;
+  *json\ .Image*) t="$(awk -F'\t' -v r="$ref" '$1=="title" && $2==r {print $3}' "$STUB_TABLE")"; [ -n "$t" ] && printf '{"config":{"Labels":{"org.opencontainers.image.title":"%s"}}}' "$t" || echo null ;;
+  *) echo '{"x":1}' ;;
+esac`)
+	return append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "STUB_TABLE="+table), filepath.Join(dir, "cosign.log")
+}
+
+func verifyRun(env []string, args ...string) (string, error) {
+	cmd := exec.Command(filepath.Join(imagesDir(), "verify-release.sh"), args...)
+	cmd.Env = env
+	var ob bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &ob, &ob
+	err := cmd.Run()
+	return ob.String(), err
+}
+
+func TestVerifyReleaseScript(t *testing.T) {
+	t.Run("good", func(t *testing.T) {
+		p, digests := fakeManifest(t, nil)
+		env, _ := verifyEnv(t, digests, [2]string{})
+		if out, err := verifyRun(env, p); err != nil {
+			t.Fatalf("good manifest refused: %v\n%s", err, out)
+		}
+	})
+	t.Run("missing bundle fails closed", func(t *testing.T) {
+		p, digests := fakeManifest(t, nil)
+		os.Remove(p + ".sigstore.json")
+		env, log := verifyEnv(t, digests, [2]string{})
+		out, err := verifyRun(env, p)
+		if err == nil || !strings.Contains(out, "no signature bundle") {
+			t.Fatalf("want refusal, got err=%v\n%s", err, out)
+		}
+		if b, _ := os.ReadFile(log); len(b) != 0 {
+			t.Errorf("nothing may be checked without the bundle, cosign was called: %s", b)
+		}
+	})
+	t.Run("wrong repository", func(t *testing.T) {
+		for name, mut := range map[string]func(relManifest){
+			"source": func(m relManifest) { m["source"].(map[string]any)["repository"] = "https://github.com/evil/repo" },
+			"image": func(m relManifest) {
+				m["images"].(map[string]any)["qv-core"].(map[string]any)["repository"] = "ghcr.io/evil/repo/qv-core"
+			},
+		} {
+			p, digests := fakeManifest(t, mut)
+			env, log := verifyEnv(t, digests, [2]string{})
+			out, err := verifyRun(env, p)
+			if err == nil || !strings.Contains(out, "FAIL") {
+				t.Errorf("%s: want refusal, got err=%v\n%s", name, err, out)
+			}
+			if b, _ := os.ReadFile(log); strings.Contains(string(b), "evil") {
+				t.Errorf("%s: cosign was asked about the manifest's repository: %s", name, b)
+			}
+		}
+	})
+	t.Run("swapped entries", func(t *testing.T) {
+		// the manifest gives qv-core the digest of qv-worker and the other way round; every signature and tag is fine, only the images' own labels say so
+		p, digests := fakeManifest(t, func(m relManifest) {
+			imgs := m["images"].(map[string]any)
+			a, b := imgs["qv-core"].(map[string]any), imgs["qv-worker"].(map[string]any)
+			a["digest"], b["digest"] = b["digest"], a["digest"]
+		})
+		env, _ := verifyEnv(t, digests, [2]string{})
+		out, err := verifyRun(env, p)
+		if err == nil || !strings.Contains(out, "swapped or wrong entry") {
+			t.Fatalf("want refusal naming the swap, got err=%v\n%s", err, out)
+		}
+	})
+	t.Run("signature does not verify", func(t *testing.T) {
+		p, digests := fakeManifest(t, nil)
+		env, _ := verifyEnv(t, digests, [2]string{})
+		// replace the stub with a failing one (the first PATH entry is the stub directory)
+		var pathDir string
+		for _, e := range env {
+			if strings.HasPrefix(e, "PATH=") {
+				pathDir = strings.SplitN(strings.TrimPrefix(e, "PATH="), string(os.PathListSeparator), 2)[0]
+			}
+		}
+		cosignStub(t, pathDir, true)
+		if out, err := verifyRun(env, p); err == nil || !strings.Contains(out, "does not verify") {
+			t.Fatalf("want refusal, got err=%v\n%s", err, out)
+		}
+	})
 }

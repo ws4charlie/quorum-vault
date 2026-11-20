@@ -13,7 +13,9 @@
 #   REGISTRY    default ghcr.io/<owner>/<repo>, lower-case, from GITHUB_REPOSITORY; each image is $REGISTRY/<name>
 #   PUBLISH     1 = push and sign (needs `docker login` and an OIDC token: id-token: write); anything else = dry run
 #   ONLY        dry run only (refused with PUBLISH=1): build just these images, space-separated, to try the script locally without cb-mpc
-#   OUT         output directory (default: a new temporary directory; the path is printed)
+#   OUT         output directory (default: a new temporary directory; the path is printed). A real release also writes pushed.tsv (each digest as soon as
+#               it is pushed, before its signature) and signed.tsv (after it): the workflow uploads them even when the job fails, as the record of a
+#               half-published release (runbook: "A release failed half way")
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=images.sh
@@ -66,7 +68,7 @@ for name in $images; do
   # A published version is immutable: never push over an existing tag (a second run of the same tag, or a tag that was moved). Not found = fine.
   if [ "$PUBLISH" = 1 ] && docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then echo "publish.sh: $ref already exists: versions are never overwritten (publish a new patch version)" >&2; exit 1; fi
   common=(--file deploy/images/Dockerfile --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" --target "$name" --sbom=true --provenance=mode=max
-          --label "org.opencontainers.image.source=$SOURCE_URL" --label "org.opencontainers.image.revision=$COMMIT" --label "org.opencontainers.image.version=$VERSION"
+          --label "org.opencontainers.image.title=$name" --label "org.opencontainers.image.source=$SOURCE_URL" --label "org.opencontainers.image.revision=$COMMIT" --label "org.opencontainers.image.version=$VERSION"
           --metadata-file "$OUT/$name.metadata.json")
   # The source label links the package to this repository on GitHub (so the workflow's token may write it, and the package page shows the source). The same
   # annotation on the index and the manifests makes it visible to the registry, whose "container image" is the index once an SBOM is attached.
@@ -74,7 +76,10 @@ for name in $images; do
   if [ "$PUBLISH" = 1 ]; then
     docker buildx build "${common[@]}" --output "type=image,name=$ref,push=true,rewrite-timestamp=true,$ann" .
     digest="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["containerimage.digest"])' "$OUT/$name.metadata.json")"
+    # Record the pushed digest BEFORE signing, so a failure later in this script (or in a later job step) never leaves pushed images unrecorded.
+    printf '%s\t%s\n' "$name" "$digest" >>"$OUT/pushed.tsv"
     cosign sign --yes "$REGISTRY/$name@$digest"
+    printf '%s\t%s\n' "$name" "$digest" >>"$OUT/signed.tsv"
   else
     docker buildx build "${common[@]}" --output "type=oci,dest=$OUT/$name.oci.tar,rewrite-timestamp=true,$ann" .
     digest="$(digest_of_oci "$OUT/$name.oci.tar")"

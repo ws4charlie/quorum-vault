@@ -160,5 +160,9 @@ jobs:
         if: always()   # a failed run still leaves what it wrote: the runbook needs it to find what was pushed
         with:
           name: release-${{ needs.gate.outputs.version }}
-          path: ${{ runner.temp }}/release/release-*.json   # the manifest and, beside it, its .sigstore.json bundle
+          # the manifest and its .sigstore.json bundle, and pushed.tsv / signed.tsv: what was pushed and signed, also when this job failed half way
+          path: |
+            ${{ runner.temp }}/release/release-*.json
+            ${{ runner.temp }}/release/*.tsv
           retention-days: 90
+          if-no-files-found: warn

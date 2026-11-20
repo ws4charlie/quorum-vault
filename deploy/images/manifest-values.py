@@ -8,10 +8,15 @@
 Use the files with `helm ... -f images-<chart>.yaml` (last, so they win over the chart's all-zero placeholders). Charts: qv-business, qv-party,
 qv-signing-core. (qv-certs runs no image. The Grafana Alloy image `images.agent` of qv-signing-core is not ours: pin it yourself.)
 
-Refuses: a dry-run manifest, a release candidate (unless --allow-rc, for a staging cluster), an image missing from the manifest, a digest that is not
+FAIL CLOSED: the manifest's own signature (<manifest>.sigstore.json, or --bundle) must exist and verify with cosign against this repository's release workflow
+for the manifest's version BEFORE anything in it is used. The repository, registry path and signer are constants of this file, never read from the manifest.
+(Without that, anyone could hand over a manifest with another repository's digests, or with two images' digests swapped.) `verify-release.sh` also checks every
+image in the registry (signature, label, tag, SBOM): run it before you deploy. Needs cosign on PATH (environment QV_COSIGN names another binary, for tests).
+
+Refuses: an unsigned or wrongly signed manifest, a dry-run manifest, a release candidate (unless --allow-rc, for a staging cluster), an image missing from the manifest, a digest that is not
 sha256:<64 hex> or is all zeros, and a repository that is not the manifest's own unless --registry names the mirror. Needs only python3.
 """
-import argparse, json, os, re, sys
+import argparse, json, os, re, subprocess, sys
 
 # chart -> values key -> image name (deploy/images/images.sh). One place that says which image a chart value runs.
 CHARTS = {
@@ -20,6 +25,9 @@ CHARTS = {
     "qv-party": {"party": "mpc-party", "cosigner": "qv-cosigner"},
     "qv-signing-core": {"gateway": "qv-gateway", "tools": "qv-tools-signing"},
 }
+REPO = "ws4charlie/quorum-vault"
+REGISTRY = "ghcr.io/" + REPO
+ISSUER = "https://token.actions.githubusercontent.com"
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 VERSION = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$")
 
@@ -29,20 +37,38 @@ def die(msg):
     sys.exit(1)
 
 
-def load(path, allow_rc):
+def load(path, bundle, allow_rc):
     try:
         m = json.load(open(path))
     except (OSError, ValueError) as e:
         die("cannot read %s: %s" % (path, e))
-    if m.get("schema") != 1:
-        die("unknown manifest schema %r" % m.get("schema"))
-    if m.get("dryRun"):
-        die("this manifest comes from a dry run: nothing was pushed, its digests name no published image")
-    v = m.get("version", "")
+    v = m.get("version", "") if isinstance(m, dict) else ""
     if not VERSION.match(v):
         die("manifest version %r is not vMAJOR.MINOR.PATCH[-rc.N]" % v)
+    # 0. signature first, nothing else is trusted before it
+    bundle = bundle or path + ".sigstore.json"
+    if not os.path.isfile(bundle):
+        die("no signature bundle %s: an unsigned manifest is not used (fail closed)" % bundle)
+    identity = "https://github.com/%s/.github/workflows/images.yml@refs/tags/%s" % (REPO, v)
+    cmd = [os.environ.get("QV_COSIGN", "cosign"), "verify-blob", "--bundle", bundle, "--certificate-identity", identity, "--certificate-oidc-issuer", ISSUER, path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as e:
+        die("cannot run cosign to verify the manifest: %s" % e)
+    if r.returncode != 0:
+        die("manifest signature does not verify against %s:\n%s" % (identity, r.stderr.strip()))
+    # authentic; still checked against the constants
+    if m.get("schema") != 1:
+        die("unknown manifest schema %r" % m.get("schema"))
+    if m.get("dryRun") is not False:
+        die("this manifest comes from a dry run: nothing was pushed, its digests name no published image")
+    if m.get("source", {}).get("repository") != "https://github.com/" + REPO:
+        die("manifest names repository %r, not %s" % (m.get("source", {}).get("repository"), REPO))
     if "-rc." in v and not allow_rc:
         die("%s is a release candidate: it is for staging; pass --allow-rc to use it anyway" % v)
+    for n, im in m.get("images", {}).items():
+        if im.get("repository") != REGISTRY + "/" + n:
+            die("image %s: repository %r, want %s/%s" % (n, im.get("repository"), REGISTRY, n))
     return m
 
 
@@ -72,8 +98,9 @@ def main():
     ap.add_argument("--out-dir", help="with --all: where the files go (created)")
     ap.add_argument("--registry", help="mirror prefix: repository becomes <prefix>/<image name>; digests are unchanged")
     ap.add_argument("--allow-rc", action="store_true")
+    ap.add_argument("--bundle", help="the manifest's signature bundle (default: <manifest>.sigstore.json)")
     a = ap.parse_args()
-    m = load(a.manifest, a.allow_rc)
+    m = load(a.manifest, a.bundle, a.allow_rc)
     if a.all:
         if not a.out_dir:
             die("--all needs --out-dir")
