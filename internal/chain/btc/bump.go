@@ -116,7 +116,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	sh, ok := a.hotByAddr(ctx, p.Outputs[len(p.Outputs)-1].Address)
+	sh, ok := a.hotByAddr(ctx, tx, p.Outputs[len(p.Outputs)-1].Address)
 	if len(p.Outputs) < 2 || !ok {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: the transaction has no change output to pay a higher fee from", chain.ErrCannotBump)
 	}
@@ -264,7 +264,7 @@ func (a *Adapter) buildSweepReplacement(ctx context.Context, tx pgx.Tx, ownerID 
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	sh, ok := a.hotByAddr(ctx, p.Outputs[0].Address)
+	sh, ok := a.hotByAddr(ctx, tx, p.Outputs[0].Address)
 	if len(p.Outputs) != 1 || !ok {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: a sweep has one output to a shard", chain.ErrCannotBump)
 	}
@@ -319,7 +319,7 @@ func (a *Adapter) buildConsolidateReplacement(ctx context.Context, tx pgx.Tx, ow
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}
-	sh, ok := a.hotByAddr(ctx, p.Outputs[0].Address)
+	sh, ok := a.hotByAddr(ctx, tx, p.Outputs[0].Address)
 	if len(p.Outputs) != 1 || !ok {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: a consolidation has one output to a shard", chain.ErrCannotBump)
 	}

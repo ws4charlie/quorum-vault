@@ -35,7 +35,7 @@ type DrainPlan struct {
 
 // genOfShardAddr says which generation's shard of the partition has this address.
 func (a *Adapter) genOfShardAddr(ctx context.Context, partitionID, addr string) (int, error) {
-	t, err := a.treeStates(ctx)
+	t, err := a.treeStates(ctx, a.pool)
 	if err != nil {
 		return 0, err
 	}

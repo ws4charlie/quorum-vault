@@ -25,7 +25,7 @@ func (a *Adapter) MaxMove(ctx context.Context, partitionID string) (*big.Int, er
 	if err := a.refreshCaps(ctx); err != nil {
 		return nil, err
 	}
-	sh, err := a.shardOf(ctx, partitionID)
+	sh, err := a.shardOf(ctx, a.pool, partitionID)
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +333,7 @@ func (a *Adapter) ChainView(ctx context.Context, addrs []string) (chain.ChainVie
 		if b, ok := v.Balance[ad]; ok {
 			b.Add(b, amt)
 		}
-		if _, hot := a.hotByAddr(ctx, ad); hot {
+		if _, hot := a.hotByAddr(ctx, a.pool, ad); hot {
 			v.Diffs = append(v.Diffs, chain.OutputDiff{Address: ad, Output: k, Detail: "an unspent output on a hot address that the table does not hold"})
 			continue
 		}
@@ -455,7 +455,7 @@ func (a *Adapter) BuildRefill(ctx context.Context, b chain.RefillBuild) (coldsig
 	if err := a.refreshCaps(ctx); err != nil {
 		return coldsign.BTCRequest{}, err
 	}
-	sh, err := a.shardOf(ctx, b.PartitionID)
+	sh, err := a.shardOf(ctx, a.pool, b.PartitionID)
 	if err != nil {
 		return coldsign.BTCRequest{}, err
 	}

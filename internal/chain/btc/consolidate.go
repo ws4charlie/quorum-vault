@@ -45,7 +45,7 @@ func worthSpendingSQL(sh shard) string {
 // smallestWorthSpending reads the partition's available hot outputs that are worth spending at the rate (more than one input costs to add), smallest
 // first, at most limit of them.
 func (a *Adapter) smallestWorthSpending(ctx context.Context, partitionID string, rate uint64, limit int) ([]uint64, error) {
-	sh, err := a.shardOf(ctx, partitionID)
+	sh, err := a.shardOf(ctx, a.pool, partitionID)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +78,7 @@ func (a *Adapter) PlanConsolidation(ctx context.Context, partitionID string) (ch
 	if a.cfg.ConsolidateAbove <= 0 {
 		return none, nil
 	}
-	sh, err := a.shardOf(ctx, partitionID)
+	sh, err := a.shardOf(ctx, a.pool, partitionID)
 	if err != nil {
 		return none, err
 	}
@@ -124,7 +124,7 @@ func (a *Adapter) BuildConsolidation(ctx context.Context, tx pgx.Tx, c chain.Con
 	if a.cfg.ConsolidateAbove <= 0 {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: consolidate_above is 0", ErrConsolidateWait)
 	}
-	sh, err := a.shardOf(ctx, c.PartitionID)
+	sh, err := a.shardOf(ctx, tx, c.PartitionID)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}

@@ -102,7 +102,7 @@ func (a *Adapter) BuildCPFP(ctx context.Context, tx pgx.Tx, ownerKind, ownerID s
 		return chain.UnsignedTx{}, err
 	}
 	n := len(pp.Outputs)
-	sh, ok := a.hotByAddr(ctx, pp.Outputs[n-1].Address)
+	sh, ok := a.hotByAddr(ctx, tx, pp.Outputs[n-1].Address)
 	if n < 2 || !ok {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: the transaction has no change output to spend", chain.ErrCannotBump)
 	}

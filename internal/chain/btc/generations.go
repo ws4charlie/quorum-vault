@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
@@ -66,9 +68,13 @@ func (a *Adapter) shardsOfGen(gen int) ([]shard, error) {
 	return out, nil
 }
 
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
 // treeStates reads the generations of the chain's deposit tree and their states (nil: the registry has no row for it).
-func (a *Adapter) treeStates(ctx context.Context) (map[int]string, error) {
-	rows, err := a.pool.Query(ctx, `SELECT generation, state FROM keysets WHERE shard_id LIKE $1`, partition.DepositTreeLike(a.cfg.Chain))
+func (a *Adapter) treeStates(ctx context.Context, q querier) (map[int]string, error) {
+	rows, err := q.Query(ctx, `SELECT generation, state FROM keysets WHERE shard_id LIKE $1`, partition.DepositTreeLike(a.cfg.Chain))
 	if err != nil {
 		return nil, err
 	}
@@ -90,8 +96,8 @@ func (a *Adapter) treeStates(ctx context.Context) (map[int]string, error) {
 
 // ActiveGeneration is the generation that serves new work: 1 when the registry has no row for the tree, else its active generation, else
 // ErrNoActiveGeneration.
-func (a *Adapter) ActiveGeneration(ctx context.Context) (int, error) {
-	t, err := a.treeStates(ctx)
+func (a *Adapter) ActiveGeneration(ctx context.Context, q querier) (int, error) {
+	t, err := a.treeStates(ctx, q)
 	if err != nil {
 		return 0, err
 	}
@@ -107,8 +113,8 @@ func (a *Adapter) ActiveGeneration(ctx context.Context) (int, error) {
 }
 
 // shardOf is the hot shard of a partition that serves new work: the one under the active generation.
-func (a *Adapter) shardOf(ctx context.Context, partitionID string) (shard, error) {
-	gen, err := a.ActiveGeneration(ctx)
+func (a *Adapter) shardOf(ctx context.Context, q querier, partitionID string) (shard, error) {
+	gen, err := a.ActiveGeneration(ctx, q)
 	if err != nil {
 		return shard{}, err
 	}
@@ -131,11 +137,11 @@ func (a *Adapter) shardOfGen(partitionID string, gen int) (shard, error) {
 
 // hotByAddr finds the hot shard an address belongs to, under any generation of the tree that is not a mere candidate's... (a candidate's shard can be
 // funded before it is active, so it is recognised too).
-func (a *Adapter) hotByAddr(ctx context.Context, addr string) (shard, bool) {
+func (a *Adapter) hotByAddr(ctx context.Context, q querier, addr string) (shard, bool) {
 	if sh, ok := a.byAddr[addr]; ok {
 		return sh, true
 	}
-	t, err := a.treeStates(ctx)
+	t, err := a.treeStates(ctx, q)
 	if err != nil {
 		return shard{}, false
 	}
@@ -163,7 +169,7 @@ func (a *Adapter) HotAddresses(ctx context.Context) ([]string, error) {
 	for _, s := range a.shards {
 		out = append(out, s.address)
 	}
-	t, err := a.treeStates(ctx)
+	t, err := a.treeStates(ctx, a.pool)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +190,7 @@ func (a *Adapter) HotAddresses(ctx context.Context) ([]string, error) {
 
 // HotAddressesOf lists the addresses of one partition's shard under every generation, generation 1 first.
 func (a *Adapter) HotAddressesOf(ctx context.Context, partitionID string) ([]string, error) {
-	t, err := a.treeStates(ctx)
+	t, err := a.treeStates(ctx, a.pool)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +214,7 @@ func (a *Adapter) HotAddressesOf(ctx context.Context, partitionID string) ([]str
 
 // ActiveHotAddress is the address of the partition's shard under the active generation.
 func (a *Adapter) ActiveHotAddress(ctx context.Context, partitionID string) (string, error) {
-	sh, err := a.shardOf(ctx, partitionID)
+	sh, err := a.shardOf(ctx, a.pool, partitionID)
 	return sh.address, err
 }
 

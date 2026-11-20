@@ -39,7 +39,7 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 	if batchID == "" || len(members) == 0 {
 		return BatchBuild{}, errors.New("btc: a batch needs an id and at least one member")
 	}
-	sh, err := a.shardOf(ctx, partitionID)
+	sh, err := a.shardOf(ctx, tx, partitionID)
 	if err != nil {
 		return BatchBuild{}, err
 	}
@@ -234,7 +234,7 @@ func (a *Adapter) BuildBatch(ctx context.Context, tx pgx.Tx, batchID, partitionI
 // lockCandidates reads up to limit of the partition's available hot outputs in the given order and locks them for the caller's transaction, skipping
 // the ones another transaction holds.
 func (a *Adapter) lockCandidates(ctx context.Context, tx pgx.Tx, partitionID, order string, limit int) ([]utxo, error) {
-	sh, err := a.shardOf(ctx, partitionID)
+	sh, err := a.shardOf(ctx, tx, partitionID)
 	if err != nil {
 		return nil, err
 	}

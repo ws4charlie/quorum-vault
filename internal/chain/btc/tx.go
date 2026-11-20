@@ -496,7 +496,7 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 		if n == skip {
 			continue
 		}
-		sh, ok := a.hotByAddr(ctx, o.Address)
+		sh, ok := a.hotByAddr(ctx, tx, o.Address)
 		if !ok {
 			if _, isCold := a.cold[o.Address]; isCold { // an output on the cold address (a move to cold, a refill's change) is a cold output
 				if _, err := tx.Exec(ctx, `INSERT INTO btc_utxos (chain, txid, vout, value, partition_id, path, cold, address) VALUES ($1,$2,$3,$4,'','',true,$5) ON CONFLICT DO NOTHING`,
@@ -516,7 +516,7 @@ func (a *Adapter) Settle(ctx context.Context, tx pgx.Tx, ownerKind, ownerID, txi
 			return err
 		}
 		for n, o := range child.p.Outputs {
-			sh, ok := a.hotByAddr(ctx, o.Address)
+			sh, ok := a.hotByAddr(ctx, tx, o.Address)
 			if !ok {
 				return fmt.Errorf("btc: CPFP child %s pays %s, which is not a hot address of this cell", child.txid, o.Address)
 			}
@@ -585,7 +585,7 @@ func (a *Adapter) RecordFunding(ctx context.Context, tx pgx.Tx, f chain.FundingO
 			a.cfg.Chain, f.TxHash, int64(f.Vout), f.Amount.Int64(), f.Address)
 		return err == nil && tag.RowsAffected() == 1, err
 	}
-	sh, ok := a.hotByAddr(ctx, f.Address)
+	sh, ok := a.hotByAddr(ctx, tx, f.Address)
 	if !ok {
 		return false, fmt.Errorf("btc: %s is not a hot address of this cell", f.Address)
 	}

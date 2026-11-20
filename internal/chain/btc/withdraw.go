@@ -59,7 +59,7 @@ type utxo struct {
 // oldestCannotCarry reports whether the oldest max_inputs available outputs of the partition cannot pay the amount, the fee and the fee-bump reserve (no prefix of them
 // does) while the partition holds more outputs than that, so that taking the largest ones is the only way to pay. Nothing is locked or reserved.
 func (a *Adapter) oldestCannotCarry(ctx context.Context, tx pgx.Tx, partitionID string, amount uint64, destScript, changeScript []byte, rate uint64) (bool, error) {
-	sh, err := a.shardOf(ctx, partitionID)
+	sh, err := a.shardOf(ctx, tx, partitionID)
 	if err != nil {
 		return false, err
 	}
@@ -106,7 +106,7 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 	if kind != "withdrawal" && kind != "to-cold" { // a hot-to-cold move is built like a withdrawal: the shard's inputs, change back to the shard
 		return chain.UnsignedTx{}, errLater
 	}
-	sh, err := a.shardOf(ctx, w.PartitionID)
+	sh, err := a.shardOf(ctx, tx, w.PartitionID)
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}

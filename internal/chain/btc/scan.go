@@ -134,7 +134,7 @@ func (a *Adapter) matchBlock(ctx context.Context, blk Block, h uint64, tip int64
 	hotTx := map[string]bool{}
 	for _, tx := range blk.Tx {
 		for _, o := range tx.Vout {
-			_, hot := a.hotByAddr(ctx, o.ScriptPubKey.Address)
+			_, hot := a.hotByAddr(ctx, a.pool, o.ScriptPubKey.Address)
 			_, cold := a.cold[o.ScriptPubKey.Address]
 			if hot || cold {
 				hotTx[tx.Txid] = true
@@ -166,7 +166,7 @@ func (a *Adapter) matchBlock(ctx context.Context, blk Block, h uint64, tip int64
 	for _, tx := range blk.Tx {
 		coinbase := len(tx.Vin) > 0 && tx.Vin[0].Coinbase != ""
 		for _, o := range tx.Vout {
-			if sh, hot := a.hotByAddr(ctx, o.ScriptPubKey.Address); hot {
+			if sh, hot := a.hotByAddr(ctx, a.pool, o.ScriptPubKey.Address); hot {
 				if !hotTx[tx.Txid] || coinbase { // ours, or a coinbase (not supported to a hot address)
 					continue
 				}
