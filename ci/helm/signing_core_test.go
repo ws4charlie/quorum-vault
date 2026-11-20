@@ -572,8 +572,8 @@ func TestSigningCoreRefusals(t *testing.T) {
 		{"empty link peers", false, []string{"--set", "network.kafka.peers=null"}, "network.kafka.peers is required"},
 		{"agent without an endpoint", false, []string{"--set", "metrics.agent.enabled=true"}, "remoteWrite.url is required"},
 		{"Job without its ConfigMap", false, []string{"--set", "signedSettings.job.enabled=true"}, "configMap is required"},
-		{"sign in a cluster", false, []string{"--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x", "--set", "signedSettings.job.action=sign"}, "show or apply"},
-		{"unknown tool", false, []string{"--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x", "--set", "signedSettings.job.tool=sh"}, "route, fee-caps"},
+		{"sign in a cluster", false, []string{"--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x", "--set", "signedSettings.job.action=sign"}, "must be one of"},
+		{"unknown tool", false, []string{"--set", "signedSettings.job.enabled=true", "--set", "signedSettings.job.configMap=x", "--set", "signedSettings.job.tool=sh"}, "must be one of"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
