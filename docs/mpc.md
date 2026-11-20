@@ -27,13 +27,13 @@ A restarted party must be checked against the others before it signs. When A is 
 
 ## Which pair signs
 
-Operators choose which two parties sign by default (A and B, A and C, or B and C), for example to take one out for maintenance. Approvers sign the choice with the keys they already use, it is recorded in the zone's audit log, and it applies from the next job ([runbook](runbooks/mpc-signing-pair.md)).
+Approvers choose which two parties sign by default (A and B, A and C, or B and C), for example to take one out for maintenance. They sign the choice with the keys they already use, an operator applies it, it is recorded in the zone's audit log, and it applies from the next job ([runbook](runbooks/mpc-signing-pair.md)).
 
 The gateway also checks the parties itself. It changes the pair only after several failed checks in a short time, and changes back only after several good ones, so a party that keeps dropping out does not make the route flip back and forth. A route can only make signing slower or unavailable: every pair includes B or C, whose cosigner reads every job.
 
 ## A failed check freezes the key
 
-If a proof does not verify, a message cannot be read, or a final signature is wrong, a party may be faulty. The key is then frozen on every party that holds it. Withdrawals wait with their holds, and only an unfreeze signed by operators lifts it. A party that is merely slow or offline does not cause a freeze ([runbook](runbooks/mpc-keyset-freeze.md)).
+If a proof does not verify, a message cannot be read, or a final signature is wrong, a party may be faulty. The key is then frozen on every party that holds it. Withdrawals wait with their holds, and only an unfreeze signed with a party administrator key lifts it. A party that is merely slow or offline does not cause a freeze ([runbook](runbooks/mpc-keyset-freeze.md)).
 
 ## Failures are counted per suspect
 

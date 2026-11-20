@@ -38,5 +38,5 @@ Each party and its cosigner also prove their identity to each other, so a proces
 | What happened | What the zone does |
 |:---|:---|
 | A check fails | Signs nothing; the job states why |
-| A party sends bad data during signing | Freezes the key on every party until zone operators lift the freeze |
+| A party sends bad data during signing | Freezes the key on every party until a party administrator unlocks it |
 | The same job arrives twice | Returns the first signature; refuses the job if its content changed |

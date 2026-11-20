@@ -35,4 +35,4 @@ QuorumVault is made of nine small services in two groups. The business side take
 
 The services rely on a few standard components that QuorumVault does not write itself: PostgreSQL for the books and for each zone's records, Kafka for events and audit heads, Temporal for workflows, an identity provider for logins, and an HSM for the keys that seal each party's shares. Which service runs in which cluster is on the [Deployment](deployment.md) page.
 
-Operators also have command-line tools for tasks done by hand, such as a key ceremony or a signed change of settings. These run only when needed and are not services.
+Command-line tools also exist for tasks done by hand, such as a key ceremony or a signed change of settings. These run only when needed and are not services.

@@ -15,7 +15,7 @@ Today each party's shares are sealed under a key in its own HSM token, on a host
 1. The party starts and asks a broker for its key.
 2. The broker answers with a fresh challenge.
 3. The party replies with proof (an attestation) of which program it runs, tied to its own connection.
-4. The broker compares the proof with a list that several operators signed. Only on a match does it release the key, and it writes its record first.
+4. The broker compares the proof with a list that several broker operators signed. Only on a match does it release the key, and it writes its record first.
 
 The key lives in memory only. A running party keeps signing if the broker goes away, but a party that restarts cannot open its shares until the broker is back. Taking a program off the list stops new starts, not a party that is already running.
 
