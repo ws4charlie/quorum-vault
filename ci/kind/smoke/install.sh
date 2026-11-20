@@ -18,7 +18,7 @@ psql_as() { # $1 pod-side role (cert name), $2 sql: runs psql inside the databas
   chmod 600 "$d/tls.key"
   kn "$NS_BIZ" port-forward svc/qv-business-db-rw 15432:5432 >/dev/null 2>&1 & local pf=$!
   sleep 2
-  PGPASSWORD= psql "host=127.0.0.1 port=15432 dbname=quorumvault user=$role sslmode=verify-ca sslrootcert=$d/ca.crt sslcert=$d/tls.crt sslkey=$d/tls.key" -Atc "$sql" 2>&1
+  env -u PGPASSWORD psql "host=127.0.0.1 port=15432 dbname=quorumvault user=$role sslmode=verify-ca sslrootcert=$d/ca.crt sslcert=$d/tls.crt sslkey=$d/tls.key" -Atc "$sql" 2>&1
   local r=$?; kill $pf 2>/dev/null; rm -rf "$d"; return $r
 }
 if command -v psql >/dev/null; then

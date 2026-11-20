@@ -38,7 +38,7 @@ phase_secrets() {
     --from-literal=BTC_RPC_USER="qv$(val btc-user 4)" --from-literal=BTC_RPC_PASSWORD="$(val btc-pass 20)" | k apply -f - >/dev/null
   # HSM PIN and security-officer PIN of the gateway's SoftHSM token (signing-core values-kind names the Secret)
   kn "$NS_SIGN" create secret generic qv-gateway-hsm-pin --dry-run=client -o yaml \
-    --from-literal=pin="$(val hsm-pin 4 | tr -d a-f | cut -c1-8)1234" --from-literal=so-pin="$(val hsm-so-pin 8)" | k apply -f - >/dev/null
+    --from-literal=pin="$(val hsm-pin 8 | tr a-f 0-5 | cut -c1-12)" --from-literal=so-pin="$(val hsm-so-pin 8)" | k apply -f - >/dev/null
 }
 
 # DNS names the clients dial, per catalog name, per namespace (qv-certs extraDNSNames)
