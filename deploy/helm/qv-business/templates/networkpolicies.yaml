@@ -1,0 +1,142 @@
+{{- if .Values.network.enabled }}
+{{- $n := .Values.network }}
+{{- $all := list "core" "worker" "relay" "archiver" "migrate" }}
+{{- /* 1. Default deny, ingress and egress, for every pod of the namespace. Everything below adds one explicit allow. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default-deny
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "network") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+{{- /* 2. DNS for the chart's pods. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-allow-dns
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "network") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $n.dns | nindent 8 }}
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+{{- /* 3. Egress of each component: only the dependencies it uses. */}}
+{{- $egress := dict
+    "core"     (list (dict "peers" $n.postgres.peers "ports" (list $n.postgres.port)) (dict "peers" $n.temporal.peers "ports" (list $n.temporal.port)) (dict "peers" $n.idp.peers "ports" $n.idp.ports) (dict "peers" $n.chain.peers "ports" $n.chain.ports))
+    "worker"   (list (dict "peers" $n.postgres.peers "ports" (list $n.postgres.port)) (dict "peers" $n.temporal.peers "ports" (list $n.temporal.port)) (dict "peers" $n.chain.peers "ports" $n.chain.ports))
+    "relay"    (list (dict "peers" $n.postgres.peers "ports" (list $n.postgres.port)) (dict "peers" $n.kafka.peers "ports" (list $n.kafka.port)))
+    "archiver" (list (dict "peers" $n.kafka.peers "ports" (list $n.kafka.port)) (dict "peers" $n.archive.peers "ports" $n.archive.ports))
+    "migrate"  (list (dict "peers" $n.postgres.peers "ports" (list $n.postgres.port))) }}
+{{- range $c, $rules := $egress }}
+{{- if or (ne $c "archiver") $.Values.archiver.enabled }}
+{{- if or (ne $c "migrate") $.Values.migration.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" $ "c" $c) }}-egress
+  labels: {{- include "qv.labels" (dict "ctx" $ "c" $c) | nindent 4 }}
+  {{- if eq $c "migrate" }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+  {{- end }}
+spec:
+  podSelector:
+    matchLabels: {{- include "qv.selector" (dict "ctx" $ "c" $c) | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    {{- range $r := $rules }}
+    - to: {{- toYaml $r.peers | nindent 8 }}
+      ports:
+        {{- range $p := $r.ports }}
+        - { port: {{ $p }}, protocol: TCP }
+        {{- end }}
+    {{- end }}
+---
+{{- end }}
+{{- end }}
+{{- end }}
+{{- /* The migration job also needs DNS before the rest of the chart exists on a first install: its own copy, as a hook. */}}
+{{- if .Values.migration.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "migrate") }}-dns
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "migrate") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  podSelector:
+    matchLabels: {{- include "qv.selector" (dict "ctx" . "c" "migrate") | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to: {{- toYaml $n.dns | nindent 8 }}
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+{{- end }}
+{{- /* 4. Ingress to the core: the ingress controller, and the pods of this namespace (service callers in the cluster). Nothing else. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "qv.fullname" (dict "ctx" . "c" "core") }}-ingress
+  labels: {{- include "qv.labels" (dict "ctx" . "c" "core") | nindent 4 }}
+  annotations:
+    quorumvault.io/ingress-purpose: ingress-controller
+spec:
+  podSelector:
+    matchLabels: {{- include "qv.selector" (dict "ctx" . "c" "core") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from: {{- toYaml $n.ingressController | nindent 8 }}
+      ports: [{ port: {{ .Values.core.port }}, protocol: TCP }]
+    - from: [{ podSelector: {} }]
+      ports: [{ port: {{ .Values.core.port }}, protocol: TCP }]
+{{- if $n.dependencyPolicies.enabled }}
+---
+{{- /* 5. The dependencies' pods accept the chart's workloads (in the namespace) on their one port. */}}
+{{- range $d := list (dict "k" "postgres" "p" $n.postgres) (dict "k" "kafka" "p" $n.kafka) (dict "k" "temporal" "p" $n.temporal) }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $.Release.Name }}-{{ $d.k }}-from-qv
+  labels: {{- include "qv.labels" (dict "ctx" $ "c" $d.k) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- (index $d.p.peers 0).podSelector.matchLabels | toYaml | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ $.Release.Name | quote }} } } }]
+      ports: [{ port: {{ $d.p.port }}, protocol: TCP }]
+---
+{{- end }}
+{{- end }}
+{{- /* 6. THE signing link: the only ingress from another trust domain. The signing zone's gateway reads the job queue (Postgres) and publishes audit heads (Kafka). */}}
+{{- if and $n.dependencyPolicies.enabled $n.signingLink.from }}
+{{- range $d := list (dict "k" "postgres" "p" $n.postgres) (dict "k" "kafka" "p" $n.kafka) }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $.Release.Name }}-signing-link-{{ $d.k }}
+  labels: {{- include "qv.labels" (dict "ctx" $ "c" $d.k) | nindent 4 }}
+  annotations:
+    quorumvault.io/ingress-purpose: signing-link
+spec:
+  podSelector:
+    matchLabels: {{- (index $d.p.peers 0).podSelector.matchLabels | toYaml | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from: {{- toYaml $n.signingLink.from | nindent 8 }}
+      ports: [{ port: {{ $d.p.port }}, protocol: TCP }]
+---
+{{- end }}
+{{- end }}
+{{- end }}

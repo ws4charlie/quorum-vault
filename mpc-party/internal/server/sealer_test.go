@@ -181,3 +181,26 @@ func TestFileStoreSealedBlobsAreBound(t *testing.T) {
 		t.Fatal("tampered file opened")
 	}
 }
+
+// The real SoftHSM module is refused when QV_ENV says production (unset, or anything but dev or test), and works in development and tests.
+func TestPKCS11SealerRefusesSoftHSMInProduction(t *testing.T) {
+	pin := testenv.HSMEnv(t) // sets QV_ENV=test
+	t.Setenv("QV_TEST_PIN", pin)
+	cfg := server.SealerConfig{Type: "pkcs11", Token: "qv-party-1", PinEnv: "QV_TEST_PIN"}
+	for _, env := range []string{"", "production", "staging"} {
+		t.Setenv("QV_ENV", env)
+		_, err := server.NewPKCS11Sealer(cfg)
+		if err == nil || !strings.Contains(err.Error(), "SoftHSM") || !strings.Contains(err.Error(), "refused in production") {
+			t.Fatalf("QV_ENV=%q: want a SoftHSM refusal, got %v", env, err)
+		}
+		if strings.Contains(err.Error(), pin) {
+			t.Fatal("PIN in the error")
+		}
+	}
+	for _, env := range []string{"dev", "test"} {
+		t.Setenv("QV_ENV", env)
+		if _, err := server.NewPKCS11Sealer(cfg); err != nil {
+			t.Fatalf("QV_ENV=%s: %v", env, err)
+		}
+	}
+}

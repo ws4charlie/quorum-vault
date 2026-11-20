@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -284,5 +285,39 @@ func TestSocketPinsAreSPKI(t *testing.T) {
 	expired := sameKeyCert(t, kp, 12, now.Add(-3*time.Hour), now.Add(-2*time.Hour))
 	if r, err := call(sock, client(expired, cos.pin)); err == nil && r.Allow {
 		t.Fatal("an expired certificate with a pinned key was accepted")
+	}
+}
+
+// The socket certificate's time left is published under the name every other certificate uses, so the one alert rule covers it.
+func TestSocketMetricsExpiry(t *testing.T) {
+	c := selfSigned(t, "cosigner-b")
+	crt, key := writePair(t, c)
+	partyB := selfSigned(t, "party-b")
+	cfg, err := cosigner.SocketTLS(crt, key, []string{partyB.pin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	var b strings.Builder
+	cosigner.WriteSocketMetrics(&b, cfg, now)
+	line := strings.TrimSpace(b.String())
+	if !strings.HasPrefix(line, `qv_tls_cert_seconds_to_expiry{name="qv-cosigner-socket",zone="signing",kind="leaf"} `) {
+		t.Fatalf("metric line: %q", line)
+	}
+	leaf, _ := x509.ParseCertificate(cfg.Certificates[0].Certificate[0])
+	want := fmt.Sprintf("%.0f", leaf.NotAfter.Sub(now).Seconds())
+	if !strings.HasSuffix(line, " "+want) {
+		t.Fatalf("value: %q, want suffix %s", line, want)
+	}
+	// a later look shows less time; past the end it is negative
+	b.Reset()
+	cosigner.WriteSocketMetrics(&b, cfg, leaf.NotAfter.Add(time.Hour))
+	if !strings.Contains(b.String(), "} -3600") {
+		t.Fatalf("after expiry: %q", b.String())
+	}
+	b.Reset()
+	cosigner.WriteSocketMetrics(&b, nil, now) // the development plain-text channel has no certificate
+	if b.Len() != 0 {
+		t.Fatalf("nil config wrote %q", b.String())
 	}
 }

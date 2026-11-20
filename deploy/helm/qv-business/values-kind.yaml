@@ -1,0 +1,42 @@
+# Local kind cluster (task D8 installs this with the same templates). Only configuration differs from production: images are loaded locally and referenced by tag,
+# one replica of everything, small requests, the dependencies run in the same namespace, a self-signed ingress, chain and IdP are stubs in the cluster.
+imagePullPolicy: IfNotPresent
+images:
+  core:     { digest: "", tag: local, repository: qv-image/qv-core }
+  worker:   { digest: "", tag: local, repository: qv-image/qv-worker }
+  relay:    { digest: "", tag: local, repository: qv-image/qv-relay }
+  archiver: { digest: "", tag: local, repository: qv-image/qv-anchor-archiver }
+  migrate:  { digest: "", tag: local, repository: qv-image/qv-migrate }
+database: { host: qv-business-db-rw }
+oidc: { issuer: https://keycloak:8443/realms/qv, caSecret: qv-oidc-ca }
+archive:
+  endpoint: https://seaweedfs:8333
+  bucket: qv-audit
+  region: us-east-1
+  pathStyle: true
+  retention: 24h
+  credentialsSecret: qv-archive-credentials
+  tls: { secretName: qv-archiver-archive-tls }
+core:
+  replicas: 1
+  resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: "1", memory: 512Mi } }
+worker:
+  replicas: 1
+  resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: "1", memory: 512Mi } }
+relay:
+  replicas: 1
+  resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 256Mi } }
+archiver:
+  resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 500m, memory: 256Mi } }
+migration: { enableLogin: true }
+podDisruptionBudgets: { enabled: false }
+topologySpread: { enabled: false }
+ingress:
+  public: { host: custody.localtest.me, tlsSecret: qv-public-tls }
+network:
+  # kind runs one cluster: every dependency is a pod of the same namespace, the IdP, chain and archive stubs too.
+  idp:     { peers: [{ podSelector: { matchLabels: { app: keycloak } } }], ports: [8443] }
+  chain:   { peers: [{ podSelector: { matchLabels: { app: chain-stub } } }], ports: [8545, 8332, 8899] }
+  archive: { peers: [{ podSelector: { matchLabels: { app: seaweedfs } } }], ports: [8333] }
+  # the signing "cluster" is another namespace in kind
+  signingLink: { from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv-signing } } }] }

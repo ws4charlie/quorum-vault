@@ -27,6 +27,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chainfactory"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db"
+	"github.com/ws4charlie/quorum-vault/internal/health"
 	"github.com/ws4charlie/quorum-vault/internal/pki"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
 )
@@ -50,6 +51,7 @@ func run(log *slog.Logger) error {
 	wdStall := flag.Duration("watchdog-stall", 2*time.Minute, "a loop workflow with no new history for this long is terminated and restarted, a withdrawal or sweep workflow is only reported (ALERT); 0 turns the watchdog off")
 	wdEvery := flag.Duration("watchdog-interval", 15*time.Second, "how often the watchdog looks")
 	tlsFor := pki.Flags(flag.CommandLine, "")
+	healthListen := health.Flag(flag.CommandLine)
 	flag.Parse()
 	if *cfgPath == "" || *dsn == "" {
 		return errors.New("-config and -dsn (or DATABASE_URL) are required")
@@ -69,6 +71,12 @@ func run(log *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	probe := health.New(log)
+	stopHealth, err := probe.Serve(ctx, *healthListen)
+	if err != nil {
+		return err
+	}
+	defer stopHealth()
 
 	tsrc, err := tlsFor("qv-worker", pki.ZoneBusiness, log)
 	if err != nil {
@@ -82,6 +90,8 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	defer pool.Close()
+	probe.Check("database", health.Ping(pool))
+	probe.Check("certificates", health.Certs(tsrc))
 	if err := db.Check(ctx, pool); err != nil {
 		return err
 	}
@@ -106,6 +116,10 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("dial temporal: %w", err)
 	}
 	defer tc.Close()
+	probe.Check("temporal", func(ctx context.Context) error {
+		_, err := tc.CheckHealth(ctx, &client.CheckHealthRequest{})
+		return err
+	})
 
 	w := workflow.NewWorker(tc, workflow.Deps{Svc: svc, Client: tc, AutoKey: key, Log: log, T: workflow.DefaultTimings(cfg), Queue: *queue})
 	if err := w.Start(); err != nil {
@@ -121,6 +135,9 @@ func run(log *slog.Logger) error {
 		go wd.Run(ctx)
 	}
 	log.Info("qv-worker started", "chain", cfg.Chain, "failpoint", workflow.Armed())
+	probe.SetReady(true)
+	// SIGTERM: not ready at once (the probe), then the deferred w.Stop() stops polling and the process exits. Activities still running are
+	// handed back: Temporal retries them on another worker after their timeout (they are idempotent by design; the crash tests kill the worker).
 	<-ctx.Done()
 	return nil
 }

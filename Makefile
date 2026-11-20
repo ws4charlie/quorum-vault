@@ -312,3 +312,7 @@ test-e2e-all:
 # The first build compiles cb-mpc and takes several minutes. `deploy/images/build.sh repro` builds every binary twice and compares the hashes.
 images:
 	deploy/images/build.sh
+
+# Business-zone chart checks (deploy/helm/qv-business): lint, render, Kubernetes schemas, policy and image-contract tests. Needs helm and kubeconform (brew install helm kubeconform).
+helm-check:
+	ci/helm/check.sh
