@@ -17,7 +17,7 @@ QuorumVault moves money only when everyone required has agreed. The person who r
 
 ## How many people each action needs
 
-- **Withdrawal**: set in tiers by amount, with at least one approver per tier and never fewer for a larger amount; the requester cannot be one of them.
+- **Withdrawal**: the number of approvers is set per amount tier, at least one; the requester cannot be one of them.
 - **Signing-zone settings change**: several zone operators sign together.
 - **Cold transfer**: M of N cold signers, in a key ceremony.
 
