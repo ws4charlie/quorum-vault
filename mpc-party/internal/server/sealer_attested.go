@@ -606,4 +606,3 @@ func brokerKindOf(err error) (kind, code string, allowlist bool) {
 	}
 	return "other", "", false
 }
-

@@ -90,6 +90,9 @@ func (f *fileFreeze) load() error {
 			}
 			raw = plain
 		}
+		if f.fs == nil && isEnvelope(raw) {
+			return ErrLocalSealed
+		}
 		var r freezeRecord
 		if json.Unmarshal(raw, &r) != nil || !validID(r.KeysetID) {
 			if f.fs != nil && validID(name) {

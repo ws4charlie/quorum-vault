@@ -46,6 +46,10 @@ func main() {
 		backupMain(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "migrate-seal" {
+		migrateMain(os.Args[2:])
+		return
+	}
 	cfgPath := flag.String("config", "", "path to the JSON config file (required)")
 	healthListen := flag.String("health-listen", os.Getenv("QV_HEALTH_LISTEN"), "serve /livez and /readyz (plain http, no credentials, no detail) on this address for container probes, e.g. 0.0.0.0:9100; off when empty (env QV_HEALTH_LISTEN)")
 	flag.Parse()

@@ -43,14 +43,25 @@ func (s *FileStore) sealLocal(ctx context.Context, kind, name string, raw []byte
 	return s.scoped.SealScoped(ctx, LocalScope, aadLocal(s.role, kind, name), raw)
 }
 
-func (s *FileStore) openLocal(ctx context.Context, kind, name string, data []byte) ([]byte, error) {
-	if s.scoped == nil {
-		return data, nil
-	}
+// ErrLocalSealed: a local state file is an attested-sealer envelope where a sealer without sealed local state (pkcs11) expects plain JSON. Reading it as
+// plain JSON would give an empty record, so it is refused: the data directory has been migrated and only the attested sealer reads it.
+var ErrLocalSealed = errors.New("this local state file is sealed by the attested sealer (the data directory was migrated); a party with another sealer cannot read it")
+
+func isEnvelope(data []byte) bool {
 	var probe struct {
 		KID string `json:"kid"`
 	}
-	if json.Unmarshal(data, &probe) != nil || probe.KID == "" {
+	return json.Unmarshal(data, &probe) == nil && probe.KID != ""
+}
+
+func (s *FileStore) openLocal(ctx context.Context, kind, name string, data []byte) ([]byte, error) {
+	if s.scoped == nil {
+		if isEnvelope(data) {
+			return nil, ErrLocalSealed
+		}
+		return data, nil
+	}
+	if !isEnvelope(data) {
 		return nil, ErrLocalUnsealed
 	}
 	return s.scoped.OpenScoped(ctx, LocalScope, aadLocal(s.role, kind, name), data)
