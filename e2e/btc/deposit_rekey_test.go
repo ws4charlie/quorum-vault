@@ -224,7 +224,8 @@ func TestRekeyDepositKeyReplacementDrivenByTheTool(t *testing.T) {
 	clean()
 
 	// Retire waits for the window: inside it the tool refuses; after it (and with nothing left to sweep) it goes through.
-	if out, err := s.rekeyTool(dir, "retire"); err == nil || !strings.Contains(out, "stay swept until") && !strings.Contains(out, "not drained") {
+	early := s.treeChange("ret-early", 4, "-action", "retire", "-generation", "1")
+	if out, err := s.rekeyTool(dir, "retire", "-change", early); err == nil || !strings.Contains(out, "stay swept until") {
 		t.Fatalf("retire inside the window: %v\n%s", err, out)
 	}
 	s.waitFor(2*time.Minute, "the window has passed", func() bool {

@@ -189,7 +189,8 @@ func TestSwFlowsDepositKeyReplacementDrivenByTheTool(t *testing.T) {
 	s.reconcileClean("with two deposit key generations")
 
 	// retire: refused inside the window; after it, with the old addresses empty, it goes through
-	if out, err := s.rekeyTool(dir, "retire"); err == nil || !strings.Contains(out, "stay swept until") {
+	early := s.treeChange(ops, "ret-early", 4, "-action", "retire", "-generation", "1")
+	if out, err := s.rekeyTool(dir, "retire", "-change", early); err == nil || !strings.Contains(out, "stay swept until") {
 		t.Fatalf("retire inside the window: %v\n%s", err, out)
 	}
 	s.waitFor(2*time.Minute, "the window has passed", func() bool {
