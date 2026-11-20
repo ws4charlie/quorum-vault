@@ -41,12 +41,13 @@ kafka:
 tls:
   reload: 1m
   gateway:     { secretName: qv-signing-gateway-tls }        # certificate name signing/gateway: the guard database login, the parties' caller ports (pinned there)
+  gatewayParty: { secretName: qv-signing-gateway-party-tls }   # certificate name signing/gateway-party: the client certificate the parties pin on their caller ports (its key never rotates)
   gatewayLink: { secretName: qv-gateway-link-tls }   # certificate name business/gateway-link (business CA): business Postgres and Kafka
 
 # --- The signing config (JSON, internal/gateway/config.example.json): approvers, bounds, chains, signers, mpc_route, party addresses and pins ---
 # Public keys, limits, addresses and pins only: no secret. The chart turns it into an IMMUTABLE ConfigMap whose name carries a hash of the content, so a change is
 # a new rollout and never an edit in place. REQUIRED: set it from the config repo (--set-file config.signing=signing-config.json).
-# Certificate and key paths inside it point at the mounted Secrets: /etc/qv/tls/tls.crt and /etc/qv/tls/tls.key (the parties pin the gateway's certificate).
+# Certificate and key paths inside it point at the mounted Secrets: /etc/qv/party-tls/tls.crt and /etc/qv/party-tls/tls.key for the parties' caller ports (they pin the gateway-party certificate), /etc/qv/tls for the guard database.
 config:
   signing: ""
   signTimeoutSeconds: 30         # must equal the config's sign_timeout (a test compares them); terminationGracePeriodSeconds must exceed it by 30 s

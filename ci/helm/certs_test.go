@@ -648,5 +648,9 @@ func TestCertsSecretNamesMatchThePartyAndSigningCoreCharts(t *testing.T) {
 		}
 		check("qv-party "+role, text, cluster)
 	}
-	check("qv-signing-core", scText(t, true), "signing-core")
+	scTxt := scText(t, true)
+	check("qv-signing-core", scTxt, "signing-core")
+	if !strings.Contains(scTxt, "secretName: qv-signing-gateway-party-tls") { // the parties pin this certificate on their caller ports; the gateway must present it
+		t.Error("qv-signing-core does not mount the gateway-party certificate")
+	}
 }

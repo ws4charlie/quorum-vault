@@ -68,6 +68,7 @@ spec:
           volumeMounts:
             - { name: tls, mountPath: /etc/qv/tls, readOnly: true }
             - { name: link-tls, mountPath: /etc/qv/link-tls, readOnly: true }
+            - { name: party-tls, mountPath: /etc/qv/party-tls, readOnly: true }
             - { name: config, mountPath: /etc/qv/config, readOnly: true }
             - { name: metrics, mountPath: /var/lib/qv/metrics }
             {{- if $pin }}
@@ -99,6 +100,7 @@ spec:
       volumes:
         {{- include "qvs.secretVolume" (dict "name" "tls" "secret" .Values.tls.gateway.secretName) | nindent 8 }}
         {{- include "qvs.secretVolume" (dict "name" "link-tls" "secret" .Values.tls.gatewayLink.secretName) | nindent 8 }}
+        {{- include "qvs.secretVolume" (dict "name" "party-tls" "secret" .Values.tls.gatewayParty.secretName) | nindent 8 }}
         - name: config
           configMap: { name: {{ include "qvs.signingConfigName" . }} }
         - name: metrics
