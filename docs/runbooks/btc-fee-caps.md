@@ -33,11 +33,17 @@ The shipped examples carry the section: `internal/gateway/config.example.json` (
    ```bash
    qv-fee-caps show -config zone.json -chain btc -guard-dsn gateway=$GW_DSN -guard-dsn cosigner-b=$CB_DSN -core-dsn $CORE_DSN
    ```
-2. Each of `min_approvers` approvers signs the same change on their own machine, with the next sequence number, within `max_change_age` of step 3 (no database needed):
+2. The approvers sign **one change**, each on their own machine (no database needed), in turn. The first states it:
    ```bash
    qv-fee-caps sign -actor alice -key alice.key -chain btc -max-tx-fee-sats 90000 -max-fee-rate 200 -seq 4 -out alice.json
    ```
-   The values must be the same in every file. Each person's key counts once, however many keys they have.
+   Alice sends `alice.json` to the next approver. The signing time is part of what is signed, and two people never sign in the same second, so every later approver signs **the same change** with `-like`: the chain, both caps, the sequence number and the signing time come from alice's file, and nothing is typed again:
+   ```bash
+   qv-fee-caps sign -actor bob -key bob.key -like alice.json -out bob.json
+   ```
+   Before it signs, the tool prints in plain words what it signs (chain, both caps, sequence, signing time and how long ago that was). Read it and compare it with what you agreed; do not sign if it differs. A flag that disagrees with the file (`-max-fee-rate 300` next to a file with 200) stops the tool with nothing signed; the same approver cannot sign the same file twice. `-signed-at UNIX` is the other way: the first approver passes the time to the others, who type all values again with the same `-signed-at`. The tool checks the shape of alice's file but cannot check her signature (it has no approver keys): `apply` checks every signature, and a file changed after she signed it fails there with `valid signatures ... needed`.
+
+   **Time.** The change must be applied within `max_change_age` (default 10 minutes) of the signing time, which is the time of the *first* signature; the clock does not restart for later approvers. Agree the numbers first, then start the round. If the time runs out, the first approver signs again with the same values and a new time (or a new `-signed-at`) and the others follow with `-like` the new file. Each person's key counts once, however many keys they have.
 3. Apply the joined files to the gateway, every cosigner and the core, in one command:
    ```bash
    qv-fee-caps apply -config zone.json -guard-dsn gateway=$GW_DSN -guard-dsn cosigner-b=$CB_DSN -core-dsn $CORE_DSN alice.json bob.json

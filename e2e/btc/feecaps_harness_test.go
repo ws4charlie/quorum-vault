@@ -105,6 +105,17 @@ func (s *system) signCaps(actor string, maxTx, maxRate uint64, seq int64) string
 	return out
 }
 
+// cosignCaps is `qv-fee-caps sign -like FIRST` by a later approver: it signs the same change as the file of the first approver, as two people on two machines do
+// (they cannot sign in the same second). It returns the signature file.
+func (s *system) cosignCaps(actor, first string) string {
+	s.t.Helper()
+	out := filepath.Join(s.dir, fmt.Sprintf("cosign-%s-%s", actor, filepath.Base(first)))
+	if o, err := s.tool("qv-fee-caps", "sign", "-actor", actor, "-key", s.keyFile(actor, s.approv[actor]), "-like", first, "-out", out); err != nil {
+		s.t.Fatalf("qv-fee-caps sign -like: %v\n%s", err, o)
+	}
+	return out
+}
+
 // dbs is which databases a command names: the signing zone's guards (the gateway's and the cosigner's) and the core's.
 type dbs struct{ zone, core bool }
 
@@ -140,11 +151,15 @@ func (s *system) mustApply(d dbs, files ...string) {
 	}
 }
 
-// signedBy signs the change with each actor and returns the files.
+// signedBy signs the change with each actor and returns the files: the first signs it, every later one signs the same change with -like (the real two-step flow).
 func (s *system) signedBy(maxTx, maxRate uint64, seq int64, actors ...string) []string {
 	var fs []string
-	for _, a := range actors {
-		fs = append(fs, s.signCaps(a, maxTx, maxRate, seq))
+	for i, a := range actors {
+		if i == 0 {
+			fs = append(fs, s.signCaps(a, maxTx, maxRate, seq))
+		} else {
+			fs = append(fs, s.cosignCaps(a, fs[0]))
+		}
 	}
 	return fs
 }
