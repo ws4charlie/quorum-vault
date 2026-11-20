@@ -328,6 +328,9 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 		if s.peerCConn != nil {
 			s.peerCConn.Connect()
 		}
+		if s.sealerReady() != nil {
+			continue // the attested sealer has not got its data keys yet: nothing can be opened
+		}
 		ids, err := s.store.List(ctx)
 		if err != nil {
 			continue

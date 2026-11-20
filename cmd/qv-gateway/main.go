@@ -150,6 +150,7 @@ func run(log *slog.Logger) error {
 	}
 
 	signers := map[string]signer.Signer{}
+	genSigners := []gateway.GenerationSigner{gateway.MPCGenerationSigner()} // the keys of later generations of a shard (docs/runbooks/key-replacement.md)
 	if gateway.HasHSMSigners(cfg) {
 		lib, err := hsm.LoadLib(hsm.DefaultLibPath())
 		if err != nil {
@@ -160,11 +161,12 @@ func run(log *slog.Logger) error {
 		if err := hsm.RefuseSoftHSM(lib, auth.EnvironmentFromEnv() == auth.Production); err != nil {
 			return err
 		}
-		hs, closeSigners, err := gateway.HSMSigners(cfg, lib, os.Getenv("QV_HSM_PIN"))
+		hs, hsmGen, closeSigners, err := gateway.HSMSignersWithGenerations(cfg, lib, os.Getenv("QV_HSM_PIN"))
 		if err != nil {
 			return err
 		}
 		defer closeSigners()
+		genSigners = append(genSigners, hsmGen)
 		for k, v := range hs {
 			signers[k] = v
 		}
@@ -210,7 +212,8 @@ func run(log *slog.Logger) error {
 		h, _ := os.Hostname()
 		id = fmt.Sprintf("%s-%d", h, os.Getpid())
 	}
-	gw, err := gateway.New(cfg, nil, signers, guard, jobs, gateway.Options{WorkerID: id, Lease: *lease, Logger: log, MessageSigners: hotMsg, DepositSigners: depositMsg})
+	gw, err := gateway.New(cfg, nil, signers, guard, jobs, gateway.Options{WorkerID: id, Lease: *lease, Logger: log, MessageSigners: hotMsg, DepositSigners: depositMsg,
+		Generations: gateway.ComposeGenerationSigners(genSigners...)})
 	if err != nil {
 		return err
 	}

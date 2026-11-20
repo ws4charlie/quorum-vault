@@ -27,6 +27,9 @@ func (s *Server) Ready(now time.Time) error {
 	if stopped {
 		return errors.New("stopping")
 	}
+	if err := s.sealerReady(); err != nil {
+		return err
+	}
 	if len(s.cert.Certificate) == 0 {
 		return errors.New("no certificate")
 	}

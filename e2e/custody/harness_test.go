@@ -113,7 +113,7 @@ func TestMain(m *testing.M) {
 				buildErr = err
 			}
 		}
-		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold", "qv-guardian", "qv-keysets", "qv-approval-web", "qv-approvers"} {
+		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold", "qv-guardian", "qv-keysets", "qv-rekey", "qv-approval-web", "qv-approvers"} {
 			// The worker is built with -tags devauth: only then does it have the crash-test failpoints (QV_FAILPOINT).
 			args := []string{"build", "-o", filepath.Join(dir, b)}
 			if b == "qv-worker" {

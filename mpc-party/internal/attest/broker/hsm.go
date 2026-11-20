@@ -151,6 +151,13 @@ func OpenHSM(c PKCS11Config, parties []string) (*HSM, error) {
 	if err != nil {
 		return nil, err
 	}
+	var libInfo pkcs11.Info
+	if info, err := ctx.GetInfo(); err == nil {
+		libInfo = info
+	}
+	if err := refuseSoftHSM(libInfo, nil, lib); err != nil { // before the PIN is sent anywhere
+		return nil, err
+	}
 	slots, err := ctx.GetSlotList(true)
 	if err != nil {
 		return nil, fmt.Errorf("hsm: C_GetSlotList: %w", err)
@@ -165,6 +172,11 @@ func OpenHSM(c PKCS11Config, parties []string) (*HSM, error) {
 	}
 	if !found {
 		return nil, fmt.Errorf("hsm: token %q not found in %s (check SOFTHSM2_CONF)", c.Token, lib)
+	}
+	if tok, err := ctx.GetTokenInfo(h.slot); err == nil {
+		if err := refuseSoftHSM(libInfo, &tok, lib); err != nil {
+			return nil, err
+		}
 	}
 	login, err := ctx.OpenSession(h.slot, pkcs11.CKF_SERIAL_SESSION|pkcs11.CKF_RW_SESSION)
 	if err != nil {
@@ -308,4 +320,32 @@ func wipe(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+}
+
+// productionEnv: QV_ENV unset, or anything but dev or test, is production (the rule of the gateway and the party: a typo cannot loosen anything).
+func productionEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QV_ENV"))) {
+	case "dev", "test":
+		return false
+	}
+	return true
+}
+
+// isSoftHSM says whether the module is SoftHSM, from what the module reports (library manufacturer or description, token manufacturer or model),
+// not from its file name.
+func isSoftHSM(lib pkcs11.Info, tok *pkcs11.TokenInfo) bool {
+	has := func(s string) bool { return strings.Contains(strings.ToLower(s), "softhsm") }
+	if has(lib.ManufacturerID) || has(lib.LibraryDescription) {
+		return true
+	}
+	return tok != nil && (has(tok.ManufacturerID) || has(tok.Model))
+}
+
+// refuseSoftHSM: SoftHSM keeps the wrapping keys in files next to the broker, so in production (QV_ENV unset, or not dev or test) it stops the start.
+func refuseSoftHSM(lib pkcs11.Info, tok *pkcs11.TokenInfo, libPath string) error {
+	if productionEnv() && isSoftHSM(lib, tok) {
+		return fmt.Errorf("hsm: %s is SoftHSM (reported by the module: manufacturer %q, description %q): refused in production, it is for development and tests only; use a real HSM, or set QV_ENV=dev on a development machine",
+			libPath, strings.TrimSpace(lib.ManufacturerID), strings.TrimSpace(lib.LibraryDescription))
+	}
+	return nil
 }

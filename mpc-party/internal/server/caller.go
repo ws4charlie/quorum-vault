@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/cbmpc"
@@ -184,6 +185,9 @@ func (s *Server) Derive(ctx context.Context, r *pb.DeriveRequest) (_ *pb.DeriveR
 }
 
 func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthResponse, error) {
+	if err := s.sealerReady(); err != nil { // the attested sealer has not got its data keys: the party is not ready, and there is nothing to report
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
 	h := &pb.HealthResponse{Role: s.cfg.Role, PeerReachable: s.peerReachable(), ActiveSessions: int32(s.slots.active()),
 		Version: Version, CbmpcCommit: cbmpc.PinnedCommit}
 	if s.peerConn != nil {

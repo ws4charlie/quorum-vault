@@ -128,6 +128,7 @@ func (d *Decider) DecideKey(ctx context.Context, job signjob.Job, key SignerKey)
 				return nil, lag
 			}
 			arec.reason = rj
+			d.noteDrainRefusal(job, rj)
 			if aerr := d.guard.auditAlone(ctx, *arec, EventSignRefused); aerr != nil {
 				return nil, aerr
 			}
