@@ -20,17 +20,45 @@ Prerequisites: `docker`, `kind`, `kubectl`, `helm`, `openssl`, `jq`, `go` (and `
 | Postgres | CloudNativePG, one instance per database, the same `pg_hba`/`pg_ident` files as compose, TLS 1.3 and client certificates only |
 | Redpanda, Temporal + name gate, Keycloak (dev realm), SeaweedFS (Object Lock), anvil, bitcoind (regtest) | plain manifests in `deps/`, the same flags and scripts as compose, images by digest |
 | Certificates | `qv-certs` once per namespace (`issuers.ca.existing`: every namespace issues under the same two authorities, which `up.sh` generates with openssl into the gitignored work dir) |
-| Business chart | `qv-business` |
+| Business chart | `qv-business` (EVM custody config; the Bitcoin one is switched in by the `withdraw` case) |
+| Signing zone | `qv-party` ×3 (A in `qv-signing`, B and C in their namespaces, SoftHSM shares), `qv-signing-core` (the gateway, no HSM: every signer is an MPC signer) |
+| Keys and configs | `dkg.sh`: an ECDSA 2-of-3 keyset `hot-0` (the EVM hot key) and an HD keyset `btc-0` (the Bitcoin account), made through party A's caller port by `tools/kindctl` with a generated admin key. `signing.sh`: deploys the deposit factory on anvil, then `tools/kindcfg` writes the signing config (auto approver, both hot keys, the parties' addresses and pins), the cosigners' copy, and the two custody configs. Every file is parsed by the services' own parsers before it is used |
 
 Images: third-party ones are pulled **by digest** and loaded into the node; the service images are built from the checkout (`deploy/images/build.sh`) and loaded. The cluster pulls nothing itself. Everything generated (CAs, passwords, keys) is in `ci/kind/.work/<name>/`, gitignored; nothing secret is in the repository.
 
 Solana is **not** in the kind lane (the validator image is 778 MB and not needed for install-to-ready); it stays covered by compose.
 
-## Status (this is the first of three stacked pieces)
+## Smoke cases
 
-Done: cluster, dependencies, certificates, `qv-business` installed and ready (migration hook, role login, health-listener probes, archiver with its Object Lock bucket), smoke cases `install`, `netpol` (business part), `upgrade`.
+`make kind-smoke` runs, in this order (`ci/kind/smoke/run.sh [case ...]`):
 
-Not done yet (listed by `ci/kind/smoke/run.sh --pending`): `qv-signing-core` and the three `qv-party` releases, the DKG they need, the EVM and Bitcoin withdrawals, the pod-kill cases, the trust-bundle switch (charts still mount the Secret's `ca.crt`), and the CI workflow's nightly part.
+| Case | What it shows |
+|---|---|
+| `install` | every pod ready, the migration hook ran, roles log in with their certificates |
+| `netpol` | an unlisted pod cannot reach Postgres, a listed one can; business pods cannot reach the signing zone except where the charts say; the gateway pod cannot reach the internet |
+| `withdraw` | an EVM and a Bitcoin withdrawal through the real pods: Keycloak token, deposit on the local chain, request, auto approval, signing by the gateway with parties A and B (cosigner B authorises), broadcast, confirmation, **exactly one payout** of the amount, Reconcile clean. The EVM deposit is swept by the pods too |
+| `crash` | party A deleted while the sign job is in flight, the worker deleted right after the job exists, the gateway rolled while signing: each withdrawal still pays once and Reconcile stays clean |
+| `upgrade` | a no-change `helm upgrade` replaces no pod; a changed value rolls the pods that read it and core stays available (a prober dials it twice a second: no refused connection) |
+
+`smoke/run.sh --pending` lists what is not done. `withdraw` and `crash` drive the pods from the host through port-forwards (`tools/kindwd`); the person tokens come from the dev realm's test-only login (`qv-e2e`, as `e2e/idp`), passwords from the gitignored work dir.
+
+## Trust bundles
+
+The charts take the CA file of their certificate volumes from the `qv-certs` trust bundle (`qv-trust-<zone>-<hash>`, an immutable ConfigMap) and not from the `ca.crt` cert-manager puts into each Secret: a projected volume (`tls.crt` and `tls.key` from the Secret, `ca.crt` from the bundle). `tls.trust.<zone>` names the bundle in each chart; the lane finds the names with `trust_args` in `lib.sh`. Empty, the charts behave as before.
+
+## Measured here (a Mac, Docker VM 24 GiB, images cached)
+
+| | |
+|---|---|
+| `make kind-up`, cold (cluster, dependencies, three parties, DKGs, both charts) | 236 s |
+| `make kind-smoke` (all five cases) | 225 s |
+| Node memory with everything running | 3.9 GiB |
+
+CI prints the same numbers for the runner (`.github/workflows/kind.yml`).
+
+## What is not done
+
+Certificate rotation, admission policies and tee-sim (marked pending). The crash and certificate cases of piece 3: an expired certificate refuses start, rotation without restart. `tools/kindctl` makes the DKG calls (`qv-party-admin` needs a signed file per call and one connection per party; the lane has one port-forward and reads the public keys back in the same tool).
 
 ## What it cannot show
 

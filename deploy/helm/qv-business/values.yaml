@@ -54,6 +54,9 @@ serviceAllow: "business/guardian,business/worker"   # QV_CORE_SERVICE_ALLOW
 # --- Certificates: Secrets made by cert-manager (task D5), each with tls.crt, tls.key, ca.crt. Referenced by name. ---
 tls:
   reload: 1m
+  # The trust bundle of the business zone: the name of the immutable ConfigMap qv-certs makes (`qv-trust-business-<hash>`, README of qv-certs, "Trust"). Set, the CA file of every certificate
+  # volume is that bundle; empty, it is the ca.crt cert-manager put into the Secret (development only: that file changes when the issuer's chain does).
+  trust: { business: "" }
   core:     { secretName: qv-core-tls }
   worker:   { secretName: qv-worker-tls }
   relay:    { secretName: qv-relay-tls }
@@ -79,6 +82,12 @@ core:
   # health (default): the service's health listener (QV_HEALTH_LISTEN on healthPort, plain http, /readyz and /livez); tcp; none
   probes: { mode: health, healthPort: 9100 }
   terminationGracePeriodSeconds: 30
+  # On SIGTERM qv-core closes its listener at once (cmd/qv-core: srv.Shutdown) and does not mark itself not ready first, while the Service endpoints and the nodes' rules take a moment to drop the
+  # pod: a connection in that moment is refused. So the pod waits this long BEFORE it gets SIGTERM (a `sleep` preStop action: the image is distroless, no shell; Kubernetes 1.30+), still ready and
+  # still serving. 0 turns it off. terminationGracePeriodSeconds must cover it plus the binary's 10 s shutdown (the chart check refuses less).
+  preStopSeconds: 8
+  # never take a pod away before its replacement is ready
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
 worker:
   replicas: 2
   taskQueue: ""                  # empty: qv-core-<chain> (the same default the core uses)

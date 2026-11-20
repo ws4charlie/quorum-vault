@@ -22,5 +22,5 @@ network:
   kafka:  { peers: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv } }, podSelector: { matchLabels: { app.kubernetes.io/name: redpanda } } }], port: 9092 }
   # parties B and C run in their own namespaces here (one kind cluster stands in for four)
   parties:
-    b: { peers: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv-party-b } } }], port: 7002 }
-    c: { peers: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv-party-c } } }], port: 7003 }
+    b: { peers: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv-party-b } } }], port: 7001 }
+    c: { peers: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv-party-c } } }], port: 7001 }

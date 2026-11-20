@@ -5,6 +5,7 @@ metadata:
   labels: {{- include "qv.labels" (dict "ctx" . "c" "core") | nindent 4 }}
 spec:
   replicas: {{ .Values.core.replicas }}
+  strategy: {{- toYaml .Values.core.strategy | nindent 4 }}
   selector:
     matchLabels: {{- include "qv.selector" (dict "ctx" . "c" "core") | nindent 6 }}
   template:
@@ -32,6 +33,11 @@ spec:
           ports:
             - { name: https, containerPort: {{ .Values.core.port }}, protocol: TCP }
           {{- include "qv.probes" (dict "probes" .Values.core.probes "tcpPort" "https") | nindent 10 }}
+          {{- if .Values.core.preStopSeconds }}
+          {{- if lt (int .Values.core.terminationGracePeriodSeconds) (add (int .Values.core.preStopSeconds) 12) }}{{ fail "core.terminationGracePeriodSeconds must be at least core.preStopSeconds + 12 (the binary's 10 s shutdown and a margin)" }}{{- end }}
+          lifecycle:
+            preStop: { sleep: { seconds: {{ int .Values.core.preStopSeconds }} } }
+          {{- end }}
           resources: {{- toYaml .Values.core.resources | nindent 12 }}
           securityContext: {{- include "qv.containerSecurityContext" . | nindent 12 }}
           volumeMounts:
@@ -41,7 +47,7 @@ spec:
             - { name: oidc-ca, mountPath: /etc/qv/oidc, readOnly: true }
             {{- end }}
       volumes:
-        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.core.secretName) | nindent 8 }}
+        {{- include "qv.secretVolume" (dict "name" "tls" "secret" .Values.tls.core.secretName "trust" .Values.tls.trust.business) | nindent 8 }}
         {{- include "qv.custodyVolume" (dict "ctx" .) | nindent 8 }}
         {{- if .Values.oidc.caSecret }}
         - name: oidc-ca

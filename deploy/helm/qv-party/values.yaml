@@ -72,10 +72,13 @@ hsm:
 # --- Certificates: Secrets made by cert-manager (task D5), each with tls.crt, tls.key, ca.crt. Referenced by name. ---
 tls:
   reload: 1m
-  party:         { secretName: "" }     # empty = mpc-party-<role>-tls (catalog name mpc-party-a|b|c; pinned by the other parties, long-lived)
-  cosigner:      { secretName: qv-cosigner-tls }          # signing identity of the cosigner (guard database client)
+  # The trust bundles (qv-certs, "Trust"): the names of the immutable ConfigMaps `qv-trust-<zone>-<hash>`. Set, the CA file of the volumes of that zone's certificates is the bundle; empty, it is the
+  # ca.crt cert-manager put into the Secret (development only). signing: the peers and callers, the guard database; business: the link certificate's peers (Kafka).
+  trust: { signing: "", business: "" }
+  party:         { secretName: "" }     # empty = qv-signing-mpc-party-<role>-tls (catalog name mpc-party-a|b|c; pinned by the other parties, long-lived)
+  cosigner:      { secretName: qv-signing-cosigner-tls }          # signing identity of the cosigner (guard database client)
   cosignerLink:  { secretName: qv-cosigner-link-tls }     # business-CA link certificate, publishes audit heads
-  cosignerSocket: { secretName: qv-cosigner-socket-tls }  # the certificate the cosigner presents to its party on the socket (pinned by the party)
+  cosignerSocket: { secretName: qv-signing-cosigner-socket-tls }  # the certificate the cosigner presents to its party on the socket (pinned by the party)
 
 # --- The cosigner (roles B and C only; ignored for A) ---
 cosigner:
