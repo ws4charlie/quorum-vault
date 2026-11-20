@@ -1,0 +1,16 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.45; }
+body { margin: 0 auto; max-width: 46rem; padding: 0 1rem 3rem; }
+header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: .5rem 1rem; border-bottom: 1px solid #8886; }
+h1 { font-size: 1.25rem; margin: 1rem 0 .5rem; }
+nav { display: flex; gap: 1rem; flex-wrap: wrap; }
+#who { opacity: .7; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem; }
+dt { opacity: .7; }
+dd { margin: 0; overflow-wrap: anywhere; }
+code, pre { font-family: ui-monospace, monospace; font-size: .9em; }
+pre { padding: .75rem; background: #8881; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+button, input { font: inherit; padding: .5rem .8rem; }
+.sentence { font-size: 1.15rem; padding: .75rem 1rem; border-left: 4px solid #36c; background: #8881; }
+.ok { color: #0a7a2f; }
+.bad { color: #c0262d; font-weight: 600; }
+.note { opacity: .75; font-size: .9rem; }

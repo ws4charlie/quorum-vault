@@ -21,6 +21,9 @@ Roles do not include each other: whoever requests a withdrawal never approves it
 ## Big actions need a fresh login
 Approving a withdrawal, booking cold funds, closing a parked refill and changing the factory need a recent login at the strongest level. An older login is told to log in again. Sessions have an overall limit, checked by the core, and an idle limit, enforced by the provider, which alone sees activity.
 
+## The approval page
+Approvers can approve with a security key or passkey on a small web page that has its own address, apart from the core. The page signs the person in, builds its text from the withdrawal itself, recomputes the hash and refuses to go on if the core's hash differs, then asks the key to sign that hash. This protects against a lying core, not against a replaced page ([Limits](limits.md)); the [runbook](runbooks/webauthn-approver.md) covers setup.
+
 ## Services
 Workers and scripts that call the core use their own service identity with a client-credentials token, not a person's. A service skips the fresh-login rule, since nobody logs in for it, and it can never approve or change the factory.
 

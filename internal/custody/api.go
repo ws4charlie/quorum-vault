@@ -83,7 +83,7 @@ func (a *API) Handler() http.Handler {
 	a.handle(mux, "POST /v2/keysets/drains", a.startDrainingKeyset)
 	a.handle(mux, "POST /v2/keysets/retirements", a.retireKeyset)
 	a.handle(mux, "POST /v2/keysets/compromises", a.compromiseKeyset)
-	return mux
+	return approvalCORS(mux)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

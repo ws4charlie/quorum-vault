@@ -344,6 +344,47 @@ jobs:
       - name: make test-e2e-evm-identity
         run: ci/run-in-image.sh make test-e2e-evm-identity
 
+  # The approval page (web/approval) in a real browser with a virtual passkey (SIMULATED: no hardware, no person). The browser is the headless-shell image
+  # of the chromedp project, pinned by digest (Chromium 159, as of 2026-11-19), run on the host network next to the job; the tests drive it over its
+  # DevTools port (QV_E2E_CHROME_URL), so the CI image needs no browser. It ignores certificate errors only because the dev Keycloak and the core use the
+  # test authority's certificates.
+  e2e-approval-web:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_REQUIRE_BROWSER: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+      # A shared runner is slower than a laptop: every condition wait in the custody tests gets three times as long.
+      QV_E2E_TIMEOUT_SCALE: "3"
+      QV_E2E_KEYCLOAK_URL: https://127.0.0.1:8180
+      QV_E2E_CHROME_URL: http://127.0.0.1:9222
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the headless browser (pinned image)
+        run: |
+          docker run -d --name chrome --network host chromedp/headless-shell@sha256:381353d3530ab9d579d2fe8b9c0f4519c995617f5a71daf6bb649e2d12005bd9 --ignore-certificate-errors
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:9222/json/version && exit 0; sleep 1; done
+          docker logs chrome; exit 1
+      - uses: ./.github/actions/mpc-env
+        with:
+          postgres: "true"
+          infra: "true"
+          keycloak: "true"
+      - name: make test-e2e-approval-web
+        run: ci/run-in-image.sh make test-e2e-approval-web
+
   e2e-evm-tx-failures:
     runs-on: ubuntu-24.04
     needs: image

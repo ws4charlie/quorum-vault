@@ -60,6 +60,7 @@ func run(log *slog.Logger) error {
 	serviceAllow := flag.String("service-allow", envOr("QV_CORE_SERVICE_ALLOW", "business/guardian,business/worker"), "names (zone/service) of the services that may call with a client-credentials token; each must also present a business-zone client certificate with that name (env QV_CORE_SERVICE_ALLOW)")
 	metricsListen := flag.String("metrics-listen", os.Getenv("QV_CORE_METRICS_LISTEN"), "serve Prometheus metrics (certificate expiry) in plain http on a loopback address, e.g. 127.0.0.1:9101 (another address only with QV_METRICS_ALLOW_NON_LOOPBACK=1); off when empty (env QV_CORE_METRICS_LISTEN)")
 	healthListen := health.Flag(flag.CommandLine)
+	flag.Func("approval-origins", "comma separated origins (scheme://host[:port]) of the approval page that may call the approval routes from a browser; off when empty (env QV_APPROVAL_ORIGINS)", custody.AllowApprovalOrigins)
 	flag.Parse()
 	if *cfgPath == "" || *dsn == "" {
 		return errors.New("-config and -dsn (or DATABASE_URL) are required")

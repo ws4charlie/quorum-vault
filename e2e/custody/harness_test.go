@@ -113,7 +113,7 @@ func TestMain(m *testing.M) {
 				buildErr = err
 			}
 		}
-		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold", "qv-guardian", "qv-keysets"} {
+		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold", "qv-guardian", "qv-keysets", "qv-approval-web", "qv-approvers"} {
 			// The worker is built with -tags devauth: only then does it have the crash-test failpoints (QV_FAILPOINT).
 			args := []string{"build", "-o", filepath.Join(dir, b)}
 			if b == "qv-worker" {
@@ -152,6 +152,7 @@ type opts struct {
 	gwETHPerTx      string   // gateway per-tx cap for ETH (wei), default huge
 	gwETHDest       []string // when set, the gateway lets ETH withdrawals pay only these addresses (default: any_destination)
 	webauthn        bool     // enrol "dave", a simulated WebAuthn approver (s.wa["dave"])
+	approvalWeb     bool     // the approval page test (approvalweb_test.go): operators in the zone config, and "bob" is not a bootstrap approver (the page enrols his passkey)
 	businessOneTier bool     // business config knows only the lowest tier (the gateway still has two)
 	approvalTimeout string   // default 20s
 	stuckAfter      string   // default 4s (scaled)
@@ -488,6 +489,9 @@ func newSystem(t *testing.T, o opts) *system {
 		s.wa["dave"] = a
 		apprFiles["dave"] = gateway.ApproverFile{Enabled: true, Scheme: "webauthn", Alg: webauthn.ES256, PublicKey: a.PublicKeyHex(), CredentialID: a.CredentialIDString(), RPID: waRPID, Origins: []string{waOrigin}}
 	}
+	if o.approvalWeb {
+		delete(apprFiles, "bob") // the person bob approves with a passkey enrolled through the page, under his own name (the approval's actor is the token's sub)
+	}
 	seed := s.approv["auto"].Seed()
 	s.keyPath = filepath.Join(s.dir, "auto.key")
 	if err := os.WriteFile(s.keyPath, []byte(hex.EncodeToString(seed)), 0o600); err != nil {
@@ -607,6 +611,9 @@ func newSystem(t *testing.T, o opts) *system {
 	}
 	if mpcMode() && o.route != nil {
 		gf.MPCRoute = s.mpc.RouteFile(o.route.interval, o.route.failCount, o.route.window, o.route.recoverCount)
+	}
+	if o.approvalWeb {
+		gf.Operators = s.newOperators()
 	}
 	if o.keysets {
 		opf := &gateway.OperatorsFile{Keys: map[string]gateway.OperatorFile{}, MinOperators: 2}
