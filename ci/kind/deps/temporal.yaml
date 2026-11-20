@@ -18,10 +18,10 @@ spec:
             - |
               set -e
               cp /pki/tls.key /tmp/sql.key && chmod 600 /tmp/sql.key
-              temporal-sql-tool --db temporal create-database || true
+              temporal-sql-tool --db temporal create-database || true   # already there on a second run (the job is idempotent)
               temporal-sql-tool --db temporal setup-schema -v 0.0
               temporal-sql-tool --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
-              temporal-sql-tool --db temporal_visibility create-database || true
+              temporal-sql-tool --db temporal_visibility create-database || true   # already there on a second run (the job is idempotent)
               temporal-sql-tool --db temporal_visibility setup-schema -v 0.0
               temporal-sql-tool --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
           env:

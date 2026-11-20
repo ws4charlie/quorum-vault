@@ -45,7 +45,7 @@ load_images() {
 pf_start() {
   local ns="$1" target="$2" remote="$3" log; log="$(mktemp "$WORK/pf.XXXXXX")"
   kubectl --context "$CTX" -n "$ns" port-forward "$target" ":$remote" >"$log" 2>&1 &
-  PF_PID=$!
+  PF_PID=$!; disown "$PF_PID" 2> /dev/null || true   # no "Terminated" job message when it is stopped
   local i
   for i in $(seq 100); do
     PF_PORT="$(sed -n 's/^Forwarding from 127.0.0.1:\([0-9]*\) ->.*/\1/p' "$log" | head -1)"
@@ -55,4 +55,16 @@ pf_start() {
   done
   cat "$log" >&2; rm -f "$log"; kill "$PF_PID" 2>/dev/null; return 1
 }
+# The trust bundles qv-certs made in a namespace (immutable ConfigMaps, `qv-trust-<zone>-<hash>`), as helm flags: the charts take them as the CA file of their certificate volumes.
+trust_args() {
+  local ns="$1" z n
+  for z in business signing; do
+    n="$(kn "$ns" get configmap -l "quorumvault.io/trust-bundle=$z" -o jsonpath='{.items[0].metadata.name}' 2> /dev/null || true)"   # no bundle in this namespace (qv-certs not installed there): empty, the chart keeps the CA of its Secret
+    if [ -n "$n" ]; then printf -- '--set tls.trust.%s=%s ' "$z" "$n"; fi
+  done
+  return 0
+}
+# Waits for each background job by pid: a bare `wait` returns 0 whatever the jobs returned, so a failed `helm upgrade ... &` would pass. Fails if any job failed (after all have ended).
+#   job_a & pa=$!; job_b & pb=$!; wait_all "$pa" "$pb"
+wait_all() { local p rc=0; for p in "$@"; do wait "$p" || rc=1; done; return $rc; }
 pf_stop() { [ -n "${PF_PID:-}" ] && kill "$PF_PID" 2>/dev/null; PF_PID=""; return 0; }
