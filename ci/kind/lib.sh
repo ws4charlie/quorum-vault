@@ -10,6 +10,7 @@ QV_KIND_NAME="${QV_KIND_NAME:-qv-kind-$(printf %s "$QV_KIND_ROOT" | shasum | cut
 CTX="kind-$QV_KIND_NAME"
 WORK="$KDIR/.work/$QV_KIND_NAME"            # generated, gitignored: CAs, passwords, values files, test keys. Nothing in it is ever committed.
 NS_BIZ=qv; NS_SIGN=qv-signing; NS_B=qv-party-b; NS_C=qv-party-c
+NS_PTEST=qv-ptest                           # the namespace the policy chart labels (policy.sh); not part of ALL_NS
 ALL_NS="$NS_BIZ $NS_SIGN $NS_B $NS_C"
 export KUBECONFIG="${QV_KIND_KUBECONFIG:-$WORK/kubeconfig}"
 mkdir -p "$WORK"

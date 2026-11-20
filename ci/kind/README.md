@@ -39,6 +39,7 @@ Solana is **not** in the kind lane (the validator image is 778 MB and not needed
 | `withdraw` | an EVM and a Bitcoin withdrawal through the real pods: Keycloak token, deposit on the local chain, request, auto approval, signing by the gateway with parties A and B (cosigner B authorises), broadcast, confirmation, **exactly one payout** of the amount, Reconcile clean. The EVM deposit is swept by the pods too |
 | `crash` | party A deleted while the sign job is in flight, the worker deleted right after the job exists, the gateway rolled while signing: each withdrawal still pays once and Reconcile stays clean |
 | `upgrade` | a no-change `helm upgrade` replaces no pod; a changed value rolls the pods that read it and core stays available (a prober dials it twice a second: no refused connection) |
+| `admission` | the cluster policies (`deploy/policy/qv-policy`, installed by `policy.sh` in kind mode for the namespace `qv-ptest` only) are live: every policy has its binding and no type-checking warning; each denied example is refused by the real API server **with the policy's own message** (foreign registry, hostNetwork, hostPath, privileged, added capability, root, escalation, automounted token, mutable ConfigMap, NodePort, public LoadBalancer, externalIPs, Ingress; Pod Security `restricted` in `qv-ptest`), the controls are admitted (conforming pod, immutable ConfigMap, private LoadBalancer), and exec, port-forward and debug into a pod are refused outside the break-glass group and not refused for a member |
 
 `smoke/run.sh --pending` lists what is not done. `withdraw` and `crash` drive the pods from the host through port-forwards (`tools/kindwd`); the person tokens come from the dev realm's test-only login (`qv-e2e`, as `e2e/idp`), passwords from the gitignored work dir.
 
@@ -58,8 +59,8 @@ CI prints the same numbers for the runner (`.github/workflows/kind.yml`).
 
 ## What is not done
 
-Certificate rotation, admission policies and tee-sim (marked pending). The crash and certificate cases of piece 3: an expired certificate refuses start, rotation without restart. `tools/kindctl` makes the DKG calls (`qv-party-admin` needs a signed file per call and one connection per party; the lane has one port-forward and reads the public keys back in the same tool).
+Certificate rotation and tee-sim (marked pending). Admission: only the rules that kind mode keeps are live-tested. The production-only rules (digest, the cosign signature check by Kyverno, development switches in a pod or ConfigMap, the ConfigMap writer list) need production mode, which needs Kyverno and a signed test image: later. The policy is installed for one namespace of its own, not for the lane's namespaces: the lane port-forwards into the signing namespaces, which the exec rule refuses outside the break-glass group. The certificate cases: an expired certificate refuses start, rotation without restart. `tools/kindctl` makes the DKG calls (`qv-party-admin` needs a signed file per call and one connection per party; the lane has one port-forward and reads the public keys back in the same tool).
 
 ## What it cannot show
 
-One cluster, simulated HSM (SoftHSM on a volume, `QV_ENV=dev`), no cloud, no real network between domains, no Vault. Certificate rotation, admission policies and tee-sim are later, marked as pending, not half-tested.
+One cluster, simulated HSM (SoftHSM on a volume, `QV_ENV=dev`), no cloud, no real network between domains, no Vault. Certificate rotation and tee-sim are later, marked as pending, not half-tested.

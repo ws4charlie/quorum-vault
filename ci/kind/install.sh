@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Phase 2 of `make kind-up`: generated secrets, certificates (qv-certs per namespace), the dependencies, the four charts. Idempotent.
-#   ci/kind/install.sh [secrets|certs|deps|charts|all]
+#   ci/kind/install.sh [secrets|certs|deps|charts|policy|all]
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 cd "$QV_KIND_ROOT"
@@ -171,6 +171,7 @@ case "$PHASE" in
   certs)   phase_secrets; phase_certs ;;
   deps)    phase_secrets; phase_certs; phase_deps ;;
   charts)  "$KDIR/charts.sh" ;;
-  all)     phase_secrets; phase_certs; phase_deps; "$KDIR/charts.sh" ;;
-  *) echo "usage: install.sh [secrets|certs|deps|charts|all]" >&2; exit 2 ;;
+  policy)  "$KDIR/policy.sh" ;;
+  all)     phase_secrets; phase_certs; phase_deps; "$KDIR/charts.sh"; "$KDIR/policy.sh" ;;
+  *) echo "usage: install.sh [secrets|certs|deps|charts|policy|all]" >&2; exit 2 ;;
 esac
