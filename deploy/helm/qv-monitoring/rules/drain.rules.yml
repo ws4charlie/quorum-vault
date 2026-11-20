@@ -1,0 +1,15 @@
+# Refused drains in the signing zone (docs/runbooks/key-replacement.md). A drain moves funds from a replaced key to its successor; the zone refuses one that does not match its own view.
+# Refusals use up neither the drain rate nor the cap, so a repeating one is a stuck planner or the business zone probing: it must be visible.
+#
+# PENDING metric: the counter exists only in process (Guard.DrainRefusals() in internal/gateway/keysets.go) and as an ALERT log line. The metric below is what the gateway
+# (its metrics file) and the cosigner (its metrics port) must publish; the rule and its test are ready (monitoring/pending-metrics.txt, reports/D10-r1.md). Until then use the log-based alert (docs/runbooks/on-call.md).
+#   qv_drain_refusals_total{mode="gateway"|"cosigner"}   counter since process start
+groups:
+  - name: qv-drain
+    rules:
+      - alert: QVDrainRefused
+        expr: sum by (mode) ((increase(qv_drain_refusals_total[15m]) unless (qv_drain_refusals_total unless qv_drain_refusals_total offset 15m)) or (qv_drain_refusals_total unless qv_drain_refusals_total offset 15m)) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "The signing zone refused a drain ({{ $labels.mode }})"
+          description: "The ALERT line 'drain refused' in the {{ $labels.mode }} log has the intent, the source and the reason. Repeated refusals: a stuck planner, or the business zone probing. Runbook: docs/runbooks/key-replacement.md"

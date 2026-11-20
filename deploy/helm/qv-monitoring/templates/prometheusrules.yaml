@@ -1,0 +1,19 @@
+{{- include "qm.guards" . -}}
+{{- /* The rules of monitoring/ as PrometheusRule objects, evaluated centrally. Never in a signing cluster. */ -}}
+{{- if and .Values.rules.enabled (eq .Values.clusterKind "central") }}
+{{- range $path, $_ := .Files.Glob "rules/*.rules.yml" }}
+{{- $doc := $.Files.Get $path | fromYaml }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ printf "qv-%s" (base $path | trimSuffix ".rules.yml") }}
+  labels:
+    {{- include "qm.labels" $ | nindent 4 }}
+    {{- with $.Values.rules.labels }}{{ toYaml . | nindent 4 }}{{ end }}
+  annotations:
+    quorumvault.io/generated-from: {{ printf "monitoring/%s" (base $path) }}
+spec:
+  groups: {{- toYaml $doc.groups | nindent 4 }}
+---
+{{- end }}
+{{- end }}

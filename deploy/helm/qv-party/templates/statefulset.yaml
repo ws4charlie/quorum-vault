@@ -147,6 +147,19 @@ spec:
             - { name: cosigner-socket-tls, mountPath: /etc/qv/socket-tls, readOnly: true }
             - { name: socket, mountPath: /run/qv }
         {{- end }}
+        {{- if $v.metrics.agent.enabled }}
+        # The metrics agent: same pod, so it reaches the loopback metrics ports; it mounts no data, no socket, no PIN, and remote-writes outward only (README "Metrics").
+        - name: metrics-agent
+          image: {{ include "qp.image" (dict "ctx" . "k" "agent") | quote }}
+          imagePullPolicy: {{ $v.imagePullPolicy }}
+          args: ["run", "/etc/alloy/config.alloy", "--server.http.listen-addr=127.0.0.1:12345", "--storage.path=/var/lib/alloy", "--disable-reporting"]
+          resources: {{- toYaml $v.metrics.agent.resources | nindent 12 }}
+          securityContext: {{- include "qp.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: agent-config, mountPath: /etc/alloy, readOnly: true }
+            - { name: agent-data, mountPath: /var/lib/alloy }
+            - { name: remote-write, mountPath: /etc/qv/remote-write, readOnly: true }
+        {{- end }}
       volumes:
         - name: config
           configMap: { name: {{ include "qp.partyConfigName" . }}, defaultMode: 288 }
@@ -171,6 +184,13 @@ spec:
         # The cosigner's unix socket (mode 0600, owner only: both containers run as the same uid). In memory, empty at every start, shared by exactly these two containers.
         - name: socket
           emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        {{- end }}
+        {{- if $v.metrics.agent.enabled }}
+        - name: agent-config
+          configMap: { name: {{ printf "%s-agent-%s" (include "qp.fullname" .) (include "qp.agentConfig" . | sha256sum | trunc 10) }} }
+        - name: agent-data
+          emptyDir: { sizeLimit: 64Mi }
+        {{- include "qp.secretVolume" (dict "name" "remote-write" "secret" $v.metrics.agent.remoteWrite.tlsSecret) | nindent 8 }}
         {{- end }}
         {{- with $v.backup.outputClaim }}
         - name: backup-out

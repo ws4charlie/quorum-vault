@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["clusterKind"],
+  "properties": {
+    "clusterKind": { "enum": ["central", "business", "signing"] },
+    "rules": { "type": "object", "additionalProperties": false, "properties": { "enabled": { "type": "boolean" }, "labels": { "type": "object" } } },
+    "serviceMonitors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "labels": { "type": "object" },
+        "businessNamespace": { "type": "string", "minLength": 1 },
+        "clusterLabel": { "type": "string", "minLength": 1 },
+        "interval": { "type": "string" },
+        "components": { "type": "array", "items": { "enum": ["core", "relay", "archiver"] } }
+      }
+    },
+    "alertmanager": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "labels": { "type": "object" },
+        "defaultReceiver": { "type": "string" },
+        "groupBy": { "type": "array", "items": { "type": "string" } },
+        "receivers": {
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": false, "required": ["name", "webhookUrlSecret"], "properties": { "name": { "type": "string" }, "webhookUrlSecret": { "type": "object", "required": ["name", "key"] } } }
+        },
+        "partyRoutes": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["party", "receiver"], "properties": { "party": { "enum": ["A", "B", "C"] }, "receiver": { "type": "string" } } } }
+      }
+    }
+  }
+}

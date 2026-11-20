@@ -133,7 +133,7 @@
       "noTLSEnv": true
     }
   },
-  "externalImages": { "alloy": { "note": "Grafana Alloy, the optional metrics sidecar of qv-signing-core (metrics.agent.enabled); not built here" } },
+  "externalImages": { "alloy": { "repository": "docker.io/grafana/alloy", "tag": "v1.10.2", "digest": "sha256:bcf27f18c4402869af112fb39e35e1db3804a404686f4caa20bdf77814219223", "note": "Grafana Alloy, the optional metrics agent sidecar of qv-signing-core and qv-party (metrics.agent.enabled): reads loopback metrics and the gateway's text files in the pod and remote-writes OUTWARD with a client certificate. Not built here. Both charts' images.agent must equal this digest (ci/helm/monitoring_test.go); the multi-arch index digest of the tag was read on 2026-11-19. Update the tag, the digest and both charts together." } },
   "devImages": {
     "qv-gateway-dev": {
       "of": "qv-gateway",

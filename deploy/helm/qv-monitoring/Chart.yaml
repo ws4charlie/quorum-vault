@@ -1,0 +1,7 @@
+apiVersion: v2
+name: qv-monitoring
+description: QuorumVault monitoring objects - the alert rules as PrometheusRule objects (generated from monitoring/), ServiceMonitors for the business cluster, and an Alertmanager routing example. Nothing here scrapes into a signing cluster.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"

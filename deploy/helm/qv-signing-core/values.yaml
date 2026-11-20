@@ -10,8 +10,8 @@ imagePullSecrets: []
 images:
   gateway: { repository: ghcr.io/ws4charlie/quorum-vault/qv-gateway,       digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
   tools:   { repository: ghcr.io/ws4charlie/quorum-vault/qv-tools-signing, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
-  # only when metrics.agent.enabled: any image that runs Grafana Alloy (pin the digest)
-  agent:   { repository: docker.io/grafana/alloy,                           digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  # only when metrics.agent.enabled: Grafana Alloy v1.10.2, the same image and digest as externalImages.alloy in deploy/images/contract.json (a test compares them)
+  agent:   { repository: docker.io/grafana/alloy,                           digest: "sha256:bcf27f18c4402869af112fb39e35e1db3804a404686f4caa20bdf77814219223", tag: "" }
 runAsUser: 65532
 
 # QV_ENV. Production: leave empty (the binary then treats the run as production and refuses SoftHSM). Only values-kind.yaml sets `dev`.
@@ -86,8 +86,10 @@ metrics:
   agent:
     enabled: false               # a sidecar that reads the file inside the pod and remote-writes OUTWARD (Grafana Alloy). Off by default.
     remoteWrite:
-      url: ""                    # https://... (a private endpoint of the central monitoring)
-      tokenSecret: ""            # a Secret with a bearer token (key `token`); empty = none (mutual TLS or network identity at the endpoint)
+      url: ""                    # https://... (a private endpoint of the central monitoring); REQUIRED when enabled
+      tlsSecret: ""              # REQUIRED when enabled: a Secret (cert-manager) with tls.crt, tls.key, ca.crt: the client certificate the endpoint checks, and the CA of the endpoint
+    cluster: ""                  # REQUIRED when enabled: this cluster's name, sent on every series as qv_cluster
+    externalLabels: {}           # more labels on every series; the key qv_cluster is ignored (the chart sets it)
     resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 250m, memory: 192Mi } }
 
 # --- Signed settings: an operator-run Job, OFF by default (README "Signed settings") ---

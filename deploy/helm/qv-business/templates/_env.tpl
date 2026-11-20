@@ -23,6 +23,10 @@ QV_OIDC_CA_FILE: /etc/qv/oidc/ca.crt
 {{- if .Values.approval.enabled }}
 QV_APPROVAL_ORIGINS: {{ include "qv.approvalOrigin" . | quote }}
 {{- end }}
+{{- if .Values.metrics.enabled }}
+QV_METRICS_ALLOW_NON_LOOPBACK: "1"
+QV_CORE_METRICS_LISTEN: {{ printf "0.0.0.0:%d" (int .Values.metrics.port) | quote }}
+{{- end }}
 {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 0 }}
 {{- include "qv.healthEnv" .Values.core.probes | nindent 0 }}
 {{- end -}}
@@ -40,6 +44,9 @@ QV_AUTO_APPROVER_KEY_FILE: /etc/qv/approver/{{ .Values.custody.autoApprover.key 
 {{- define "qv.env.relay" -}}
 DATABASE_URL: {{ include "qv.dsn" (dict "ctx" . "role" "qv_relay" "dir" "/etc/qv/tls") | quote }}
 QV_KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
+{{- if .Values.metrics.enabled }}
+QV_METRICS_ALLOW_NON_LOOPBACK: "1"
+{{- end }}
 {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 0 }}
 {{- include "qv.healthEnv" .Values.relay.probes | nindent 0 }}
 {{- end -}}
@@ -59,6 +66,9 @@ QV_ARCHIVE_SECRET_KEY_FILE: /etc/qv/archive/{{ .Values.archive.secretKeyKey }}
 QV_ARCHIVE_TLS_CERT: /etc/qv/archive-tls/tls.crt
 QV_ARCHIVE_TLS_KEY: /etc/qv/archive-tls/tls.key
 QV_ARCHIVE_TLS_CA: /etc/qv/archive-tls/ca.crt
+{{- end }}
+{{- if .Values.metrics.enabled }}
+QV_METRICS_ALLOW_NON_LOOPBACK: "1"
 {{- end }}
 {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 0 }}
 {{- include "qv.healthEnv" .Values.archiver.probes | nindent 0 }}

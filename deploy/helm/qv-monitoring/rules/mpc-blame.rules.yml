@@ -1,0 +1,112 @@
+# Failure counters per suspected party, in central, read-only monitoring (runbook: docs/runbooks/mpc-failures.md).
+#
+# Inputs: every mpc-party serves qv_mpc_party_session_failures_total on its metrics port (labels party, side, op, peer, kind); the gateway writes
+# qv_mpc_gateway_sign_failures_total (labels pair, kind) into its metrics file, as for mpc-routing.rules.yml.
+#
+# "peer" is a SUSPECT, not proof: cb-mpc aborts without blame, so the peer is where the failed message came in, or the link that failed. Only humans
+# act on these alerts. Nothing in the signing zone reads these counters: no freeze, no route change and no refusal depends on them.
+#
+# One failed session is counted by both parties that took part (A sees peer=B, B sees peer=A). The peer-level sums below therefore add what the OTHER
+# parties saw with that peer; a party that is the common factor of failures on every link it has stands out in the peer-level numbers, and the
+# link-level numbers (party, peer) show which link it is.
+#
+# Thresholds are the `vector(...)` numbers in the first group: edit them here, they are the only place. The `for:` durations of the alerts are in
+# the alerts themselves (a rule's `for` cannot be an expression).
+groups:
+  - name: qv-mpc-blame
+    rules:
+      # ---- thresholds (the one place to tune) ----
+      # cryptographic: failures with one peer in 1 hour at which to alert. 1 = at the first one. A cryptographic failure also freezes the keyset, and it is
+      # the one kind that may mean a bad or hostile party, so there is no reason to wait for a second.
+      - record: qv_mpc_blame:threshold
+        expr: vector(1)
+        labels: {name: cryptographic_1h}
+      # availability (TRANSPORT, UNAVAILABLE): failed sessions with one peer in 5 minutes. 5 is about one a minute: a restart or a deploy of a party gives a
+      # few at once and stays below it; a flaky link or host keeps going. The alert needs it to hold for 10 minutes. A party the health checks already
+      # route away from is left to QVMpcPartyUnhealthy.
+      - record: qv_mpc_blame:threshold
+        expr: vector(5)
+        labels: {name: availability_5m}
+      # refusals by a cosigner (REFUSED): in 1 hour. Policy refusals happen in normal life, so this is a ticket and not a page; a burst of them means the
+      # asking party or the gateway sends requests the cosigner's policy does not allow.
+      - record: qv_mpc_blame:threshold
+        expr: vector(5)
+        labels: {name: refused_1h}
+      # LIMIT, INTERNAL, FROZEN: in 1 hour. Sessions that fail for reasons that are not the network and not a verdict: limits hit, bugs, a frozen keyset still being asked.
+      - record: qv_mpc_blame:threshold
+        expr: vector(3)
+        labels: {name: other_1h}
+
+      # ---- recording rules: failed sessions per link (reporting party, suspect) and per suspect, over 5 minutes, 1 hour and 24 hours ----
+      # The parties create a series only at its first failure, so its first samples are 1, 1, 1 and increase() alone says 0. Each expression is therefore increase() for a series
+      # that existed a window ago, and the value itself for a series that did not exist then (it started at 0 inside the window). Limit: a target missing for over 5 minutes that returns
+      # makes its series look new once and re-reports its old total for one window.
+      - record: qv_mpc:link_session_failures:increase5m
+        expr: sum by (party, peer, kind) ((increase(qv_mpc_party_session_failures_total[5m]) unless (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 5m)) or (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 5m))
+      - record: qv_mpc:link_session_failures:increase1h
+        expr: sum by (party, peer, kind) ((increase(qv_mpc_party_session_failures_total[1h]) unless (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 1h)) or (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 1h))
+      - record: qv_mpc:link_session_failures:increase24h
+        expr: sum by (party, peer, kind) ((increase(qv_mpc_party_session_failures_total[24h]) unless (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 24h)) or (qv_mpc_party_session_failures_total unless qv_mpc_party_session_failures_total offset 24h))
+      - record: qv_mpc:peer_session_failures:increase5m
+        expr: sum by (peer, kind) (qv_mpc:link_session_failures:increase5m)
+      - record: qv_mpc:peer_session_failures:increase1h
+        expr: sum by (peer, kind) (qv_mpc:link_session_failures:increase1h)
+      - record: qv_mpc:peer_session_failures:increase24h
+        expr: sum by (peer, kind) (qv_mpc:link_session_failures:increase24h)
+      # the gateway's view, per pair
+      - record: qv_mpc:gateway_sign_failures:increase5m
+        expr: sum by (pair, kind) (increase(qv_mpc_gateway_sign_failures_total[5m]))
+      - record: qv_mpc:gateway_sign_failures:increase1h
+        expr: sum by (pair, kind) (increase(qv_mpc_gateway_sign_failures_total[1h]))
+      - record: qv_mpc:gateway_sign_failures:increase24h
+        expr: sum by (pair, kind) (increase(qv_mpc_gateway_sign_failures_total[24h]))
+
+      # ---- alerts ----
+      - alert: QVMpcPeerCryptographicFailures
+        expr: qv_mpc:peer_session_failures:increase1h{kind="CRYPTOGRAPHIC", peer!="none"} >= scalar(qv_mpc_blame:threshold{name="cryptographic_1h"})
+        labels: {severity: page}
+        annotations:
+          summary: "A signing session failed a cryptographic check with party {{ $labels.peer }} (suspect, not proven)"
+          description: "The failed message came in from party {{ $labels.peer }}, or its link failed. The cause may equally be the reporting party, the link or the third party. The keyset is frozen. Runbook: docs/runbooks/mpc-failures.md"
+      - alert: QVMpcPeerAvailabilityFailures
+        expr: |
+          qv_mpc:peer_session_failures:increase5m{kind=~"TRANSPORT|UNAVAILABLE", peer!="none"} >= scalar(qv_mpc_blame:threshold{name="availability_5m"})
+          unless on (peer) label_replace(qv_mpc_party_healthy == 0, "peer", "$1", "party", "(.*)")
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "Sessions keep failing with party {{ $labels.peer }} although the health checks pass (suspect, not proven)"
+          description: "A flaky link or host. A party that the health checks rule out is covered by QVMpcPartyUnhealthy. Runbook: docs/runbooks/mpc-failures.md"
+      - alert: QVMpcPeerRefusals
+        expr: qv_mpc:peer_session_failures:increase1h{kind="REFUSED", peer!="none"} >= scalar(qv_mpc_blame:threshold{name="refused_1h"})
+        labels: {severity: ticket}
+        annotations:
+          summary: "Party {{ $labels.peer }} keeps asking for signatures that a cosigner refuses"
+          description: "Look at the cosigner's refusal reasons and at what the gateway sent. Runbook: docs/runbooks/mpc-failures.md"
+      - alert: QVMpcPeerOtherFailures
+        expr: sum by (peer) (qv_mpc:peer_session_failures:increase1h{kind=~"LIMIT|INTERNAL|FROZEN"}) >= scalar(qv_mpc_blame:threshold{name="other_1h"})
+        labels: {severity: ticket}
+        annotations:
+          summary: "Sessions with party {{ $labels.peer }} fail with limit, internal or frozen errors"
+          description: "Not the network and not a cryptographic verdict. peer=none: no single peer. Runbook: docs/runbooks/mpc-failures.md"
+      - alert: QVMpcGatewayPairCryptographicFailures
+        expr: qv_mpc:gateway_sign_failures:increase1h{kind="CRYPTOGRAPHIC"} >= scalar(qv_mpc_blame:threshold{name="cryptographic_1h"})
+        labels: {severity: page}
+        annotations:
+          summary: "A sign call through pair {{ $labels.pair }} failed a cryptographic check"
+          description: "Either party of the pair, or the link between them, is suspect. Runbook: docs/runbooks/mpc-failures.md"
+      - alert: QVMpcGatewayPairAvailabilityFailures
+        expr: sum by (pair) (qv_mpc:gateway_sign_failures:increase5m{kind=~"TRANSPORT|UNAVAILABLE"}) >= scalar(qv_mpc_blame:threshold{name="availability_5m"})
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "Sign calls through pair {{ $labels.pair }} keep failing"
+          description: "The gateway also counts calls that never reached a party. The health checks and the route move signing away from a pair on their own; this says it has been going on. Runbook: docs/runbooks/mpc-failures.md"
+      # a counter that is not collected raises nothing: say so
+      - alert: QVMpcBlameMetricsMissing
+        expr: (count(count by (party) (qv_mpc_party_session_failures_total)) or vector(0)) < 3
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "The failure counters of fewer than three parties are collected"
+          description: "Check that Prometheus scrapes every party's metrics port (metrics_listen)."

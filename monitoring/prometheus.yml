@@ -11,6 +11,9 @@ rule_files:
   - mpc-blame.rules.yml
   - audit-archive.rules.yml
   - tls-cert.rules.yml
+  - attest-broker.rules.yml
+  - party-sealer.rules.yml
+  - drain.rules.yml
 
 scrape_configs:
   # every party's metrics port: qv_mpc_party_session_failures_total. Local development: start the parties with metrics_listen on these ports.

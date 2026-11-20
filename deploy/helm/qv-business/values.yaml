@@ -147,6 +147,13 @@ ingress:
     host: custody-internal.example.invalid
     annotations:
       nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+# Metrics for the central monitoring (task D10; chart qv-monitoring). Off by default: the binaries then keep metrics on loopback. On: core, relay and archiver bind the pod
+# address (QV_METRICS_ALLOW_NON_LOOPBACK=1), each gets a metrics Service, and ONE ingress rule lets the monitoring namespace (and nothing else) reach the metrics port.
+# The worker has no metrics port (no -metrics-listen in its code), so it has none here.
+metrics:
+  enabled: false
+  port: 9102
+  monitoringNamespace: monitoring      # where Prometheus runs (label kubernetes.io/metadata.name)
 network:
   enabled: true
   # Peers (NetworkPolicy `to`/`from` entries). Pod selectors name the dependencies when they run in this namespace; use ipBlock or namespaceSelector otherwise.
