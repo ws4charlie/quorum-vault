@@ -53,7 +53,14 @@ func (s *system) rekeyErr(dir string, args ...string) (string, error) {
 		base = append(base, "-guard-dsn", "cosigner-b="+s.cosGuardDSN, "-guard-dsn", "cosigner-c="+s.cosCGuardDSN)
 	}
 	cmd := exec.Command(filepath.Join(binDir, "qv-rekey"), append(base, args[1:]...)...)
-	cmd.Env = append(os.Environ(), "QV_HSM_PIN="+hsmtest.PIN(s.t), "SOFTHSM2_CONF="+os.Getenv("SOFTHSM2_CONF"))
+	// The PIN reaches the tool as a file (QV_HSM_PIN_FILE, mode 0400), the way it does in production.
+	pinFile := filepath.Join(s.dir, "rekey-hsm-pin")
+	if _, err := os.Stat(pinFile); err != nil {
+		if err := os.WriteFile(pinFile, []byte(hsmtest.PIN(s.t)+"\n"), 0o400); err != nil {
+			s.t.Fatal(err)
+		}
+	}
+	cmd.Env = append(os.Environ(), "QV_HSM_PIN=", "QV_HSM_PIN_FILE="+pinFile, "SOFTHSM2_CONF="+os.Getenv("SOFTHSM2_CONF"))
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
