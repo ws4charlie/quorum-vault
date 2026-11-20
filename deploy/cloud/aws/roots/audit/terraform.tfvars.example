@@ -1,0 +1,10 @@
+region        = "eu-central-1"
+bucket_prefix = "acme"
+account_ids = {
+  business     = "111111111111"
+  signing-core = "222222222222"
+  party-b      = "333333333333"
+  party-c      = "444444444444"
+  audit        = "555555555555"
+}
+# archiver_role_exists = true   # PHASE 2, after the business root is applied

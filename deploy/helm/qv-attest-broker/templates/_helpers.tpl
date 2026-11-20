@@ -108,6 +108,15 @@ log.level = INFO
 {{- if not $v.allowlist.file }}{{ fail "allowlist.file is required: the signed allowlist JSON (--set-file allowlist.file=allowlist.json)" }}{{ end -}}
 {{- $al := fromJson $v.allowlist.file -}}
 {{- if or (not (kindIs "map" $al)) (hasKey $al "Error") }}{{ fail "allowlist.file must be the JSON object the operators signed (it does not parse)" }}{{ end -}}
+{{- /* The shape of a v2 list (internal/attest/signedlist.go). The broker checks signatures and every rule itself; these are the mistakes that are cheap to catch before a rollout: a list for another party, a misspelled field (the tool and the broker refuse it too), a status that is not active or revoked. */ -}}
+{{- if not (and (hasKey $al "seq") (kindIs "float64" $al.seq) (ge $al.seq 1.0)) }}{{ fail "allowlist.file: seq must be a number of at least 1 (every list has a higher sequence than the one in force)" }}{{ end -}}
+{{- if not (and (hasKey $al "entries") (kindIs "slice" $al.entries)) }}{{ fail "allowlist.file: entries must be a list" }}{{ end -}}
+{{- range $al.entries }}
+{{- $e := . -}}
+{{- range $k, $_ := $e }}{{ if not (has $k (list "party" "measurement" "not_before" "not_after" "version" "status")) }}{{ fail (printf "allowlist.file: an entry has the unknown field %q (a misspelled not_after or status would be read as a default): fields are party, measurement, not_before, not_after, version, status" $k) }}{{ end }}{{ end -}}
+{{- if ne (toString (get $e "party")) (include "qab.role" $) }}{{ fail (printf "allowlist.file: an entry is for party %q but this broker releases the keys of party %q only (one list per broker)" (toString (get $e "party")) (include "qab.role" $)) }}{{ end -}}
+{{- if and (hasKey $e "status") (not (has (toString $e.status) (list "active" "revoked"))) }}{{ fail (printf "allowlist.file: status %q is not active or revoked" (toString $e.status)) }}{{ end -}}
+{{- end -}}
 {{- if not (has (toString $v.service.type) (list "ClusterIP" "LoadBalancer")) }}{{ fail "service.type must be ClusterIP or LoadBalancer (private)" }}{{ end -}}
 {{- if eq $v.service.type "LoadBalancer" -}}
 {{- if not $v.service.annotations }}{{ fail "service: type LoadBalancer needs the internal-load-balancer annotations of your cloud in service.annotations" }}{{ end -}}
