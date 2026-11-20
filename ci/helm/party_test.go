@@ -1238,3 +1238,167 @@ func TestPartyBackupJob(t *testing.T) {
 		}
 	}
 }
+
+// The operator Job (`qv-party-admin`, one call): off by default, refuses missing pieces, holds no signing key, carries the operator label and not the
+// party's selector labels, mounts only the caller certificate and the signed file, and passes the policies.
+func TestPartyOperatorJob(t *testing.T) {
+	base := []string{"--set", "operator.job.enabled=true", "--set", "operator.job.command=refresh", "--set", "operator.job.keysetId=hot-0",
+		"--set", "operator.job.authConfigMap=refresh-auth", "--set", "operator.job.callerCertSecret=operator-caller",
+		"--set", "operator.job.partyPin=" + strings.Repeat("ab", 32)}
+	for _, role := range []string{"A", "B", "C"} {
+		for _, e := range partyEnvs {
+			objs, text := partyObjs(t, e.kind, role, base...)
+			jobs := partyFind(objs, "Job")
+			if len(jobs) != 1 {
+				t.Fatalf("%s %s: want 1 Job, got %d", role, e.name, len(jobs))
+			}
+			for _, m := range partyPolicy(objs, e.kind) {
+				t.Error(role + " " + e.name + " policy: " + m)
+			}
+			pod, _ := jobs[0].Pod()
+			c := pod.Containers[0]
+			args := strings.Join(c.Args, " ")
+			for _, want := range []string{"refresh -auth /etc/qv/admin/auth.json", "-party " + role + "=qv-party-" + strings.ToLower(role) + "-caller:7001@" + strings.Repeat("ab", 32), "-cert /etc/qv/caller/tls.crt", "-window 300s"} {
+				if !strings.Contains(args, want) {
+					t.Errorf("%s %s: args lack %q: %s", role, e.name, want, args)
+				}
+			}
+			if !strings.Contains(c.Image, "qv-tools-signing") || len(c.Command) != 1 || c.Command[0] != "/usr/local/bin/qv-party-admin" {
+				t.Errorf("%s %s: image %s command %v", role, e.name, c.Image, c.Command)
+			}
+			if strings.Contains(strings.ToLower(text), "admin-key") || strings.Contains(args, "-key /etc/qv/admin") {
+				t.Errorf("%s %s: the Job refers to an operator signing key", role, e.name)
+			}
+			secrets := 0
+			for _, vol := range pod.Volumes {
+				if vol.Secret != nil {
+					secrets++
+					if vol.Secret.SecretName != "operator-caller" {
+						t.Errorf("%s %s: the Job mounts the Secret %s", role, e.name, vol.Secret.SecretName)
+					}
+				}
+			}
+			if secrets != 1 {
+				t.Errorf("%s %s: want exactly the caller certificate Secret, got %d", role, e.name, secrets)
+			}
+			var tpl struct {
+				Template struct {
+					Metadata Meta `yaml:"metadata"`
+				} `yaml:"template"`
+			}
+			if err := jobs[0].Spec.Decode(&tpl); err != nil {
+				t.Fatal(err)
+			}
+			l := tpl.Template.Metadata.Labels
+			if l["quorumvault.io/party-operator"] != "true" || l["app.kubernetes.io/component"] == "party" {
+				t.Errorf("%s %s: pod labels %v: want the operator label and not the party's", role, e.name, l)
+			}
+			if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+				t.Errorf("%s %s: the Job mounts a service account token", role, e.name)
+			}
+		}
+	}
+	// a DKG carries its scheme; status needs no file
+	objs, _ := partyObjs(t, false, "A", "--set", "operator.job.enabled=true", "--set", "operator.job.command=dkg", "--set", "operator.job.keysetId=k", "--set", "operator.job.scheme=ecdsa-2of3",
+		"--set", "operator.job.authConfigMap=a", "--set", "operator.job.callerCertSecret=s", "--set", "operator.job.partyPin="+strings.Repeat("cd", 32))
+	pod, _ := partyFind(objs, "Job")[0].Pod()
+	if a := strings.Join(pod.Containers[0].Args, " "); !strings.Contains(a, "dkg -auth") || !strings.Contains(a, "-scheme ecdsa-2of3") || strings.Contains(a, "-curve") {
+		t.Errorf("dkg args: %s", a)
+	}
+	objs, _ = partyObjs(t, false, "B", "--set", "operator.job.enabled=true", "--set", "operator.job.command=status", "--set", "operator.job.callerCertSecret=s", "--set", "operator.job.partyPin="+strings.Repeat("cd", 32))
+	pod, _ = partyFind(objs, "Job")[0].Pod()
+	if a := strings.Join(pod.Containers[0].Args, " "); strings.Contains(a, "-auth") || len(pod.Volumes) != 1 {
+		t.Errorf("status args: %s, volumes %d", a, len(pod.Volumes))
+	}
+	// off by default
+	for _, e := range partyEnvs {
+		if objs, _ := partyObjs(t, e.kind, "A"); len(partyFind(objs, "Job")) != 0 {
+			t.Errorf("%s: a Job renders by default", e.name)
+		}
+	}
+	// refusals
+	with := func(drop string, extra ...string) []string {
+		var out []string
+		for i := 0; i < len(base); i += 2 {
+			if !strings.Contains(base[i+1], drop) {
+				out = append(out, base[i], base[i+1])
+			}
+		}
+		return append(out, extra...)
+	}
+	for _, c := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no command", with("command", "--set", "operator.job.command="), "operator.job.command must be"},
+		{"no auth file", with("authConfigMap"), "operator.job.authConfigMap is required"},
+		{"no certificate", with("callerCertSecret"), "operator.job.callerCertSecret is required"},
+		{"no pin", with("partyPin"), "operator.job.partyPin is required"},
+		{"bad pin", with("partyPin", "--set", "operator.job.partyPin=XYZ"), "64 lowercase hex"},
+		{"no keyset", with("keysetId"), "operator.job.keysetId is required"},
+		{"bad scheme", with("command", "--set", "operator.job.command=dkg", "--set", "operator.job.scheme=rsa"), "operator.job.scheme must be"},
+	} {
+		if _, err := partyRender(false, "A", c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err %v, want %q", c.name, err, c.want)
+		}
+	}
+}
+
+// The Job's arguments are parsed by the real qv-party-admin's flag definitions (the binary is built and asked with -h), so the chart and the
+// tool cannot drift; and every command that acts on a keyset passes the expected one (the tool refuses a file for another keyset).
+func TestPartyOperatorJobFlagsMatchTheTool(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not found")
+	}
+	bin := filepath.Join(t.TempDir(), "qv-party-admin")
+	build := exec.Command("go", "build", "-o", bin, "./cmd/qv-party-admin")
+	build.Dir = filepath.Join(partyChartDir(), "..", "..", "..", "mpc-party")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build qv-party-admin: %v\n%s", err, out)
+	}
+	known := func(cmd string) map[string]bool {
+		out, _ := exec.Command(bin, cmd, "-h").CombinedOutput() // exits 1 after printing the flags
+		m := map[string]bool{}
+		for _, l := range strings.Split(string(out), "\n") {
+			if f := strings.Fields(l); len(f) > 0 && strings.HasPrefix(f[0], "-") {
+				m[strings.TrimPrefix(f[0], "-")] = true
+			}
+		}
+		if len(m) < 4 {
+			t.Fatalf("%s -h printed no flags:\n%s", cmd, out)
+		}
+		return m
+	}
+	pin := strings.Repeat("ab", 32)
+	for _, cmd := range []string{"dkg", "refresh", "unfreeze", "status"} {
+		args := []string{"--set", "operator.job.enabled=true", "--set", "operator.job.command=" + cmd, "--set", "operator.job.keysetId=hot-0",
+			"--set", "operator.job.authConfigMap=a", "--set", "operator.job.callerCertSecret=s", "--set", "operator.job.partyPin=" + pin}
+		objs, _ := partyObjs(t, false, "A", args...)
+		pod, _ := partyFind(objs, "Job")[0].Pod()
+		a := pod.Containers[0].Args
+		if a[0] != cmd {
+			t.Fatalf("%s: first argument %q", cmd, a[0])
+		}
+		ks := known(cmd)
+		sawKeyset := false
+		for i := 1; i < len(a); i++ {
+			if !strings.HasPrefix(a[i], "-") {
+				continue
+			}
+			name := strings.TrimPrefix(a[i], "-")
+			if !ks[name] {
+				t.Errorf("%s: the Job passes -%s, which `qv-party-admin %s` does not define", cmd, name, cmd)
+			}
+			if name == "keyset" {
+				sawKeyset = true
+				if a[i+1] != "hot-0" {
+					t.Errorf("%s: -keyset is %q", cmd, a[i+1])
+				}
+			}
+		}
+		if !sawKeyset {
+			t.Errorf("%s: the Job does not pass -keyset: a file for another keyset would be accepted", cmd)
+		}
+	}
+}

@@ -59,6 +59,7 @@ type Server struct {
 	linksUp    map[string]bool
 	kick       chan struct{}
 	loopCancel context.CancelFunc
+	ident      *tlsHolder  // the sealed TLS identity (tls_sealed); nil when the key is a file
 	gate       *sealerGate // attested sealer: the party is not ready until it holds its data keys (nil for the other sealers)
 	gateCancel context.CancelFunc
 	stats      frameStats
@@ -120,8 +121,11 @@ func New(o Options) (srv *Server, err error) {
 			lock.release()
 		}
 	}()
-	cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
-	if err != nil {
+	var cert tls.Certificate
+	var ident *tlsHolder
+	if c.TLSSealed {
+		ident = &tlsHolder{} // filled by the sealer gate once the data keys are released
+	} else if cert, err = tls.LoadX509KeyPair(c.CertFile, c.KeyFile); err != nil {
 		return nil, fmt.Errorf("tls key pair: %w", err)
 	}
 	lg := o.Logger
@@ -157,7 +161,25 @@ func New(o Options) (srv *Server, err error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{gate: newSealerGate(st, c.Role, lg), dataLock: lock, cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
+	gate := newSealerGate(st, c.Role, lg)
+	if ident != nil {
+		if gate == nil {
+			return nil, errors.New("tls_sealed needs the attested sealer")
+		}
+		fs := st.(*FileStore)
+		gate.afterKeys = func(ctx context.Context) error {
+			cert, err := fs.LoadTLSIdentity(ctx)
+			if err != nil {
+				return err
+			}
+			ident.p.Store(cert)
+			return nil
+		}
+		if ia, ok := o.Authorizer.(IdentityAware); ok {
+			ia.SetIdentity(ident.get)
+		}
+	}
+	return &Server{gate: gate, ident: ident, dataLock: lock, cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
 		fails: newFailStats(c.Role), cache: newKeyCache(), tcache: newTKeyCache(), rts: map[string]*ksRT{}, kick: make(chan struct{}, 1), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
 		replay: newReplayCache(c.Limits.ReplayCacheSize), inflight: map[string]*flight{}}, nil
 }
@@ -211,10 +233,10 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
-	s.callerSrv = grpc.NewServer(append(common, grpc.Creds(credentials.NewTLS(ServerTLS(s.cert, callerPins))))...)
+	s.callerSrv = grpc.NewServer(append(common, grpc.Creds(credentials.NewTLS(s.tlsServer(callerPins))))...)
 	dial := func(addr string, pins map[Pin]bool) (*grpc.ClientConn, error) {
 		return grpc.NewClient(addr,
-			grpc.WithTransportCredentials(credentials.NewTLS(ClientTLS(s.cert, pins))),
+			grpc.WithTransportCredentials(credentials.NewTLS(s.tlsClient(pins))),
 			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxMsg), grpc.MaxCallSendMsgSize(maxMsg)),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 20 * time.Second, Timeout: 10 * time.Second, PermitWithoutStream: true}),
 			grpc.WithConnectParams(grpc.ConnectParams{Backoff: backoff.Config{BaseDelay: 100 * time.Millisecond, Multiplier: 1.6, MaxDelay: time.Second}, MinConnectTimeout: 2 * time.Second}))
@@ -279,7 +301,7 @@ func (s *Server) Start() error {
 			return err
 		}
 		s.peerSrv = grpc.NewServer(append(common, grpc.MaxConcurrentStreams(uint32(2*c.Limits.MaxPeerSessions)+4),
-			grpc.Creds(credentials.NewTLS(ServerTLS(s.cert, peerPins))))...)
+			grpc.Creds(credentials.NewTLS(s.tlsServer(peerPins))))...)
 		pb.RegisterPeerServer(s.peerSrv, s)
 		go s.peerSrv.Serve(s.peerLn)
 	case "C":
@@ -305,7 +327,7 @@ func (s *Server) Start() error {
 			return err
 		}
 		s.peerSrv = grpc.NewServer(append(common, grpc.MaxConcurrentStreams(uint32(4*c.Limits.MaxPeerSessions)+8),
-			grpc.Creds(credentials.NewTLS(ServerTLS(s.cert, all))))...)
+			grpc.Creds(credentials.NewTLS(s.tlsServer(all))))...)
 		pb.RegisterPeerServer(s.peerSrv, s)
 		go s.peerSrv.Serve(s.peerLn)
 	}

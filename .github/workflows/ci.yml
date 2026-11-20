@@ -396,6 +396,35 @@ jobs:
       - name: make test-e2e-evm-flows
         run: ci/run-in-image.sh make test-e2e-evm-flows
 
+  # The simulated enclave run mode (SIMULATED: mock attester, test CA, SoftHSM brokers): three parties on the attested sealer with sealed TLS keys, one
+  # broker each, through the real gateway; wrong binary or config, debug evidence, a revoked entry, a rolled-back data directory, a broker that is down.
+  e2e-tee-sim:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          postgres: "true"
+          infra: "true"
+      - name: make test-e2e-tee-sim
+        run: ci/run-in-image.sh make test-e2e-tee-sim
+
   e2e-evm-identity:
     runs-on: ubuntu-24.04
     needs: image

@@ -50,3 +50,5 @@ that the old key's calls revert on chain. Then update the cold address in the si
 
 Once a quarter, on the test chain: freeze with the guardian, run the destination ceremony to a spare address, update the configs, check that a deposit sent before the change reaches the new
 address, and that sweeps waited in between. `TestFactoryAdminRotationCeremony` and `TestGuardianFreezeAndCeremonyUnfreeze` do exactly this against anvil.
+
+A key ceremony (new keyset, refresh, unfreeze) is done with `qv-party-admin`: [key-ceremony.md](key-ceremony.md).
