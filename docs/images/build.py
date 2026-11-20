@@ -146,6 +146,16 @@ ZH = {
     "Broker": "代理", "checks, then": "核对后", "releases the key": "才放出密钥",
     "Key in memory": "内存里的密钥", "opens the": "打开封存", "sealed shares": "的份额",
     "Simulated today": "目前是模拟", "no real enclave has run it yet": "还没有真正的飞地运行过",
+    # services
+    "Business side: holds no keys": "业务区：不持有密钥", "Signing zone: the only part that can sign": "签名区：唯一能签名的部分",
+    "Core": "核心服务", "API and ledger": "API 和账本",
+    "Worker": "Worker", "runs payments": "把每笔付款办完",
+    "Relay": "Relay", "events to Kafka": "把事件发到 Kafka",
+    "Archiver": "归档服务", "keeps audit heads": "保存审计链头",
+    "Approval page": "审批页面", "approvers sign": "审批人在这里签名",
+    "checks every job": "核对每个任务", "Cosigner": "Cosigner", "checks again, alone": "独立再核对一遍",
+    "holds one key share": "持有一份密钥份额", "releases a party's key": "给参与方放出密钥",
+    "The signing zone fetches its jobs": "签名区自己来取任务", "nothing can push one in": "没有东西能推进去",
 }
 
 
@@ -467,8 +477,22 @@ def enclaves():
     d.write()
 
 
+def services():
+    d = D("services", 1140, 452)
+    d.group(30, 20, 1080, 168, "Business side: holds no keys", "gray")
+    cards(d, [("Core", "API and ledger", "white"), ("Worker", "runs payments", "white"), ("Relay", "events to Kafka", "white"),
+              ("Archiver", "keeps audit heads", "white"), ("Approval page", "approvers sign", "white")],
+          y=76, h=92, x0=50, total=1040, gap=14, size=21)
+    d.box(250, 206, 640, 60, "The signing zone fetches its jobs", "nothing can push one in", "amber", size=21)
+    d.group(30, 284, 1080, 148, "Signing zone: the only part that can sign", "green")
+    cards(d, [("Gateway", "checks every job", "white"), ("Cosigner", "checks again, alone", "white"),
+              ("Party", "holds one key share", "white"), ("Broker", "releases a party's key", "white")],
+          y=336, h=80, x0=50, total=1040, gap=18, size=21)
+    d.write()
+
+
 def build_all():
-    for f in (deployment, enclaves, key_replacement, flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, bitcoin_sending, solana, identity, api, audit, testing):
+    for f in (services, deployment, enclaves, key_replacement, flow, architecture, signing_zone, ledger, workflows, mpc, tiers, evm, bitcoin, bitcoin_sending, solana, identity, api, audit, testing):
         f()
 
 
