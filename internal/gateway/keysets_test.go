@@ -576,6 +576,56 @@ func TestKeysetDrainOfACompromisedActiveKeyNamesItsSuccessorInTheRecord(t *testi
 	r.mustSign(r.drain("e2", addrG2, 100, 0, "ETH"))
 }
 
+// The emergency: one record stops ordinary signing, names the only drain and carries the caps; the hourly rate of a planned drain does not apply to
+// it, the cap does.
+func TestKeysetEmergencyRecordStopsSigningAndLiftsTheDrainRateNotTheCap(t *testing.T) {
+	r := newKSRig(t)
+	r.cfg.Chains[testChain].DrainsPerHour = 1
+	r.candidate(testShardID, 2, addrG2)
+	r.step(testShardID, KeysetMarkCompromised, 1, func(c *KeysetChange) { c.Successor = 2; ethCaps("5000", "5000000")(c) })
+	r.step(testShardID, KeysetActivate, 2, nil)
+	// Ordinary signing from the generation is refused at once; a withdrawal from its successor is not touched.
+	r.mustReject(r.withdrawalShard1("em-w", 100, 0), ReasonKeyset)
+	// Four drains in the same hour are signed although the zone's rate is one an hour; the cap of the record is what stops the fifth.
+	r.mustSign(r.drain("em1", addrG2, 1000, 0, "ETH"))
+	r.mustSign(r.drain("em2", addrG2, 1000, 1, "ETH"))
+	r.mustSign(r.drain("em3", addrG2, 1000, 2, "USDT"))
+	r.mustSign(r.drain("em4", addrG2, 2000, 3, "ETH"))
+	r.mustReject(r.drain("em5", addrG2, 1001, 4, "ETH"), ReasonDrainCap)
+	// A planned drain of the same zone is still held to the rate.
+	r2 := newKSRig(t)
+	r2.cfg.Chains[testChain].DrainsPerHour = 1
+	r2.replace()
+	r2.mustSign(r2.drain("pl1", addrG2, 1, 0, "ETH"))
+	r2.mustReject(r2.drain("pl2", addrG2, 1, 1, "ETH"), ReasonDrainRate)
+}
+
+// Many tiny drains to the right successor stay inside the value cap but burn the source's gas: the number of drains signed from one source is bounded,
+// in an emergency and in a planned drain alike.
+func TestKeysetDrainCountBoundsTheGasATinyDrainStormBurns(t *testing.T) {
+	for _, emergency := range []bool{true, false} {
+		r := newKSRig(t)
+		r.cfg.Chains[testChain].MaxDrainsPerSource = 3
+		r.cfg.Chains[testChain].DrainsPerHour = 100
+		if emergency {
+			r.candidate(testShardID, 2, addrG2)
+			r.step(testShardID, KeysetMarkCompromised, 1, func(c *KeysetChange) { c.Successor = 2; ethCaps("5000", "5000000")(c) })
+			r.step(testShardID, KeysetActivate, 2, nil)
+		} else {
+			r.replace()
+		}
+		for i := 0; i < 3; i++ {
+			r.mustSign(r.drain(fmt.Sprintf("g%d", i), addrG2, 1, uint64(i), "ETH"))
+		}
+		d := r.mustReject(r.drain("g3", addrG2, 1, 3, "ETH"), ReasonDrainGas)
+		if !contains(d.Reason, "max_drains_per_source") {
+			t.Fatal(d.Reason)
+		}
+		// Another asset does not help: the count is per source.
+		r.mustReject(r.drain("g4", addrG2, 1, 4, "USDT"), ReasonDrainGas)
+	}
+}
+
 func TestKeysetDrainWithAnApproverAttachedIsNotCounted(t *testing.T) {
 	r := newKSRig(t)
 	r.replace()

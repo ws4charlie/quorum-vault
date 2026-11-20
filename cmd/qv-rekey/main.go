@@ -9,6 +9,7 @@
 //	qv-rekey caps       -cap ASSET=N ... [-change F]          raise (or reset) the drain caps of the old generation in the zone
 //	qv-rekey status                                           where every part stands, and the next step
 //	qv-rekey retire     [-change F]                          the drained old generation is retired
+//	qv-rekey emergency  -cap ASSET=N ... -changes F ... [-shard S -mode M -reason T]   the emergency order in one resumable run (emergency.go)
 //
 // Common flags: -dir WORK_DIR (the plan lives there), -config ZONE_CONFIG, -guard-dsn name=DSN (repeat: the gateway's and every cosigner's guard database),
 // -core URL, -core-ca CA.pem, -token-file FILE (an admin's bearer token, read at every call), -core-header K=V (development only).
@@ -68,7 +69,7 @@ func (l *listFlag) Set(v string) error { *l = append(*l, v); return nil }
 
 func run(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: qv-rekey open|dkg|candidate|drain-start|activate|caps|status|retire (see docs/runbooks/key-replacement.md)")
+		return errors.New("usage: qv-rekey open|dkg|candidate|drain-start|activate|caps|status|retire|emergency (see docs/runbooks/key-replacement.md)")
 	}
 	cmd := args[0]
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
@@ -83,6 +84,10 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	tokenFile := fs.String("token-file", "", "file with an admin's bearer token (a fresh login: the routes need step-up)")
 	compromised := fs.Bool("compromised", false, "drain-start: the emergency order, the old key is marked compromised (it signs only its drain, and is never retired)")
 	change := fs.String("change", "", "the signed, joined change file for this step")
+	var changes listFlag
+	fs.Var(&changes, "changes", "emergency: a signed, joined change file (repeat: the candidate, mark-compromised and activate records, signed ahead of time)")
+	poll := fs.Duration("poll", 10*time.Second, "emergency: how often the drain is looked at")
+	stallAfter := fs.Duration("stall-after", 10*time.Minute, "emergency: the drain is called stalled when it shows no progress for this long (the command ends; run it again)")
 	shard := fs.String("shard", "", "open: the shard ID, entity/chain/pool/number")
 	mode := fs.String("mode", "", "open: mpc (2-of-3 keyset on the parties) or hsm (a key in the token)")
 	reason := fs.String("reason", "", "open: why the key is replaced")
@@ -126,27 +131,17 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 			return err
 		}
 		if cmd == "dkg" {
-			part, err := zone.Partition(p.Shard)
+			keys, closeKeys, err := keysFor(cfg, zone, p, *adminAuth)
 			if err != nil {
 				return err
 			}
-			switch p.Mode {
-			case "mpc":
-				env.Keys = &mpcKeys{cfg: cfg, partition: part, adminAuth: *adminAuth}
-				if isTreePlan(p.Shard) {
-					env.Keys = &treeKeys{cfg: cfg, partition: part, adminAuth: *adminAuth}
-				}
-			case "hsm":
-				k, closeKeys, err := newHSMKeys(cfg, part)
-				if err != nil {
-					return err
-				}
-				defer closeKeys()
-				env.Keys = k
-			}
+			defer closeKeys()
+			env.Keys = keys
 			return env.DKG(ctx)
 		}
 		return env.Status(ctx)
+	case "emergency":
+		return runEmergency(ctx, env, func(p *Plan) (Keys, func(), error) { return keysFor(cfg, zone, p, *adminAuth) }, emergencyFlags{shard: *shard, mode: *mode, reason: *reason, adminAuth: *adminAuth, changes: changes, poll: *poll, stallAfter: *stallAfter})
 	case "candidate":
 		return env.Candidate(ctx)
 	case "drain-start":
@@ -604,4 +599,26 @@ func factoryDestination(ctx context.Context, rpc string, factory common.Address)
 
 func domainKey(id, pub []byte) domain.Key {
 	return domain.Key{ID: "rekey", Backend: domain.BackendHSM, Curve: domain.CurveSecp256k1, HSMKeyID: id, PublicKey: pub}
+}
+
+// keysFor makes the Keys of the plan's mode: the parties for mpc, the token for hsm. The caller closes it.
+func keysFor(cfg *gateway.Config, zone *zoneDBs, p *Plan, adminAuth string) (Keys, func(), error) {
+	part, err := zone.Partition(p.Shard)
+	if err != nil {
+		return nil, nil, err
+	}
+	switch p.Mode {
+	case "mpc":
+		if isTreePlan(p.Shard) {
+			return &treeKeys{cfg: cfg, partition: part, adminAuth: adminAuth}, func() {}, nil
+		}
+		return &mpcKeys{cfg: cfg, partition: part, adminAuth: adminAuth}, func() {}, nil
+	case "hsm":
+		k, closeKeys, err := newHSMKeys(cfg, part)
+		if err != nil {
+			return nil, nil, err
+		}
+		return k, closeKeys, nil
+	}
+	return nil, nil, fmt.Errorf("the plan has no mode %q", p.Mode)
 }

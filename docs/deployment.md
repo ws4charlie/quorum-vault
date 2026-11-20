@@ -17,6 +17,8 @@ QuorumVault is meant to run as four separate clusters, one for each group of peo
 
 Any two parties can sign, so two parties must never share an administrator. Putting them in one cluster would give that administrator the keys. The cold signer is an offline machine and never runs in a cluster ([Hot and cold](tiers.md)).
 
+When the parties run in enclaves, each party also has its own key broker. It sits in a place that neither that party's administrators nor the business side control, and it releases the keys of that one party only, so a broken broker costs one party and not two ([Enclaves](enclaves.md)).
+
 ## The signing side only calls out
 Nothing pushes anything into the signing clusters. They fetch jobs, publish audit heads and reach each other over the party links; nobody scrapes them from outside. This keeps the rule of the [signing zone](signing-zone.md) true on a cluster: the business side can only ask.
 

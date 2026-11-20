@@ -108,3 +108,8 @@ Claims about AWS behaviour that no account has shown yet. Each has the documenta
 
 **Chart changes the lead must schedule** (found by `values/render_test.py`, listed in its `KNOWN_GAPS`; the test fails when one closes): `qv-signing-core` `network.kafka` and `qv-business` `network.kafka`
 take one port, but Redpanda brokers listen on 9092, 9093 and 9094 behind the endpoint (a list `ports` is needed in both); until then only the first broker is reachable.
+
+## 8. Follow-up: attestation brokers (not built)
+
+The party chart now has an attested mode and there is a broker chart (`qv-attest-broker`). The broker placement decision (`reports/Broker-chart-r1.md`, still needing the human's confirmation) is **one broker per party, in a cluster of its own**, outside the party's cluster and the business cluster, run by a group apart from the party's operators. If that holds, the AWS reference needs **three more clusters (one per party, each in its own account or at least its own administrator domain)** and three more paths: party → its broker (port 8443, mTLS, a private endpoint service of the broker's account, consumer: that party's account only).
+None of this is in the reference deployment: it uses the PKCS#11 sealer (CloudHSM or, in a throw-away, SoftHSM), and the values files here set no `attested` or `network.broker` value. Adding it means three roots, three entries in `cidrs.json`, one path each in `paths.json` (the tests then check them), and an `attested` overlay per party. It also replaces CloudHSM, so the hourly HSM cost goes away and the broker clusters' cost comes in. Needs T7 (the real attester) first; the broker today has only the mock attester.

@@ -16,6 +16,8 @@ qv-tools-signing:signing:qv-route,qv-fee-caps,qv-approvers,qv-btc-xpub,qv-keyset
 "
 # development variants (SoftHSM2 added), signing zone only
 QV_DEV_IMAGES="qv-gateway-dev:signing:qv-gateway qv-cosigner-dev:signing:qv-cosigner mpc-party-dev:signing:mpc-party qv-attest-broker-dev:signing:qv-attest-broker"
+# tee-sim variants (SIMULATED enclave): dev base + the teesim build. Deliberately NOT in QV_IMAGES or QV_DEV_IMAGES (so build.sh, smoke.sh and check-secrets.sh leave them alone): build by name.
+QV_TEESIM_IMAGES="mpc-party-teesim qv-attest-broker-teesim"
 QV_BUSINESS_BINS="qv-core qv-worker qv-relay qv-anchor-archiver qv-migrate qv-approval-web qv-guardian qv-sol-nonces"
 QV_SIGNING_BINS="qv-gateway qv-cosigner mpc-party qv-attest-broker qv-route qv-fee-caps qv-approvers qv-btc-xpub qv-keysets qv-party-admin"
 QV_IMAGE_PREFIX="${QV_IMAGE_PREFIX:-qv-image/}"
