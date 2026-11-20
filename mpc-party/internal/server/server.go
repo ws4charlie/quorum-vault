@@ -151,6 +151,7 @@ func New(o Options) (srv *Server, err error) {
 	if err != nil {
 		return nil, err
 	}
+	adm.persistOn(st, c.DataDir)
 	var fz *fileFreeze
 	if fs, ok := st.(*FileStore); ok {
 		fz, err = newFileFreezeOn(fs)
