@@ -163,7 +163,7 @@ spec:
       volumes:
         - name: config
           configMap: { name: {{ include "qp.partyConfigName" . }}, defaultMode: 288 }
-        {{- include "qp.secretVolume" (dict "name" "party-tls" "secret" (include "qp.partySecret" .)) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "party-tls" "secret" (include "qp.partySecret" .) "trust" $v.tls.trust.signing) | nindent 8 }}
         {{- if $pkcs }}
         {{- include "qp.secretVolume" (dict "name" "hsm-pin" "secret" $v.hsm.pinSecret) | nindent 8 }}
         {{- if $soft }}
@@ -178,9 +178,9 @@ spec:
         {{- if $cos }}
         - name: cosigner-config
           configMap: { name: {{ include "qp.cosignerConfigName" . }}, defaultMode: 288 }
-        {{- include "qp.secretVolume" (dict "name" "cosigner-tls" "secret" $v.tls.cosigner.secretName) | nindent 8 }}
-        {{- include "qp.secretVolume" (dict "name" "cosigner-link-tls" "secret" $v.tls.cosignerLink.secretName) | nindent 8 }}
-        {{- include "qp.secretVolume" (dict "name" "cosigner-socket-tls" "secret" $v.tls.cosignerSocket.secretName) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "cosigner-tls" "secret" $v.tls.cosigner.secretName "trust" $v.tls.trust.signing) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "cosigner-link-tls" "secret" $v.tls.cosignerLink.secretName "trust" $v.tls.trust.business) | nindent 8 }}
+        {{- include "qp.secretVolume" (dict "name" "cosigner-socket-tls" "secret" $v.tls.cosignerSocket.secretName "trust" $v.tls.trust.signing) | nindent 8 }}
         # The cosigner's unix socket (mode 0600, owner only: both containers run as the same uid). In memory, empty at every start, shared by exactly these two containers.
         - name: socket
           emptyDir: { medium: Memory, sizeLimit: 1Mi }
