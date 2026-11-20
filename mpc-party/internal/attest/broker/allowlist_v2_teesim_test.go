@@ -122,6 +122,38 @@ func TestStatusAndMetrics(t *testing.T) {
 	}
 }
 
+// Two entries with the same party, version, measurement and state are one series (the same name and labels twice in a scrape is invalid).
+func TestMetricsCombineDuplicateEntries(t *testing.T) {
+	r := newRig(t, rigOpts{})
+	now := r.clk.Now()
+	m := hex.EncodeToString(r.meas["A"])
+	r.writeList([]attest.AllowEntry{
+		{Party: "A", Measurement: m, NotBefore: now.Add(-2 * time.Hour), NotAfter: now.Add(time.Hour), Version: "v2.0.0"},
+		{Party: "A", Measurement: strings.ToUpper(m), NotBefore: now.Add(-time.Hour), Version: "v2.0.0"}, // the same release listed again (renewed window)
+	}, 2, 3)
+	if err := r.srv.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	r.srv.HealthHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body, _ := io.ReadAll(rec.Result().Body)
+	seen := map[string]int{}
+	for _, l := range strings.Split(string(body), "\n") {
+		if i := strings.LastIndex(l, " "); i > 0 {
+			seen[l[:i]]++
+		}
+	}
+	for k, n := range seen {
+		if n > 1 {
+			t.Errorf("series %s written %d times:\n%s", k, n, body)
+		}
+	}
+	want := `qv_attest_broker_allowlist_entry{party="A",version="v2.0.0",measurement="` + m[:12] + `",state="allowing"} 2`
+	if !strings.Contains(string(body), want) {
+		t.Errorf("want %q in:\n%s", want, body)
+	}
+}
+
 func readFile(p string) ([]byte, error) { return os.ReadFile(p) }
 
 func writeFile(t *testing.T, p string, b []byte) {

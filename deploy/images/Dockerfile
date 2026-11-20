@@ -86,6 +86,14 @@ COPY --from=cbmpc /src/mpc-party/.deps /src/mpc-party/.deps
 RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; cd mpc-party; \
     CGO_ENABLED=1 go build -ldflags "$LDFLAGS" -o /out/mpc-party ./cmd/mpc-party
 
+# gobin-party-teesim: the SIMULATED-enclave party (-tags teesim: mock attester, test roots). A different binary from mpc-party above, so a different
+# measurement. It is built here only so that build.sh repro can check that two builders get the same bytes (and so the same simulated measurement). It is
+# in the `bins` stage and in no image: the release rules refuse a tee-sim image under any name.
+FROM src AS gobin-party-teesim
+COPY --from=cbmpc /src/mpc-party/.deps /src/mpc-party/.deps
+RUN --mount=type=cache,target=/go/pkg/mod set -eu; mkdir -p /out; cd mpc-party; \
+    CGO_ENABLED=1 go build -tags teesim -ldflags "$LDFLAGS" -o /out/mpc-party-teesim ./cmd/mpc-party
+
 # gobin-broker: qv-attest-broker (mpc-party's module): cgo for miekg/pkcs11 (dlopen of the HSM module), no cb-mpc. The production build: no -tags teesim
 # (no mock attester, no test roots; smoke.sh probes for it).
 FROM src AS gobin-broker
@@ -102,6 +110,7 @@ FROM scratch AS bins
 COPY --from=gobin-static /out/ /
 COPY --from=gobin-cgo /out/ /
 COPY --from=gobin-party /out/ /
+COPY --from=gobin-party-teesim /out/ /
 COPY --from=gobin-broker /out/ /
 COPY --from=gobin-partyadmin /out/ /
 

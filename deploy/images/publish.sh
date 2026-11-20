@@ -131,14 +131,22 @@ m = {
     # What a verifier must expect on every image (cosign verify): exactly this certificate identity and issuer. Empty in a dry run (nothing is signed).
     "signer": {"identity": "$IDENTITY", "issuer": "$ISSUER" if "$PUBLISH" == "1" else "", "sbom": "BuildKit SBOM (SPDX) and SLSA provenance attestations inside each image index"},
     "images": images,
-    # The input of the attestation allowlist (docs/runbooks/tee-broker.md). SIMULATED enclave: the measurement (PCR0) is SHA-384 over the party binary of this image
-    # and the party's measured configuration (peer pins, caller pins, admin keys: different for every deployment), so it cannot be a build-time value. What IS
-    # fixed here is its input, the image DIGEST, and the recipe: anyone computes the value with deploy/images/measure-release.py (it pulls the image by this digest).
-    # Real Nitro (T7): PCR0 of the enclave image built from this digest, with the AWS tooling.
-    "partyMeasurement": {"image": "mpc-party", "digest": images.get("mpc-party", {}).get("digest"), "binary": "/usr/local/bin/mpc-party", "pcr0": None,
-                         "formula": "sha384(len8(binary) || binary || len8(config) || config), simulated enclave",
-                         "recipe": "deploy/images/measure-release.py image --manifest <this file> --config <the party's measured config file>",
-                         "status": "per deployment: the measured configuration is part of the input; two independent builds give the same binary, so the same measurement (checked by build.sh repro)"},
+    # The inputs of the attestation allowlist (docs/runbooks/tee-broker.md). Two different things, kept apart:
+    #  production: what real hardware will measure (task T7: PCR0 of the enclave image built from this digest). TODAY NOTHING CAN USE IT: this build has no
+    #              attester and refuses sealer.type "attested", so no party of this image can ask the broker for a key.
+    #  simulated:  what the simulated enclave measures: the party built with -tags teesim, a DIFFERENT binary from the one in the image (different bytes, different
+    #              measurement). It is never published (the release rules refuse a tee-sim image); it is built from the same commit, and two builders' copies
+    #              are checked equal by build.sh repro.
+    # The measured configuration (peer pins, caller pins, admin keys) differs per deployment, so no PCR0 is a build-time value: pcr0 is null on purpose.
+    "partyMeasurement": {
+        "production": {"image": "mpc-party", "digest": images.get("mpc-party", {}).get("digest"), "binary": "/usr/local/bin/mpc-party", "pcr0": None,
+                       "recipe": "real Nitro: PCR0 of the enclave image built from this digest, with the AWS tooling (task T7, not built)",
+                       "status": "unusable today: the production party has no attester and refuses sealer.type attested"},
+        "simulated": {"image": None, "binary": "mpc-party-teesim (stage bins of deploy/images/Dockerfile, built with -tags teesim from this commit; never published)", "pcr0": None,
+                      "formula": "sha384(len8(binary) || binary || len8(config) || config)",
+                      "recipe": "docker buildx build -f deploy/images/Dockerfile --target bins --output type=local,dest=bins . && deploy/images/measure-release.py binary --binary bins/mpc-party-teesim --config <the party's measured config file>",
+                      "status": "simulation only; per deployment (the measured configuration is part of the input); two builders give the same binary, so the same value (checked by build.sh repro)"},
+    },
 }
 json.dump(m, open(out, "w"), indent=2, sort_keys=True); open(out, "a").write("\n")
 PY

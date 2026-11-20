@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""The measurement (PCR0) a party release is allowed under, computed by anyone from a release. SIMULATED enclave only: the real Nitro PCR0 is the hash of the
-enclave image file (EIF), which needs the AWS tooling (task T7). Here PCR0 is what the simulation build's party computes about itself at start
+"""The measurement (PCR0) a party build is allowed under, computed by anyone. SIMULATED enclave only: the real Nitro PCR0 is the hash of the enclave image
+file (EIF), which needs the AWS tooling (task T7). Here PCR0 is what the simulation build's party computes about itself at start
 (mpc-party/internal/attest.MeasureImage): SHA-384 over the party binary and the config file the party starts with, each preceded by its 8-byte big-endian length.
-The binary is the one in the released `mpc-party` image (the image holds exactly that one executable, see the images readme); the config is the
-deployment's own measured configuration (peer pins, caller pins, admin keys), so one release has one measurement per party and deployment. The formula is
-the same as `qv-attest-ca measure`; `selftest` checks it against the vector the Go test pins.
+The config is the deployment's own measured configuration (peer pins, caller pins, admin keys), so one build has one measurement per party and deployment.
+The formula is the same as `qv-attest-ca measure`; `selftest` checks it against the vector the Go test pins.
+
+TWO BINARIES, NOT ONE. A simulated enclave runs the `-tags teesim` party (it has the mock attester). That is not the `mpc-party` of the released image, which has
+no attester and refuses sealer.type "attested": the bytes differ, so the measurements differ. The simulated recipe measures the tee-sim build:
+
+  docker buildx build -f deploy/images/Dockerfile --target bins --output type=local,dest=bins .
+  measure-release.py binary --binary bins/mpc-party-teesim --config FILE      the simulated measurement (96 hex): what goes on the simulation's allowlist
+
+`image` measures the PRODUCTION binary of a released image. Today that value is on no allowlist a simulation can use; it is the shape of what task T7 will
+produce with the AWS tooling (PCR0 of the enclave image built from the release digest). It is kept so the release side has one tool, not as something to allow.
 
   measure-release.py selftest
   measure-release.py binary --binary FILE --config FILE                 prints the measurement (96 hex)
-  measure-release.py image --manifest release-vX.json --config FILE     pulls the image BY DIGEST, takes /usr/local/bin/mpc-party, prints the measurement
+  measure-release.py image --manifest release-vX.json --config FILE     pulls the image BY DIGEST, takes /usr/local/bin/mpc-party, prints its measurement
   measure-release.py image --ref REPO@sha256:<64 hex> --config FILE
   measure-release.py same --binary A --binary B --config FILE           two builders' binaries: exit 1 unless the measurements are equal
 

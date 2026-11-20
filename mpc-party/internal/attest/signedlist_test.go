@@ -170,3 +170,28 @@ func TestSignedAllowlistCoversVersionStatusAndEnd(t *testing.T) {
 		t.Error("message domain tag")
 	}
 }
+
+// A misspelled field in an entry must not be read as its default: not_after would become "no end" and status would become active, in a list that
+// then gets signed. Unknown fields are refused at every level: the list, an entry, a signature.
+func TestUnknownFieldsAreRefusedAtEveryLevel(t *testing.T) {
+	ok := `{"seq":1,"signed_at":1,"entries":[{"party":"A","measurement":"aa","not_before":"2026-01-01T00:00:00Z","not_after":"2026-02-01T00:00:00Z","status":"revoked"}],"signatures":[]}`
+	if _, err := ParseSignedAllowlist([]byte(ok)); err != nil {
+		t.Fatalf("a good list was refused: %v", err)
+	}
+	for name, bad := range map[string]string{
+		"entry: not_atfer":   strings.Replace(ok, `"not_after"`, `"not_atfer"`, 1),
+		"entry: statuss":     strings.Replace(ok, `"status"`, `"statuss"`, 1),
+		"entry: extra field": strings.Replace(ok, `"party":"A"`, `"party":"A","note":"x"`, 1),
+		"list: extra field":  strings.Replace(ok, `"seq":1`, `"seq":1,"valid_until":"x"`, 1),
+		"signature: extra":   strings.Replace(ok, `"signatures":[]`, `"signatures":[{"operator":"a","sig":"00","extra":1}]`, 1),
+		"entry: trailing":    strings.Replace(ok, `"entries":[{`, `"entries":[{}  {`, 1),
+	} {
+		if _, err := ParseSignedAllowlist([]byte(bad)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	var e AllowEntry
+	if err := json.Unmarshal([]byte(`{"party":"A","measurement":"aa","not_before":"2026-01-01T00:00:00Z","not_atfer":"2026-02-01T00:00:00Z"}`), &e); err == nil {
+		t.Error("AllowEntry.UnmarshalJSON accepts an unknown field")
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -277,8 +278,19 @@ func (s *Server) HealthHandler() http.Handler {
 		}{{"allowing", st.Allowing}, {"outside_window", st.OutsideWindow}, {"revoked", st.Revoked}} {
 			fmt.Fprintf(w, "qv_attest_broker_allowlist_entries{state=%q} %d\n", c.state, c.n)
 		}
-		for _, e := range st.EntriesInForce { // one series per entry: which release is allowed for which party, and in what state
-			fmt.Fprintf(w, "qv_attest_broker_allowlist_entry{party=%q,version=%q,measurement=%q,state=%q} 1\n", e.Party, e.Version, shortHex(e.Measurement), e.State)
+		// One series per (party, version, measurement, state): which release is allowed for which party, and in what state. Entries that share all four
+		// (the same release listed twice, e.g. a renewed window, or two measurements that share the shown prefix) are one series whose value is their count:
+		// the same name and labels twice in one scrape is invalid exposition. Overlapping entries stay legal (the upgrade overlap needs them).
+		type series struct{ party, version, measurement, state string }
+		counts, order := map[series]int{}, []series{}
+		for _, e := range st.EntriesInForce {
+			k := series{e.Party, e.Version, shortHex(e.Measurement), e.State}
+			if counts[k]++; counts[k] == 1 {
+				order = append(order, k)
+			}
+		}
+		for _, k := range order {
+			fmt.Fprintf(w, "qv_attest_broker_allowlist_entry{party=%q,version=%q,measurement=%q,state=%q} %d\n", k.party, k.version, k.measurement, k.state, counts[k])
 		}
 		for k, v := range s.rules {
 			fmt.Fprintf(w, "qv_attest_broker_refusals_total{rule=%q} %d\n", k, v)
@@ -469,6 +481,7 @@ func (s *Server) release(rec *Record, req attest.ReleaseRequest, pin [32]byte, p
 
 // shortHex is the first 12 hex characters: enough to tell measurements apart in a metric label.
 func shortHex(h string) string {
+	h = strings.ToLower(h) // the list accepts either case; one release is one series
 	if len(h) > 12 {
 		return h[:12]
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
@@ -46,11 +47,18 @@ func (e AllowEntry) MarshalJSON() ([]byte, error) {
 	return json.Marshal(j)
 }
 
-// UnmarshalJSON reads an entry; a missing or null not_after means no end.
+// UnmarshalJSON reads an entry; a missing or null not_after means no end. Decoding is strict: an unknown field is an error. A misspelled
+// not_after would otherwise read as "no end" and a misspelled status as active, and the file could be signed that way (the outer decoder's
+// DisallowUnknownFields does not reach a field type that has its own UnmarshalJSON).
 func (e *AllowEntry) UnmarshalJSON(b []byte) error {
 	var j allowEntryJSON
-	if err := json.Unmarshal(b, &j); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&j); err != nil {
 		return err
+	}
+	if dec.More() {
+		return errors.New("attest: allowlist entry: trailing data")
 	}
 	*e = AllowEntry{Party: j.Party, Measurement: j.Measurement, NotBefore: j.NotBefore, Version: j.Version, Status: j.Status}
 	if j.NotAfter != nil {

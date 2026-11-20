@@ -114,3 +114,33 @@ func TestAllowlistEditTools(t *testing.T) {
 		t.Fatalf("no warning for an older list: %s", out)
 	}
 }
+
+// The tool refuses to read, show, sign or edit a file it cannot parse strictly (a misspelled not_after must not become "no end" in a list that gets signed).
+func TestToolRefusesUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	p := func(n string) string { return filepath.Join(dir, n) }
+	m := strings.Repeat("a1", 48)
+	if out, code := runCLI(t, "allowlist", "new", "-seq", "1", "-out", p("ok.json"), "-entry", "A,"+m+",2026-01-01T00:00:00Z,2026-06-01T00:00:00Z"); code != 0 {
+		t.Fatalf("new: %s", out)
+	}
+	good, _ := os.ReadFile(p("ok.json"))
+	bad := strings.Replace(string(good), `"not_after"`, `"not_atfer"`, 1)
+	if bad == string(good) {
+		t.Fatal("test file has no not_after to misspell")
+	}
+	os.WriteFile(p("bad.json"), []byte(bad), 0o600)
+	runCLI(t, "allowlist", "keygen", "-key", p("k.key"))
+	for name, args := range map[string][]string{
+		"show":   {"allowlist", "show", "-in", p("bad.json")},
+		"sign":   {"allowlist", "sign", "-in", p("bad.json"), "-key", p("k.key"), "-operator", "alice", "-out", p("s.json")},
+		"revoke": {"allowlist", "revoke", "-in", p("bad.json"), "-out", p("r.json"), "-party", "A", "-measurement", m},
+		"touch":  {"allowlist", "touch", "-in", p("bad.json"), "-out", p("t.json")},
+	} {
+		if out, code := runCLI(t, args...); code == 0 {
+			t.Errorf("%s accepted a file with an unknown field: %s", name, out)
+		}
+	}
+	if _, err := os.Stat(p("s.json")); err == nil {
+		t.Error("a signed copy of the bad file was written")
+	}
+}

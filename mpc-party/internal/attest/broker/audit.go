@@ -151,18 +151,31 @@ func hexs(b []byte) string { return strings.ToLower(hex.EncodeToString(b)) }
 // with, so a mounted file replaced by an older (once valid) list is refused at a restart too. The floor lives in the audit log because that
 // file is already append-only, hash-chained and shipped off the host; a log that was cut or replaced loses the floor (see the runbook).
 func MaxLoadedSeq(path string) (int64, error) {
-	recs, err := ReadAudit(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
 		}
 		return 0, err
 	}
+	defer f.Close()
+	// Streamed: one line in memory at a time, only the maximum kept (a log that ran for years is not loaded whole to find one number).
 	var max int64
-	for _, r := range recs {
-		if r.Event == "allowlist_load" && r.Outcome == "loaded" && r.Seq > max {
-			max = r.Seq
+	var rec struct {
+		Event   string `json:"event"`
+		Outcome string `json:"outcome"`
+		Seq     int64  `json:"seq"`
+	}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for n := 1; sc.Scan(); n++ {
+		rec.Event, rec.Outcome, rec.Seq = "", "", 0
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			return 0, fmt.Errorf("audit: line %d: %w", n, err)
+		}
+		if rec.Event == "allowlist_load" && rec.Outcome == "loaded" && rec.Seq > max {
+			max = rec.Seq
 		}
 	}
-	return max, nil
+	return max, sc.Err()
 }

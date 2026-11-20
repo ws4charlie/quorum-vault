@@ -397,6 +397,19 @@ func TestTEESimRollingUpgradeKeepsSigning(t *testing.T) {
 			t.Fatal("the new build has the old measurement")
 		}
 	}
+	// The release recipe computes, from the binary that actually runs (the tee-sim build, not the production image's: that one has no attester) and the
+	// party's own config, the value the broker sees: the allowlist entry made by the documented script is the one the running party presents.
+	if py, err := exec.LookPath("python3"); err == nil {
+		script := filepath.Join(mpcstack.RepoRoot(), "deploy", "images", "measure-release.py")
+		for _, r := range roles {
+			out, err := exec.Command(py, "-I", script, "binary", "--binary", mpcBin.MPCParty, "--config", mpc.ConfigPath(r)).Output()
+			if err != nil || strings.TrimSpace(string(out)) != oldM[r] {
+				t.Fatalf("measure-release.py for party %s: %q, %v; the running party has %s", r, out, err, oldM[r])
+			}
+		}
+	} else {
+		t.Log("python3 not found: the measure-release.py cross-check is skipped")
+	}
 
 	// before the new measurement is on the list, the new build is refused (and nothing is released to it)
 	refused := tee.AuditLines("B", refusedOn, `"rule":"allowlist:measurement_not_allowed"`)
