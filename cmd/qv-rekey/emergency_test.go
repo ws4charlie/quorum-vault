@@ -108,3 +108,51 @@ func mustRead(t *testing.T, p string) string {
 	}
 	return string(b)
 }
+
+// A run killed between the zone call and the core call of any step is finished by the next run, whichever step it was.
+func TestEmergencyResumesAStepHalfDoneInTheZone(t *testing.T) {
+	for _, route := range []string{"candidates", "compromises", "activations"} {
+		t.Run(route, func(t *testing.T) {
+			r := newRig(t)
+			r.env.Caps = []string{"ETH=1000"}
+			keys := func(*Plan) (Keys, func(), error) { return r.k, func() {}, nil }
+			flags := func(ch ...string) emergencyFlags {
+				return emergencyFlags{shard: shard, mode: "mpc", reason: "stolen", changes: ch, stallAfter: 30 * time.Millisecond, poll: time.Millisecond}
+			}
+			_ = runEmergency(context.Background(), r.env, keys, flags()) // makes the key
+			p := r.plan()
+			cand := r.signed(gateway.KeysetChange{Action: "register-candidate", Generation: 2, Address: p.Address, KeyRef: p.KeyRef, PublicKey: p.PublicKey}, 2)
+			mark := r.signed(gateway.KeysetChange{Action: "mark-compromised", Generation: 1, Successor: 2, Caps: map[string]string{"ETH": "1000"}}, 2)
+			act := r.signed(gateway.KeysetChange{Action: "activate", Generation: 2}, 2)
+			r.c.failOn = route // the zone takes the step, the core call fails once
+			err := runEmergency(context.Background(), r.env, keys, flags(cand, mark, act))
+			if err == nil || !strings.Contains(err.Error(), "core is down") {
+				t.Fatalf("expected the core failure: %v\n%s", err, r.out)
+			}
+			r.c.drain = "drained"
+			if err := runEmergency(context.Background(), r.env, keys, flags(cand, mark, act)); err != nil {
+				t.Fatalf("the rerun: %v\n%s", err, r.out)
+			}
+			if r.c.gens[1].State != "compromised" || r.c.gens[2].State != "active" {
+				t.Fatalf("%+v", r.c.gens)
+			}
+			if !strings.Contains(r.out.String(), "found half done") {
+				t.Fatalf("the rerun did not report the half-done step:\n%s", r.out)
+			}
+		})
+	}
+}
+
+// A shard named on the command line must be the shard of the plan in the directory.
+func TestEmergencyRefusesAShardThatIsNotThePlans(t *testing.T) {
+	r := newRig(t)
+	r.open()
+	err := runEmergency(context.Background(), r.env, func(*Plan) (Keys, func(), error) { return r.k, func() {}, nil },
+		emergencyFlags{shard: "qv-us/evm-test/omnibus/2", mode: "mpc", reason: "x"})
+	if err == nil || !strings.Contains(err.Error(), "already holds the plan") {
+		t.Fatalf("%v", err)
+	}
+	if r.c.gens[1].State != "active" {
+		t.Fatal("something was changed")
+	}
+}

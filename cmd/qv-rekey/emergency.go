@@ -39,7 +39,12 @@ var ErrStalled = errors.New("the emergency drain is stalled")
 func runEmergency(ctx context.Context, env *Env, keysFn func(*Plan) (Keys, func(), error), f emergencyFlags) error {
 	env.Compromised = true
 	env.AdoptCandidate = true
-	if _, err := loadPlan(env.Dir); err != nil {
+	if old, err := loadPlan(env.Dir); err == nil {
+		// A directory holds one plan: a shard named on the command line must be that one, or the run would drive another shard than the operator means.
+		if f.shard != "" && f.shard != old.Shard {
+			return fmt.Errorf("%s already holds the plan for %s, not %s: use another -dir for another shard", env.Dir, old.Shard, f.shard)
+		}
+	} else {
 		if f.shard == "" {
 			return errors.New("no plan in -dir yet: give -shard, -mode and -reason (the reason is the record of why the key is treated as stolen)")
 		}
@@ -83,15 +88,28 @@ func runEmergency(ctx context.Context, env *Env, keysFn func(*Plan) (Keys, func(
 		em.logf("dkg", "skipped: generation %d has a key already (%s)", p.To, p.Address)
 	}
 
-	steps := []struct {
+	type step struct {
 		name, action string
 		gen          func(*Plan) int
 		post         string
 		run          func(context.Context) error
-	}{
+	}
+	steps := []step{
 		{StepCandidate, gateway.KeysetRegisterCandidate, func(p *Plan) int { return p.To }, partition.StateCandidate, env.Candidate},
 		{StepDrainStart, gateway.KeysetMarkCompromised, func(p *Plan) int { return p.From }, partition.StateCompromised, env.DrainStart},
 		{StepActivate, gateway.KeysetActivate, func(p *Plan) int { return p.To }, partition.StateActive, env.Activate},
+	}
+	// A step half done (the zone has it, the core or a zone database not yet: a run killed between the two calls) is finished first. Its own agreement check
+	// allows exactly that difference; run after another step's check it would be refused as an unrelated mismatch. Only one step can be half done, since
+	// the steps run one at a time and each ends with both sides agreeing.
+	if z, c, err := env.read(ctx, p); err == nil {
+		for i, st := range steps {
+			if ss := stepState(z, c, st.gen(p), st.post); ss == "zone" || ss == "partial" {
+				em.logf(st.name, "found half done (%s): finished first", ss)
+				steps = append([]step{st}, append(append([]step{}, steps[:i]...), steps[i+1:]...)...)
+				break
+			}
+		}
 	}
 	for _, st := range steps {
 		env.ChangeFile = files[st.action]

@@ -600,6 +600,32 @@ func TestKeysetEmergencyRecordStopsSigningAndLiftsTheDrainRateNotTheCap(t *testi
 	r2.mustReject(r2.drain("pl2", addrG2, 1, 1, "ETH"), ReasonDrainRate)
 }
 
+// Many tiny drains to the right successor stay inside the value cap but burn the source's gas: the number of drains signed from one source is bounded,
+// in an emergency and in a planned drain alike.
+func TestKeysetDrainCountBoundsTheGasATinyDrainStormBurns(t *testing.T) {
+	for _, emergency := range []bool{true, false} {
+		r := newKSRig(t)
+		r.cfg.Chains[testChain].MaxDrainsPerSource = 3
+		r.cfg.Chains[testChain].DrainsPerHour = 100
+		if emergency {
+			r.candidate(testShardID, 2, addrG2)
+			r.step(testShardID, KeysetMarkCompromised, 1, func(c *KeysetChange) { c.Successor = 2; ethCaps("5000", "5000000")(c) })
+			r.step(testShardID, KeysetActivate, 2, nil)
+		} else {
+			r.replace()
+		}
+		for i := 0; i < 3; i++ {
+			r.mustSign(r.drain(fmt.Sprintf("g%d", i), addrG2, 1, uint64(i), "ETH"))
+		}
+		d := r.mustReject(r.drain("g3", addrG2, 1, 3, "ETH"), ReasonDrainGas)
+		if !contains(d.Reason, "max_drains_per_source") {
+			t.Fatal(d.Reason)
+		}
+		// Another asset does not help: the count is per source.
+		r.mustReject(r.drain("g4", addrG2, 1, 4, "USDT"), ReasonDrainGas)
+	}
+}
+
 func TestKeysetDrainWithAnApproverAttachedIsNotCounted(t *testing.T) {
 	r := newKSRig(t)
 	r.replace()
