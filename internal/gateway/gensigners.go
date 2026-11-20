@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/domain"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/internal/hsmsigner"
@@ -238,5 +240,82 @@ func (g *Gateway) signerFor(ctx context.Context, job signjob.Job, base signer.Si
 		slog.Error("ALERT keyset registry: the zone cannot sign from a generation of a shard: its signed record names no usable key", "job", job.ID, "partition", job.PartitionID, "sender", info.Sender, "error", err.Error())
 		return base, nil
 	}
+	return s, nil
+}
+
+// ---- Solana hot shards ----
+
+// MessageGenerationSigner is GenerationSigner for the Ed25519 signers of a Solana hot shard.
+type MessageGenerationSigner func(partition string, base signer.MessageSigner, e *KeysetEntry) (signer.MessageSigner, error)
+
+// MPCEdGenerationSigner builds the signer of a later generation of a 2-of-3 Ed25519 hot shard: the same parties and certificates as the partition's
+// configured signer, the keyset named by the record's key reference.
+func MPCEdGenerationSigner() MessageGenerationSigner {
+	return func(p string, base signer.MessageSigner, e *KeysetEntry) (signer.MessageSigner, error) {
+		ts, ok := base.(*mpcsigner.EdThresholdSigner)
+		if !ok {
+			return nil, nil
+		}
+		if e.KeyRef == "" || e.PublicKey == "" {
+			return nil, fmt.Errorf("generation %d of %s has no key reference in its signed record: register the candidate with one", e.Generation, e.Shard)
+		}
+		pub, err := hex.DecodeString(e.PublicKey)
+		if err != nil {
+			return nil, err
+		}
+		return ts.WithKey(e.KeyRef, pub)
+	}
+}
+
+// hotMessageSigner picks the signer of a Solana job that the hot shard signs: the partition's configured signer, or the one of the later generation whose
+// address pays the transaction fee. Like signerFor it authorises nothing: the decision refuses a payer that is no generation of the shard, a state that
+// does not allow the job, and a signer whose key is not the payer's, so a wrong pick is a refusal or a failed job, never a signature the state rules do not
+// allow.
+func (g *Gateway) hotMessageSigner(ctx context.Context, job signjob.Job, base signer.MessageSigner) (signer.MessageSigner, error) {
+	if base == nil {
+		return base, nil
+	}
+	var p sol.Payload
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		return base, nil // the decision refuses a payload that does not parse
+	}
+	m, err := sol.DecodeMessage(p.Message)
+	if err != nil || len(m.Keys) == 0 {
+		return base, nil
+	}
+	payer := sol.Address(m.Keys[0])
+	if string(m.Keys[0][:]) == string(base.PublicKey()) {
+		return base, nil
+	}
+	kv, err := g.guard.EffectiveKeysets(ctx, g.cfg)
+	if err != nil {
+		return nil, err
+	}
+	shard, ok := kv.shardOf(job.PartitionID)
+	if !ok {
+		return base, nil
+	}
+	e := kv.byAddress(shard, payer)
+	if e == nil || e.Generation == 1 {
+		return base, nil
+	}
+	k := job.PartitionID + "|" + e.KeyRef + "|" + e.PublicKey
+	g.edMu.Lock()
+	defer g.edMu.Unlock()
+	if s := g.msgGens[k]; s != nil {
+		return s, nil
+	}
+	s, err := g.opt.MessageGenerations(job.PartitionID, base, e)
+	if err == nil && s == nil {
+		err = fmt.Errorf("no way to reach the key of generation %d of %s from this partition's signer", e.Generation, e.Shard)
+	}
+	if err != nil {
+		slog.Error("ALERT keyset registry: the zone cannot sign from a generation of a Solana hot shard: its signed record names no usable key", "job", job.ID, "partition", job.PartitionID, "payer", payer, "error", err.Error())
+		return base, nil
+	}
+	if g.msgGens == nil {
+		g.msgGens = map[string]signer.MessageSigner{}
+	}
+	g.msgGens[k] = s
 	return s, nil
 }

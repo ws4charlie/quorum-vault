@@ -303,12 +303,12 @@ func (s *Service) cancelFee(ctx context.Context, feeTx string) (*big.Int, error)
 
 // NonceCloser is implemented by a chain cell that can retire a nonce account and close it to get its rent back (Solana).
 type NonceCloser interface {
-	RetireNonce(ctx context.Context, partitionID string, idx int) error
-	NonceIdle(ctx context.Context, partitionID string, idx int) (bool, string, error)
-	BuildNonceClose(ctx context.Context, partitionID string, idx int) (chain.UnsignedTx, *big.Int, error)
-	MarkNonceClosed(ctx context.Context, partitionID string, idx int) error
-	RecordNonceCloseTx(ctx context.Context, partitionID string, idx int, sig string) error
-	NonceCloseTx(ctx context.Context, partitionID string, idx int) (string, error)
+	RetireNonce(ctx context.Context, partitionID, hotAddr string, idx int) error
+	NonceIdle(ctx context.Context, partitionID, hotAddr string, idx int) (bool, string, error)
+	BuildNonceClose(ctx context.Context, partitionID, hotAddr string, idx int) (chain.UnsignedTx, *big.Int, error)
+	MarkNonceClosed(ctx context.Context, partitionID, hotAddr string, idx int) error
+	RecordNonceCloseTx(ctx context.Context, partitionID, hotAddr string, idx int, sig string) error
+	NonceCloseTx(ctx context.Context, partitionID, hotAddr string, idx int) (string, error)
 	SubmitNonceSetup(ctx context.Context, s chain.SignedTx, wait time.Duration) (string, error)
 }
 

@@ -25,6 +25,13 @@ import (
 // number of accounts created; zero means the pool was complete. Repeating it after a crash is safe: the job is the idempotency key, and an
 // account that exists is not created twice.
 func (s *Service) SetupNonces(ctx context.Context, shard int, approver string, key ed25519.PrivateKey, wait time.Duration) (int, error) {
+	return s.SetupNoncesGen(ctx, shard, 0, approver, key, wait)
+}
+
+// SetupNoncesGen is SetupNonces for generation gen of the shard (0: the active one). A key replacement creates the pool of the candidate before it is
+// activated, so the switch of signing finds the new generation's pool ready: the candidate's key signs this one kind of job (the zone's rule), paid from the
+// SOL the candidate address holds.
+func (s *Service) SetupNoncesGen(ctx context.Context, shard, gen int, approver string, key ed25519.PrivateKey, wait time.Duration) (int, error) {
 	ns, ok := s.Chain.(NonceSetup)
 	if !ok {
 		return 0, fmt.Errorf("%w: this chain has no nonce pool", ErrInvalid)
@@ -33,16 +40,41 @@ func (s *Service) SetupNonces(ctx context.Context, shard int, approver string, k
 		return 0, fmt.Errorf("%w: shard %d", ErrInvalid, shard)
 	}
 	part := s.Cfg.PartitionKey(s.Cfg.Native, shard).String()
-	u, amount, n, err := ns.BuildNonceSetup(ctx, part)
-	if err != nil || n == 0 {
-		return 0, err
-	}
-	hotAddr := ""
-	if h, ok := s.Chain.(interface {
-		HotAddress(string) (string, error)
-	}); ok {
-		if hotAddr, err = h.HotAddress(part); err != nil {
+	if gen == 0 {
+		// pin the generation once: the build and the intent's address must be the same key even if another generation is activated meanwhile
+		gen = 1
+		if err := s.Pool.QueryRow(ctx, `SELECT generation FROM keysets WHERE shard_id=$1 AND state='active'`, string(s.Cfg.shardIDOf(shard))).Scan(&gen); err != nil && !isNoRows(err) {
 			return 0, err
+		}
+	}
+	var u chain.UnsignedTx
+	var amount *big.Int
+	var n int
+	var err error
+	hotAddr := ""
+	if g, ok := s.Chain.(interface {
+		BuildNonceSetupGen(ctx context.Context, partitionID string, gen int) (chain.UnsignedTx, *big.Int, int, error)
+		HotKeyOfGeneration(ctx context.Context, partitionID string, gen int) ([32]byte, string, error)
+	}); ok {
+		u, amount, n, err = g.BuildNonceSetupGen(ctx, part, gen)
+		if err != nil || n == 0 {
+			return 0, err
+		}
+		hk, _, err := g.HotKeyOfGeneration(ctx, part, gen)
+		if err != nil {
+			return 0, err
+		}
+		hotAddr = sol.Address(hk)
+	} else {
+		if u, amount, n, err = ns.BuildNonceSetup(ctx, part); err != nil || n == 0 {
+			return 0, err
+		}
+		if h, ok := s.Chain.(interface {
+			HotAddress(string) (string, error)
+		}); ok {
+			if hotAddr, err = h.HotAddress(part); err != nil {
+				return 0, err
+			}
 		}
 	}
 	sum := sha256.Sum256(u.Digest)
@@ -114,7 +146,11 @@ func (s *Service) RetireNonce(ctx context.Context, shard, idx int) error {
 		return fmt.Errorf("%w: shard %d", ErrInvalid, shard)
 	}
 	part := s.Cfg.PartitionKey(s.Cfg.Native, shard).String()
-	if err := nc.RetireNonce(ctx, part, idx); err != nil {
+	hot, err := s.Chain.(interface{ HotAddress(string) (string, error) }).HotAddress(part)
+	if err != nil {
+		return err
+	}
+	if err := nc.RetireNonce(ctx, part, hot, idx); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -135,20 +171,22 @@ func (s *Service) CloseNonce(ctx context.Context, shard, idx int, approver strin
 		return nil, fmt.Errorf("%w: shard %d", ErrInvalid, shard)
 	}
 	part := s.Cfg.PartitionKey(s.Cfg.Native, shard).String()
-	u, lamports, err := nc.BuildNonceClose(ctx, part, idx)
+	// The key is resolved ONCE and pinned through build, sign, record and finish: an activation in the middle must not move a close of the old key's pool to
+	// the new key's rows (nor book it twice).
+	hotAddr, err := s.Chain.(interface{ HotAddress(string) (string, error) }).HotAddress(part)
+	if err != nil {
+		return nil, err
+	}
+	u, lamports, err := nc.BuildNonceClose(ctx, part, hotAddr, idx)
 	if errors.Is(err, sol.ErrNonceGone) {
 		// closed already; a crash may have kept the booking from happening
-		if sig, serr := nc.NonceCloseTx(ctx, part, idx); serr == nil && sig != "" {
-			return new(big.Int), s.finishNonceClose(ctx, nc, part, idx, sig)
+		if sig, serr := nc.NonceCloseTx(ctx, part, hotAddr, idx); serr == nil && sig != "" {
+			return new(big.Int), s.finishNonceClose(ctx, nc, part, hotAddr, idx, sig)
 		}
 		return new(big.Int), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
-	}
-	hotAddr, err := s.Chain.(interface{ HotAddress(string) (string, error) }).HotAddress(part)
-	if err != nil {
-		return nil, err
 	}
 	sum := sha256.Sum256(u.Digest)
 	id := "nonceclose-" + hex.EncodeToString(sum[:8])
@@ -185,7 +223,7 @@ func (s *Service) CloseNonce(ctx context.Context, shard, idx int, approver strin
 				return nil, err
 			}
 			sig := base58.Encode(j.Signature)
-			if err := nc.RecordNonceCloseTx(ctx, part, idx, sig); err != nil {
+			if err := nc.RecordNonceCloseTx(ctx, part, hotAddr, idx, sig); err != nil {
 				return nil, err
 			}
 			if _, err := nc.SubmitNonceSetup(ctx, stx, wait); err != nil {
@@ -203,7 +241,7 @@ func (s *Service) CloseNonce(ctx context.Context, shard, idx int, approver strin
 				}
 				return nil, err
 			}
-			return lamports, s.finishNonceClose(ctx, nc, part, idx, sig)
+			return lamports, s.finishNonceClose(ctx, nc, part, hotAddr, idx, sig)
 		case JobRejected:
 			return nil, fmt.Errorf("custody: the signing zone refused the nonce close: %s", reason)
 		case JobFailed:
@@ -217,12 +255,8 @@ func (s *Service) CloseNonce(ctx context.Context, shard, idx int, approver strin
 
 // finishNonceClose books what the close cost (negative: the rent that came back, less the fee) and marks the account closed, in one transaction: between
 // the close being final and this commit, Reconcile explains the difference from the recorded signature.
-func (s *Service) finishNonceClose(ctx context.Context, nc NonceCloser, part string, idx int, sig string) error {
+func (s *Service) finishNonceClose(ctx context.Context, nc NonceCloser, part, hot string, idx int, sig string) error {
 	cost, err := s.Chain.TxFee(ctx, sig)
-	if err != nil {
-		return err
-	}
-	hot, err := s.Chain.(interface{ HotAddress(string) (string, error) }).HotAddress(part)
 	if err != nil {
 		return err
 	}

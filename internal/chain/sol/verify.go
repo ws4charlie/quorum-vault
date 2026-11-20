@@ -160,7 +160,10 @@ type Verifier struct {
 	// gens are the account nodes of the later generations of the deposit tree this verifier knows (WithGenerations); generation 1 is the configured one.
 	gens   map[uint32]Node
 	cold   map[string][32]byte          // pool -> cold address
-	hotOf  map[string]map[[32]byte]bool // pool -> the hot shard keys of the pool
+	hotOf  map[string]map[[32]byte]bool // pool -> the hot shard keys of the pool (the ones a rebalance may pay)
+	// senders are the keys that may be the fee payer of a job of a hot shard: every generation of the shard the zone's signed records know (WithHotGenerations);
+	// without records, the configured address alone.
+	senders map[partition.ShardID]map[[32]byte]bool
 }
 
 type tokenInfo struct {
@@ -254,6 +257,66 @@ func (v *Verifier) Canonical(address string) (string, error) {
 
 // OwnsSender reports whether sender is a hot shard address of the zone.
 func (v *Verifier) OwnsSender(sender string) bool { return v.own[sender] }
+
+// HotGeneration is one generation of a hot shard's key as the zone's signed records give it (keysets.go in the gateway).
+type HotGeneration struct {
+	Shard   partition.ShardID
+	Gen     uint32
+	Address string
+	// Active: the generation serves new work, so a rebalance may pay it.
+	Active bool
+}
+
+// WithHotGenerations returns a copy of v in which the fee payer of a job of a hot shard may be any generation of that shard in gs, each with its own
+// pool of nonce accounts, and in which a rebalance pays only an ACTIVE generation of another shard. Which job each generation's state allows is the
+// gateway's rule (it knows the states); here only the shapes are fixed. v itself is not changed.
+func (v *Verifier) WithHotGenerations(gs []HotGeneration) (*Verifier, error) {
+	nv := *v
+	nv.senders = map[partition.ShardID]map[[32]byte]bool{}
+	nv.own = map[string]bool{}
+	for a := range v.own {
+		nv.own[a] = true
+	}
+	nv.nonces = map[[32]byte]map[[32]byte]int{}
+	for k, m := range v.nonces {
+		nv.nonces[k] = m
+	}
+	nv.hotOf = map[string]map[[32]byte]bool{}
+	poolOf := map[partition.ShardID]string{}
+	for part := range v.hot {
+		k, _ := partition.Parse(part)
+		poolOf[k.ShardID()] = string(k.Pool)
+	}
+	for _, g := range gs {
+		raw, err := ParseAddress(g.Address)
+		if err != nil || !onCurve(raw[:]) {
+			return nil, fmt.Errorf("sol: hot shard %s generation %d: %q is not an Ed25519 public key", g.Shard, g.Gen, g.Address)
+		}
+		pool, ok := poolOf[g.Shard]
+		if !ok {
+			return nil, fmt.Errorf("sol: hot shard %s is not one of this chain's", g.Shard)
+		}
+		if nv.senders[g.Shard] == nil {
+			nv.senders[g.Shard] = map[[32]byte]bool{}
+		}
+		nv.senders[g.Shard][raw] = true
+		nv.own[Address(raw)] = true
+		if nv.nonces[raw] == nil {
+			m := map[[32]byte]int{}
+			for i := 0; i < v.cfg.NoncePool; i++ {
+				m[NonceAddress(raw, i)] = i
+			}
+			nv.nonces[raw] = m
+		}
+		if g.Active {
+			if nv.hotOf[pool] == nil {
+				nv.hotOf[pool] = map[[32]byte]bool{}
+			}
+			nv.hotOf[pool][raw] = true
+		}
+	}
+	return &nv, nil
+}
 
 // HotKey is the key of the hot shard of a partition.
 func (v *Verifier) HotKey(partitionID string) ([32]byte, bool) {
@@ -368,7 +431,7 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		return nil, reject("%v", err)
 	}
 	switch i.Kind {
-	case "withdrawal", "to-cold", "rebalance", "sweep", "cancel", KindNonceSetup, KindNonceClose:
+	case "withdrawal", "to-cold", "rebalance", "sweep", "cancel", KindNonceSetup, KindNonceClose, signjob.KindDrain:
 	default:
 		return nil, reject("intent kind %q is not signed on this chain", i.Kind)
 	}
@@ -383,6 +446,10 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		return nil, reject("partition %q has no hot shard in this zone", i.PartitionID)
 	}
 	pk, _ := partition.Parse(i.PartitionID)
+	// The fee payer is the shard's key of one of its generations: the configured one, or a later one the zone's signed records name.
+	if m.Keys[0] != hot && v.senders[pk.ShardID()][m.Keys[0]] {
+		hot = m.Keys[0]
+	}
 	if i.Kind == "cancel" || i.Kind == KindNonceSetup || i.Kind == KindNonceClose {
 		// All move no asset: they are about the shard, whichever of its partitions the owner is in. They are paid in SOL.
 		if i.Asset != Native {
@@ -400,6 +467,8 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		if amt.Sign() != 0 {
 			return nil, reject("a cancel moves nothing: its amount is 0, not %s", i.Amount)
 		}
+	} else if i.Kind == signjob.KindDrain && amt.Sign() == 0 && i.Asset != Native {
+		amount = 0 // the close of an empty token account moves no token
 	} else if amount, ok = u64(amt); !ok {
 		return nil, reject("amount %s is not between 1 and 2^64-1", i.Amount)
 	}
@@ -483,6 +552,10 @@ func (v *Verifier) check(u chain.UnsignedTx, i signjob.Intent) (*shape, error) {
 		}
 	case KindNonceClose:
 		if err := v.nonceClose(s, rest, amount); err != nil {
+			return nil, err
+		}
+	case signjob.KindDrain:
+		if err := v.drain(s, rest, i); err != nil {
 			return nil, err
 		}
 	case "sweep":
@@ -570,6 +643,91 @@ func (v *Verifier) nonceClose(s *shape, rest []MsgInstruction, amount uint64) er
 		return reject("the rent of a closed nonce account goes to the hot shard itself, with the hot shard as authority, on the usual sysvars")
 	}
 	s.dest = s.hotAddr
+	return nil
+}
+
+// drain accepts what moves an old generation's holdings to the successor named by the intent (To), on a recent blockhash (the old key's nonce accounts are
+// among what is drained, so no nonce can carry the last steps) and with the hot shard as the only signer. One of:
+//
+//	SOL    one system transfer hot shard -> To, or one WithdrawNonceAccount of the whole balance of an account of the hot shard's own pool to To
+//	token  [create To's associated token account, idempotent, paid by the hot shard] transferChecked of the amount, hot shard's token account -> To's,
+//	       and optionally closeAccount of the hot shard's token account with its rent paid to To
+//	token, amount 0   closeAccount of the hot shard's token account, rent to To
+//
+// Nothing here says the successor is the right one: the gateway checks To against its own signed records. What this fixes is that every lamport and token
+// of the message goes to To, and that the only account of the hot shard that ever closes is a pool account or a token account.
+func (v *Verifier) drain(s *shape, rest []MsgInstruction, i signjob.Intent) error {
+	if i.To == "" {
+		return reject("a drain has no destination")
+	}
+	dest, err := ParseAddress(i.To)
+	if err != nil {
+		return reject("destination: %v", err)
+	}
+	if dest == s.hot {
+		return reject("a drain pays another address than the hot shard itself")
+	}
+	s.dest = Address(dest)
+	if i.Asset == Native {
+		if len(rest) != 1 {
+			return reject("a SOL drain is one transfer or one nonce account withdrawal, the message has %d instructions after the compute budget", len(rest))
+		}
+		in := rest[0]
+		if in.Program != v.sys {
+			return reject("a SOL drain is a system instruction")
+		}
+		if eqAccts(in.Accts, s.hot, dest) && bytes.Equal(in.Data, v.transferData(s.amount)) {
+			return nil
+		}
+		if len(in.Accts) == 5 && bytes.Equal(in.Data, WithdrawNonceData(s.amount)) {
+			if _, ok := v.nonces[s.hot][in.Accts[0]]; !ok {
+				return reject("the nonce account %s is not in the pool of hot shard %s", Address(in.Accts[0]), s.hotAddr)
+			}
+			if in.Accts[1] != dest || in.Accts[2] != v.bh || in.Accts[3] != v.rent || in.Accts[4] != s.hot {
+				return reject("a drained nonce account pays %s, with the hot shard as authority, on the usual sysvars", s.dest)
+			}
+			return nil
+		}
+		return reject("the instruction is neither a system transfer of %d lamports from the hot shard to %s nor a withdrawal of that many lamports of a pool nonce account to it", s.amount, s.dest)
+	}
+	t, ok := v.tok[i.Asset]
+	if !ok {
+		return reject("asset %q is not configured", i.Asset)
+	}
+	src, err := ATA(s.hot, t.mint)
+	if err != nil {
+		return err
+	}
+	dst, err := ATA(dest, t.mint)
+	if err != nil {
+		return err
+	}
+	if s.amount > 0 {
+		if len(rest) > 0 && rest[0].Program == v.atap {
+			in := rest[0]
+			if !eqAccts(in.Accts, s.hot, dst, dest, t.mint, v.sys, v.tokp) || !bytes.Equal(in.Data, []byte{1}) {
+				return reject("the first instruction is not an idempotent create of the destination's associated token account, paid by the hot shard")
+			}
+			rest = rest[1:]
+		}
+		if len(rest) == 0 {
+			return reject("a token drain has a transferChecked")
+		}
+		in := rest[0]
+		if in.Program != v.tokp || !eqAccts(in.Accts, src, t.mint, dst, s.hot) || !bytes.Equal(in.Data, v.checkedData(s.amount, t.decimals)) {
+			return reject("the instruction is not a transferChecked of %d (decimals %d, mint %s) from the hot shard's token account to %s's", s.amount, t.decimals, Address(t.mint), s.dest)
+		}
+		rest = rest[1:]
+	}
+	if len(rest) > 1 || (s.amount == 0 && len(rest) != 1) {
+		return reject("after the transfer a token drain may only close the hot shard's token account (and a drain of amount 0 does only that)")
+	}
+	if len(rest) == 1 {
+		in := rest[0]
+		if in.Program != v.tokp || !bytes.Equal(in.Data, []byte{9}) || !eqAccts(in.Accts, src, dest, s.hot) {
+			return reject("the last instruction is not the closeAccount of the hot shard's token account with its rent paid to %s", s.dest)
+		}
+	}
 	return nil
 }
 

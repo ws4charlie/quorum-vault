@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
@@ -55,7 +56,7 @@ func (s *Service) keysetShard(shardID string) (partition.ShardID, error) {
 		}
 		return partition.ShardID(shardID), nil
 	}
-	if c.Family != FamilyEVM && c.Family != "" {
+	if c.Family != FamilyEVM && c.Family != FamilySOL && c.Family != "" {
 		return "", fmt.Errorf("%w: the hot shards of a %s chain are replaced with its deposit tree: name %s", ErrInvalid, c.Family, func() string { id, _ := c.depositTreeID(); return string(id) }())
 	}
 	id, err := partition.ParseShardID(shardID)
@@ -121,12 +122,25 @@ func (s *Service) RegisterKeysetCandidate(ctx context.Context, shardID, address,
 	if s.isDepositTree(shardID) {
 		return s.registerTreeCandidate(ctx, shard, address, keyRef)
 	}
-	if !common.IsHexAddress(address) || common.HexToAddress(address) == (common.Address{}) {
-		return KeysetInfo{}, fmt.Errorf("%w: address %q is not an EVM address", ErrInvalid, address)
-	}
-	addr := common.HexToAddress(address)
-	if err := s.addressIsNew(ctx, addr); err != nil {
-		return KeysetInfo{}, err
+	var canon string
+	if s.Cfg.Family == FamilySOL {
+		raw, err := sol.ParseAddress(address)
+		if err != nil || raw == ([32]byte{}) {
+			return KeysetInfo{}, fmt.Errorf("%w: address %q is not a Solana address", ErrInvalid, address)
+		}
+		canon = sol.Address(raw)
+		if err := s.solAddressIsNew(ctx, canon); err != nil {
+			return KeysetInfo{}, err
+		}
+	} else {
+		if !common.IsHexAddress(address) || common.HexToAddress(address) == (common.Address{}) {
+			return KeysetInfo{}, fmt.Errorf("%w: address %q is not an EVM address", ErrInvalid, address)
+		}
+		addr := common.HexToAddress(address)
+		if err := s.addressIsNew(ctx, addr); err != nil {
+			return KeysetInfo{}, err
+		}
+		canon = addr.Hex()
 	}
 	var out KeysetInfo
 	err = InTx(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -138,11 +152,33 @@ func (s *Service) RegisterKeysetCandidate(ctx context.Context, shardID, address,
 		if n > 0 {
 			return fmt.Errorf("%w: %s already has a candidate generation", partition.ErrIllegalTransition, shard)
 		}
-		k, err := partition.RegisterCandidate(ctx, tx, actorOf(ctx), shard, addr.Hex(), keyRef, nil)
+		k, err := partition.RegisterCandidate(ctx, tx, actorOf(ctx), shard, canon, keyRef, nil)
 		out = KeysetInfo{Keyset: k}
 		return err
 	})
 	return out, err
+}
+
+// solAddressIsNew refuses a Solana address that is already one of ours: a hot shard's key of any generation, or a pool's cold address.
+func (s *Service) solAddressIsNew(ctx context.Context, addr string) error {
+	for _, h := range s.Cfg.SOLHot {
+		if h == addr {
+			return fmt.Errorf("%w: %s is a configured hot shard", ErrInvalid, addr)
+		}
+	}
+	for pool, cold := range s.Cfg.SOL.ColdAddresses {
+		if cold == addr {
+			return fmt.Errorf("%w: %s is the cold address of pool %q", ErrInvalid, addr, pool)
+		}
+	}
+	var n int
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM keysets WHERE address=$1`, addr).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return fmt.Errorf("%w: %s is already a generation of a shard", ErrInvalid, addr)
+	}
+	return nil
 }
 
 // addressIsNew refuses an address that is already one of ours.
@@ -335,7 +371,11 @@ func (s *Service) RetireKeysetAfter(ctx context.Context, shardID string, gen int
 	var out KeysetInfo
 	err = InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		var open int
-		if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM evm_nonce_allocations WHERE chain=$1 AND lower(address)=lower($2) AND status IN ('allocated','broadcast'))
+		inflight := `SELECT count(*) FROM evm_nonce_allocations WHERE chain=$1 AND lower(address)=lower($2) AND status IN ('allocated','broadcast')`
+		if s.Cfg.Family == FamilySOL {
+			inflight = `SELECT count(*) FROM sol_nonce_allocations WHERE chain=$1 AND hot_address=$2 AND status IN ('allocated','broadcast')`
+		}
+		if err := tx.QueryRow(ctx, `SELECT (`+inflight+`)
 			+ (SELECT count(*) FROM drain_moves WHERE shard_id=$3 AND from_generation=$4 AND status NOT IN ('confirmed','failed'))`,
 			s.Cfg.Chain, cur.Address, string(shard), gen).Scan(&open); err != nil {
 			return err
