@@ -101,10 +101,15 @@ func (cl *cluster) deadParty(t *testing.T, role string) *proc {
 }
 
 func TestCrashMatrixRefresh(t *testing.T) {
+	crashMatrixRefresh(t, func(t *testing.T) *cluster { return newCluster(t, nil, false) })
+}
+
+// crashMatrixRefresh is the matrix on clusters made by mk (the attested-sealer run uses its own).
+func crashMatrixRefresh(t *testing.T, mk func(t *testing.T) *cluster) {
 	for _, st := range crashSteps {
 		st := st
 		t.Run(fmt.Sprintf("%s@%s", st.name, st.role), func(t *testing.T) {
-			cl := newCluster(t, nil, false)
+			cl := mk(t)
 			x := ctx(t, 3*time.Minute)
 			root, err := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: pb.Curve_CURVE_SECP256K1, Admin: cl.env.Admin("dkg", "k")})
 			must(t, err)
@@ -170,10 +175,14 @@ func TestCrashMatrixRefresh(t *testing.T) {
 }
 
 func TestCrashMatrixDKG(t *testing.T) {
+	crashMatrixDKG(t, func(t *testing.T) *cluster { return newCluster(t, nil, false) })
+}
+
+func crashMatrixDKG(t *testing.T, mk func(t *testing.T) *cluster) {
 	for _, st := range crashSteps {
 		st := st
 		t.Run(fmt.Sprintf("%s@%s", st.name, st.role), func(t *testing.T) {
-			cl := newCluster(t, nil, false)
+			cl := mk(t)
 			x := ctx(t, 3*time.Minute)
 			env := "QV_FAILPOINT=" + st.name
 			if st.role == "A" {

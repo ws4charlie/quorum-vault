@@ -171,6 +171,9 @@ func (s *Server) WriteMetrics(w io.Writer) {
 	}
 	// the party's own certificate (its ports and the channel to its cosigner); pinned, never reloaded, so the time left is that of the loaded one
 	wire.WriteCertMetrics(w, "mpc-party-"+strings.ToLower(s.cfg.Role), "signing", s.cert, time.Now())
+	if s.gate != nil {
+		s.gate.writeMetrics(w)
+	}
 	fmt.Fprintf(w, "# HELP qv_mpc_party_info The party's role and version.\n# TYPE qv_mpc_party_info gauge\nqv_mpc_party_info{party=%q,version=%q} 1\n", s.cfg.Role, Version)
 }
 

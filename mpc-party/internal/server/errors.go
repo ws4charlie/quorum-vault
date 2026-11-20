@@ -64,7 +64,10 @@ func fromWrapper(op string, err error) *Fail {
 		f.CB = e.Code
 	}
 	var te *transportErr
+	var ue *UnavailableError
 	switch {
+	case errors.As(err, &ue): // the HSM, or the attested sealer's data keys, cannot be reached right now: retry
+		f.Kind, f.Code = pb.ErrorKind_ERROR_KIND_UNAVAILABLE, codes.Unavailable
 	case errors.As(err, &te):
 		f.Kind, f.Code = pb.ErrorKind_ERROR_KIND_TRANSPORT, codes.Unavailable
 		if errors.Is(err, context.DeadlineExceeded) {

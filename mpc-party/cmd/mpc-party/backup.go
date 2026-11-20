@@ -95,12 +95,19 @@ func openStore(cfgPath string) (*server.Config, *server.FileStore, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	sealer, err := server.NewSealer(cfg.Sealer)
+	sealer, err := server.NewSealerForRole(cfg.Role, cfg.Sealer)
 	if err != nil {
 		return nil, nil, err
 	}
 	st, err := server.NewFileStore(cfg.DataDir, cfg.Role, sealer)
-	return cfg, st, err
+	if err != nil {
+		return nil, nil, err
+	}
+	// the attested sealer first asks the broker for the data keys (nothing for the other sealers)
+	if err := st.PrepareSealer(context.Background()); err != nil {
+		return nil, nil, fmt.Errorf("the sealer cannot get its keys: %w", err)
+	}
+	return cfg, st, nil
 }
 
 func cmdExport(args []string) error {

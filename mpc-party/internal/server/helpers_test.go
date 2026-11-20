@@ -36,6 +36,7 @@ type pairOpts struct {
 	beforeA          func(env *testenv.Env)
 	sealerA, sealerB server.Sealer // override the test sealer
 	logA, logB       io.Writer     // capture logs
+	env              *testenv.Env  // use this environment (certificates) instead of a new one
 }
 
 type pair struct {
@@ -69,7 +70,10 @@ func storeFor(t *testing.T, cfg *server.Config, sealer server.Sealer) *server.Fi
 
 func startPair(t *testing.T, o pairOpts) *pair {
 	t.Helper()
-	env := testenv.NewEnv(t)
+	env := o.env
+	if env == nil {
+		env = testenv.NewEnv(t)
+	}
 	if o.authA == nil {
 		o.authA = allowAll
 	}
