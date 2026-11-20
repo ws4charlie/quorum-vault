@@ -47,6 +47,8 @@ type Plan struct {
 	Address   string `json:"address,omitempty"`
 	// Window (a deposit tree, seconds) is the one the signed draining record carries; retire passes it to the core.
 	Window int64 `json:"window_seconds,omitempty"`
+	// EmergencyAt is when the emergency command first ran: the clock its log counts from, kept so a second run continues it.
+	EmergencyAt time.Time `json:"emergency_at,omitempty"`
 }
 
 var slug = regexp.MustCompile(`[^a-z0-9]+`)
@@ -158,6 +160,9 @@ type Env struct {
 	// Compromised makes drain-start the emergency step: the old generation is marked compromised (with its successor and caps in the same record)
 	// instead of draining. A compromised generation signs only its drain and is never retired.
 	Compromised bool
+	// AdoptCandidate lets open take a candidate the zone and the core already hold (a standing, pre-made one) as the new generation, so the emergency
+	// needs no DKG. It is set by the emergency command only.
+	AdoptCandidate bool
 }
 
 func (e *Env) printf(format string, a ...any) { fmt.Fprintf(e.Out, format, a...) }
@@ -308,10 +313,16 @@ func (e *Env) Open(ctx context.Context, shard, mode, reason string) error {
 	if len(z) == 0 {
 		return errors.New("no zone database")
 	}
-	top, active := 0, 0
+	adoptOK := e.AdoptCandidate && !isTreePlan(shard)
+	top, active, adopt := 0, 0, 0
 	for _, v := range z {
 		for g, e := range v.Gens {
 			top = max(top, g)
+			if e.State == partition.StateCandidate && adoptOK && (adopt == 0 || adopt == g) {
+				adopt = g
+				p.Address, p.KeyRef = e.Address, e.KeyRef
+				continue
+			}
 			if e.State == partition.StateActive {
 				if active != 0 && active != g {
 					return fmt.Errorf("the zone databases disagree about the active generation of %s", shard)
@@ -325,6 +336,9 @@ func (e *Env) Open(ctx context.Context, shard, mode, reason string) error {
 	}
 	for g, k := range c {
 		top = max(top, g)
+		if adoptOK && k.State == partition.StateCandidate && g == adopt {
+			continue
+		}
 		if k.State == partition.StateCandidate || k.State == partition.StateDraining {
 			return fmt.Errorf("the core shows generation %d of %s as %s: finish that replacement first", g, shard, k.State)
 		}
@@ -336,6 +350,9 @@ func (e *Env) Open(ctx context.Context, shard, mode, reason string) error {
 		return err
 	}
 	p.From, p.To = active, top+1
+	if adopt != 0 {
+		p.To = adopt // the standing candidate: its key is made and registered, and p.Address says so (dkg and candidate find them done)
+	}
 	if err := savePlan(e.Dir, p); err != nil {
 		return err
 	}
