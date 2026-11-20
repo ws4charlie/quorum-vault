@@ -77,3 +77,25 @@ func TestServiceChartsTakeTheTrustBundleAsCA(t *testing.T) {
 		}
 	}
 }
+
+// qv-core closes its listener at once on SIGTERM, so a pod must keep serving for a moment after it is chosen for removal (preStop sleep) and never leave before its replacement is ready
+// (maxUnavailable 0). Found by the kind lane's upgrade case: one refused connection in a roll.
+func TestCoreDrainsBeforeItStops(t *testing.T) {
+	out, err := exec.Command("helm", "template", "r", "../../deploy/helm/qv-business", "-n", "n", "-f", "../../deploy/helm/qv-business/values-kind.yaml").CombinedOutput()
+	if err != nil {
+		if _, e := exec.LookPath("helm"); e != nil && os.Getenv("CI") == "" {
+			t.Skip("helm not on PATH")
+		}
+		t.Fatalf("%v\n%s", err, out)
+	}
+	s := string(out)
+	for _, want := range []string{"maxUnavailable: 0", "preStop:", "sleep:"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the core Deployment lacks %q", want)
+		}
+	}
+	bad, err := exec.Command("helm", "template", "r", "../../deploy/helm/qv-business", "-n", "n", "-f", "../../deploy/helm/qv-business/values-kind.yaml", "--set", "core.preStopSeconds=25").CombinedOutput()
+	if err == nil || !strings.Contains(string(bad), "preStopSeconds + 12") {
+		t.Errorf("a preStop longer than the grace period was not refused: %v", err)
+	}
+}
