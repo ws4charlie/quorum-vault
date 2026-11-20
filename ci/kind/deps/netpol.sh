@@ -84,3 +84,18 @@ spec:
     - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } } }]
       ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
 Y
+cat <<Y
+---
+# the availability prober of smoke/upgrade.sh: a pod with this label may open connections to core's port (and DNS), nothing else
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: kind-prober, namespace: qv }
+spec:
+  podSelector: { matchLabels: { qv-kind/prober: "true" } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/component: core } } }]
+      ports: [{ port: 8443, protocol: TCP }]
+    - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } } }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+Y

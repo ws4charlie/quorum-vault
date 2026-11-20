@@ -16,10 +16,9 @@ psql_as() { # $1 pod-side role (cert name), $2 sql: runs psql inside the databas
   local d; d="$(mktemp -d)"
   for f in tls.crt tls.key ca.crt; do kn "$NS_BIZ" get secret "qv-$cert-tls" -o jsonpath="{.data.${f/./\\.}}" | base64 -d > "$d/$f"; done
   chmod 600 "$d/tls.key"
-  kn "$NS_BIZ" port-forward svc/qv-business-db-rw 15432:5432 >/dev/null 2>&1 & local pf=$!
-  sleep 2
-  env -u PGPASSWORD psql "host=127.0.0.1 port=15432 dbname=quorumvault user=$role sslmode=verify-ca sslrootcert=$d/ca.crt sslcert=$d/tls.crt sslkey=$d/tls.key" -Atc "$sql" 2>&1
-  local r=$?; kill $pf 2>/dev/null; rm -rf "$d"; return $r
+  pf_start "$NS_BIZ" svc/qv-business-db-rw 5432 || return 2
+  env -u PGPASSWORD psql "host=127.0.0.1 port=$PF_PORT dbname=quorumvault user=$role sslmode=verify-ca sslrootcert=$d/ca.crt sslcert=$d/tls.crt sslkey=$d/tls.key" -Atc "$sql" 2>&1
+  local r=$?; pf_stop; rm -rf "$d"; return $r
 }
 if command -v psql >/dev/null; then
   out="$(psql_as core qv_core 'select current_user')"; [ "$out" = qv_core ] || bad "core's certificate did not log in as qv_core: $out"

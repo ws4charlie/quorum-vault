@@ -170,7 +170,7 @@ case "$PHASE" in
   secrets) phase_secrets ;;
   certs)   phase_secrets; phase_certs ;;
   deps)    phase_secrets; phase_certs; phase_deps ;;
-  charts)  [ -x "$KDIR/charts.sh" ] && "$KDIR/charts.sh" ;;
-  all)     phase_secrets; phase_certs; phase_deps; [ -x "$KDIR/charts.sh" ] && "$KDIR/charts.sh" || true ;;
+  charts)  "$KDIR/charts.sh" ;;
+  all)     phase_secrets; phase_certs; phase_deps; "$KDIR/charts.sh" ;;
   *) echo "usage: install.sh [secrets|certs|deps|charts|all]" >&2; exit 2 ;;
 esac
