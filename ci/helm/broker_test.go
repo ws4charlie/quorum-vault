@@ -427,6 +427,10 @@ func TestBrokerRefusals(t *testing.T) {
 		{"an evidence root ConfigMap without a hash", false, []string{"--set", "trustRoots.configMap=qv-attest-evidence-root"}, "10-hex content hash"},
 		{"no allowlist", false, []string{"--set", "allowlist.file="}, "allowlist.file is required"},
 		{"an allowlist that is not JSON", false, []string{"--set", "allowlist.file=not json"}, "does not parse"},
+		{"a list without a sequence", false, listArg(`{"entries":[],"signatures":[]}`), "seq must be a number"},
+		{"a list for another party", false, listArg(`{"seq":2,"entries":[{"party":"A","measurement":"11","not_before":"2026-01-01T00:00:00Z"}],"signatures":[]}`), "one list per broker"},
+		{"a misspelled not_after", false, listArg(`{"seq":2,"entries":[{"party":"B","measurement":"11","not_before":"2026-01-01T00:00:00Z","not_atfer":"2027-01-01T00:00:00Z"}],"signatures":[]}`), "unknown field"},
+		{"a status that is neither active nor revoked", false, listArg(`{"seq":2,"entries":[{"party":"B","measurement":"11","not_before":"2026-01-01T00:00:00Z","status":"revokd"}],"signatures":[]}`), "not active or revoked"},
 		{"nobody may reach it", false, []string{"--set", "network.partyIngress.from=null"}, "network.partyIngress.from is required"},
 		{"load balancer without annotations", false, []string{"--set", "service.type=LoadBalancer"}, "internal-load-balancer annotations"},
 		{"load balancer without source ranges", false, []string{"--set", "service.type=LoadBalancer", "--set", "service.annotations.service\\.beta\\.kubernetes\\.io/aws-load-balancer-internal=true"}, "sourceRanges"},
@@ -493,4 +497,10 @@ func TestBrokerKindIsTheSimulation(t *testing.T) {
 			t.Errorf("the production render mentions %q", s)
 		}
 	}
+}
+
+// listArg passes a list as the value of allowlist.file (a JSON string: --set would split it at the commas).
+func listArg(list string) []string {
+	b, _ := json.Marshal(list)
+	return []string{"--set-json", "allowlist.file=" + string(b)}
 }

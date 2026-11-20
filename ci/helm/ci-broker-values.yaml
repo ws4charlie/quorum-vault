@@ -10,7 +10,7 @@ operators:
     carol: "3333333333333333333333333333333333333333333333333333333333333333"
 trustRoots: { configMap: qv-attest-evidence-root-0a1b2c3d4e }
 allowlist:
-  file: '{"seq":1,"entries":[{"party":"B","measurement":"11","not_before":"2026-01-01T00:00:00Z","not_after":"2027-01-01T00:00:00Z"}],"signatures":[]}'
+  file: '{"seq":1,"entries":[{"party":"B","measurement":"11","not_before":"2026-01-01T00:00:00Z","not_after":"2027-01-01T00:00:00Z","version":"v1.0.0"},{"party":"B","measurement":"22","not_before":"2026-06-01T00:00:00Z","version":"v1.1.0","status":"active"}],"signatures":[]}'
 hsm:
   module:
     path: /etc/qv/hsm/libvendor-pkcs11.so
