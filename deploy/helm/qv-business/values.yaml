@@ -13,6 +13,7 @@ images:
   relay:     { repository: ghcr.io/ws4charlie/quorum-vault/qv-relay,          digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
   archiver:  { repository: ghcr.io/ws4charlie/quorum-vault/qv-anchor-archiver, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
   migrate:   { repository: ghcr.io/ws4charlie/quorum-vault/qv-migrate,        digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }
+  approval:  { repository: ghcr.io/ws4charlie/quorum-vault/qv-approval-web,   digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000", tag: "" }   # only used when approval.enabled
 
 # The uid/gid every image runs as (deploy/images/README.md).
 runAsUser: 65532
@@ -98,6 +99,22 @@ archiver:
   probes: { mode: none, httpPath: /healthz, healthPort: 8081 }
   terminationGracePeriodSeconds: 30
   serviceAccount: { annotations: {}, automountToken: false }   # IRSA / workload identity needs automountToken: true and an annotation
+# The approval page (qv-approval-web): static files plus a /config.json, served from its OWN origin. Off by default. When on, the core's -approval-origins is set from
+# approval.ingress.host (https://<host>), so the page's origin and the core's CORS list cannot disagree; the chart refuses the core's own host.
+approval:
+  enabled: false
+  replicas: 2
+  port: 8090
+  clientId: qv-approval          # the page's public OIDC client (authorization code with PKCE); register it at the identity provider
+  assetDecimals: ""              # ASSET=decimals pairs for display, e.g. "ETH=18,USDT=6"
+  maxLoginAge: ""                # e.g. 4m; empty keeps the binary's default (keep it under the core's step-up max age)
+  ingress:
+    className: nginx
+    host: approval.example.invalid      # PLACEHOLDER: a different host than ingress.public.host
+    tlsSecret: qv-approval-tls          # the public certificate for that host (TLS ends at the controller; inside the cluster the page is plain http)
+    annotations: {}
+  resources: { requests: { cpu: 50m, memory: 32Mi }, limits: { cpu: 500m, memory: 128Mi } }
+  terminationGracePeriodSeconds: 30
 podDisruptionBudgets: { enabled: true }                         # core, worker, relay: minAvailable 1 (archiver has one replica: none)
 topologySpread: { enabled: true }                               # spread replicas over nodes (soft)
 

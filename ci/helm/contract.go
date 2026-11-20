@@ -39,6 +39,14 @@ type Contract struct {
 	TLSEnv         []string                 `json:"tlsEnv"`
 	Images         map[string]ImageContract `json:"images"`
 	ExternalImages map[string]any           `json:"externalImages"`
+	DevImages      map[string]DevImage      `json:"devImages"`
+}
+
+// DevImage is a SoftHSM variant of a production image: the same binary, and an environment it must run with.
+type DevImage struct {
+	Of          string            `json:"of"`
+	RequiredEnv map[string]string `json:"requiredEnv"`
+	PKCS11Lib   string            `json:"pkcs11Lib"`
 }
 
 // LoadContract reads deploy/images/contract.json.

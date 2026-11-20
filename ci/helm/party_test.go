@@ -114,6 +114,13 @@ func partyPolicy(objs []Obj, kind bool) []string {
 // partyContract runs the shared image contract. The contract was written for the business chart: its zone test is replaced here by one that wants the SIGNING zone,
 // and the token-making init container of kind (a shell and softhsm2-util in the -dev image: not the image's entrypoint) is checked by partySoftHSMInit instead.
 func partyContract(objs []Obj, c Contract) []string {
+	for n, d := range c.DevImages { // a -dev image is the same binary: it is checked against its production image's entry
+		if ic, ok := c.Images[d.Of]; ok {
+			ic.Env = append(append([]string{}, ic.Env...), "QV_ENV", "SOFTHSM2_CONF")
+			ic.PathEnv = append(append([]string{}, ic.PathEnv...), "SOFTHSM2_CONF")
+			c.Images[n] = ic
+		}
+	}
 	signing := map[string]bool{}
 	for k, ic := range c.Images {
 		signing[k] = ic.Zone == "signing"
