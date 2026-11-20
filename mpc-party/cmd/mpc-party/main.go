@@ -50,6 +50,10 @@ func main() {
 		migrateMain(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "tls-init" {
+		tlsInitMain(os.Args[2:])
+		return
+	}
 	cfgPath := flag.String("config", "", "path to the JSON config file (required)")
 	healthListen := flag.String("health-listen", os.Getenv("QV_HEALTH_LISTEN"), "serve /livez and /readyz (plain http, no credentials, no detail) on this address for container probes, e.g. 0.0.0.0:9100; off when empty (env QV_HEALTH_LISTEN)")
 	flag.Parse()
@@ -58,6 +62,10 @@ func main() {
 	if *cfgPath == "" {
 		fmt.Fprintln(os.Stderr, "usage: mpc-party -config <file>")
 		os.Exit(2)
+	}
+	server.RunningConfigPath = *cfgPath
+	if server.SimulatedEnclave {
+		log.Warn(server.SimulationMarker)
 	}
 	cfg, err := server.LoadConfig(*cfgPath)
 	if err != nil {

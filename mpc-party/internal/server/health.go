@@ -30,10 +30,11 @@ func (s *Server) Ready(now time.Time) error {
 	if err := s.sealerReady(); err != nil {
 		return err
 	}
-	if len(s.cert.Certificate) == 0 {
+	cert := s.certNow()
+	if len(cert.Certificate) == 0 {
 		return errors.New("no certificate")
 	}
-	leaf, err := x509.ParseCertificate(s.cert.Certificate[0])
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
 		return err
 	}

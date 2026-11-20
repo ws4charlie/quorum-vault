@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,7 +23,11 @@ type cosignerAuthorizer struct {
 	client  *http.Client
 	timeout time.Duration
 	base    string
+	ident   atomic.Pointer[func() (*tls.Certificate, error)] // sealed TLS identity (tls_sealed): set by the server
 }
+
+// SetIdentity gives the authorizer the source of the party's certificate when its key is sealed (config tls_sealed: no cert_file and key_file).
+func (c *cosignerAuthorizer) SetIdentity(get func() (*tls.Certificate, error)) { c.ident.Store(&get) }
 
 // plaintextAllowed is the one switch that lets the cosigner channel run without TLS: QV_ALLOW_PLAINTEXT=1 together with
 // QV_ENV=dev or test (the same rule as every other service). Production refuses.
@@ -40,6 +45,7 @@ func NewCosignerAuthorizer(socket string, timeout time.Duration, cosignerPins []
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
+	a := &cosignerAuthorizer{}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
@@ -56,17 +62,30 @@ func NewCosignerAuthorizer(socket string, timeout time.Duration, cosignerPins []
 		if err != nil {
 			return nil, fmt.Errorf("authorizer.cosigner_pins: %w", err)
 		}
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return nil, fmt.Errorf("authorizer cosigner: this party's certificate: %w", err)
-		}
-		if err := wire.CheckValid(cert, time.Now()); err != nil {
-			return nil, fmt.Errorf("authorizer cosigner: this party's certificate: %w", err)
-		}
-		tr.TLSClientConfig = wire.ClientTLS(cert, pins)
 		scheme = "https"
+		if certFile == "" && keyFile == "" { // sealed TLS key: the certificate arrives through SetIdentity once the data keys are released
+			cfg := wire.ClientTLS(tls.Certificate{}, pins)
+			cfg.Certificates = nil
+			cfg.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				if f := a.ident.Load(); f != nil {
+					return (*f)()
+				}
+				return nil, errors.New("the party's sealed TLS key is not available yet")
+			}
+			tr.TLSClientConfig = cfg
+		} else {
+			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				return nil, fmt.Errorf("authorizer cosigner: this party's certificate: %w", err)
+			}
+			if err := wire.CheckValid(cert, time.Now()); err != nil {
+				return nil, fmt.Errorf("authorizer cosigner: this party's certificate: %w", err)
+			}
+			tr.TLSClientConfig = wire.ClientTLS(cert, pins)
+		}
 	}
-	return &cosignerAuthorizer{client: &http.Client{Transport: tr}, timeout: timeout, base: scheme + "://cosigner"}, nil
+	a.client, a.timeout, a.base = &http.Client{Transport: tr}, timeout, scheme+"://cosigner"
+	return a, nil
 }
 
 // UnavailableError: the authorizer could not decide (cosigner socket down, timeout, non-200, bad body, or the cosigner
