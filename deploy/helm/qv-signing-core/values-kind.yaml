@@ -1,0 +1,26 @@
+# Local kind cluster (task D8 installs this with the same templates). Only configuration differs from production: images are loaded locally and referenced by
+# tag, one replica, SoftHSM on a volume (QV_ENV=dev), the guard database and party A run in this namespace, the business side is another namespace.
+imagePullPolicy: IfNotPresent
+images:
+  gateway: { digest: "", tag: local, repository: qv-image/qv-gateway-dev }     # the -dev image has SoftHSM2
+  tools:   { digest: "", tag: local, repository: qv-image/qv-tools-signing }
+env: dev
+hsm:
+  mode: softhsm
+  pin: { secretName: qv-gateway-hsm-pin }       # made by the kind setup (random, gitignored), keys `pin` and `so-pin`
+gateway:
+  replicas: 1
+  strategy: { type: Recreate }                  # one SoftHSM token directory: two gateways must never run together
+  resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: "1", memory: 512Mi } }
+podDisruptionBudget: { enabled: false }
+topologySpread: { enabled: false }
+guard: { host: qv-guard-rw }
+jobs: { host: qv-business-db-rw.qv.svc }
+kafka: { brokers: redpanda.qv.svc:9092 }
+network:
+  jobsDb: { peers: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv } }, podSelector: { matchLabels: { cnpg.io/cluster: qv-business-db } } }], port: 5432 }
+  kafka:  { peers: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv } }, podSelector: { matchLabels: { app.kubernetes.io/name: redpanda } } }], port: 9092 }
+  # parties B and C run in their own namespaces here (one kind cluster stands in for four)
+  parties:
+    b: { peers: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv-party-b } } }], port: 7002 }
+    c: { peers: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: qv-party-c } } }], port: 7003 }

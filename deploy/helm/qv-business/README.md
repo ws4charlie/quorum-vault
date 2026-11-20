@@ -67,7 +67,7 @@ Database access: each service's DSN names its own role (`qv_core`, `qv_worker`, 
 
 Two Helm hooks, `pre-install` and `pre-upgrade`, run before the Deployments are created or changed:
 
-1. `qv-migrate` (hook weight -5) applies pending migrations as the owner role (certificate `admin`, Postgres role `qv`; the Secret name is `tls.admin.secretName`). Migrations must be backward compatible by one release, because old pods keep running while the new ones start. A dedicated migrator certificate name is planned with the certificate task (D5); `admin` is used until then.
+1. `qv-migrate` (hook weight -5) applies pending migrations as the owner role (certificate `migrator`, Postgres role `qv`; the Secret name is `tls.admin.secretName`, default `qv-migrator-tls`). Migrations must be backward compatible by one release, because old pods keep running while the new ones start.
 2. `qv-migrate -enable-login` (weight -4) runs `ALTER ROLE ... LOGIN` for the service roles. It is **off by default** (`migration.enableLogin: false`) and on in `values-kind.yaml`. In production the database operator enables login for the roles (for example CloudNativePG managed roles); the binary's own flag is for development.
 
 **Why a hook and not a separate step.** A hook gives the order with `helm upgrade` and with Flux's helm-controller (hooks run) and Argo CD (hooks map to PreSync) without extra tooling, and the migration is tied to the chart version that needs it. The services check at start that no migration is pending and refuse to run otherwise, so a skipped or failed hook fails safe: the new pods crash-loop and the old ones keep serving. If a deployment tool ignores hooks, run the same Job as its own step before the release; the templates are in `templates/migrate.yaml`.
@@ -90,7 +90,7 @@ The hook Jobs need the `admin` certificate Secret and the database to exist at i
 
 | Dependency | Must provide | Reference behaviour |
 |---|---|---|
-| Postgres (CloudNativePG) | server certificate for `database.host`; client CA = the business CA; `pg_hba` `hostssl ... cert map=...` and `hostnossl reject`; `pg_ident` mapping certificate names `core`, `worker`, `relay`, `archiver`, `gateway-link`, `admin` to roles `qv_core`, `qv_worker`, `qv_relay`, `qv_archiver`, `qv_gateway`, `qv`; the database `quorumvault` owned by `qv` | [`deploy/postgres`](../../postgres) |
+| Postgres (CloudNativePG) | server certificate for `database.host`; client CA = the business CA; `pg_hba` `hostssl ... cert map=...` and `hostnossl reject`; `pg_ident` mapping certificate names `core`, `worker`, `relay`, `archiver`, `gateway-link`, `admin`, `migrator` to roles `qv_core`, `qv_worker`, `qv_relay`, `qv_archiver`, `qv_gateway`, `qv`, `qv`; the database `quorumvault` owned by `qv` | [`deploy/postgres`](../../postgres) |
 | Redpanda | mTLS on the Kafka listener, principal mapping rule from the certificate's CN; ACLs by name (relay writes the outbox topics and audit heads; archiver reads audit heads in its group; the signing link names publish heads only); the relay creates its topics (the ACLs allow it) | [`deploy/redpanda`](../../redpanda) |
 | Temporal | the frontend reachable only through the **name gate** that admits the certificate names `worker`, `core`, `admin`; the namespace in `temporal.namespace` | [`deploy/temporal-gate`](../../temporal-gate) |
 | Audit bucket | an S3 bucket with Object Lock in COMPLIANCE mode and default retention of at least `archive.retention`, in a separate account, write-only for the archiver | `docs/runbooks/audit-archive.md` |

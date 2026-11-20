@@ -1,0 +1,49 @@
+{{- /* One cert-manager Certificate per catalog identity of this cluster. The Secret holds tls.crt, tls.key and ca.crt; mount it as a volume (not subPath), the services re-read it. */ -}}
+{{- $root := . -}}
+{{- range $e := (include "qv-certs.selected" . | fromJsonArray) }}
+{{- $name := include "qv-certs.secretName" (dict "zone" $e.zone "name" $e.name) }}
+{{- $dns := concat $e.dnsNames (default (list) (get $root.Values.extraDNSNames $e.name)) | uniq }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $name | trimSuffix "-tls" }}
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+    quorumvault.io/zone: {{ $e.zone }}
+    quorumvault.io/identity: {{ $e.name }}
+spec:
+  secretName: {{ $name }}
+  commonName: {{ $e.cn }}
+  uris:
+    - {{ $e.uri }}
+  {{- with $dns }}
+  dnsNames:
+    {{- range . }}
+    - {{ . }}
+    {{- end }}
+  {{- end }}
+  {{- with $e.ipAddresses }}
+  ipAddresses:
+    {{- range . }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- end }}
+  usages:
+    - digital signature
+    {{- range $e.usages }}
+    - {{ . }}
+    {{- end }}
+  duration: {{ ternary $root.Values.duration.pinned $root.Values.duration.default $e.pinned }}
+  renewBefore: {{ ternary $root.Values.renewBefore.pinned $root.Values.renewBefore.default $e.pinned }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    {{- /* Pinned identities: peers pin the public key, so a renewal must keep the key. Every other identity gets a new key at each renewal. */}}
+    rotationPolicy: {{ ternary "Never" "Always" $e.pinned }}
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: {{ include "qv-certs.issuer" (dict "cluster" $root.Values.cluster "zone" $e.zone) }}
+{{- end }}

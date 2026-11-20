@@ -1,0 +1,9 @@
+# Local kind cluster and CI (the kind lane installs this with the same templates). Only configuration differs from production: one cluster holds every
+# identity (cluster: all), the authorities are CA issuers made at install time, and the operators' identities are made too.
+cluster: all
+operatorCertificates: true
+issuers:
+  mode: ca
+# The CAs do not exist before the first install: install once, copy each CA certificate out of its Secret, and upgrade with it (README, "kind").
+trust:
+  allowEmpty: true

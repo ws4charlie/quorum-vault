@@ -1,0 +1,22 @@
+{{- /* The trust bundle of each zone this cluster holds identities of: public CA certificates from values. Not cert-manager's ca.crt (README). */ -}}
+{{- $root := . -}}
+{{- range $zone := (include "qv-certs.zones" . | fromJsonArray) }}
+{{- $pem := get $root.Values.trust $zone }}
+{{- if $pem }}
+{{- if contains "PRIVATE KEY" $pem }}{{ fail (printf "trust.%s holds a private key: it must hold only the CA certificate" $zone) }}{{- end }}
+{{- if not (regexMatch "^\\s*-----BEGIN CERTIFICATE-----" $pem) }}{{ fail (printf "trust.%s is not a PEM certificate" $zone) }}{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qv-trust-{{ $zone }}
+  labels:
+    {{- include "qv-certs.labels" $root | nindent 4 }}
+    quorumvault.io/zone: {{ $zone }}
+data:
+  ca.crt: |
+    {{- $pem | trim | nindent 4 }}
+{{- else if not $root.Values.trust.allowEmpty }}
+{{- fail (printf "trust.%s is empty: set the CA certificate of the %s zone (--set-file trust.%s=ca.pem). Services mount this bundle, not cert-manager's ca.crt" $zone $zone $zone) }}
+{{- end }}
+{{- end }}
