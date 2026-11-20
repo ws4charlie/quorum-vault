@@ -59,6 +59,8 @@ type Deps struct {
 	Log     *slog.Logger
 	T       Timings // handed to the workflows this package starts
 	Queue   string  // task queue; default DefaultTaskQueue
+	// StopTimeout is how long a stopping worker waits for running activities; zero means DefaultStopTimeout.
+	StopTimeout time.Duration
 }
 
 // Activities is the activity set. Register one instance with the worker.
@@ -163,6 +165,24 @@ func heartbeating(ctx context.Context) (stop func()) {
 		}
 	}()
 	return func() { close(done) }
+}
+
+// stopCtx returns a context that ends when the worker starts to stop (or the activity's own context ends), the function that releases it,
+// and a function that says whether the worker stop was the reason. A wait activity runs on it and, when the worker stops, hands its
+// current state back instead of waiting out its slice: the workflow asks again and another worker answers.
+func stopCtx(ctx context.Context) (context.Context, func(), func() bool) {
+	c, cancel := context.WithCancel(ctx)
+	var stopped atomic.Bool
+	ch := activity.GetWorkerStopChannel(ctx)
+	go func() {
+		select {
+		case <-ch:
+			stopped.Store(true)
+			cancel()
+		case <-c.Done():
+		}
+	}()
+	return c, cancel, func() bool { return stopped.Load() && ctx.Err() == nil }
 }
 
 // ---- starting workflows (reconcilers) ----
@@ -480,6 +500,7 @@ func (a *Activities) BroadcastRefill(ctx context.Context, id string) (string, er
 // WaitRefillTx polls the transaction for up to wait and returns "pending", "confirmed" or "reverted".
 func (a *Activities) WaitRefillTx(ctx context.Context, id string, wait time.Duration) (string, error) {
 	deadline := time.Now().Add(wait)
+	stop := activity.GetWorkerStopChannel(ctx)
 	for {
 		st, err := a.D.Svc.RefillTxState(ctx, id)
 		if err != nil {
@@ -494,6 +515,8 @@ func (a *Activities) WaitRefillTx(ctx context.Context, id string, wait time.Dura
 			return "pending", nil
 		}
 		select {
+		case <-stop: // the worker is stopping: still pending; the workflow asks again
+			return "pending", nil
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-time.After(500 * time.Millisecond):
@@ -787,8 +810,13 @@ type JobResult struct {
 // WaitJob polls the job for up to wait and returns its state. It heartbeats,
 // so a dead worker is noticed within the heartbeat timeout.
 func (a *Activities) WaitJob(ctx context.Context, jobID string, wait time.Duration) (JobResult, error) {
-	st, reason, err := a.D.Svc.WaitJob(ctx, jobID, wait, func() { activity.RecordHeartbeat(ctx) })
+	wctx, release, stopped := stopCtx(ctx)
+	defer release()
+	st, reason, err := a.D.Svc.WaitJob(wctx, jobID, wait, func() { activity.RecordHeartbeat(ctx) })
 	if err != nil {
+		if stopped() { // the worker is stopping: the job is still pending; the workflow asks again and another worker answers
+			return JobResult{Status: custody.JobPending}, nil
+		}
 		return JobResult{}, err
 	}
 	if st == custody.JobDone {
@@ -877,6 +905,7 @@ type NonceResult struct {
 // and a cancel mining.
 func (a *Activities) WaitNonce(ctx context.Context, o OwnerArg, wait time.Duration) (NonceResult, error) {
 	deadline := time.Now().Add(wait)
+	stop := activity.GetWorkerStopChannel(ctx)
 	for {
 		n, err := a.D.Svc.AttemptState(ctx, o.owner())
 		if err != nil {
@@ -894,6 +923,8 @@ func (a *Activities) WaitNonce(ctx context.Context, o OwnerArg, wait time.Durati
 		}
 		activity.RecordHeartbeat(ctx)
 		select {
+		case <-stop: // the worker is stopping: hand the state back as at the deadline
+			return NonceResult{State: n.State, FeeRefusals: n.FeeRefusals, Refusal: n.Refusal, Child: n.Child}, nil
 		case <-ctx.Done():
 			return NonceResult{}, ctx.Err()
 		case <-time.After(500 * time.Millisecond):
