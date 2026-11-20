@@ -28,15 +28,17 @@ No difference beyond noise: the data keys are in memory, so a signature asks no 
 
 Reconciliation, not the sealer, takes the time (about 0.3 s per keyset). The broker saw 12, 63 and 264 `released` records (one per keyset plus the local key and the earlier DKG/newkey records).
 
-## The broker's rate limit: it is a problem
-The broker allows 30 calls per minute and a burst of 10 per party, challenge and release together. A start needs **2 calls per keyset plus 2** (challenge + release, and the local key). Projection with the defaults (not measured as a start; limit logic from T3):
+## The broker's rate limit (fixed in fix1)
+A start needs **2 calls per keyset plus 2** (challenge + release, and the local key). The first version allowed 30 calls per minute with burst 10 per party. Projected start-up with that limit: about 24 s at 10 keysets, 3.1 min at 50, 13 min at 200. Measured: the 6th DKG in a row failed with `rate_limited`, because a DKG or refresh needs a `newkey` (2 calls) on each party.
 
-| Keysets | Calls | Start-up with 30/min, burst 10 |
+Default now: **600 per minute, burst 100, per party** (`broker.DefaultRatePerMinute`, `DefaultRateBurst`; the limit stays per party, so one party's flood cannot use another's tokens). Measured with these defaults (party B killed and started; time until all three parties are ready):
+
+| Keysets | Limit off | 600/min, burst 100 |
 |---|---:|---:|
-| 10 | 22 | about 0.4 min (24 s) |
-| 50 | 102 | about 3.1 min |
-| 200 | 402 | about 13 min |
+| 10 | 2.9 s | 3.2 s |
+| 50 | 15.5 s | 16.3 s |
+| 200 | 63.5 s | 97.9 s |
 
-**Measured:** with the default limit, a DKG of the 6th keyset in a row failed: `B cannot store the new generation: ... broker refused (429): rate_limited`. A DKG or refresh needs a `newkey` (2 calls) on each party, so about 5 in a burst and then about 15 per minute; the operation fails cleanly (old state kept), it does not hang.
+At 200 keysets the limit adds about 34 s (402 calls, 100 at once, the rest at 10 per second), which fits the formula. Tests: a 50-keyset start (102 calls, one every 50 ms) is not limited; a flood of 5000 calls at one instant gets at most the burst through and does not use another party's tokens (`TestDefaultLimitAllowsLargeStartsAndStopsAFlood`).
 
-Proposal (not done; the broker's rule is out of this task's scope): (a) raise the per-party default to 600/min with burst 100 on a broker that serves three parties; (b) better, a batch release (one challenge and one call for all keysets of a party at start), which needs a protocol change; (c) in the meantime deploy with `rate_per_minute` raised and rely on the party's backoff. The tests of this lane run with the limit effectively off.
+For later: a batch release (one challenge and one call for all keysets of a party at start) would cut the calls from 2N+2 to 3. It is a protocol change and is not done.

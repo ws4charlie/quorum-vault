@@ -28,7 +28,7 @@ Key generation for an operator: `allowlist keygen -key operator.key -pub operato
 Metrics (`/metrics`): `qv_attest_broker_events_total{event=...}` (`release_ok`, `release_refused`, `rate_limited`, `reload_refused`...). Alert on refusals and on `reload_refused`.
 
 ## Rate limit
-Per party, challenge and key calls together: `rate_per_minute` (30) and `rate_burst` (10). A party that restarts needs one challenge and one release per keyset.
+Per party, challenge and key calls together: `rate_per_minute` (600) and `rate_burst` (100). A party that restarts needs one challenge and one release per keyset (2N+2 calls for N keysets); at 200 keysets the limit adds about 34 s to a start (`docs/measurements/tee-sim.md`). A batch release call is a possible later change.
 
 ## Broker outage
 Parties **cannot restart** (they cannot unseal) and cannot create new data keys (DKG, refresh) while the broker is down. **Running parties keep signing**: the data keys are released once at start and live in the enclave's memory, so signing does not call the broker (design: "release once, at start, not per signature"; the party code does exactly that, see "Party side"). Restore the broker first, then restart parties one at a time, keeping any two parties up (a 2-of-3 set must stay signable). A lost HSM token without a backup makes every wrapped data key unrecoverable: back up the token like any HSM.
@@ -163,5 +163,5 @@ Each line is something only real hardware, the vendor's service or a real networ
 | 8 | Rollback with real storage | The blob store the host controls: an older directory back (same results as the table above), and a rollback of both parties to the same generation (nothing detects it today, D7) |
 | 9 | The broker's HSM | The broker on a real HSM, not SoftHSM (the broker refuses SoftHSM in production); the wrapping key is not extractable; the audit chain is archived |
 | 10 | Clock and time limits | Evidence freshness with the enclave's real clock; the 60 s nonce TTL against real network delay |
-| 11 | The rate limit with many keysets | A real start with the production keyset count against the broker's limit (see the measurements: the default 30 per minute is too low beyond about 15 keysets) |
+| 11 | The rate limit with many keysets | A real start with the production keyset count against the broker's limit (measured in simulation: 200 keysets start in about 98 s with the defaults 600 per minute, burst 100) |
 | 12 | Revocation at once | A procedure to stop a revoked enclave (terminate the instance), since revocation alone does not take its keys away |
