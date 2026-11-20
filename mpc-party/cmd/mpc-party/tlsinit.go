@@ -30,6 +30,8 @@ func tlsInitMain(args []string) {
 		os.Exit(2)
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	// The enrolment process holds the new TLS private key in plain memory: the same protections as a running party (no core dump, no swap), before anything else.
+	server.Harden(slog.Default())
 	server.RunningConfigPath = *cfgPath
 	if server.SimulatedEnclave {
 		slog.Warn(server.SimulationMarker)
