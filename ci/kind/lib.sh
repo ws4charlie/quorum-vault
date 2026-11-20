@@ -45,7 +45,7 @@ load_images() {
 pf_start() {
   local ns="$1" target="$2" remote="$3" log; log="$(mktemp "$WORK/pf.XXXXXX")"
   kubectl --context "$CTX" -n "$ns" port-forward "$target" ":$remote" >"$log" 2>&1 &
-  PF_PID=$!
+  PF_PID=$!; disown "$PF_PID" 2> /dev/null || true   # no "Terminated" job message when it is stopped
   local i
   for i in $(seq 100); do
     PF_PORT="$(sed -n 's/^Forwarding from 127.0.0.1:\([0-9]*\) ->.*/\1/p' "$log" | head -1)"
