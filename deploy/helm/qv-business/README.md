@@ -1,6 +1,6 @@
 # qv-business
 
-Helm chart for the business zone: `qv-core`, `qv-worker`, `qv-relay`, `qv-anchor-archiver` and the database migration job. It creates no database, broker, Temporal or bucket and no certificate: it names them. Design: the Kubernetes deployment note (task D3); image contract: [`deploy/images/README.md`](../../images/README.md) and its machine-readable form [`contract.json`](../../images/contract.json).
+Helm chart for the business zone: `qv-core`, `qv-worker`, `qv-relay`, `qv-anchor-archiver`, the database migration job and, optionally, the approval page (`qv-approval-web`). It creates no database, broker, Temporal or bucket and no certificate: it names them. Design: the Kubernetes deployment note (task D3); image contract: [`deploy/images/README.md`](../../images/README.md) and its machine-readable form [`contract.json`](../../images/contract.json).
 
 One release serves **one chain cell**: `qv-core` and `qv-worker` each read one custody config, and the Temporal task queue is per chain. A second chain is a second release (set `archiver.enabled=false` there; one archiver reads the shared audit topic).
 
@@ -13,6 +13,7 @@ One release serves **one chain cell**: `qv-core` and `qv-worker` each read one c
 | relay | Deployment | 2 | `FOR UPDATE SKIP LOCKED` makes two safe; PDB |
 | archiver | Deployment | 1 | refuses a bucket without Object Lock |
 | migrate | two Helm hook Jobs | n/a | before install and upgrade, see below |
+| approval page (optional, `approval.enabled`, **off**) | Deployment, Service, Ingress | 2 | own host, own origin; see "The approval page" |
 | NetworkPolicies | default deny + one allow per path | n/a | see "Network" |
 
 Every pod: uid/gid 65532, `runAsNonRoot`, read-only root filesystem, all capabilities dropped, no privilege escalation, seccomp `RuntimeDefault`, no host namespaces, service account token not mounted (the archiver may opt in for workload identity), requests and limits set. No process listens on a metrics port a scraper can reach: metrics are loopback-only in the binaries (decision D12), so the chart creates no metrics Service.
@@ -30,6 +31,23 @@ make helm-check                                                                 
 Production images are referenced **by digest**. The digests in `values.yaml` are all-zero placeholders and the chart **refuses to render** them: the release pipeline sets the real ones (from `deploy/images/publish.sh`) with `--set` or a values file. The checks use `ci/helm/ci-digests.yaml`. `values-kind.yaml` uses local tags.
 
 Tested with Helm 4.3.2 (the chart is `apiVersion: v2`).
+
+## The approval page
+
+`approval.enabled: true` adds `qv-approval-web`: a static file server for the approvers' page (`web/approval`) that writes the page's `/config.json` from its settings. It holds no state, no secret, no database and makes no connection; the approver's *browser* talks to the identity provider and to the core.
+
+| Setting | Meaning |
+|---|---|
+| `approval.ingress.host` (+ `className`, `tlsSecret`) | The page's own host. TLS ends at the Ingress; inside the cluster the page speaks plain http on `approval.port` (8090). |
+| core's `-approval-origins` | **Not a value you set.** The chart writes `QV_APPROVAL_ORIGINS=https://<approval.ingress.host>` into the core's ConfigMap from the same value, so the page's origin and the core's CORS list cannot disagree. |
+| `approval.clientId`, `oidc.issuer` | The page's public OIDC client and the identity provider (the same issuer the core trusts). Register the client with the page's origin as redirect URI. |
+| the page's `api` | `https://<ingress.public.host>`, the core's public host. |
+| `approval.assetDecimals`, `approval.maxLoginAge` | Display only / the page's sign-in age (keep it under the core's step-up age). |
+
+- **Its own origin.** The host must differ from the core's (`ingress.public.host`, and `ingress.passthrough.host` when on): the chart **refuses to render** otherwise. A passkey is bound to the page's origin, and a page served from the API's origin would let any script of the API run as the page.
+- **Network.** One NetworkPolicy admits the ingress controller to the page's port and nothing else. No egress rule selects the page's pods (the chart's DNS rule excludes them), so under the default deny it cannot open a connection, DNS included.
+- **Pod.** The chart's hardening (uid 65532, read-only root filesystem, no capabilities, seccomp), no volume, 2 replicas with a PDB. Probes are `httpGet /config.json` (the server has no health listener).
+- Tested in `ci/helm` (`approval_test.go`): off by default; on, it passes the policy and contract checks; the origin is one value; the same host is refused; no egress; ingress only from the controller.
 
 ## Configuration and secrets
 

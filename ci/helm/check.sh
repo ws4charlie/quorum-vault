@@ -14,6 +14,10 @@ for v in values values-kind; do
   helm template qv "$chart" --namespace qv -f "$chart/$v.yaml" $dig > "$out/$v.yaml"
   kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" "$out/$v.yaml"
 done
+echo "== production values with the approval page on: template + kubeconform"
+helm template qv "$chart" --namespace qv -f "$chart/values.yaml" -f ci/helm/ci-digests.yaml --set approval.enabled=true > "$out/approval.yaml"
+kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" "$out/approval.yaml"
 ci/helm/certs-check.sh   # deploy/helm/qv-certs (task D5)
+
 echo "== policy and contract tests"
 (cd ci/helm && CI=1 go test -count=1 ./...)

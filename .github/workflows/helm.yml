@@ -8,6 +8,9 @@ on:
       - "deploy/helm/**"
       - "ci/helm/**"
       - "deploy/images/contract.json"
+      - "deploy/images/README.md"   # compared with contract.json by ci/helm
+      - "deploy/images/images.sh"
+      - "deploy/images/Dockerfile"
       - ".github/workflows/helm.yml"
   workflow_dispatch:
 
