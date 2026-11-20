@@ -1,0 +1,5 @@
+# kind / CI cluster: the same rules, minus what a local cluster cannot meet. Everything below is the whole difference (the README lists it again).
+environment: kind
+requireDigest: false      # local images are tags (qv-image/<name>:local)
+registry: qv-image        # the prefix of the locally built images (deploy/images)
+signature: { enabled: false }

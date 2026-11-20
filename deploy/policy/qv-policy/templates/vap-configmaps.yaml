@@ -1,0 +1,65 @@
+{{- $v := .Values -}}
+{{- $prod := eq (include "qvp.prod" .) "true" -}}
+{{- $sign := eq (include "qvp.signing" .) "true" -}}
+{{- if or $prod $sign }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: qv-configmaps
+  labels: {{- include "qvp.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: [CREATE, UPDATE]
+        resources: [configmaps]
+  matchConditions:
+    - name: not-exempt
+      expression: |-
+        !(object.metadata.name in {{ include "qvp.list" $v.exemptConfigMaps }})
+  validations:
+    {{- if $sign }}
+    - reason: Forbidden
+      message: "ConfigMaps in a signing cluster must be immutable (immutable: true)"
+      expression: |-
+        has(object.immutable) && object.immutable
+    {{- end }}
+    {{- if $prod }}
+    - reason: Forbidden
+      message: "development switches are not allowed in a production cluster: QV_ENV dev or test, SoftHSM, QV_ALLOW_PLAINTEXT, QV_DEV_ACTOR_HEADER, QV_OIDC_TEST_JWKS"
+      expression: |-
+        !has(object.data) || object.data.all(k, !(k in ['QV_ALLOW_PLAINTEXT', 'QV_DEV_ACTOR_HEADER', 'QV_OIDC_TEST_JWKS', 'SOFTHSM2_CONF']) && !(k == 'QV_ENV' && object.data[k] in ['dev', 'test']) && !object.data[k].lowerAscii().contains('softhsm'))
+    {{- end }}
+---
+{{ include "qvp.binding" (dict "ctx" . "name" "qv-configmaps") }}
+{{- end }}
+{{- if and $sign $prod }}
+---
+{{- /* Who may write a ConfigMap at all. Immutable objects cannot be edited, but they can be deleted and created again: only the GitOps identity may do either. The same rule as the design: "only the GitOps service account may create or edit it". */}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: qv-configmap-writers
+  labels: {{- include "qvp.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [configmaps]
+  matchConditions:
+    - name: not-exempt
+      expression: |-
+        !(request.name in {{ include "qvp.list" $v.exemptConfigMaps }})
+  validations:
+    - reason: Forbidden
+      message: "only the configured GitOps identity (configWriters) may create, change or delete a ConfigMap in a signing cluster"
+      expression: |-
+        request.userInfo.username in {{ include "qvp.list" $v.configWriters.users }} || request.userInfo.groups.exists(g, g in {{ include "qvp.list" $v.configWriters.groups }})
+---
+{{ include "qvp.binding" (dict "ctx" . "name" "qv-configmap-writers") }}
+{{- end }}
