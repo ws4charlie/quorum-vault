@@ -283,6 +283,12 @@ func (a *Activities) ReserveHot(ctx context.Context, id string) (bool, error) {
 // alertReserve gives the ALERT for a build that waits only because the available outputs cannot keep the fee-bump reserve, once per owner (the
 // build is retried every poll). The error text names the reserve and the amount that releases it.
 func (a *Activities) alertReserve(kind, id string, err error) {
+	if errors.Is(err, custody.ErrSuccessorUnfunded) {
+		if _, seen := a.reserveAlerted.LoadOrStore(kind+"/"+id, true); !seen {
+			a.log().Error("ALERT: waiting for the successor key to be funded: the shard's old key is still draining into it (docs/runbooks/key-replacement.md)", "owner", kind+" "+id, "error", err.Error())
+		}
+		return
+	}
 	if !errors.Is(err, chain.ErrFeeReserve) {
 		return
 	}
