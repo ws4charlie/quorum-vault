@@ -2,25 +2,31 @@
 
 [中文](zh/people.md)
 
-QuorumVault moves money only when the right people agree. Nobody can both ask for a payment and approve it, and the people who decide who may approve are a different group again.
+QuorumVault moves money only when everyone required has agreed. The person who requests a payment cannot approve it, and a different group decides who may approve.
 
-## Who does what
+## Roles and duties
 
-| Who | Does | Typically |
-|---|---|---|
-| **Requester** | Opens customers and deposit addresses, asks for withdrawals | The exchange's own backend, or support staff |
-| **Approver** | Approves or rejects each withdrawal with a personal key | Treasury or finance officers; two or more per payment |
-| **Operator** | Runs daily operations: cold refills, batches, checking the books against the chain | The operations team on shift |
-| **Zone operator** | Signs the signing zone's own settings: who the approvers are, which keys are in use, the fee limits | Security officers; several must sign each change |
-| **Cold signer** | Signs moves out of cold storage on an offline machine | Senior custodians; M of N, in a ceremony |
-| **Admin** | Changes what the deposit contracts do | The platform lead, rarely |
+| Role | Duties | Usually held by |
+|:---|:---|:---|
+| Requester | Opens customers, creates deposit addresses, requests withdrawals | The exchange's backend or support staff |
+| Approver | Approves or rejects each withdrawal with a personal key | Treasury or finance officers |
+| Operator | Daily operations: refilling hot wallets from cold storage, batching payments, reconciling the books with the chain | The operations team on shift |
+| Zone operator | Signs the signing zone's settings: the approver list, the keys in use, the fee caps | Security officers |
+| Cold signer | Signs transfers out of cold storage on an offline machine | Senior custodians |
+| Contract admin | Changes how the deposit contracts behave; rarely needed | The platform lead |
 
-For example, at a small exchange: the trading backend is the requester, two finance officers are approvers, three security officers are zone operators, and the same three plus the CFO are cold signers.
+## How many people each action needs
 
-## How each one proves who they are
+- **Withdrawal**: the number of approvers is set per amount tier, at least one; the requester cannot be one of them.
+- **Signing-zone settings change**: several zone operators sign together.
+- **Cold transfer**: M of N cold signers, in a key ceremony.
 
-- **A login** at the company's identity provider gives the role for the core API, and big actions need a fresh one ([Identity](identity.md)).
-- **A personal key** makes an approval count: the [signing zone](signing-zone.md) checks the signature against its own list and does not trust the login alone. The key can be a hardware security key, used on a web page or in a small terminal tool.
-- **An offline key** signs zone settings and cold moves. These never touch the online system ([Hot and cold](tiers.md)).
+One person can hold several roles, but the system counts people, not keys: two keys held by the same person are one vote.
 
-One person can hold more than one role, but the system counts people, not keys: two keys of the same person are one approval.
+Example: at a small exchange, the trading backend is the requester, two finance officers are approvers, three security officers are zone operators, and those three plus the CFO are cold signers.
+
+## How each person proves who they are
+
+- **Login**: signing in at the company's identity provider gives the role for the core API; important actions require logging in again ([Identity](identity.md)).
+- **Personal key**: an approval must be signed with a personal key. The [signing zone](signing-zone.md) checks the signature against its own list and does not rely on the login alone. The key can be a hardware security key, used on a web page or in a command-line tool.
+- **Offline key**: used to sign zone settings and cold transfers, and never touches the online system ([Hot and cold](tiers.md)).
