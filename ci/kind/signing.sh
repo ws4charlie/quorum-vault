@@ -4,6 +4,7 @@
 # Run by charts.sh after the DKG. `signing.sh core` installs qv-signing-core (after the business chart, whose migration makes the gateway's database role). Idempotent.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+trace_failures
 cd "$QV_KIND_ROOT"
 S="$WORK/secrets"; C="$WORK/cfg"
 pin() { kn "$1" get secret "$2" -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -pubkey | openssl pkey -pubin -outform DER | openssl dgst -sha256 -hex | awk '{print $NF}'; }
