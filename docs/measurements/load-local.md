@@ -30,7 +30,7 @@ The numbers are **assumptions**, marked A. They come from the day [DESIGN_SCALE.
 
 The generator drives the core API as a client: bearer tokens, requests, signed approvals, deposits paid on the chain. Each operation records the time of each stage from its **scheduled arrival** (so a late generator cannot hide delay): for a withdrawal *request*, *approved*, *signing*, *broadcast*, *confirmed*; for a deposit *credited* and *swept*. A run is judged by objectives (assumptions too): withdrawal p95 request to confirmed under 5 s, approved to broadcast under 3 s, deposit credited under 5 s and swept under 30 s, error rate under 0.1%. The **first step that breaks one** is where the first limit sits. A run that stops being a good test (more than 200 operations open) stops its arrivals and drains.
 
-**Correctness is part of the result.** After every run, and after waiting for what the generator gave up on to settle: every withdrawal paid exactly once (its destination holds the amount) or not at all; no hold left behind; every customer's books equal funded minus paid; deposits credited and every address swept; Reconcile clean; the audit chain verifies; the services' logs hold no `ALERT` (apart from the two transient kinds named below); every outbox row published and consumed once; no open work, no pending hold, no failed sign job, no two withdrawals sharing a transaction. All the runs below passed these, except where a table says otherwise.
+**Correctness is part of the result.** After every run, and after waiting for what the generator gave up on to settle: every withdrawal paid exactly once (its destination holds the amount) or not at all; no hold left behind; every customer's books equal funded minus paid; deposits credited and every address swept; Reconcile clean; the audit chain verifies; the services' logs hold no `ALERT` (apart from the two transient kinds named below); every outbox row published and consumed once; no open work, no pending hold, no failed sign job, no two withdrawals sharing a transaction. The checks are made by the generator through the API and the chain, and by the test that brought the stack up; both sets are in the saved result and in the page's verdict. Each customer's credit is compared with the sum of the payments the generator made to their addresses, read from the chain's receipts (equality, in both directions), and each payment's receipt must be a success. All the runs below passed these, except where a table says otherwise.
 
 ## Results
 
@@ -167,6 +167,18 @@ This is one node and one run: it does not show what four clusters cost.
 | deposit, to credited | 157 | 2.62 | 1.0 / 1.2 |
 
 The closed loop settles at **about 4.1 withdrawals and 2.6 deposits a second with every withdrawal taking 3.5 s**: the 16 users keep the system just busy enough that its queues hold a few seconds of work, and the system cannot be driven into the collapse the open loop shows (p95 of 60 s and more) because the users wait. The two modes answer different questions. The closed loop says what the system does with this many people; it hides the limit, since a slower system just lowers the rate. The open loop says what happens to arrivals that do not wait: at 4 withdrawals a second the same system answered in 1.5 s p50 in the open loop, and at 8.6 a second in tens of seconds. Withdrawals reaching a steady 4.1 a second under 16 users agrees with the 4.1 to 4.7 a second at which the open-loop runs' queues drained.
+
+### Rerun after the review fixes
+
+The review of the load test's own checks changed the generator (payments are now tracked independently and each customer's credit is compared with exactly what the chain shows was paid, in both directions; a retried payment can no longer be signed twice; a stopped run stops every stream at once). The headline scenarios were run again on the same stack, on a busier machine (load average 15 to 46 at the start, against 8 to 14 before):
+
+| Scenario | First broken, before | First broken, after | Machine load at start, before / after |
+|---|---|---|---|
+| Withdrawals only | scale 8 (8.6 a second): p95 8.8 s | scale 8: p95 17.8 s | 14 / 15 to 46 |
+| Mixed | scale 2 (4.1 deposits, 4.9 withdrawals): sweep p95 58 s | scale 2: sweep p95 61 s, credit p95 5.0 s | 8 / 12 to 38 |
+| Deposits only | scale 6 (6.2 a second): sweep p95 93 s | scale 6: sweep p95 114 s | 9 / 13 to 30 |
+
+**The first limits did not move, and the fixes did not change any conclusion**; the latencies past the limit are 1.5 to 2 times longer on the busier machine, as the load figures say they would be. The fixed-rate runs (copies of worker and core) and the closed loop were rerun in even heavier conditions (load 20 to 29 at the start) and are not comparable with the table above, which stays as the reference; in them the single-copy run left 18 of 521 withdrawals open at the end of the drain (all paid by the settle time) and the four-copy run left 322 of 438 open, with 596 `ALERT: withdrawal or sweep workflow made no progress` lines in the worker's log: the system's own watchdog, on a machine that could not run its workflows, fired as designed, and the run's alert check failed on it, rightly. Every withdrawal in those runs was still paid exactly once. The smoke loop passed 20 of 20 on the new code.
 
 ## The first limit, per scenario
 
