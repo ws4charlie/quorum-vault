@@ -31,4 +31,8 @@ A sweep moves several deposit addresses into the hot wallet in one transaction, 
 
 ## The deposit key can be replaced
 
-The key that derives customer deposit addresses can be replaced by a second one, which the two parties make and zone operators activate with signed records. New customers get addresses of the new key. Old addresses stay watched and swept for a stated period, signed with the old key, into the same hot wallet. The hot wallet itself is replaced separately. After the period, and once nothing is left on the old addresses, the old key is retired.
+The key that derives customer deposit addresses can be replaced by a second one that the two parties make and zone operators activate with signed records. New customers get addresses of the new key. Old addresses stay watched and swept for a stated period, signed with the old key, into the same hot wallet. The hot wallet itself is replaced separately. After the period, and once nothing is left on the old addresses, the old key is retired.
+
+## The hot wallet can be replaced
+
+A hot wallet is replaced by a new key that the three parties make and zone operators activate with signed records. From then on withdrawals and sweeps use the new key and its own nonce accounts, and the system empties the old key into it: the tokens, the old nonce accounts and the last SOL, so that the old address ends at zero and its token accounts are closed. A withdrawal that was already sent with the old key lands or is cancelled there. The signing zone lets the old key sign only these moves to the new address, within a total the zone operators signed, and Reconcile stays clean throughout. New withdrawals wait for a short time after the switch, until an operator has created the new key's nonce accounts ([Key replacement](key-replacement.md)).

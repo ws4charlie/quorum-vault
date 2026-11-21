@@ -1,11 +1,13 @@
 package gateway
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/partition"
@@ -25,8 +27,7 @@ func TestSolDepositGenerationStates(t *testing.T) {
 	e1.Chain = "sol-t"
 	v.gens[id] = map[int]*KeysetEntry{1: e1, 2: solEntry(2, partition.StateCandidate)}
 	d := &Decider{}
-	sweep := signjob.Intent{Kind: "sweep"}
-	ok := func(gens ...uint32) error { return d.solGenRules(v, cc, sweep, TxInfo{DepositGens: gens}) }
+		ok := func(gens ...uint32) error { return d.solDepositRules(v, cc, TxInfo{DepositGens: gens}) }
 	if err := ok(); err != nil {
 		t.Fatal("generation 1 alone:", err)
 	}
@@ -42,7 +43,7 @@ func TestSolDepositGenerationStates(t *testing.T) {
 	if err := ok(3); err == nil {
 		t.Fatal("an unknown generation")
 	}
-	if err := d.solGenRules(v, cc, signjob.Intent{Kind: "withdrawal"}, TxInfo{}); err != nil {
+	if err := d.solGenRules(context.Background(), nil, v, cc, signjob.Intent{Kind: "withdrawal"}, TxInfo{}, nil, false, time.Now()); err != nil {
 		t.Fatal("withdrawals are not judged by the deposit tree:", err)
 	}
 }

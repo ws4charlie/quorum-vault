@@ -44,4 +44,6 @@ Each process ships as its own image, pinned by digest, with a separate set of to
 | The charts and their rules | Certificates come from a script, not from a certificate manager |
 | The trust domains and the links between them | Chains are local; all parties run on one machine |
 
-No real cluster has run the charts yet. The shape on this page is a design checked by tests, not a running system with real funds.
+No real cluster has run the charts yet. The shape on this page is a design, checked by tests, not a running system with real funds.
+
+A reference deployment for AWS exists as code (four accounts for the four clusters and a fifth for the audit store). It has never been applied: it is checked without an account, so it shows the shape and not that it runs.

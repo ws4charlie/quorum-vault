@@ -19,6 +19,9 @@ Today each party's shares are sealed under a key in its own HSM token, on a host
 
 The key lives in memory only. A running party keeps signing if the broker goes away, but a party that restarts cannot open its shares until the broker is back. Taking a program off the list stops new starts, not a party that is already running.
 
+## Which builds may get the keys
+Every new release of a party is a new program, so it needs its own place on the list. The list is a signed file with a rising version number: the broker ignores a list that has too few signatures or is older than the one it already holds, and keeps using the last good one. To upgrade, the operators add the new release while the old one stays listed, restart the parties one at a time, and only then set an end date on the old release. The shares do not change, because the key belongs to the party and not to the program. A release found bad is marked revoked, and it never gets a key again ([Upgrade runbook](runbooks/tee-broker.md)).
+
 ## What is simulated
 
 The broker, its checks, the sealed shares, the start gate and the tests with real party processes are real code. The enclave and its proof are not: a stand-in measures the program file and its settings. No vendor hardware has produced a proof, so nobody has shown that real hardware measures what the stand-in measures ([Limits](limits.md)).

@@ -6,6 +6,8 @@
 //
 //	qv-sol-nonces -config custody.json -dsn $DATABASE_URL -shard 0 -approver alice -approver-key alice.key
 //
+// After a key replacement the active generation is the new key, and its pool is created the same way; the old key's pool is emptied by the drain (qv-rekey).
+//
 // The approver key file holds the operator's Ed25519 private key (64 bytes, hex). The approver's public key must be in the signing zone's config.
 package main
 
@@ -42,6 +44,7 @@ func run(log *slog.Logger) error {
 	shard := flag.Int("shard", 0, "hot shard whose pool to complete")
 	action := flag.String("action", "setup", "setup: create the missing accounts; retire: take account -index out of the pool; close: close the retired, idle account -index")
 	index := flag.Int("index", -1, "pool account (retire and close)")
+	gen := flag.Int("generation", 0, "setup: the generation of the shard's key whose pool to complete (0: the active one; after a key replacement the new key's pool is made once it is active)")
 	approver := flag.String("approver", "", "the operator's name in the signing zone's approver list (required)")
 	keyFile := flag.String("approver-key", "", "file with the operator's Ed25519 private key, 64 bytes in hex (required)")
 	wait := flag.Duration("wait", 2*time.Minute, "how long to wait for the signature and for finality")
@@ -98,7 +101,7 @@ func run(log *slog.Logger) error {
 	default:
 		return fmt.Errorf("unknown -action %q", *action)
 	}
-	n, err := svc.SetupNonces(ctx, *shard, *approver, ed25519.PrivateKey(kb), *wait)
+	n, err := svc.SetupNoncesGen(ctx, *shard, *gen, *approver, ed25519.PrivateKey(kb), *wait)
 	if err != nil {
 		return err
 	}

@@ -34,10 +34,10 @@ func (a *Adapter) retiredNonces(ctx context.Context) (map[string]bool, error) {
 
 // RetireNonce takes pool account idx of the partition's shard out of the pool. The last account of a pool is never retired. Repeating it changes
 // nothing.
-func (a *Adapter) RetireNonce(ctx context.Context, partitionID string, idx int) error {
-	hot, ok := a.cfg.hot[partitionID]
-	if !ok {
-		return fmt.Errorf("sol: partition %q has no hot shard", partitionID)
+func (a *Adapter) RetireNonce(ctx context.Context, partitionID, hotAddr string, idx int) error {
+	hot, err := a.pinnedHot(ctx, partitionID, hotAddr)
+	if err != nil {
+		return err
 	}
 	if idx < 0 || idx >= a.cfg.NoncePool {
 		return fmt.Errorf("sol: pool account %d: the pool has %d", idx, a.cfg.NoncePool)
@@ -71,10 +71,10 @@ func (a *Adapter) RetireNonce(ctx context.Context, partitionID string, idx int) 
 }
 
 // NonceIdle says whether a retired account may be closed now, and if not why.
-func (a *Adapter) NonceIdle(ctx context.Context, partitionID string, idx int) (bool, string, error) {
-	hot, ok := a.cfg.hot[partitionID]
-	if !ok {
-		return false, "", fmt.Errorf("sol: partition %q has no hot shard", partitionID)
+func (a *Adapter) NonceIdle(ctx context.Context, partitionID, hotAddr string, idx int) (bool, string, error) {
+	hot, err := a.pinnedHot(ctx, partitionID, hotAddr)
+	if err != nil {
+		return false, "", err
 	}
 	if idx < 0 || idx >= a.cfg.NoncePool {
 		return false, "", fmt.Errorf("sol: pool account %d: the pool has %d", idx, a.cfg.NoncePool)
@@ -115,15 +115,18 @@ func (a *Adapter) NonceIdle(ctx context.Context, partitionID string, idx int) (b
 
 // BuildNonceClose builds the withdrawal of the whole balance of a retired, idle account back to its hot shard, on a recent blockhash, and returns the
 // unsigned transaction with the lamports the intent must name.
-func (a *Adapter) BuildNonceClose(ctx context.Context, partitionID string, idx int) (chain.UnsignedTx, *big.Int, error) {
-	idle, why, err := a.NonceIdle(ctx, partitionID, idx)
+func (a *Adapter) BuildNonceClose(ctx context.Context, partitionID, hotAddr string, idx int) (chain.UnsignedTx, *big.Int, error) {
+	idle, why, err := a.NonceIdle(ctx, partitionID, hotAddr, idx)
 	if err != nil {
 		return chain.UnsignedTx{}, nil, err
 	}
 	if !idle {
 		return chain.UnsignedTx{}, nil, fmt.Errorf("sol: pool account %d cannot be closed: %s", idx, why)
 	}
-	hot := a.cfg.hot[partitionID]
+	hot, err := a.pinnedHot(ctx, partitionID, hotAddr)
+	if err != nil {
+		return chain.UnsignedTx{}, nil, err
+	}
 	nonce := NonceAddress(hot, idx)
 	acct, err := a.rpc.GetAccount(ctx, Address(nonce), Finalized)
 	if errors.Is(err, ErrNoAccount) {
@@ -157,23 +160,32 @@ func (a *Adapter) BuildNonceClose(ctx context.Context, partitionID string, idx i
 var ErrNonceGone = errors.New("sol: the nonce account does not exist")
 
 // MarkNonceClosed records that the account is closed.
-func (a *Adapter) MarkNonceClosed(ctx context.Context, partitionID string, idx int) error {
-	hot := a.cfg.hot[partitionID]
-	_, err := a.pool.Exec(ctx, `UPDATE sol_nonce_accounts SET closed_at=COALESCE(closed_at, now()) WHERE chain=$1 AND address=$2 AND retired_at IS NOT NULL`,
+func (a *Adapter) MarkNonceClosed(ctx context.Context, partitionID, hotAddr string, idx int) error {
+	hot, err := a.pinnedHot(ctx, partitionID, hotAddr)
+	if err != nil {
+		return err
+	}
+	_, err = a.pool.Exec(ctx, `UPDATE sol_nonce_accounts SET closed_at=COALESCE(closed_at, now()) WHERE chain=$1 AND address=$2 AND retired_at IS NOT NULL`,
 		a.cfg.Chain, Address(NonceAddress(hot, idx)))
 	return err
 }
 
 // RecordNonceCloseTx stores the signature of the close before it is sent, so that a crash after the send can still be booked.
-func (a *Adapter) RecordNonceCloseTx(ctx context.Context, partitionID string, idx int, sig string) error {
-	hot := a.cfg.hot[partitionID]
-	_, err := a.pool.Exec(ctx, `UPDATE sol_nonce_accounts SET close_tx=$3 WHERE chain=$1 AND address=$2 AND retired_at IS NOT NULL`, a.cfg.Chain, Address(NonceAddress(hot, idx)), sig)
+func (a *Adapter) RecordNonceCloseTx(ctx context.Context, partitionID, hotAddr string, idx int, sig string) error {
+	hot, err := a.pinnedHot(ctx, partitionID, hotAddr)
+	if err != nil {
+		return err
+	}
+	_, err = a.pool.Exec(ctx, `UPDATE sol_nonce_accounts SET close_tx=$3 WHERE chain=$1 AND address=$2 AND retired_at IS NOT NULL`, a.cfg.Chain, Address(NonceAddress(hot, idx)), sig)
 	return err
 }
 
 // NonceCloseTx is the recorded signature of the close of an account ("" if none).
-func (a *Adapter) NonceCloseTx(ctx context.Context, partitionID string, idx int) (string, error) {
-	hot := a.cfg.hot[partitionID]
+func (a *Adapter) NonceCloseTx(ctx context.Context, partitionID, hotAddr string, idx int) (string, error) {
+	hot, err := a.pinnedHot(ctx, partitionID, hotAddr)
+	if err != nil {
+		return "", err
+	}
 	var s *string
 	if err := a.pool.QueryRow(ctx, `SELECT close_tx FROM sol_nonce_accounts WHERE chain=$1 AND address=$2`, a.cfg.Chain, Address(NonceAddress(hot, idx))).Scan(&s); err != nil {
 		return "", err

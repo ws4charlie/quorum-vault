@@ -288,7 +288,18 @@ func (cc *ChainConfig) maxDrainsPerSource() int {
 	if cc.MaxDrainsPerSource > 0 {
 		return cc.MaxDrainsPerSource
 	}
+	if cc.Family == FamilySOL {
+		return SolDrainsPerSource(cc.SOL.NoncePool, len(cc.SOL.Tokens))
+	}
 	return DefaultMaxDrainsPerSource
+}
+
+// SolDrainsPerSource is the default bound on Solana drains from one source. A Solana drain is one transaction per account the old key holds: a transfer
+// (and close) for each token, a withdrawal for each nonce account of the pool, and the last SOL move. Those steps are what a drain IS, not repeats, so
+// they come on top of the room every chain gets for retries and late arrivals (DefaultMaxDrainsPerSource). The gas stays bounded: each step costs the
+// base fee of one signature (the drain has no priority fee), so the burn is at most this count times 5000 lamports, and the pool is at most 64.
+func SolDrainsPerSource(noncePool, tokens int) int {
+	return DefaultMaxDrainsPerSource + noncePool + tokens + 1
 }
 
 // drainsPerHour is the chain's limit on drains (default 10; zero: none allowed). A Bitcoin key replacement drains the hot shard of the old generation.
@@ -771,7 +782,8 @@ func (cf ChainFile) buildSOL(name string, enabledApprovers int) (*ChainConfig, e
 	}
 	return &ChainConfig{Name: name, Family: FamilySOL, SOL: sc, Assets: assets,
 		SweepsPerHour: cf.SweepsPerHour, WithdrawalsPerHour: cf.WithdrawalsPerHour, CancelsPerHour: cf.CancelsPerHour,
-		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour, ConsolidationsPerHour: cf.ConsolidationsPerHour}, nil
+		ToColdPerHour: cf.ToColdPerHour, RebalancePerHour: cf.RebalancePerHour, ConsolidationsPerHour: cf.ConsolidationsPerHour,
+		DrainsPerHour: drainsPerHour(cf)}, nil
 }
 
 // checkDepositSigner validates an ed25519-2of3 signer entry: the hot keyset's 32-byte public key and the optional deposit key tree.

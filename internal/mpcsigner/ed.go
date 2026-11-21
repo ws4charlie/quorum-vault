@@ -44,6 +44,22 @@ func NewEdThreshold(cfg ThresholdConfig) (*EdThresholdSigner, error) {
 	return &EdThresholdSigner{thresholdCore: core, pub: append([]byte(nil), cfg.PublicKey...)}, nil
 }
 
+// WithKey returns a signer for another 2-of-3 Ed25519 keyset of the same parties: the connections, certificates, pins and router are shared with t
+// (closing t closes them), the keyset and its 32-byte public key are the ones given. It is how the gateway signs from a later generation of a Solana hot
+// shard, whose key reference comes from an operator-signed record.
+func (t *EdThresholdSigner) WithKey(keysetID string, publicKey []byte) (*EdThresholdSigner, error) {
+	if keysetID == "" {
+		return nil, errors.New("keyset id is required")
+	}
+	if len(publicKey) != 32 {
+		return nil, errors.New("an Ed25519 keyset's public key is 32 bytes")
+	}
+	cfg := t.cfg
+	cfg.KeysetID, cfg.PublicKey = keysetID, append([]byte(nil), publicKey...)
+	core := &thresholdCore{cfg: cfg, log: t.log, conns: t.conns, cls: t.cls}
+	return &EdThresholdSigner{thresholdCore: core, pub: append([]byte(nil), publicKey...)}, nil
+}
+
 func (t *EdThresholdSigner) Backend() domain.Backend { return domain.BackendMPC }
 func (t *EdThresholdSigner) PublicKey() []byte       { return append([]byte(nil), t.pub...) }
 
