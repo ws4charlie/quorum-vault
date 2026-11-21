@@ -281,14 +281,13 @@ func (s *Service) planDrain(ctx context.Context, log *slog.Logger, shardIdx int,
 		return nil, nil // the zone's refusal is being waited out
 	}
 	// Work from the old address that is not ours to drain (a withdrawal or sweep built before the replacement) finishes first: the drain would spend
-	// the balance it needs and share its nonces.
-	var busy int
-	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM evm_nonce_allocations WHERE chain=$1 AND lower(address)=lower($2) AND status IN ('allocated','broadcast') AND owner_kind <> $3`,
-		c.Chain, from.Address, OwnerKindDrain).Scan(&busy); err != nil {
+	// the balance it needs and share its nonces. What the zone refused and can no longer be signed is not in flight (drain_inflight.go).
+	busy, fillBelow, err := s.drainInflight(ctx, from)
+	if err != nil {
 		return nil, err
 	}
-	if busy > 0 {
-		return wait(fmt.Sprintf("%d transactions built from the old address are still in flight; the drain starts when they are final", busy))
+	if len(busy) > 0 && !fillBelow {
+		return wait(inflightReason(busy))
 	}
 	bal, err := s.balancesAt(ctx, from.Address)
 	if err != nil {
@@ -299,6 +298,14 @@ func (s *Service) planDrain(ctx context.Context, log *slog.Logger, shardIdx int,
 		return wait("cannot work out the gas of the last transfer: " + err.Error())
 	}
 	asset, amount := s.pickDrainAsset(c, bal, nativeDust, from.State == partition.StateCompromised)
+	if len(busy) > 0 {
+		// A live transaction sits above a hole: fill the hole with the smallest drain there is, one wei of the native asset to the successor, so the
+		// transaction above is not made unpayable by a larger move. Every filler counts against the zone's max_drains_per_source (each costs gas).
+		asset, amount = c.Native, big.NewInt(1)
+		if bal[c.Native].Cmp(new(big.Int).Add(c.NativeReserve(), amount)) < 0 {
+			return wait("a nonce below a transaction in flight needs a drain transfer to fill it and the old address has no gas for one (it needs " + c.NativeReserve().String() + "); fund it with the native asset. " + inflightReason(busy))
+		}
+	}
 	if asset == "" {
 		err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 			return setDrainState(ctx, tx, shard, from.Generation, "drained", "", 0)
@@ -356,6 +363,9 @@ func (s *Service) BuildDrainJob(ctx context.Context, id string) (string, error) 
 		}
 		if m.JobID != "" || m.Status != "planned" {
 			return nil
+		}
+		if err := s.adoptHole(ctx, tx, m); err != nil {
+			return err
 		}
 		u, err := db.BuildDrain(ctx, tx, evm.DrainRequest{ID: id, PartitionID: m.PartitionID, From: m.From, To: m.To, Asset: m.Asset, Amount: m.Amount})
 		if err != nil {

@@ -81,6 +81,13 @@ func (a *Adapter) sweepDestination(ctx context.Context, q queryer) (common.Addre
 	return a.hotFor(ctx, q, p)
 }
 
+// SweepDestinationAddress is the address sweeps pay (the active generation's hot address when the destination is a hot partition), for the core's check
+// that it is not a compromised generation's.
+func (a *Adapter) SweepDestinationAddress(ctx context.Context) (string, error) {
+	d, err := a.sweepDestination(ctx, a.pool)
+	return d.Hex(), err
+}
+
 // partitionOfAddress is a partition whose shard the address serves, for the key reference of a transaction built for an address that is not in the
 // configuration (a later generation).
 func (a *Adapter) partitionOfAddress(ctx context.Context, q queryer, from common.Address) string {

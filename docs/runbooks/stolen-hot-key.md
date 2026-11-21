@@ -66,6 +66,25 @@ Times are from the drill on the local test chains (`TestEmergencyDrillStolenHotK
 
 If the run says `STALLED`, read the reason on the line: gas missing at the old address (send a little native asset to it: it is the thief's key, so only what the drain needs), a zone database that is behind (`qv-keysets show`; apply the same record again), or the cap (a signed `set-drain-caps` raises it: `qv-rekey caps`). Then run the command again.
 
+## Work in flight at the mark (EVM)
+
+A withdrawal or a sweep built a moment before the mark may be in any state. The drain starts only when nothing from the old address can still reach the chain, and the run says what it waits for: `waiting: N transactions built from the old address are still in flight; the drain starts when they are final: withdrawal wd-… at nonce 7 is broadcast (sign jobs: …)`.
+
+| State at the mark | What the system does | What you see |
+|---|---|---|
+| built, or queued for signing | the core rejects the queued job at once; the withdrawal is voided (its hold is released), the sweep fails | nothing waits |
+| being signed | the zone answers at its next decision: refused, as above; signed, as the next two rows | a wait of seconds |
+| refused, no signature (the zone refuses the cancel too: a compromised key signs only its drain) | the nonce becomes a hole; the next drain transfer uses it, so the nonce lane stays gapless | nothing waits |
+| signed, not broadcast | the worker broadcasts it; the drain waits for it to confirm | the wait names it |
+| broadcast, not confirmed | real: it can still mine, so the drain waits. The old key cannot sign a fee bump (the zone refuses it), so it confirms at the fee it has | the wait names it and its nonce |
+
+Sweeps are not planned while the sweep destination is the compromised address (until step 5 is done); funds that arrive meanwhile wait in the forwarders. A sweep that confirms after the mark puts funds on the old address: the drain looks at the balance again when every transaction is final, and the driver checks twice before it says `drained`.
+
+**If the wait does not end** (`STALLED` names the transaction): read the sign jobs on the line.
+1. A job `failed` or `signing` for longer than a few minutes: the signer had a fault, not a refusal. Fix the signer (gateway and cosigner logs); the job completes or is rejected, and the wait ends. Never mark it rejected by hand: a signature may exist.
+2. Broadcast and not confirming for a long time: look at the transaction on the node. It is real, so the drain does not start under it (it would spend the balance the transaction needs and queue behind its nonce). The system has no way to replace it, because the old key may not sign a fee bump. It mines when the fee allows. If the node dropped it, nothing replaces it (the replacement would be signed by the old key too): the decision to go on without it is a human one, and no tool makes it for you (backlog: a drain transfer that replaces it at the same nonce).
+3. A row is `parked` (an `ALERT` named it): read its reason, fix the cause, clear the parked reason as the other runbooks describe, and run the command again.
+
 ## Verify
 
 - `qv-rekey status` shows the old generation `compromised`, drain `drained`; Reconcile is clean.
@@ -102,7 +121,7 @@ that the old key's calls revert on chain. Then update the cold address in the si
 
 ## Drill
 
-Once a quarter and after every change to this path, on the test chains: `make test-e2e-all GROUPS=e2e-evm-flows` runs `TestEmergencyDrillStolenHotKey` (a withdrawal in flight and
+Once a quarter and after every change to this path, on the test chains: `make test-e2e-all GROUPS=e2e-evm-drill` runs `TestEmergencyDrillStolenHotKey` (a withdrawal in flight, a refused sweep and withdrawal stranded at the mark, and
 deposits arriving, the three records signed, the driver run killed and rerun, the old key's transactions refused, funds ending at the new key, the ledger clean). It logs the time of every step. Run the cold ceremony part by hand with a spare address ([key ceremony](key-ceremony.md)): `TestFactoryAdminRotationCeremony` and `TestGuardianFreezeAndCeremonyUnfreeze` cover it against anvil.
 
 A key ceremony (new keyset, refresh, unfreeze) is done with `qv-party-admin`: [key-ceremony.md](key-ceremony.md).
