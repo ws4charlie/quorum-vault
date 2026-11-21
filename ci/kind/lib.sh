@@ -69,3 +69,6 @@ trust_args() {
 #   job_a & pa=$!; job_b & pb=$!; wait_all "$pa" "$pb"
 wait_all() { local p rc=0; for p in "$@"; do wait "$p" || rc=1; done; return $rc; }
 pf_stop() { [ -n "${PF_PID:-}" ] && kill "$PF_PID" 2>/dev/null; PF_PID=""; return 0; }
+
+# A failing command in a setup script must say which one and where (set -e alone exits silently: a CI run once stopped right after "guard databases" with no error text). Call it right after sourcing this file.
+trace_failures() { set -E; trap 'echo "FAILED (exit $?): ${BASH_SOURCE[0]##*/}:$LINENO: $BASH_COMMAND" >&2' ERR; }

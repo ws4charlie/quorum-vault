@@ -3,6 +3,7 @@
 # Installed: qv-party x3 + DKG, the generated configs (signing.sh), qv-business with the EVM custody config, qv-signing-core. The Bitcoin custody config is switched in by smoke/withdraw.sh.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+trace_failures
 cd "$QV_KIND_ROOT"
 S="$WORK/secrets"
 

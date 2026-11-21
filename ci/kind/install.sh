@@ -3,6 +3,7 @@
 #   ci/kind/install.sh [secrets|certs|deps|charts|policy|all]
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+trace_failures
 cd "$QV_KIND_ROOT"
 PHASE="${1:-all}"
 S="$WORK/secrets"; mkdir -p "$S"; chmod 700 "$S"

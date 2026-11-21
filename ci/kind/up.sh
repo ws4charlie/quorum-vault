@@ -5,6 +5,7 @@
 # Phases are idempotent: run it again after a failure.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+trace_failures
 cd "$QV_KIND_ROOT"
 PHASE="${1:-all}"
 

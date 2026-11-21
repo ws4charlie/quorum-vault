@@ -4,6 +4,7 @@
 # not a break-glass user. The admission case (smoke/admission.sh) tests the rules in qv-ptest. Idempotent.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+trace_failures
 cd "$QV_KIND_ROOT"
 log "qv-policy (kind mode) for the namespace $NS_PTEST"
 hm upgrade --install qv-policy deploy/policy/qv-policy -n kube-system -f deploy/policy/qv-policy/values-kind.yaml \
