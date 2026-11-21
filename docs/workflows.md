@@ -27,3 +27,5 @@ Every change that other systems should hear about writes an event in the same da
 ## The watchdog restarts loops that stall
 
 Some jobs never end: scanning the chains, planning sweeps and moves to cold. If one stops making progress, the watchdog raises an alert, ends it and starts it again. Draining an old key is one more such loop. A worker that is told to stop first finishes or hands over its current step.
+
+A small deposit is not swept while the fee of the sweep is more than a twentieth of its value. The planner looks at it again every round and sweeps it when the fee falls; the reconcile view says that it is waiting and why ([runbook](runbooks/unswept-deposits.md)).

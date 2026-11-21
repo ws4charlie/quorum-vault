@@ -94,6 +94,8 @@ func run(log *slog.Logger) error {
 	reg := workermetrics.New(*stopTimeout)
 	// qv_btc_fee_caps_zone_refusals_total is 0 from start, so a rule on its increase has a series (monitoring/fee-caps.rules.yml, docs/runbooks/btc-fee-caps.md).
 	reg.AddWriter(custody.WriteFeeCapsMetrics)
+	var held custody.SweepHoldMetrics // qv_sweep_held_*: deposits left below the sweep threshold (docs/runbooks/unswept-deposits.md); it reads once the database is open
+	reg.AddWriter(held.Write)
 	reg.SetReadyFunc(probe.Ready) // qv_worker_ready is what /readyz answers now: the same checks, not a flag set once at start
 	if *metricsListen != "" {
 		if err := pki.CheckMetricsAddr(*metricsListen, pki.ZoneBusiness); err != nil {
@@ -114,6 +116,7 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	defer pool.Close()
+	held.Use(pool)
 	probe.Check("database", health.Ping(pool))
 	probe.Check("certificates", health.Certs(tsrc))
 	if err := db.Check(ctx, pool); err != nil {
