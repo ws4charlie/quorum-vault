@@ -48,8 +48,8 @@ func newRig(t *testing.T) *rig {
 
 func TestProbeReportsEveryCheck(t *testing.T) {
 	r := newRig(t)
-	rep := nitroprobe.Run(context.Background(), nitroprobe.Config{ExpectPCR0: strings.ToUpper(r.pcr0)}, r.deps)
-	if !rep.Verified || rep.Debug || rep.PCR0Matches == nil || !*rep.PCR0Matches || rep.PCRs["0"] != r.pcr0 {
+	rep := nitroprobe.Run(context.Background(), nitroprobe.Config{}, r.deps)
+	if !rep.Verified || rep.Debug || rep.PCRs["0"] != r.pcr0 {
 		t.Fatalf("%+v", rep)
 	}
 	if rep.KMS == nil || !rep.KMS.KeysEqual || rep.KMS.Error != "" || rep.DocumentBytes == 0 || len(rep.Errors) != 0 {
@@ -71,10 +71,6 @@ func TestProbeReportsEveryCheck(t *testing.T) {
 
 func TestProbeSaysWhatIsWrong(t *testing.T) {
 	r := newRig(t)
-	wrong := strings.Repeat("ab", 48)
-	if rep := nitroprobe.Run(context.Background(), nitroprobe.Config{ExpectPCR0: wrong}, r.deps); rep.PCR0Matches == nil || *rep.PCR0Matches {
-		t.Fatal("a different expected PCR0 must show as a mismatch")
-	}
 	// a debug-mode enclave: the production verifier refuses the document, and KMS refuses the call
 	r.att.Debug = true
 	rep := nitroprobe.Run(context.Background(), nitroprobe.Config{}, r.deps)

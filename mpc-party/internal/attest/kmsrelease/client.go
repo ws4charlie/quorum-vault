@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/attest"
@@ -71,9 +72,13 @@ func New(cfg Config) (*Client, error) {
 		cfg.Endpoint = "https://kms." + cfg.Region + ".amazonaws.com"
 	}
 	u, err := url.Parse(cfg.Endpoint)
-	if err != nil || u.Host == "" || (u.Path != "" && u.Path != "/") {
+	if err != nil || u.Host == "" || strings.Trim(u.Path, "/") != "" {
 		return nil, fmt.Errorf("kmsrelease: endpoint %q is not a URL without a path", cfg.Endpoint)
 	}
+	if u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return nil, fmt.Errorf("kmsrelease: endpoint %q must be a plain URL", cfg.Endpoint)
+	}
+	u.Path = "/" // normalised once: "https://host", "https://host/" and "https://host//" all become one root path, so a request never goes to "//"
 	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname())) {
 		return nil, fmt.Errorf("kmsrelease: endpoint %q must be https", cfg.Endpoint)
 	}
@@ -197,7 +202,7 @@ func (c *Client) call(ctx context.Context, op string, in, out any) error {
 	if err != nil {
 		return fmt.Errorf("kmsrelease: credentials: %w", err)
 	}
-	r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base.String()+"/", bytes.NewReader(body))
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base.String(), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}

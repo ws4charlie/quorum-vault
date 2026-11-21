@@ -44,6 +44,8 @@ Every step lists the command, what it should print, and the **pass rule**. Stop 
 
 Take the released party image by digest from the release manifest (`images.mpc-party.ref`) and the deployment's measured configuration for this party (directory with `party.json`, never in git).
 
+**Rule: nothing inside the image may depend on the image's own measurement.** The configuration directory is part of the image, so a PCR, a hash of the allowlist, or anything derived from them written into it would change the PCR it names, and a check built on it could never pass. Expected values live outside: on the parent, in the allowlist, in the KMS key policy. `eif-build.sh` refuses a configuration directory with a PCR-sized value (96 hex characters) in it. What the party's configuration does hold is independent of the measurement: peer and caller pins, admin keys, the KMS key id and region, vsock ports.
+
 ```bash
 deploy/images/eif-build.sh --repro --party-image <repo>@sha256:<digest> --config-dir <dir> --out out-a --epoch <manifest sourceDateEpoch>
 ```
@@ -83,11 +85,11 @@ socat VSOCK-LISTEN:8001,fork,reuseaddr TCP:169.254.169.254:80 &   # instance rol
 
 ### 4. Run the probe in debug mode first (what a refusal looks like)
 
-Build the probe image (same released image, different entry point; its PCRs differ from the party's) with a `probe.json` such as `{"report_vsock_port":9100,"expect_pcr0":"<the probe's PCR0>"}`; add the `kms` object (`key_id`, `region`, `vsock_port` 8000, `creds_vsock_port` 8001) for steps 6 and 7.
+Build the probe image (same released image, different entry point; its PCRs differ from the party's) with a `probe.json` such as `{"report_vsock_port":9100}`. It holds no expected PCR: the probe reports the PCRs it sees and you compare them with the build output on the parent (step 5). Add the `kms` object (`key_id`, `region`, `vsock_port` 8000, `creds_vsock_port` 8001) for steps 6 and 7.
 
 ```bash
 deploy/images/eif-build.sh --probe --party-image <repo>@sha256:<digest> --config-dir probecfg --out probe-out --epoch <epoch>
-socat VSOCK-LISTEN:9100,fork - &      # prints the report
+socat VSOCK-LISTEN:9100,fork OPEN:report.json,creat,trunc &      # the probe's JSON report (an enclave has no console in production mode, so this is the only output)
 sudo nitro-cli run-enclave --cpu-count 2 --memory 1024 --enclave-cid 16 --eif-path probe-out/party.eif --debug-mode
 ```
 
@@ -97,7 +99,11 @@ sudo nitro-cli run-enclave --cpu-count 2 --memory 1024 --enclave-cid 16 --eif-pa
 
 Same command without `--debug-mode` and with `probe.json` without `kms`.
 
-**Pass:** `document verified by the production verifier: true`; `debug mode: false`; `PCR0 equals the build's: true`; the document is about 4.5 to 6 KB (a real one in the tests is 4461 bytes, `testdata/nitro`); `clock skew` within a few seconds; `rng: "nsm-hwrng"`. These show: the NSM ioctl layer works; the chain verifies to the pinned AWS root on real hardware; the PCRs a real enclave reports are the ones `nitro-cli` printed. If the clock skew is large or the rng is another source, fix that before going on (TLS to KMS needs a correct clock; the enclave kernel's clock source is **unverified** here).
+```bash
+deploy/cloud/aws/nitro/check-probe-report.py --report report.json --pcrs probe-out/pcrs.json     # on the parent
+```
+
+**Pass:** the check prints `every PCR of the build is in the enclave's document and equal` (PCR0, PCR1, PCR2, and PCR8 when you signed); the report has `verified: true` and `debug: false`; the document is about 4.5 to 6 KB (a real one in the tests is 4461 bytes, `testdata/nitro`); `clock skew` within a few seconds; `rng: "nsm-hwrng"`. These show: the NSM ioctl layer works; the chain verifies to the pinned AWS root on real hardware; the PCRs a real enclave reports are the ones `nitro-cli` printed. If the clock skew is large or the rng is another source, fix that before going on (TLS to KMS needs a correct clock; the enclave kernel's clock source is **unverified** here).
 
 ### 6. KMS with the probe's PCRs
 
@@ -127,7 +133,7 @@ Take `probe` out of `allowed_images`, apply, check the key policy shows only rel
 | Simulation cannot prove | Check | Pass rule |
 |---|---|---|
 | Memory isolation and confidentiality | Run without `--debug-mode` (steps 5 to 7). Try `sudo nitro-cli console --enclave-id <id>` and read the parent's process list and `/proc` for the enclave's memory | The console is refused outside debug mode; nothing of the enclave's memory is in a parent process. This confirms the mode only: the isolation itself is AWS's and is not testable by us |
-| Real hardware measures what the build measured | Step 5 (PCR0 in the document equals `nitro-cli`'s) and step 6 (KMS accepts that PCR0) | Equal, on the first try |
+| Real hardware measures what the build measured | Step 5 (`check-probe-report.py`: the document's PCRs equal `nitro-cli`'s, compared on the parent) and step 6 (KMS accepts that PCR0) | Equal, on the first try |
 | The vendor's chain, revocation and TCB handling | Step 5: verified by the production verifier. We pin the root and do not check revocation (AWS documents the chain, not CRLs) | `verified true`. Revocation stays unchecked: stated in `docs/limits.md` |
 | AWS KMS's own condition evaluation | Step 7 | Every row as listed |
 | vsock and proxy behaviour and limits | Run the probe's KMS round trip 200 times in a loop from the parent (`nitro-cli run-enclave` per run, or after the party exists, the start-up with 200 generations) and watch `vsock-proxy` logs (`journalctl -eu nitro-enclaves-vsock-proxy`) | No connection errors; time per call stable; note the maximum |

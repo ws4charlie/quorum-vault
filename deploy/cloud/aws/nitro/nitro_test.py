@@ -14,6 +14,7 @@ def load(name, file):
 
 
 cli, tfv = load("cli", "nitro-cli-to-allowlist.py"), load("tfv", "allowlist-to-tfvars.py")
+chk = load("chk", "check-probe-report.py")
 H = lambda c: c * 96
 NOW = datetime(2026, 12, 1, tzinfo=timezone.utc)
 # what `nitro-cli build-enclave` prints: progress lines, then the JSON. The values are those of a stand-in image built to test the tool (docs/runbooks/nitro-first-run.md).
@@ -116,6 +117,61 @@ class AllowlistToTfvars(unittest.TestCase):
             for k, v in i["pcrs"].items():
                 self.assertTrue(k.isdigit() and 0 <= int(k) < 100)
                 self.assertRegex(v, r"^[0-9a-f]{96}$")
+
+
+class Times(unittest.TestCase):
+    def test_forms_the_broker_writes(self):
+        # Go's time.Time marshals RFC 3339 with an offset and a fraction when it has them, and the broker's tool reads all of these
+        U = lambda *a: datetime(*a, tzinfo=timezone.utc)
+        for s, want in [("2026-01-01T00:00:00Z", U(2026, 1, 1)), ("2026-01-01T02:00:00+02:00", U(2026, 1, 1)), ("2025-12-31T19:00:00-05:00", U(2026, 1, 1)),
+                        ("2026-01-01T00:00:00.5Z", U(2026, 1, 1, 0, 0, 0, 500000)), ("2026-01-01T00:00:00.123456789Z", U(2026, 1, 1, 0, 0, 0, 123456)),
+                        ("2026-01-01T01:30:00.25+01:30", U(2026, 1, 1, 0, 0, 0, 250000)), ("2026-01-01t00:00:00z", U(2026, 1, 1))]:
+            self.assertEqual(tfv.parse_time(s), want, s)
+
+    def test_bad_forms(self):
+        for s in ["2026-01-01", "2026-01-01T00:00:00", "2026-13-01T00:00:00Z", "2026-01-01T00:00:00+25:00", "", None, "2026-01-01 00:00:00Z"]:
+            with self.assertRaises(ValueError, msg=str(s)):
+                tfv.parse_time(s)
+
+    def test_window_in_other_forms(self):
+        e = entry(nb="2026-06-01T02:00:00+02:00", na="2026-12-31T23:59:59.999Z")
+        out, _ = tfv.build(lst([e]), "A", NOW)
+        self.assertEqual(len(out["allowed_images"]), 1)
+        late = tfv.parse_time("2027-01-01T00:00:00.5Z")
+        with self.assertRaises(ValueError):
+            tfv.build(lst([e]), "A", late)  # past its end: nothing active
+        early = tfv.parse_time("2026-05-31T23:59:59Z")
+        with self.assertRaises(ValueError):
+            tfv.build(lst([e]), "A", early)  # before its start (given with an offset)
+
+    def test_now_flag_form(self):
+        self.assertEqual(tfv.parse_time("2026-12-01T00:00:00+00:00"), NOW)
+
+
+class ProbeReport(unittest.TestCase):
+    P = {"PCR0": H("a"), "PCR1": H("b"), "PCR2": H("c")}
+
+    def rep(self, **kw):
+        r = {"verified": True, "debug": False, "pcrs": {"0": H("a"), "1": H("b"), "2": H("C")}}
+        r.update(kw)
+        return r
+
+    def test_equal(self):
+        self.assertEqual(chk.check(self.rep(), self.P), [])
+
+    def test_a_different_pcr(self):
+        self.assertEqual(len(chk.check(self.rep(pcrs={"0": H("a"), "1": H("e"), "2": H("c")}), self.P)), 1)
+
+    def test_missing_pcr_and_signed_image(self):
+        self.assertEqual(len(chk.check(self.rep(), dict(self.P, PCR8=H("d")))), 1)
+
+    def test_not_verified_debug_kms(self):
+        self.assertEqual(len(chk.check(self.rep(verified=False, verify_error="debug", debug=True), self.P)), 2)
+        self.assertEqual(len(chk.check(self.rep(kms={"keys_equal": False}), self.P)), 1)
+        self.assertEqual(chk.check(self.rep(kms={"keys_equal": True}), self.P), [])
+
+    def test_no_build_pcrs(self):
+        self.assertTrue(chk.check(self.rep(), {}))
 
 
 if __name__ == "__main__":

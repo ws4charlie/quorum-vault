@@ -22,10 +22,11 @@ import (
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/attest/kmsrelease"
 )
 
-// Config is probe.json (in the probe image's config directory).
+// Config is probe.json (in the probe image's config directory). It must hold nothing that depends on the image's own measurement: the file is part of the
+// image, so a PCR written into it would change the PCR it names. The probe therefore reports the PCRs it sees and the comparison with the build happens on the
+// parent (check-probe-report.py).
 type Config struct {
 	ReportVsockPort uint32 `json:"report_vsock_port"` // the parent listens here (CID 3) and prints what arrives
-	ExpectPCR0      string `json:"expect_pcr0"`       // the PCR0 eif-build.sh printed; the report says whether the document carries it
 	KMS             *struct {
 		KeyID          string `json:"key_id"`
 		Region         string `json:"region"`
@@ -50,7 +51,6 @@ type Report struct {
 	ModuleID      string            `json:"module_id,omitempty"`
 	Debug         bool              `json:"debug"`
 	PCRs          map[string]string `json:"pcrs,omitempty"` // PCR index -> hex, only non-zero ones
-	PCR0Matches   *bool             `json:"pcr0_matches_expected,omitempty"`
 	KMS           *KMSReport        `json:"kms,omitempty"`
 	Errors        []string          `json:"errors,omitempty"`
 }
@@ -128,10 +128,6 @@ func Run(ctx context.Context, cfg Config, d Deps) Report {
 			if !allZero(v) {
 				r.PCRs[strconv.Itoa(i)] = hex.EncodeToString(v)
 			}
-		}
-		if cfg.ExpectPCR0 != "" {
-			m := strings.EqualFold(cfg.ExpectPCR0, claims.Measurement())
-			r.PCR0Matches = &m
 		}
 	}
 	if d.KMS != nil {
@@ -244,9 +240,7 @@ func (r Report) Summary() string {
 	fmt.Fprintf(&b, "document verified by the production verifier: %v %s\n", r.Verified, r.VerifyError)
 	fmt.Fprintf(&b, "debug mode: %v   module: %s   document: %d bytes   attestation: %d ms   rsa keygen: %d ms\n", r.Debug, r.ModuleID, r.DocumentBytes, r.AttestMS, r.RSAKeyGenMS)
 	fmt.Fprintf(&b, "clock skew vs the enclave clock: %d ms   rng: %q   memory: %d MiB\n", r.ClockSkewMS, r.RNG, r.MemTotalMiB)
-	if r.PCR0Matches != nil {
-		fmt.Fprintf(&b, "PCR0 equals the build's: %v\n", *r.PCR0Matches)
-	}
+	fmt.Fprintf(&b, "PCRs in the document: %v (compare them with the build's pcrs.json on the parent: deploy/cloud/aws/nitro/check-probe-report.py)\n", r.PCRs)
 	if r.KMS != nil {
 		fmt.Fprintf(&b, "KMS: GenerateDataKey %d ms, Decrypt %d ms, keys equal %v %s\n", r.KMS.GenerateDataKeyMS, r.KMS.DecryptMS, r.KMS.KeysEqual, r.KMS.Error)
 	}

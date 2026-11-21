@@ -17,13 +17,33 @@ Rules (the broker's, as far as a static policy can follow them):
   - nothing active left is an error: a key policy with no PCR condition is never written.
 """
 import argparse, json, re, sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HEX96 = re.compile(r"^[0-9a-f]{96}$")
 
 
+RFC3339 = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?([Zz]|[+-]\d{2}:\d{2})$")
+
+
 def parse_time(s):
-    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    """RFC 3339 as Go's time package reads and writes it (the broker's tool and the signed file): whole seconds or a fraction of any length, `Z` or a
+    numeric offset. The result is in UTC. A fraction is cut to microseconds; the comparison of an allowlist window never needs finer."""
+    m = RFC3339.match(s or "")
+    if not m:
+        raise ValueError("%r is not an RFC 3339 time" % (s,))
+    y, mo, d, h, mi, sec, frac, off = m.groups()
+    tz = timezone.utc
+    if off not in ("Z", "z"):
+        sign = 1 if off[0] == "+" else -1
+        oh, om = int(off[1:3]), int(off[4:6])
+        if oh > 23 or om > 59:
+            raise ValueError("%r has an impossible offset" % s)
+        tz = timezone(sign * timedelta(hours=oh, minutes=om))
+    try:
+        t = datetime(int(y), int(mo), int(d), int(h), int(mi), int(sec), int((frac or "0")[:6].ljust(6, "0")), tzinfo=tz)
+    except ValueError as e:
+        raise ValueError("%r: %s" % (s, e))
+    return t.astimezone(timezone.utc)
 
 
 def build(lst, party, now):

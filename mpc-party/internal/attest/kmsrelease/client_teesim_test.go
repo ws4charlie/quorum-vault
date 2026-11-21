@@ -254,6 +254,31 @@ func rawCall(t *testing.T, r *rig, body string) string {
 	return b.String()
 }
 
+// A trailing slash on the endpoint must not turn into a request to "//": the fake KMS answers only for the path "/".
+func TestEndpointNormalisation(t *testing.T) {
+	r := newRig(t)
+	for _, ep := range []string{r.kms.URL, r.kms.URL + "/", r.kms.URL + "//"} {
+		cl, err := kmsrelease.New(kmsrelease.Config{KeyID: "key-1", Region: "eu-central-1", Endpoint: ep,
+			Creds: kmsrelease.StaticCreds{AccessKeyID: r.kms.AccessKeyID, SecretAccessKey: r.kms.Secret, SessionToken: r.kms.Token}})
+		if err != nil {
+			t.Fatalf("%q: %v", ep, err)
+		}
+		pub, _, _ := cl.NewRecipient()
+		doc, err := r.att.Attest([]byte("n"), pub, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := cl.NewKey(context.Background(), attest.ReleaseRequest{Evidence: doc, Context: rc(attest.PurposeCreate, 1)}); err != nil {
+			t.Fatalf("endpoint %q: %v", ep, err)
+		}
+	}
+	for _, ep := range []string{"https://kms.example.com/x", "https://kms.example.com/?a=b", "https://u:p@kms.example.com", "https://kms.example.com/#f"} {
+		if _, err := kmsrelease.New(kmsrelease.Config{KeyID: "k", Region: "r", Endpoint: ep, Creds: kmsrelease.StaticCreds{AccessKeyID: "a", SecretAccessKey: "b"}}); err == nil {
+			t.Fatalf("%q accepted", ep)
+		}
+	}
+}
+
 func TestEndpointMustBeHTTPS(t *testing.T) {
 	creds := kmsrelease.StaticCreds{AccessKeyID: "a", SecretAccessKey: "b"}
 	for _, ep := range []string{"http://kms.example.com", "ftp://x", "https://kms.example.com/path", "kms.example.com"} {
