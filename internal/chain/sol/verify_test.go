@@ -794,4 +794,20 @@ func TestMixedGenerationSweep(t *testing.T) {
 	f.mustPass("mixed, the new key's job", job([]uint32{1, 2}, chain.KeyPathAt(2, DepositPath(5))), in)
 	f.mustFail("generation 1 only, written as a list", job([]uint32{1, 1}, PathHot), in, "written as no generation")
 	f.mustFail("generation 0 in a list", job([]uint32{0, 2}, PathHot), in, "generation 0")
+	// every key is still derived under the generation written for it: the generations the wrong way round name other keys than the message pays from
+	f.mustFail("the generations swapped", job([]uint32{2, 1}, PathHot), in, "not the deposit addresses")
+	f.mustFail("the new key's job under the old generation's path", job([]uint32{1, 2}, DepositPath(5)), in, "not the deposit key")
+	f.mustFail("a generation the zone knows no node for", job([]uint32{1, 3}, PathHot), in, "no deposit node for generation 3")
+	f.mustFail("fewer generations than indices", job([]uint32{2}, PathHot), in, "deposit generations for")
+	f.mustFail("the same index twice in one generation", func() chain.UnsignedTx {
+		p, _ := json.Marshal(Payload{Message: msg, DepositIndices: []uint32{5, 5}, DepositGens: []uint32{2, 2}})
+		return chain.UnsignedTx{Chain: "sol-1", Digest: msg, Payload: p, KeyRef: chain.KeyRef{PartitionID: f.partSOL, Path: PathHot}}
+	}(), in, "twice")
+	// the same index in two generations is two different keys, and passes when the message pays from both
+	k3, _ := f.v.DepositKeyAt(2, 3)
+	msg2 := compile(f.hot, f.nv, f.adv(), f.cbLimit(30_000), f.sysTransfer(k1, f.hot, 1_000_000), f.sysTransfer(k3, f.hot, 2_000_000))
+	in2 := in
+	in2.From = Address(k1) + "," + Address(k3)
+	p2, _ := json.Marshal(Payload{Message: msg2, DepositIndices: []uint32{3, 3}, DepositGens: []uint32{1, 2}})
+	f.mustPass("index 3 of generation 1 and of generation 2", chain.UnsignedTx{Chain: "sol-1", Digest: msg2, Payload: p2, KeyRef: chain.KeyRef{PartitionID: f.partSOL, Path: PathHot}}, in2)
 }

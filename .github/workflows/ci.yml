@@ -51,6 +51,9 @@ jobs:
       - name: Tests of the tracked-files check
         id: t_files
         run: ci/tracked-files_test.sh
+      # The repeat-run loop (scripts/e2e-repeat.sh, CONTRIBUTING.md) counts passes from go test's output: a fake go checks it counts each kind of command right.
+      - name: Test of the repeat-run script
+        run: scripts/e2e-repeat_test.sh
       - name: No compiled binary or oversized file is tracked
         id: files
         run: ci/tracked-files.sh

@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	wire "github.com/ws4charlie/quorum-vault/mpc-party/api/cosigner"
 	"math/big"
@@ -356,10 +357,14 @@ var (
 func FreeAddr(t testing.TB) string {
 	freeMu.Lock()
 	defer freeMu.Unlock()
+	// try returns "" when the port is taken (by someone else, or given before); any other error ends the test at once (no file descriptors left, no loopback)
 	try := func(addr string) string {
 		l, err := net.Listen("tcp", addr)
 		if err != nil {
-			return ""
+			if errors.Is(err, syscall.EADDRINUSE) {
+				return ""
+			}
+			t.Fatalf("FreeAddr: %v", err)
 		}
 		got := l.Addr().String()
 		l.Close()
@@ -374,11 +379,13 @@ func FreeAddr(t testing.TB) string {
 			return a
 		}
 	}
-	for {
+	for i := 0; i < 1000; i++ { // the kernel's choice, as before
 		if a := try("127.0.0.1:0"); a != "" {
 			return a
 		}
 	}
+	t.Fatal("FreeAddr: no free port after 1300 tries")
+	return ""
 }
 
 // ---- the stack ----

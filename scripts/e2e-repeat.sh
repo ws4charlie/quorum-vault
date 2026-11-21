@@ -28,7 +28,8 @@ engine() {
   [ "$1" = -- ] && shift
   [ "$n" -ge 1 ] 2>/dev/null || die "N must be a number of at least 1"
   mkdir -p "$out"
-  # a `go` in front of the real one: every `go test` the command runs gets -run <regexp> in place of the -run it had
+  # a `go` in front of the real one: every `go test` the command runs gets -v (the count needs the "--- PASS" lines, and the group `test` runs without -v) and
+  # -run <regexp> in place of the -run it had
   local shim="$out/shim"; mkdir -p "$shim"
   local real; real="$(command -v go)" || die "go not found"
   cat >"$shim/go" <<EOF
@@ -42,7 +43,7 @@ if [ "\${1:-}" = test ]; then
       *) args+=("\$1"); shift ;;
     esac
   done
-  exec "$real" test -run '$re' "\${args[@]}"
+  exec "$real" test -v -run '$re' "\${args[@]}"
 fi
 exec "$real" "\$@"
 EOF
