@@ -111,6 +111,10 @@ func TestEmergencyDrillStolenHotKey(t *testing.T) {
 	if open != 0 {
 		t.Errorf("%d transactions of the old address are still open after the drain", open)
 	}
+	// The filler of a hole below a live transaction is a one-wei drain to the successor: the zone must sign it (a high nonce, so it can never mine).
+	if status, reason := s.hostile("em-filler-1wei", "drain", gen1, gen2, 1, 100000); status != "done" {
+		t.Fatalf("the zone refused a one-wei drain to the successor: %s %s", status, reason)
+	}
 	s.mustRefuse("em-thief-drain", "drain", gen1, randAddr(), 1000, 952, "successor")
 	// The run again changes nothing.
 	if out, err = emergency("-changes", cand, "-changes", comp, "-changes", act); err != nil || !strings.Contains(out, "done") {

@@ -62,11 +62,17 @@ func (s *Service) handOverUnsigned(ctx context.Context, tx pgx.Tx, o Owner) (boo
 	if err != nil || !bad {
 		return false, err
 	}
+	// A signature of the owner's transfer or of its cancel may exist: then the nonce is not free (the cancel can still be broadcast, and two valid
+	// signatures for one nonce must never exist). Both tracks are locked here, so a gateway cannot claim a queued job of either meanwhile.
 	pending, may, err := jobStates(ctx, tx, o)
 	if err != nil || may {
 		return false, err
 	}
-	for _, id := range pending {
+	cpending, cmay, err := trackJobStates(ctx, tx, CancelTrack(o))
+	if err != nil || cmay {
+		return false, err
+	}
+	for _, id := range append(pending, cpending...) {
 		if _, err := tx.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='keyset_state: the generation of this address was marked compromised: it signs nothing but its drain', updated_at=now()
 			WHERE id=$1 AND status='pending'`, id); err != nil {
 			return false, err
@@ -89,8 +95,8 @@ func (s *Service) handedOverBefore(ctx context.Context, tx pgx.Tx, o Owner) (boo
 		return false, err
 	}
 	var jobs, notRejected int
-	if err := tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE status <> 'rejected') FROM sign_jobs WHERE starts_with(id, $1)`,
-		string(OwnerTrack(o))+":").Scan(&jobs, &notRejected); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE status <> 'rejected') FROM sign_jobs WHERE starts_with(id, $1) OR starts_with(id, $2)`,
+		string(OwnerTrack(o))+":", string(CancelTrack(o))+":").Scan(&jobs, &notRejected); err != nil {
 		return false, err
 	}
 	return jobs > 0 && notRejected == 0, nil
@@ -110,28 +116,27 @@ func (i inflightItem) String() string {
 
 // drainInflight counts what stops a drain from starting at the old address: transactions that may still reach the chain. A compromised generation's
 // transactions that can no longer be signed are handed over first (holes are not in flight). It returns the real ones, in nonce order.
-func (s *Service) drainInflight(ctx context.Context, from KeysetInfo) ([]inflightItem, error) {
+func (s *Service) drainInflight(ctx context.Context, from KeysetInfo) (real []inflightItem, fillBelow bool, err error) {
 	compromised := from.State == "compromised"
 	rows, err := s.Pool.Query(ctx, `SELECT owner_kind, owner_id, nonce, status FROM evm_nonce_allocations
 		WHERE chain=$1 AND lower(address)=lower($2) AND status IN ('allocated','broadcast') AND owner_kind NOT IN ($3,$4) ORDER BY nonce`,
 		s.Cfg.Chain, from.Address, OwnerKindDrain, OwnerKindHole)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var items []inflightItem
 	for rows.Next() {
 		var it inflightItem
 		if err := rows.Scan(&it.Kind, &it.ID, &it.Nonce, &it.Status); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, false, err
 		}
 		items = append(items, it)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	var real []inflightItem
 	for _, it := range items {
 		o := Owner{Kind: it.Kind, ID: it.ID}
 		if compromised && it.Status == "allocated" {
@@ -141,21 +146,31 @@ func (s *Service) drainInflight(ctx context.Context, from KeysetInfo) ([]infligh
 				handed, err = s.handOverUnsigned(ctx, tx, o)
 				return err
 			}); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if handed {
 				continue
 			}
 		}
 		var jobs string
-		if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(string_agg(id || '=' || status, ', ' ORDER BY id), 'none') FROM sign_jobs WHERE starts_with(id, $1)`,
-			string(OwnerTrack(o))+":").Scan(&jobs); err != nil {
-			return nil, err
+		if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(string_agg(id || '=' || status, ', ' ORDER BY id), 'none') FROM sign_jobs WHERE starts_with(id, $1) OR starts_with(id, $2)`,
+			string(OwnerTrack(o))+":", string(CancelTrack(o))+":").Scan(&jobs); err != nil {
+			return nil, false, err
 		}
 		it.Jobs = jobs
 		real = append(real, it)
 	}
-	return real, nil
+	// A hole below a live transaction must be filled first: the transaction above cannot confirm while the nonce under it is empty, so waiting for it
+	// to be final would wait for ever. (The drain's own transfers fill holes; see fillerAmount.)
+	if len(real) > 0 {
+		var lowHole *int64
+		if err := s.Pool.QueryRow(ctx, `SELECT min(nonce) FROM evm_nonce_allocations WHERE chain=$1 AND lower(address)=lower($2) AND owner_kind=$3 AND status='allocated'`,
+			s.Cfg.Chain, from.Address, OwnerKindHole).Scan(&lowHole); err != nil {
+			return nil, false, err
+		}
+		fillBelow = lowHole != nil && *lowHole < real[len(real)-1].Nonce
+	}
+	return real, fillBelow, nil
 }
 
 // inflightReason is the line the planner records on the generation and the driver prints: how many, and which ones.

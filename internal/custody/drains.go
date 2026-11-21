@@ -282,11 +282,11 @@ func (s *Service) planDrain(ctx context.Context, log *slog.Logger, shardIdx int,
 	}
 	// Work from the old address that is not ours to drain (a withdrawal or sweep built before the replacement) finishes first: the drain would spend
 	// the balance it needs and share its nonces. What the zone refused and can no longer be signed is not in flight (drain_inflight.go).
-	busy, err := s.drainInflight(ctx, from)
+	busy, fillBelow, err := s.drainInflight(ctx, from)
 	if err != nil {
 		return nil, err
 	}
-	if len(busy) > 0 {
+	if len(busy) > 0 && !fillBelow {
 		return wait(inflightReason(busy))
 	}
 	bal, err := s.balancesAt(ctx, from.Address)
@@ -298,6 +298,14 @@ func (s *Service) planDrain(ctx context.Context, log *slog.Logger, shardIdx int,
 		return wait("cannot work out the gas of the last transfer: " + err.Error())
 	}
 	asset, amount := s.pickDrainAsset(c, bal, nativeDust, from.State == partition.StateCompromised)
+	if len(busy) > 0 {
+		// A live transaction sits above a hole: fill the hole with the smallest drain there is, one wei of the native asset to the successor, so the
+		// transaction above is not made unpayable by a larger move. Every filler counts against the zone's max_drains_per_source (each costs gas).
+		asset, amount = c.Native, big.NewInt(1)
+		if bal[c.Native].Cmp(new(big.Int).Add(c.NativeReserve(), amount)) < 0 {
+			return wait("a nonce below a transaction in flight needs a drain transfer to fill it and the old address has no gas for one (it needs " + c.NativeReserve().String() + "); fund it with the native asset. " + inflightReason(busy))
+		}
+	}
 	if asset == "" {
 		err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 			return setDrainState(ctx, tx, shard, from.Generation, "drained", "", 0)

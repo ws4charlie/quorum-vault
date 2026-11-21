@@ -458,7 +458,12 @@ func sortedKeys[V any](m map[string]V) []string {
 // jobStates reads the jobs of every attempt of an owner (its track), locking them: the IDs of the pending ones, and whether a signature may exist, which
 // is when any job is being signed, is done or failed (the gateway keeps its reservation for a failed one).
 func jobStates(ctx context.Context, tx pgx.Tx, o Owner) (pending []string, mayExist bool, err error) {
-	rows, err := tx.Query(ctx, `SELECT id, status FROM sign_jobs WHERE starts_with(id, $1) FOR UPDATE`, string(OwnerTrack(o))+":")
+	return trackJobStates(ctx, tx, OwnerTrack(o))
+}
+
+// trackJobStates is jobStates for any track (the owner's own, or its cancel track).
+func trackJobStates(ctx context.Context, tx pgx.Tx, t Track) (pending []string, mayExist bool, err error) {
+	rows, err := tx.Query(ctx, `SELECT id, status FROM sign_jobs WHERE starts_with(id, $1) FOR UPDATE`, string(t)+":")
 	if err != nil {
 		return nil, false, err
 	}

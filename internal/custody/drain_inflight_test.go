@@ -3,6 +3,7 @@ package custody
 import (
 	"context"
 	"encoding/json"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -138,5 +139,130 @@ func TestDrainingGenerationKeepsItsCancel(t *testing.T) {
 	s.Pool.QueryRow(ctx, `SELECT owner_kind FROM evm_nonce_allocations WHERE nonce=3`).Scan(&kind)
 	if kind != "sweep" {
 		t.Fatalf("a draining generation's nonce was handed over: %s", kind)
+	}
+}
+
+// compromisedWorld is a shard whose generation 1 is compromised, generation 2 active, and a helper that leaves an owner's allocation and jobs at the old address.
+func compromisedWorld(t *testing.T) (*Service, string, func(kind, id string, nonce int, alloc string, jobs ...string)) {
+	t.Helper()
+	ctx := context.Background()
+	s, _ := drainWorld(t)
+	gen1 := s.Cfg.HotShards[0].Hex()
+	a := WithActor(ctx, "a")
+	if _, err := s.RegisterKeysetCandidate(a, shard0(s), gen2Addr, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MarkKeysetCompromised(a, shard0(s), 1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateKeyset(a, shard0(s), 2); err != nil {
+		t.Fatal(err)
+	}
+	part := s.Cfg.PartitionKey("ETH", 0).String()
+	intent, _ := json.Marshal(signjob.Intent{Kind: "sweep", ID: "x", PartitionID: part, Chain: testChain})
+	put := func(kind, id string, nonce int, alloc string, jobs ...string) {
+		t.Helper()
+		o := Owner{Kind: kind, ID: id, PartitionID: part}
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO evm_nonce_allocations (chain, address, nonce, owner_kind, owner_id, status) VALUES ($1,$2,$3,$4,$5,$6)`,
+			testChain, gen1, nonce, kind, id, alloc); err != nil {
+			t.Fatal(err)
+		}
+		// jobs: "own=<status>" for the owner's transfer, "cancel=<status>" for its cancel
+		for i, j := range jobs {
+			track, st, _ := strings.Cut(j, "=")
+			jid := OwnerTrack(o).FirstJob()
+			if track == "cancel" {
+				jid = CancelTrack(o).FirstJob()
+			}
+			if err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+				if err := signjob.Enqueue(ctx, tx, signjob.Job{ID: jid, PartitionID: part, KeyRef: "k", Chain: testChain, Intent: intent, Digest: []byte{byte(nonce), byte(i), 7}, Payload: []byte(`{}`)}); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, `UPDATE sign_jobs SET status=$2 WHERE id=$1`, jid, st)
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return s, gen1, put
+}
+
+// A hole below a live transaction is filled first: the transaction above cannot confirm while the nonce under it is empty. The fill is the smallest drain
+// (one wei of the native asset); the live transaction is left alone.
+func TestHoleBelowALiveTransactionIsFilledFirst(t *testing.T) {
+	for _, live := range []struct{ name, alloc, job string }{{"signed, not broadcast", "allocated", "own=done"}, {"broadcast", "broadcast", "own=done"}} {
+		t.Run(live.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, _, put := compromisedWorld(t)
+			put("sweep", "sw-refused", 3, "allocated", "own=rejected")
+			put("withdrawal", "w-live", 4, live.alloc, live.job)
+			mv := plan(t, s)
+			if len(mv) != 1 || mv[0].Asset != "ETH" || mv[0].Amount.Cmp(big.NewInt(1)) != 0 {
+				t.Fatalf("the hole was not filled with a one-wei drain: %+v", mv)
+			}
+			if _, err := s.BuildDrainJob(ctx, mv[0].ID); err != nil {
+				t.Fatal(err)
+			}
+			var k string
+			s.Pool.QueryRow(ctx, `SELECT owner_kind FROM evm_nonce_allocations WHERE nonce=3`).Scan(&k)
+			if k != "drain" {
+				t.Fatalf("nonce 3 belongs to %s, not the drain", k)
+			}
+			s.Pool.QueryRow(ctx, `SELECT owner_kind FROM evm_nonce_allocations WHERE nonce=4`).Scan(&k)
+			if k != "withdrawal" {
+				t.Fatalf("the live transaction's nonce was taken: %s", k)
+			}
+		})
+	}
+}
+
+// Two holes with a live transaction between them: the lower is filled now; the upper waits for the live one (nothing above it needs it).
+func TestTwoHolesAroundALiveTransaction(t *testing.T) {
+	ctx := context.Background()
+	s, _, put := compromisedWorld(t)
+	put("sweep", "sw-a", 3, "allocated", "own=rejected")
+	put("withdrawal", "w-live", 4, "broadcast", "own=done")
+	put("sweep", "sw-b", 5, "allocated", "own=rejected")
+	mv := plan(t, s)
+	if len(mv) != 1 {
+		t.Fatalf("%+v", mv)
+	}
+	if _, err := s.BuildDrainJob(ctx, mv[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	// the filler is final; the live transaction is still not
+	s.Pool.Exec(ctx, `UPDATE drain_moves SET status='confirmed'`)
+	s.Pool.Exec(ctx, `UPDATE evm_nonce_allocations SET status='confirmed' WHERE owner_kind='drain'`)
+	if mv := plan(t, s); len(mv) != 0 {
+		t.Fatalf("a second filler for a hole that is above the live transaction: %+v", mv)
+	}
+	if _, why := drainState(t, s); !strings.Contains(why, "w-live at nonce 4 is broadcast") {
+		t.Fatalf("%q", why)
+	}
+}
+
+// A refused transfer whose CANCEL was signed (before the mark) and not yet broadcast keeps its nonce: the cancel can still reach the chain, and a drain on the
+// same nonce would make two valid signatures for it. A cancel still queued is rejected with the rest.
+func TestSignedCancelKeepsItsNonce(t *testing.T) {
+	ctx := context.Background()
+	s, _, put := compromisedWorld(t)
+	put("sweep", "sw-cancel-signed", 3, "allocated", "own=rejected", "cancel=done")
+	put("sweep", "sw-cancel-queued", 4, "allocated", "own=rejected", "cancel=pending")
+	if mv := plan(t, s); len(mv) != 0 {
+		t.Fatalf("the drain started over a signed cancel: %+v", mv)
+	}
+	if _, why := drainState(t, s); !strings.Contains(why, "sw-cancel-signed at nonce 3 is allocated") || !strings.Contains(why, "cancel:sweep:sw-cancel-signed:a1=done") || strings.Contains(why, "sw-cancel-queued") {
+		t.Fatalf("%q", why)
+	}
+	var st, kind string
+	s.Pool.QueryRow(ctx, `SELECT status FROM sign_jobs WHERE id='cancel:sweep:sw-cancel-queued:a1'`).Scan(&st)
+	s.Pool.QueryRow(ctx, `SELECT owner_kind FROM evm_nonce_allocations WHERE nonce=4`).Scan(&kind)
+	if st != "rejected" || kind != "hole" {
+		t.Fatalf("queued cancel %s, nonce 4 owner %s", st, kind)
+	}
+	s.Pool.QueryRow(ctx, `SELECT owner_kind FROM evm_nonce_allocations WHERE nonce=3`).Scan(&kind)
+	if kind != "sweep" {
+		t.Fatalf("a nonce with a signed cancel was handed over: %s", kind)
 	}
 }
