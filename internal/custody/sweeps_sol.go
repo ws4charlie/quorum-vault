@@ -120,6 +120,11 @@ func (s *Service) planSweepsSOL(ctx context.Context, log *slog.Logger) ([]Sweep,
 		} else if backoff {
 			continue
 		}
+		if left, err := s.solRefusedLeftAlone(ctx, addr, asset); err != nil {
+			return nil, err
+		} else if left {
+			continue
+		}
 		fee, err := s.Chain.EstimateSweepFee(ctx, chain.SweepIntent{ID: "estimate", Asset: asset, From: addr, ToPartition: c.SinkPartition(asset), Amount: amt})
 		if err != nil {
 			log.Warn("sweep fee estimate failed; skipping", "address", addr, "asset", asset, "error", err.Error())

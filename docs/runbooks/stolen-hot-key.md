@@ -30,6 +30,8 @@ sign the emergency record, and how fast the old address is emptied afterwards. E
 | **Solana deposit keys** | like Bitcoin deposit keys | none |
 | Cold key, admin keys | not this page: "If the cold key is in doubt" below, and the key-ceremony pages | |
 
+Solana: a transaction of the stolen key that the zone refused before signing is released by the core at once and does not hold the drain; one that may be signed keeps its nonce and the drain waits for it, as on EVM.
+
 ## Decide: who and on what evidence (two minutes)
 
 - **Any one operator or the on-call person may stop signing paths** (step 1 and 2 below): stopping is cheap and reversible.

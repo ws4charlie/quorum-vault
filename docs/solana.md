@@ -19,6 +19,7 @@ A recent-block reference would expire before the signers finish. So a withdrawal
 | Not landed | The same transaction is sent again, later with a higher priority fee |
 | Landed and failed | The fee is booked and the hold is released |
 | The nonce moved without us | The withdrawal is parked with an alert |
+| Refused by the zone before any signature | The nonce account is released unused and the sweep is planned again (a withdrawal is voided) |
 | Cancelled | A message that only advances the nonce takes its place |
 
 ## Nonce accounts can be given back

@@ -61,6 +61,7 @@ type wdOpts struct {
 
 	// sweeps: the planner only sweeps what is worth at least minSweep lamports (default: so much that nothing is ever swept)
 	minSweep   string
+	sweepRetry string // how long the planner leaves an address alone after a failed sweep (default 3s)
 	batch      int    // addresses per sweep (default 3)
 	closeQuiet string // see custody.SOLFile.CloseQuietAfter
 	activity   string // the engine's activity timeout (default 5s; sweep suites, whose scan reads more, use more)
@@ -307,7 +308,7 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 			Assets: map[string]custody.AssetFile{"SOL": {Decimals: 9, MinDeposit: "1000"}, "TKN": {Address: s.mint.addr(), Decimals: 6, MinDeposit: "1"}}},
 		Withdrawal: custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: o.approvalWait, SignTimeout: o.signTimeout, StuckAfter: o.stuckAfter, ActivityTimeout: o.activity,
 			HotWait: "1m", MaxReplacements: o.maxReplace, Tiers: map[string][]custody.TierFile{"SOL": tiersSOL, "TKN": tiersTKN}},
-		Sweep: custody.SweepFile{K: 20, MinSweepWei: o.minSweep, PlanInterval: "500ms", RetryAfter: "3s"},
+		Sweep: custody.SweepFile{K: 20, MinSweepWei: o.minSweep, PlanInterval: "500ms", RetryAfter: orDefault(o.sweepRetry, "3s")},
 		Cold:  s.coldFile(),
 		Scan:  custody.ScanFile{Interval: "300ms", StartHeight: start + 1},
 	}
@@ -571,4 +572,11 @@ func (p *rpcProxy) takeHeld() [][]byte {
 	h := p.held
 	p.held = nil
 	return h
+}
+
+func orDefault(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
 }

@@ -268,6 +268,10 @@ func (s *Service) EnqueueReplacement(ctx context.Context, o Owner, t Track, n in
 // the same job. A chain without cancel (chain.ErrNotSupported) has nothing to free
 // after a refusal: it returns "" and the caller goes on.
 func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
+	// Solana: the attempt's other jobs may still be in the gateway's hands; what the refusal left behind is judged when none is (refused_sol.go).
+	if err := s.settleSolJobs(ctx, o); err != nil {
+		return "", err
+	}
 	t := CancelTrack(o)
 	id := t.FirstJob()
 	handed := false
@@ -315,6 +319,12 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 			_, may, err := jobStates(ctx, tx, o)
 			if err != nil {
 				return err
+			}
+			if !may {
+				// Solana: a refusal by a cosigner after the gateway reserved leaves a claim on the nonce account: it is cancelled, not released.
+				if may, err = s.solClaimedRefusal(ctx, tx, o); err != nil {
+					return err
+				}
 			}
 			if !may {
 				return chain.ErrNotSupported
@@ -531,6 +541,9 @@ func (s *Service) releaseIfUnsignedTx(ctx context.Context, tx pgx.Tx, o Owner) (
 	}
 	pending, may, err := jobStates(ctx, tx, o)
 	if err != nil || may {
+		return false, err
+	}
+	if claimed, err := s.solClaimedRefusal(ctx, tx, o); err != nil || claimed {
 		return false, err
 	}
 	for _, id := range pending {
