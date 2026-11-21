@@ -30,8 +30,47 @@ th,td{border-bottom:1px solid var(--line);padding:4px 8px;text-align:right}th:fi
 figure{margin:.8em 0}figcaption{font-weight:600;font-size:13px}svg{width:100%;height:auto}svg .grid{stroke:var(--line);stroke-width:1}svg .mark{stroke:var(--mut);stroke-dasharray:4 3;stroke-width:1}
 svg .tick{fill:var(--mut);font-size:11px}.card{background:var(--card);padding:8px 12px;border-radius:6px}`
 
-// Write writes DIR/report.html.
+// stackCheck is one line of stack-checks.json, written by the test that brought the stack up: what only the stack's own database and logs can show.
+type stackCheck struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Warn   bool   `json:"warn"`
+	Detail string `json:"detail"`
+}
+
+// MergeStackChecks puts the checks of the stack (stack-checks.json) into the result: the saved result, its verdict and the page all say whether the run was
+// correct, whoever made the check. Merging twice does nothing more (the names are prefixed "stack: " and replaced).
+func MergeStackChecks(res *gen.Result, dir string) error {
+	b, err := os.ReadFile(filepath.Join(dir, "stack-checks.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var sc []stackCheck
+	if err := json.Unmarshal(b, &sc); err != nil {
+		return err
+	}
+	var keep []gen.CheckResult
+	for _, c := range res.Checks {
+		if !strings.HasPrefix(c.Name, "stack: ") {
+			keep = append(keep, c)
+		}
+	}
+	for _, c := range sc {
+		keep = append(keep, gen.CheckResult{Name: "stack: " + c.Name, OK: c.OK, Warn: c.Warn, Detail: c.Detail})
+	}
+	res.Checks = keep
+	res.Recompute()
+	return res.WriteJSON(dir)
+}
+
+// Write writes DIR/report.html (after merging the stack's checks into the result).
 func Write(res *gen.Result, dir string) error {
+	if err := MergeStackChecks(res, dir); err != nil {
+		return err
+	}
 	var st *StackSeries
 	if b, err := os.ReadFile(filepath.Join(dir, "stack.json")); err == nil {
 		var s StackSeries

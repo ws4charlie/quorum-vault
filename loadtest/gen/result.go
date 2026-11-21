@@ -274,8 +274,18 @@ func violations(o Objectives, ops map[string]*OpSummary) []string {
 	return v
 }
 
-// Write writes result.json and ops.jsonl into dir.
-func (res *Result) Write(dir string) error {
+// Recompute sets Pass from the checks: a failed check that is not a warning fails the run.
+func (res *Result) Recompute() {
+	res.Pass = true
+	for _, c := range res.Checks {
+		if !c.OK && !c.Warn {
+			res.Pass = false
+		}
+	}
+}
+
+// WriteJSON writes result.json into dir.
+func (res *Result) WriteJSON(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -283,7 +293,12 @@ func (res *Result) Write(dir string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "result.json"), b, 0o644); err != nil {
+	return os.WriteFile(filepath.Join(dir, "result.json"), b, 0o644)
+}
+
+// Write writes result.json and ops.jsonl into dir.
+func (res *Result) Write(dir string) error {
+	if err := res.WriteJSON(dir); err != nil {
 		return err
 	}
 	f, err := os.Create(filepath.Join(dir, "ops.jsonl"))

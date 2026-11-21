@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,9 @@ func (r *Runner) runChecks(ctx context.Context) {
 		r.addCheck("backlog_drained", false, "%d withdrawals still open after the settle time of %.0f s: the run did not drain (their holds and unpaid destinations are judged as open work below)", open, r.S.SettleS)
 	}
 	r.checks[len(r.checks)-1].Warn = true
+
+	// 0. what was paid to whom, from the generator's own record of its payments and the chain's receipts, independent of anything the books say
+	credits := r.verifyPayments(ctx)
 
 	// 1. every withdrawal paid exactly once (the destination holds the amount) or not at all (it holds nothing), by the state it reached
 	type cust struct{ paid, returned, open, unknown *big.Int }
@@ -115,14 +119,14 @@ func (r *Runner) runChecks(ctx context.Context) {
 			continue
 		}
 		st := get(c.id)
-		if st.unknown.Sign() != 0 {
+		if st.unknown.Sign() != 0 || credits[c.id].unknown.Sign() != 0 {
 			continue // a request whose outcome the generator never learnt: this customer cannot be judged exactly
 		}
 		if h.Cmp(st.open) != 0 {
 			holds++
 			ex2 = append(ex2, fmt.Sprintf("%s holds %s, open withdrawals %s", c.id, h, st.open))
 		}
-		want := new(big.Int).Sub(c.funded, st.paid)
+		want := new(big.Int).Sub(credits[c.id].confirmed, st.paid)
 		want.Sub(want, st.open)
 		if a.Cmp(want) != 0 {
 			mism++
@@ -133,39 +137,23 @@ func (r *Runner) runChecks(ctx context.Context) {
 	r.addCheck("customer_books_match", mism == 0, "%d customers differ from funded minus paid minus open %s", mism, strings.Join(first(ex2, 3), "; "))
 
 	// 3. deposits credited exactly once and every address swept
-	over, notSwept := 0, 0
-	// the sweeps of the last deposits may still be running: wait for them (the stack's test checks that no work is open)
-	for i := 0; i < 60 && ctx.Err() == nil; i++ {
-		still := 0
+	// Every customer's credit equals what the chain shows was paid to their addresses: equality, in both directions. Late credits get time (settle_s).
+	r.checkDepositCredits(ctx, credits)
+	notSwept := 0
+	for i := 0; i < 60 && ctx.Err() == nil; i++ { // the sweeps of the last deposits may still be running
+		notSwept = 0
 		for _, d := range r.dcusts {
-			if d.credited.Sign() > 0 {
+			if credits[d.id].confirmed.Sign() > 0 {
 				if b, err := r.chain.balance(ctx, d.addr); err == nil && b.Sign() != 0 {
-					still++
+					notSwept++
 				}
 			}
 		}
-		if still == 0 {
+		if notSwept == 0 {
 			break
 		}
 		sleepCtx(ctx, 2*time.Second)
 	}
-	for _, d := range r.dcusts {
-		a, _, err := r.available(ctx, d.id, "ETH")
-		if err != nil {
-			over++
-			continue
-		}
-		if a.Cmp(d.credited) < 0 {
-			over++ // credited fewer than the deposits the generator saw credited: cannot happen
-		}
-		if d.credited.Sign() > 0 {
-			b, err := r.chain.balance(ctx, d.addr)
-			if err == nil && b.Sign() != 0 {
-				notSwept++
-			}
-		}
-	}
-	r.addCheck("deposits_credited", over == 0, "%d of %d deposit customers with fewer credited than seen", over, len(r.dcusts))
 	r.addCheck("deposit_addresses_swept", notSwept == 0, "%d addresses still hold funds", notSwept)
 
 	// 4. Reconcile clean (retry a little: a sweep may be mid-flight, and a report with a skipped comparison is not clean)
@@ -207,11 +195,11 @@ func (r *Runner) runChecks(ctx context.Context) {
 
 	// 6. alerts
 	if r.T.PrometheusURL != "" {
-		fired, err := firingAlerts(ctx, r.T.PrometheusURL)
+		fired, err := firingAlerts(ctx, r.T.PrometheusURL, time.Since(r.started))
 		if err != nil {
 			r.addCheck("no_alert_fired", false, "could not ask Prometheus: %v", err)
 		} else {
-			r.addCheck("no_alert_fired", len(fired) == 0, "%d alerts firing %s", len(fired), strings.Join(fired, ", "))
+			r.addCheck("no_alert_fired", len(fired) == 0, "%d alerts fired during the run %s", len(fired), strings.Join(fired, ", "))
 		}
 	}
 
@@ -279,8 +267,11 @@ func (r *Runner) settleOpen(ctx context.Context, d time.Duration) int {
 	return n
 }
 
-func firingAlerts(ctx context.Context, base string) ([]string, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(base, "/")+"/api/v1/alerts", nil)
+// firingAlerts asks Prometheus which alerts were firing at any time in the last since: the history of the whole run, not only what still fires after the
+// drain (an alert that fired and cleared during the load is the one that matters). It needs the alert rules loaded in that Prometheus.
+func firingAlerts(ctx context.Context, base string, since time.Duration) ([]string, error) {
+	q := fmt.Sprintf(`max_over_time(ALERTS{alertstate="firing"}[%ds])`, int(since.Seconds())+30)
+	req, _ := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(base, "/")+"/api/v1/query?query="+url.QueryEscape(q), nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -288,21 +279,108 @@ func firingAlerts(ctx context.Context, base string) ([]string, error) {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	var out struct {
-		Data struct {
-			Alerts []struct {
-				Labels map[string]string `json:"labels"`
-				State  string            `json:"state"`
-			} `json:"alerts"`
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+			} `json:"result"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(b, &out); err != nil {
-		return nil, err
+	if err := json.Unmarshal(b, &out); err != nil || out.Status != "success" {
+		return nil, fmt.Errorf("prometheus answered %d: %s", resp.StatusCode, truncate(string(b), 200))
 	}
+	seen := map[string]bool{}
 	var names []string
-	for _, a := range out.Data.Alerts {
-		if a.State == "firing" {
-			names = append(names, a.Labels["alertname"])
+	for _, r := range out.Data.Result {
+		if n := r.Metric["alertname"]; !seen[n] {
+			seen[n] = true
+			names = append(names, n)
 		}
 	}
 	return names, nil
+}
+
+type credit struct{ confirmed, unknown *big.Int }
+
+// verifyPayments reads the receipt of every payment the generator made and totals them by customer: confirmed (mined, status 1) and unknown (the generator
+// could not learn the outcome). A payment to an address that belongs to no customer of the run, or a reverted one, is a problem of the run itself and fails it.
+func (r *Runner) verifyPayments(ctx context.Context) map[string]credit {
+	out := map[string]credit{}
+	get := func(id string) credit {
+		c, ok := out[id]
+		if !ok {
+			c = credit{new(big.Int), new(big.Int)}
+			out[id] = c
+		}
+		return c
+	}
+	for _, c := range r.wcust {
+		get(c.id)
+	}
+	for _, d := range r.dcusts {
+		get(d.id)
+	}
+	var problems []string
+	n, reverted := 0, 0
+	for _, p := range r.chain.Payments() {
+		id, ok := r.owner[p.To]
+		if !ok {
+			problems = append(problems, "payment to an address of no customer: "+p.To.Hex())
+			continue
+		}
+		c := get(id)
+		n++
+		rc, err := r.chain.ec.TransactionReceipt(ctx, p.Hash)
+		switch {
+		case err == nil && rc.Status == 1:
+			c.confirmed.Add(c.confirmed, p.Wei)
+		case err == nil:
+			reverted++
+		case p.State == "unknown":
+			c.unknown.Add(c.unknown, p.Wei)
+		default:
+			problems = append(problems, fmt.Sprintf("no receipt for accepted payment %s: %v", p.Hash.Hex()[:10], err))
+		}
+	}
+	r.addCheck("payments_confirmed_on_chain", len(problems) == 0 && reverted == 0, "%d payments made, %d reverted, %d problems %s", n, reverted, len(problems), strings.Join(first(problems, 3), "; "))
+	return out
+}
+
+// checkDepositCredits: each deposit customer's available balance equals the sum of the confirmed payments to their addresses (within the unknown ones, if
+// the generator never learnt a payment's outcome). It waits for late credits, and fails on a credit that is too small or too large.
+func (r *Runner) checkDepositCredits(ctx context.Context, credits map[string]credit) {
+	dl, cancel := context.WithTimeout(ctx, time.Duration(r.S.SettleS*float64(time.Second)))
+	defer cancel()
+	bad := func(d *dcust) (string, bool) {
+		a, _, err := r.available(ctx, d.id, "ETH")
+		if err != nil {
+			return err.Error(), true
+		}
+		c := credits[d.id]
+		if c.confirmed == nil {
+			c = credit{new(big.Int), new(big.Int)}
+		}
+		hi := new(big.Int).Add(c.confirmed, c.unknown)
+		if a.Cmp(c.confirmed) < 0 {
+			return fmt.Sprintf("%s credited %s, paid %s", d.id, a, c.confirmed), true
+		}
+		if a.Cmp(hi) > 0 {
+			return fmt.Sprintf("%s credited %s, more than the %s paid to its addresses", d.id, a, hi), true
+		}
+		return "", false
+	}
+	var msgs []string
+	for {
+		msgs = msgs[:0]
+		for _, d := range r.dcusts {
+			if m, b := bad(d); b {
+				msgs = append(msgs, m)
+			}
+		}
+		if len(msgs) == 0 || dl.Err() != nil {
+			break
+		}
+		sleepCtx(dl, 2*time.Second)
+	}
+	r.addCheck("deposit_credits_exact", len(msgs) == 0, "%d of %d deposit customers whose credit differs from what the chain shows was paid to them %s", len(msgs), len(r.dcusts), strings.Join(first(msgs, 3), "; "))
 }

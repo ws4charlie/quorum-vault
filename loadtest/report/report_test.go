@@ -1,6 +1,8 @@
 package report
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,5 +24,31 @@ func TestRender(t *testing.T) {
 	}
 	if strings.Contains(h, "<script") || strings.Contains(h, "http://") || strings.Contains(h, "https://") {
 		t.Error("the report must need nothing from outside")
+	}
+}
+
+func TestStackChecksReachTheVerdict(t *testing.T) {
+	dir := t.TempDir()
+	res := &gen.Result{RunID: "r1", Scenario: &gen.Scenario{Name: "x", Mode: "open"}, Pass: true, Checks: []gen.CheckResult{{Name: "a", OK: true}}}
+	if err := os.WriteFile(filepath.Join(dir, "stack-checks.json"), []byte(`[{"name":"no_failed_sign_job","ok":false,"detail":"2 failed"},{"name":"w","ok":false,"warn":true}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ { // twice: no duplicates
+		if err := Write(res, dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res.Pass || len(res.Checks) != 3 {
+		t.Fatalf("pass=%v checks=%d", res.Pass, len(res.Checks))
+	}
+	page, _ := os.ReadFile(filepath.Join(dir, "report.html"))
+	for _, want := range []string{"stack: no_failed_sign_job", "FAILED: a correctness check did not hold", "2 failed"} {
+		if !strings.Contains(string(page), want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	saved, _ := os.ReadFile(filepath.Join(dir, "result.json"))
+	if !strings.Contains(string(saved), `"pass": false`) {
+		t.Error("saved result still says pass")
 	}
 }

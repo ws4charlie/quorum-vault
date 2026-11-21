@@ -1,11 +1,18 @@
 package gen
 
 import (
+	"context"
+	"fmt"
 	"math"
+	"math/big"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestShippedScenariosAreValid(t *testing.T) {
@@ -148,5 +155,102 @@ func TestResultWrite(t *testing.T) {
 	r.checks = append(r.checks, CheckResult{Name: "c", OK: false})
 	if r.result(r.t0, r.t0).Pass {
 		t.Error("a failed check must fail the run")
+	}
+}
+
+func TestRateScaleIsValidated(t *testing.T) {
+	for _, x := range []float64{0, -1, -0.001, math.NaN(), math.Inf(1), math.Inf(-1)} {
+		if ValidateRateScale(x) == nil {
+			t.Errorf("%v accepted", x)
+		}
+	}
+	for _, x := range []float64{0.001, 1, 8} {
+		if err := ValidateRateScale(x); err != nil {
+			t.Errorf("%v: %v", x, err)
+		}
+	}
+}
+
+// every arrival loop stops at the same moment, and the stop time is when it was seen, not the schedule of an arrival
+func TestEveryLoopStopsTogether(t *testing.T) {
+	r := &Runner{S: &Scenario{MaxInflight: 3}, Obs: NewObserver("r"), t0: time.Now().Add(-10 * time.Second), logf: func(string, ...any) {}}
+	for i := 0; i < 3; i++ {
+		r.Obs.opOffered("a")
+	}
+	if r.shouldStop(1) {
+		t.Fatal("stopped at the limit, not over it")
+	}
+	r.Obs.opOffered("b")
+	if !r.shouldStop(2) {
+		t.Fatal("not stopped over the limit")
+	}
+	at := r.stopT
+	// the open operations end: no loop may start again, and the record stays
+	for i := 0; i < 4; i++ {
+		r.Obs.opEnd("a", "")
+	}
+	if !r.shouldStop(3) || r.stopT != at || r.stopStep != 2 || at < 9.9 {
+		t.Fatalf("stop record changed: %v %d (first %v)", r.stopT, r.stopStep, at)
+	}
+}
+
+// a deposit credited to the wrong customer, or twice, or not at all, must fail the credit check, whatever the generator saw
+func TestDepositCreditsAreCheckedBothWays(t *testing.T) {
+	avail := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			fmt.Fprint(w, "tok")
+			return
+		}
+		parts := strings.Split(r.URL.Path, "/") // /v2/customers/{id}/balances
+		fmt.Fprintf(w, `{"balances":[{"asset":"ETH","available":%q,"held":"0","posted":"0"}]}`, avail[parts[3]])
+	}))
+	defer srv.Close()
+	tg := &Target{API: []string{srv.URL}, Token: TokenCfg{Kind: "endpoint", URL: srv.URL + "/token"}}
+	run := func(a1, a2 string) (ok bool, detail string) {
+		avail["c1"], avail["c2"] = a1, a2
+		obs := NewObserver("r")
+		cl, err := NewClient(tg, obs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &Runner{S: &Scenario{SettleS: 0.001}, C: cl, T: &Target{Actors: tg.Actors}, Obs: obs, logf: func(string, ...any) {}, dcusts: []*dcust{{id: "c1"}, {id: "c2"}}}
+		credits := map[string]credit{"c1": {big.NewInt(100), new(big.Int)}, "c2": {big.NewInt(50), big.NewInt(20)}}
+		r.checkDepositCredits(context.Background(), credits)
+		c := r.checks[len(r.checks)-1]
+		return c.OK, c.Detail
+	}
+	for _, tc := range []struct {
+		a1, a2 string
+		ok     bool
+	}{
+		{"100", "50", true},
+		{"100", "70", true},  // c2's unknown payment landed
+		{"100", "60", true},  // within the unknown range
+		{"101", "50", false}, // a credit too large: booked here though paid elsewhere
+		{"100", "49", false}, // too small
+		{"100", "71", false}, // above everything paid
+		{"0", "50", false},   // not credited at all
+	} {
+		if ok, d := run(tc.a1, tc.a2); ok != tc.ok {
+			t.Errorf("c1=%s c2=%s: ok=%v, want %v (%s)", tc.a1, tc.a2, ok, tc.ok, d)
+		}
+	}
+}
+
+// an alert that fired during the run and cleared is found: the question is asked over the whole run, not at the end
+func TestAlertHistoryIsAskedOverTheRun(t *testing.T) {
+	var query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query().Get("query")
+		fmt.Fprint(w, `{"status":"success","data":{"result":[{"metric":{"alertname":"QVSweepStuck"}},{"metric":{"alertname":"QVSweepStuck"}}]}}`)
+	}))
+	defer srv.Close()
+	names, err := firingAlerts(context.Background(), srv.URL, 5*time.Minute)
+	if err != nil || len(names) != 1 || names[0] != "QVSweepStuck" {
+		t.Fatalf("%v %v", names, err)
+	}
+	if !strings.Contains(query, "max_over_time") || !strings.Contains(query, "[330s]") {
+		t.Errorf("query %q does not cover the run", query)
 	}
 }

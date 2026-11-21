@@ -72,6 +72,10 @@ func run(args []string) int {
 		fs.Usage()
 		return 2
 	}
+	if err := gen.ValidateRateScale(*scale); err != nil {
+		log.Print(err)
+		return 2
+	}
 	s, err := gen.LoadScenario(*scen)
 	if err != nil {
 		log.Print(err)

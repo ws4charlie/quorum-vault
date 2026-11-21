@@ -139,8 +139,14 @@ func TestLoadLocal(t *testing.T) {
 	genMetrics := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	if dir := os.Getenv("QV_LOAD_TARGETS_DIR"); dir != "" {
 		os.MkdirAll(dir, 0o755)
-		// Prometheus runs in Docker: the host's loopback is host.docker.internal there (the listeners stay on 127.0.0.1)
-		dock := func(a string) string { return "host.docker.internal:" + a[strings.LastIndex(a, ":")+1:] }
+		// Prometheus runs in Docker, and the listeners stay on 127.0.0.1 (nothing is published to the network). On macOS Docker Desktop forwards
+		// host.docker.internal to the host's loopback. On Linux that name is the bridge address, which a loopback listener does not answer, so
+		// deploy/load/compose.linux.yml runs Prometheus and Grafana on the host's network and the targets are 127.0.0.1 itself (deploy/load/dash.sh picks it).
+		host := "host.docker.internal"
+		if runtime.GOOS == "linux" {
+			host = "127.0.0.1"
+		}
+		dock := func(a string) string { return host + ":" + a[strings.LastIndex(a, ":")+1:] }
 		tg := []map[string]any{{"targets": []string{dock(genMetrics)}, "labels": map[string]string{"job": "qv-load"}}, {"targets": []string{dock(smp.addr)}, "labels": map[string]string{"job": "qv-stack"}}}
 		b, _ := json.Marshal(tg)
 		lane := filepath.Base(filepath.Dir(filepath.Dir(out)))

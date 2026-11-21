@@ -8,6 +8,7 @@ package gen
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"time"
 )
@@ -171,4 +172,12 @@ func (s *Scenario) scaleAt(t float64) (scale float64, step int) {
 		i = len(s.Steps) - 1
 	}
 	return s.Steps[i], i
+}
+
+// ValidateRateScale refuses a rate scale that would make the arrival loop wait for ever or never end: zero, negative, infinite or not a number.
+func ValidateRateScale(x float64) error {
+	if math.IsNaN(x) || math.IsInf(x, 0) || x <= 0 {
+		return fmt.Errorf("-rate-scale must be a positive number, got %v", x)
+	}
+	return nil
 }

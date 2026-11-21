@@ -388,7 +388,11 @@ load-dash-up:
 load-dash-down:
 	deploy/load/dash.sh down
 
-# The same generator against the kind lane's pods (loadtest/kind/run.sh; `make kind-up` first): make load-kind SCENARIO=loadtest/scenarios/evm-kind.json
+# The same generator against the kind lane's pods (loadtest/kind/run.sh; `make kind-up` first). It has its own default scenario: SCENARIO defaults to the smoke
+# scenario of load-local, so only a SCENARIO given on the command line (or in the environment) replaces the kind one.
+#   make load-kind                                  (loadtest/scenarios/evm-kind.json)
+#   make load-kind SCENARIO=loadtest/scenarios/smoke.json OUT=data/load/kind-smoke
 .PHONY: load-kind
+KIND_SCENARIO := loadtest/scenarios/evm-kind.json
 load-kind:
-	loadtest/kind/run.sh $(or $(SCENARIO),loadtest/scenarios/evm-kind.json) $(OUT)
+	loadtest/kind/run.sh $(if $(filter command line environment,$(origin SCENARIO)),$(SCENARIO),$(KIND_SCENARIO)) $(OUT)

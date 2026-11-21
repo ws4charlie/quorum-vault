@@ -32,6 +32,9 @@ type Runner struct {
 	wcust     []*wcust
 	free      chan *dcust
 	dcusts    []*dcust
+	started   time.Time
+	owner     map[common.Address]string // deposit address -> customer, for every address a payment may go to
+	ownerMu   sync.Mutex
 
 	t0       time.Time // start of the arrival phase
 	mu       sync.Mutex
@@ -41,6 +44,7 @@ type Runner struct {
 	n        atomic.Int64
 	dropped  atomic.Int64
 	stopped  atomic.Bool
+	stopMu   sync.Mutex
 	stopT    float64
 	stopStep int
 	stopIn   int64
@@ -74,7 +78,7 @@ func NewRunner(s *Scenario, t *Target, runID string, meta map[string]string) (*R
 	}
 	h := fnv.New64a()
 	h.Write([]byte(runID))
-	return &Runner{S: s, T: t, C: c, Obs: obs, RunID: runID, Meta: meta, approvers: ap, logf: log.Printf, salt: int64(h.Sum64() >> 1)}, nil
+	return &Runner{owner: map[common.Address]string{}, S: s, T: t, C: c, Obs: obs, RunID: runID, Meta: meta, approvers: ap, logf: log.Printf, salt: int64(h.Sum64() >> 1)}, nil
 }
 
 // Run does the setup, the load and the checks, and returns the result.
@@ -84,6 +88,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 		return nil, err
 	}
 	startedAt := time.Now()
+	r.started = startedAt
 	if err := r.setupBooks(ctx); err != nil {
 		return nil, fmt.Errorf("setup: %w", err)
 	}
@@ -164,6 +169,7 @@ func (r *Runner) setupBooks(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			r.setOwner(addr, id)
 			if err := r.chain.send(ctx, addr, fundWei); err != nil {
 				return err
 			}
@@ -177,6 +183,7 @@ func (r *Runner) setupBooks(ctx context.Context) error {
 		work(func() error {
 			addr, err := r.createCustomer(ctx, id)
 			d.addr = addr
+			r.setOwner(addr, id)
 			return err
 		})
 	}
@@ -190,6 +197,12 @@ func (r *Runner) setupBooks(ctx context.Context) error {
 	r.setup = SetupInfo{WithdrawCustomers: su.WithdrawCustomers, DepositCustomers: su.DepositCustomers, FundEachETH: su.FundEachETH, DurationS: time.Since(t).Seconds()}
 	r.logf("setup: %d withdrawing and %d deposit customers in %.1fs", su.WithdrawCustomers, su.DepositCustomers, time.Since(t).Seconds())
 	return nil
+}
+
+func (r *Runner) setOwner(a common.Address, id string) {
+	r.ownerMu.Lock()
+	r.owner[a] = id
+	r.ownerMu.Unlock()
 }
 
 func (r *Runner) waitAvailable(ctx context.Context, id string, want *big.Int) error {
@@ -244,17 +257,12 @@ func (r *Runner) arrivals(ctx context.Context, wg *sync.WaitGroup, idx int, st S
 		}
 		late := time.Since(due)
 		r.Obs.opLate(late.Seconds())
-		in := r.inflightTotal()
-		if in >= maxInflight {
+		if r.shouldStop(step) { // every arrival loop asks, so all of them stop at the same moment
+			return
+		}
+		if r.inflightTotal() >= maxInflight {
 			r.dropped.Add(1)
 			continue
-		}
-		if r.S.MaxInflight > 0 && in > int64(r.S.MaxInflight) {
-			if r.stopped.CompareAndSwap(false, true) {
-				r.stopT, r.stopStep, r.stopIn = next, step, in
-				r.logf("stopping arrivals at %.0fs (step %d): %d operations open, over max_inflight %d: the system is past its limit", next, step, in, r.S.MaxInflight)
-			}
-			return
 		}
 		rec := &OpRecord{N: int(r.n.Add(1)), Key: opKey(st), Step: step, StartMS: int64(next * 1000), LateMS: late.Milliseconds(), Stages: map[string]int64{}}
 		r.Obs.opOffered(rec.Key)
@@ -265,6 +273,30 @@ func (r *Runner) arrivals(ctx context.Context, wg *sync.WaitGroup, idx int, st S
 			r.runOp(ctx, rec, due, st, sub)
 		}()
 	}
+}
+
+// shouldStop is asked by every arrival loop before it starts an operation. The first time more than max_inflight operations are open it records when (now, not
+// the scheduled time of the arrival) and where, and from then on every loop gets true. What is already running is not touched: it drains.
+func (r *Runner) shouldStop(step int) bool {
+	if r.stopped.Load() {
+		return true
+	}
+	if r.S.MaxInflight <= 0 {
+		return false
+	}
+	in := r.inflightTotal()
+	if in <= int64(r.S.MaxInflight) {
+		return false
+	}
+	r.stopMu.Lock()
+	defer r.stopMu.Unlock()
+	if r.stopped.Load() {
+		return true
+	}
+	r.stopT, r.stopStep, r.stopIn = time.Since(r.t0).Seconds(), step, in
+	r.stopped.Store(true)
+	r.logf("stopping every arrival at %.0fs (step %d): %d operations open, over max_inflight %d: the system is past its limit", r.stopT, step, in, r.S.MaxInflight)
+	return true
 }
 
 func sleepUntil(ctx context.Context, t time.Time) bool {
@@ -310,10 +342,7 @@ func (r *Runner) closedLoop(ctx context.Context, wg *sync.WaitGroup, arrive time
 				if len(r.S.Steps) > 0 {
 					_, step = r.S.scaleAt(time.Since(r.t0).Seconds())
 				}
-				if r.S.MaxInflight > 0 && r.inflightTotal() > int64(r.S.MaxInflight) {
-					if r.stopped.CompareAndSwap(false, true) {
-						r.stopT, r.stopStep, r.stopIn = time.Since(r.t0).Seconds(), step, r.inflightTotal()
-					}
+				if r.shouldStop(step) {
 					return
 				}
 				now := time.Now()
