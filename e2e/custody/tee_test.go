@@ -361,7 +361,7 @@ func plainPartyRefusesAttested(t *testing.T, cfgPath string) {
 	cmd := exec.Command(plain.MPCParty, "-config", copyPath)
 	cmd.Env = append(os.Environ(), "QV_ENV=test")
 	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "this build contains no attester") {
+	if err == nil || !strings.Contains(string(out), "is not available") {
 		t.Fatalf("a production party with sealer.type attested did not refuse: %v\n%s", err, out)
 	}
 }

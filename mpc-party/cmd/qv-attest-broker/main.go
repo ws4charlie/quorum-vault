@@ -4,7 +4,7 @@
 //	qv-attest-broker serve -config broker.json
 //	qv-attest-broker allowlist keygen -key operator.key -pub operator.pub
 //	qv-attest-broker allowlist new -seq N -out list.json -entry PARTY,PCR0HEX,NOT_BEFORE,NOT_AFTER[,VERSION[,STATUS]] [-entry ...]
-//	qv-attest-broker allowlist add -in current.json -out next.json -party P -measurement HEX -version V -not-before T [-not-after T]
+//	qv-attest-broker allowlist add -in current.json -out next.json -party P -measurement HEX -version V -not-before T [-not-after T] [-pcr N=HEX ...]
 //	qv-attest-broker allowlist expire -in current.json -out next.json -party P -measurement HEX -not-after T
 //	qv-attest-broker allowlist touch -in current.json -out next.json
 //	qv-attest-broker allowlist revoke -in current.json -out next.json -party P -measurement HEX
@@ -115,6 +115,8 @@ func allowlist(sub string, args []string, out io.Writer) error {
 	version := fs.String("version", "", "add: release version, e.g. v1.4.0")
 	notBefore := fs.String("not-before", "", "add: RFC 3339 (default now)")
 	notAfter := fs.String("not-after", "", "add, expire: RFC 3339 (add: default no end)")
+	var pcrs entryFlags
+	fs.Var(&pcrs, "pcr", "add: a further PCR of a Nitro image, N=HEX (N 1, 2 or 8 from nitro-cli build-enclave); repeatable. The entry then also needs these PCRs to match")
 	var entries entryFlags
 	fs.Var(&entries, "entry", "new: PARTY,PCR0HEX,NOT_BEFORE,NOT_AFTER[,VERSION[,STATUS]] (RFC 3339, NOT_AFTER may be empty); repeatable")
 	if err := fs.Parse(args); err != nil {
@@ -130,7 +132,7 @@ func allowlist(sub string, args []string, out io.Writer) error {
 	case "show":
 		return showList(*in, *opsPath, *against, out)
 	case "add", "expire", "revoke", "touch":
-		return editList(sub, *in, *outPath, *party, *meas, *version, *notBefore, *notAfter, out)
+		return editList(sub, *in, *outPath, *party, *meas, *version, *notBefore, *notAfter, pcrs, out)
 	}
 	return fmt.Errorf("allowlist: unknown command %q", sub)
 }
@@ -257,7 +259,11 @@ func printEntries(out io.Writer, l attest.SignedAllowlist) {
 		if st == "" {
 			st = attest.StatusActive
 		}
-		fmt.Fprintf(out, "  party %-12s measurement %s  %s  version %q  %s\n", e.Party, e.Measurement, e.Window(), e.Version, st)
+		extra := ""
+		if len(e.PCRs) > 0 {
+			extra = fmt.Sprintf("  +%d PCRs", len(e.PCRs))
+		}
+		fmt.Fprintf(out, "  party %-12s measurement %s  %s  version %q  %s%s\n", e.Party, e.Measurement, e.Window(), e.Version, st, extra)
 	}
 }
 
@@ -317,7 +323,7 @@ func orActive(s string) string {
 }
 
 // editList is add, expire and revoke: a copy of the list in -in with one change and the next sequence number, without signatures.
-func editList(sub, in, outPath, party, meas, version, notBefore, notAfter string, out io.Writer) error {
+func editList(sub, in, outPath, party, meas, version, notBefore, notAfter string, pcrs []string, out io.Writer) error {
 	if sub != "touch" && (party == "" || meas == "") || in == "" || outPath == "" {
 		return fmt.Errorf("%s: -in, -out, -party and -measurement are required", sub)
 	}
@@ -350,6 +356,19 @@ func editList(sub, in, outPath, party, meas, version, notBefore, notAfter string
 			}
 		}
 		e := attest.AllowEntry{Party: party, Measurement: meas, NotBefore: nb, Version: version}
+		for _, p := range pcrs {
+			n, v, ok := strings.Cut(p, "=")
+			if !ok {
+				return fmt.Errorf("add: -pcr %q is not N=HEX", p)
+			}
+			if e.PCRs == nil {
+				e.PCRs = map[string]string{}
+			}
+			e.PCRs[n] = strings.ToLower(v)
+		}
+		if err := attest.ValidEntries([]attest.AllowEntry{e}); err != nil {
+			return fmt.Errorf("add: %w", err)
+		}
 		if notAfter != "" {
 			if e.NotAfter, err = parse("-not-after", notAfter); err != nil {
 				return err

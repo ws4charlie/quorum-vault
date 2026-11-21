@@ -85,6 +85,8 @@ type canonEntry struct {
 	NotAfter    int64  `json:"not_after"` // 0: no end
 	Version     string `json:"version"`
 	Status      string `json:"status"` // "active" or "revoked" ("" is signed as "active")
+	// PCRs is left out when empty, so the signed bytes of a list without Nitro entries are what they were before T7-prep. A map marshals with sorted keys.
+	PCRs map[string]string `json:"pcrs,omitempty"`
 }
 
 // AllowlistMessage is what the operators sign.
@@ -99,7 +101,14 @@ func AllowlistMessage(l SignedAllowlist) []byte {
 		if st == "" {
 			st = StatusActive
 		}
-		es[i] = canonEntry{e.Party, strings.ToLower(e.Measurement), e.NotBefore.Unix(), na, e.Version, st}
+		pcrs := map[string]string(nil)
+		if len(e.PCRs) > 0 {
+			pcrs = make(map[string]string, len(e.PCRs))
+			for k, v := range e.PCRs {
+				pcrs[k] = strings.ToLower(v)
+			}
+		}
+		es[i] = canonEntry{e.Party, strings.ToLower(e.Measurement), e.NotBefore.Unix(), na, e.Version, st, pcrs}
 	}
 	body, _ := json.Marshal(struct {
 		Seq      int64        `json:"seq"`

@@ -98,6 +98,8 @@ type SealerConfig struct {
 	BrokerCertFile string         `json:"broker_cert_file"`
 	BrokerKeyFile  string         `json:"broker_key_file"`
 	Attester       AttesterConfig `json:"attester"`
+	// Release says who releases the data keys: "broker" (default, the fields above) or "kms" (AWS KMS, task T7-prep; see ReleaseConfig).
+	Release ReleaseConfig `json:"release"`
 }
 
 // AttesterConfig says how the party produces evidence. Type "mock" exists only in binaries built with -tags teesim; a production build has no
@@ -118,6 +120,12 @@ type AttesterConfig struct {
 var RunningConfigPath string
 
 func (c SealerConfig) validateAttested() error {
+	if c.Release.Type == "kms" {
+		return c.validateKMS()
+	}
+	if c.Release.Type != "" && c.Release.Type != "broker" {
+		return fmt.Errorf("sealer.release.type %q is neither broker nor kms", c.Release.Type)
+	}
 	var errs []error
 	req := func(name, v string) {
 		if strings.TrimSpace(v) == "" {

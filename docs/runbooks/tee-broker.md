@@ -1,5 +1,7 @@
 # Runbook: the attestation release broker (`qv-attest-broker`)
 
+On AWS Nitro the releaser is AWS KMS and not this broker: see `nitro-first-run.md` (written and tested against fakes; not yet run on hardware).
+
 ## What it is
 Each MPC party runs in a TEE. Its shares are sealed under data keys; the broker holds, in its own HSM token, one non-extractable wrapping key per party and releases a party's data key only to evidence that (1) verifies against the configured trust roots, (2) carries a fresh broker nonce bound to the caller's pinned TLS key, (3) is bound to the exact request (party, keyset, generations, purpose, blobs, caller key), and (4) shows a measurement that the signed allowlist lists for that party now. The key is returned encrypted to the public key inside the evidence. Every attempt is audited. Design: `research/TEE.md`. The party side is the attested sealer (`sealer.type: attested`, below).
 
