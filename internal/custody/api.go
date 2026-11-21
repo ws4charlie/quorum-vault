@@ -69,6 +69,10 @@ func (a *API) Handler() http.Handler {
 	a.handle(mux, "POST /v2/cold/fundings", a.fundCold)
 	a.handle(mux, "POST /v2/cold/spends", a.spendCold)
 	a.handle(mux, "POST /v2/cold/actions", a.requestAction)
+	a.handle(mux, "POST /v2/cold/moves", a.requestColdMove)
+	a.handle(mux, "POST /v2/refills/{id}/rebuild", a.rebuildColdMove)
+	a.handle(mux, "POST /v2/cold-move/export", a.exportColdMoveSOL)
+	a.handle(mux, "POST /v2/cold-move/submit", a.submitColdMoveSOL)
 	a.handle(mux, "POST /v2/refills/{id}/close", a.closeRefill)
 	a.handle(mux, "POST /v2/cold-setup/export", a.exportColdSetup)
 	a.handle(mux, "POST /v2/cold-setup/submit", a.submitColdSetup)
@@ -659,6 +663,94 @@ func (a *API) requestAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, refillJSON(x))
+}
+
+// requestColdMove opens (or returns) the next cold-to-cold request of a cold key replacement; {"done":true} when the old address holds nothing more.
+func (a *API) requestColdMove(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	x, found, err := a.svc.RequestColdMove(r.Context())
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	if !found {
+		writeJSON(w, http.StatusOK, map[string]any{"done": true})
+		return
+	}
+	writeJSON(w, http.StatusCreated, refillJSON(x))
+}
+
+// rebuildColdMove discards the exported request of an open cold-to-cold move on an operator's say-so (see Service.RebuildColdMove).
+func (a *API) rebuildColdMove(w http.ResponseWriter, r *http.Request) {
+	actor, ok := a.actor(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason               string `json:"reason"`
+		OfflineRecordCleared bool   `json:"offline_record_cleared"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	if err := a.svc.RebuildColdMove(r.Context(), r.PathValue("id"), actor, body.Reason, body.OfflineRecordCleared); err != nil {
+		a.fail(w, err)
+		return
+	}
+	x, err := a.svc.GetRefill(r.Context(), r.PathValue("id"))
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, refillJSON(x))
+}
+
+// exportColdMoveSOL returns the request file of the next step of a Solana cold key replacement ({"done":true} when the old address holds nothing).
+func (a *API) exportColdMoveSOL(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		Pool string `json:"pool"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	f, done, err := a.svc.ExportColdMoveSOL(r.Context(), body.Pool)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	if done {
+		writeJSON(w, http.StatusOK, map[string]any{"done": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, f)
+}
+
+// submitColdMoveSOL sends the signed step that came back from the ceremony and books its cost.
+func (a *API) submitColdMoveSOL(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	var body struct {
+		Request coldsign.SOLRequest `json:"request"`
+		Signed  coldsign.SOLSigned  `json:"signed"`
+	}
+	if err := decode(r, &body); err != nil {
+		a.fail(w, err)
+		return
+	}
+	sig, err := a.svc.SubmitColdMoveSOL(r.Context(), body.Request, body.Signed, a.svc.waitFinal)
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tx_hash": sig})
 }
 
 // closeRefill ends a parked request on an operator's say-so.

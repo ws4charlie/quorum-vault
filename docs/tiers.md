@@ -24,6 +24,9 @@ The cold address is fixed in the signing zone's own settings, which the business
 
 A hot wallet can switch to a new key without starting new books: new payments leave from the new key, the old key moves everything it holds to the new one, and only then is it retired ([Key replacement](key-replacement.md)).
 
+## A cold key can change too
+A cold key is replaced by a ceremony of its own: the old key, signed by M of N custodians, moves everything to a new address that is written into the offline machine's own config, never taken from the request. New hot-to-cold moves go to the new address from the switch, and the old address stays in the books' checks until it is empty ([runbook](runbooks/cold-key-replacement.md)).
+
 ## Cold to hot needs people
 
 A refill exposes coins to more risk, so it goes through a key ceremony.

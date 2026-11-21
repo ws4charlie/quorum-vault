@@ -280,6 +280,15 @@ type RefillBuild struct {
 	Revision    int
 }
 
+// ColdMover is implemented by a chain cell that can build the cold-to-cold request of a key replacement (Bitcoin): every available output of the retiring cold
+// address of the pool (at most max_inputs) into ONE output at the pool's new cold address, no change, the fee taken from the total. It reserves nothing; the
+// signed file is adopted with ColdRefiller.AdoptRefill, and the move is broadcast, tracked and settled as a refill is. ColdRetiringAvailable is what the
+// available outputs of the retiring address hold (zero: nothing left to move).
+type ColdMover interface {
+	BuildColdMove(ctx context.Context, id string, revision int, pool string) (coldsign.BTCRequest, error)
+	ColdRetiringAvailable(ctx context.Context, pool string) (old string, sats *big.Int, err error)
+}
+
 // ColdRefiller is implemented by a chain cell that builds refill requests from its own outputs (Bitcoin). BuildRefill picks the cold address's oldest
 // available outputs (at most max_inputs) and returns the request; it reserves nothing, so a request that is never signed leaves nothing behind. The
 // payment may be less than Need when the inputs a transaction can carry are fewer than the need: the caller books what the request pays. AdoptRefill

@@ -17,8 +17,9 @@ This page lists what QuorumVault cannot do yet, so you don't have to find out th
 - **SoftHSM, not hardware.** The tokens are software with no tamper resistance. The structure is what a real HSM would need, but it is not one.
 - **M-of-N is simulated.** The cold signing machine checks the cold signers' signatures in software; a hardware HSM would enforce the rule itself.
 - **The enclave is simulated.** A stand-in produces the proof, so nobody has shown that real hardware measures what the stand-in measures ([Enclaves](enclaves.md)).
+- **The AWS Nitro path has not run on hardware.** The attester, the key release through AWS KMS and the key policy are tested against fakes and one real AWS proof document. A party cannot yet run in an enclave: it still needs a network bridge, storage over vsock and a cosigner path. A key policy has no clock, so an expired program is removed only when the policy is applied again, and the chain of the proof is checked against AWS's root without checking revocation ([Nitro first run](runbooks/nitro-first-run.md)).
 - **Revoking a program does not stop it at once.** A running party keeps its key in memory until it restarts, and nothing makes it ask again. To cut one off now, the operator stops it as well ([Enclaves](enclaves.md)).
-- **Nothing has run the enclave charts on a real cluster.** The broker chart and the party's enclave mode are checked by tests and, later, a local cluster with the simulated enclave. There is no production attester yet, so the chart refuses an enclave party outside development and test.
+- **Nothing has run the enclave charts on a real cluster.** The broker chart and the party's enclave mode are checked by tests and, later, a local cluster with the simulated enclave. The chart still refuses an enclave party outside development and test: the Nitro attester is written but has not run on hardware.
 - **Service identity is simulated.** The two certificate authorities are made by a script on a developer's machine, and their keys sit in a file. Production must bring its own PKI and a certificate manager ([certificate runbook](runbooks/certificates.md)). Metrics are plain http, reachable on the local machine only.
 - **All parties run on one machine, run by one team.** The cryptographic separation is real. The operational separation is not.
 
@@ -45,6 +46,7 @@ This page lists what QuorumVault cannot do yet, so you don't have to find out th
 - **Bitcoin has one hot shard per pool,** so there is no rebalance. Taproot addresses are not supported, because the signing library cannot derive them ([spike note](spikes/btc-taproot.md)).
 - **Batched Bitcoin payments are visible.** The chain shows that the recipients were paid together.
 - **Solana is narrower.** Only the classic token program is credited, a very large customer base would need a different scan, and a cold ceremony that signs on a recent blockhash must finish within its short life.
+- **A cold address is pinned by configuration, not by a signed setting.** Switching to a new cold key is a reviewed deployment of the zone and the core with a restart; until both are changed, hot-to-cold moves are refused and tried again. A Bitcoin cold-to-cold move has no change output, so it is not fee-bumped, and an address with many outputs takes several rounds. On Solana, a payment that reaches the old address after its last step needs a new cold setup of that address before it can be moved ([runbook](runbooks/cold-key-replacement.md)).
 - **One refill per cold address at a time** on EVM and Bitcoin (on Solana, one per asset), and hot funding on Solana is booked by an operator call, not found by the scan.
 
 **Audit**

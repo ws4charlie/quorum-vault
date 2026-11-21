@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Every check of the AWS reference deployment that needs no account, no credentials and no network call to AWS. CI (.github/workflows/terraform.yml) and people run the same file.
 #   deploy/cloud/aws/check.sh            all checks
-#   deploy/cloud/aws/check.sh fmt        one step: fmt | validate | test | lint | scan | values | creds
+#   deploy/cloud/aws/check.sh fmt        one step: fmt | validate | test | lint | scan | values | nitro | creds
 # Needs on PATH: helm, python3 with PyYAML (requirements.txt), terraform (the version pinned in the workflow), tflint (with `tflint --init` done), trivy. The provider is downloaded from the public registry by `init`; nothing talks to AWS.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -68,6 +68,11 @@ if want values; then
   python3 -c 'import yaml' 2>/dev/null || { fail "PyYAML is not installed (pip install -r deploy/cloud/aws/requirements.txt)"; }
   python3 values/values_test.py || fail "values (keys exist in the charts)"
   python3 values/render_test.py || fail "values (rendered NetworkPolicies match paths.json)"
+fi
+
+if want nitro; then
+  echo "== the Nitro helper scripts (nitro-cli output to allowlist command, allowlist to key-policy variable)"
+  python3 nitro/nitro_test.py || fail "nitro scripts"
 fi
 
 if want creds; then
