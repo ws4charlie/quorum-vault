@@ -1,0 +1,64 @@
+rule_files:
+  - emergency.rules.yml
+evaluation_interval: 1m
+tests:
+  # nothing compromised: no series, no alert; the mark appears at 1 on one scrape and fires at once (no for)
+  - interval: 1m
+    input_series:
+      - series: 'qv_emergency_metrics_error'
+        values: '0+0x10'
+      - series: 'qv_keyset_compromised{shard="s0",generation="1"}'
+        values: '_ _ _ 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: QVKeysetCompromised
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: QVKeysetCompromised
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "A key generation is marked compromised: emergency mode is on"
+              description: "Follow docs/runbooks/stolen-hot-key.md: the drain moves the funds to a new generation under the emergency caps."
+      - eval_time: 6m
+        alertname: QVEmergencyMetricsError
+        exp_alerts: []
+  # stalled: over 600 s for 5 m pages; a drain that moves (value resets) or is at 0 does not
+  - interval: 1m
+    input_series:
+      - series: 'qv_emergency_drain_stalled_seconds{shard="s0",generation="1"}'
+        values: '0+60x20'
+      - series: 'qv_emergency_drain_stalled_seconds{shard="s1",generation="1"}'
+        values: '0 60 120 0 60 120 0 60 120 0 60 120 0 60 120 0 60 120 0 60 120'
+      - series: 'qv_emergency_drain_stalled_seconds{shard="s2",generation="2"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: QVEmergencyDrainStalled
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: QVEmergencyDrainStalled
+        exp_alerts:
+          - exp_labels: {severity: page, shard: s0, generation: "1"}
+            exp_annotations:
+              summary: "The emergency drain of shard s0 generation 1 has made no progress for over 10 minutes"
+              description: "Funds are still on a compromised key. Check the drain requests, the emergency caps and the signers (docs/runbooks/stolen-hot-key.md)."
+  # a metrics read error pages after 5 minutes, not before; it clears when the read works again
+  - interval: 1m
+    input_series:
+      - series: 'qv_emergency_metrics_error'
+        values: '0 1 1 1 1 1 1 1 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: QVEmergencyMetricsError
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: QVEmergencyMetricsError
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "The core cannot read the emergency state from the database"
+              description: "QVKeysetCompromised and QVEmergencyDrainStalled cannot fire while this is on. Check the core's database connection."
+      - eval_time: 9m
+        alertname: QVEmergencyMetricsError
+        exp_alerts: []

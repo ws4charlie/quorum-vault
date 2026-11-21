@@ -84,10 +84,17 @@ func emitted(t *testing.T, names []string) map[string]bool {
 		if err != nil {
 			return err
 		}
-		s := string(b)
+		s := codeOnly(string(b))
 		for _, n := range names {
-			if !found[n] && strings.Contains(s, n) {
-				found[n] = true
+			if found[n] {
+				continue
+			}
+			// a histogram is read as name_bucket, name_sum and name_count; the program spells the base name
+			for _, cand := range []string{n, strings.TrimSuffix(n, "_bucket"), strings.TrimSuffix(n, "_sum"), strings.TrimSuffix(n, "_count")} {
+				if strings.Contains(s, cand) {
+					found[n] = true
+					break
+				}
 			}
 		}
 		return nil
@@ -96,6 +103,19 @@ func emitted(t *testing.T, names []string) map[string]bool {
 		t.Fatal(err)
 	}
 	return found
+}
+
+// codeOnly drops the lines that are only a comment: a metric that a comment mentions and no code writes is not emitted.
+func codeOnly(src string) string {
+	var b strings.Builder
+	for _, l := range strings.Split(src, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "//") {
+			continue
+		}
+		b.WriteString(l)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // pendingMetrics reads pending-metrics.txt: the metrics a rule reads that no program emits yet.
@@ -151,6 +171,17 @@ func TestEveryRuleMetricIsEmitted(t *testing.T) {
 func TestEmittedFindsMetricNames(t *testing.T) {
 	f := emitted(t, []string{"qv_mpc_party_sealer_ready", "qv_no_such_metric_anywhere_xyz"})
 	if !f["qv_mpc_party_sealer_ready"] || f["qv_no_such_metric_anywhere_xyz"] {
+		t.Fatalf("emitted: %v", f)
+	}
+}
+
+// Comments do not count as emitting, and a histogram's _bucket line is found by its base name.
+func TestEmittedIgnoresCommentsAndFindsHistogramBase(t *testing.T) {
+	if got := codeOnly("// qv_x_total\nvar a = 1 // qv_y\n\t// qv_z"); strings.Contains(got, "qv_x_total") || strings.Contains(got, "qv_z") || !strings.Contains(got, "qv_y") {
+		t.Fatalf("codeOnly: %q", got)
+	}
+	f := emitted(t, []string{"qv_worker_activity_schedule_to_start_latency_seconds_bucket", "qv_worker_no_such_latency_seconds_bucket"})
+	if !f["qv_worker_activity_schedule_to_start_latency_seconds_bucket"] || f["qv_worker_no_such_latency_seconds_bucket"] {
 		t.Fatalf("emitted: %v", f)
 	}
 }

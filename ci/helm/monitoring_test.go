@@ -659,8 +659,8 @@ func TestMonitoringChartPerClusterKind(t *testing.T) {
 	if k := kinds(business); strings.Join(k, ",") != "ServiceMonitor" {
 		t.Errorf("business renders %v (rules and routing are central, scrape objects only here)", k)
 	}
-	if n := len(business); n != 3 {
-		t.Errorf("business renders %d ServiceMonitors, want core, relay, archiver", n)
+	if n := len(business); n != 4 {
+		t.Errorf("business renders %d ServiceMonitors, want core, worker, relay, archiver", n)
 	}
 	// a signing cluster gets nothing, whatever is switched on
 	signing := monHelm(t, monDir, "--set", "clusterKind=signing", "--set", "alertmanager.enabled=true", "--set", "rules.enabled=true", "--set", "serviceMonitors.enabled=true")
@@ -756,7 +756,7 @@ func TestBusinessMetricsOffByDefault(t *testing.T) {
 	}
 }
 
-// On: core, relay and archiver get a Service; one policy lets the monitoring namespace reach the metrics port; the policy and contract tests still pass; the ServiceMonitors select exactly these Services.
+// On: core, worker, relay and archiver get a Service; one policy lets the monitoring namespace reach the metrics port; the policy and contract tests still pass; the ServiceMonitors select exactly these Services.
 func TestBusinessMetricsReachOnlyTheMonitoringNamespace(t *testing.T) {
 	objs := monBusinessObjs(t, "--set", "metrics.enabled=true")
 	svc := map[string]Obj{}
@@ -769,11 +769,24 @@ func TestBusinessMetricsReachOnlyTheMonitoringNamespace(t *testing.T) {
 			scrape = append(scrape, o)
 		}
 	}
-	if len(svc) != 3 || svc["core"].Kind == "" || svc["relay"].Kind == "" || svc["archiver"].Kind == "" || svc["worker"].Kind != "" {
-		t.Fatalf("metrics Services: %v (want core, relay, archiver; the worker has no metrics port)", monKeys(svc))
+	if len(svc) != 4 || svc["core"].Kind == "" || svc["worker"].Kind == "" || svc["relay"].Kind == "" || svc["archiver"].Kind == "" {
+		t.Fatalf("metrics Services: %v (want core, worker, relay, archiver)", monKeys(svc))
 	}
 	if len(scrape) != 1 {
 		t.Fatalf("%d metrics-scrape policies, want 1", len(scrape))
+	}
+	// the worker's listener: its environment binds the pod address on the metrics port, with the switch that allows it (business zone only)
+	workerEnv := 0
+	for _, o := range objs {
+		if o.Kind == "ConfigMap" && strings.Contains(o.Raw, "QV_WORKER_METRICS_LISTEN") {
+			workerEnv++
+			if !strings.Contains(o.Raw, `QV_WORKER_METRICS_LISTEN: "0.0.0.0:9102"`) || !strings.Contains(o.Raw, `QV_METRICS_ALLOW_NON_LOOPBACK: "1"`) {
+				t.Errorf("ConfigMap/%s: the worker's metrics listener is not the pod address on 9102 with the allow switch", o.Metadata.Name)
+			}
+		}
+	}
+	if workerEnv != 1 {
+		t.Errorf("%d ConfigMaps set the worker's metrics listener, want 1", workerEnv)
 	}
 	var np struct {
 		PodSelector struct {
@@ -807,10 +820,16 @@ func TestBusinessMetricsReachOnlyTheMonitoringNamespace(t *testing.T) {
 	if len(np.PolicyTypes) != 1 || np.PolicyTypes[0] != "Ingress" {
 		t.Errorf("policy types %v", np.PolicyTypes)
 	}
+	// the policy admits exactly the components that have a metrics Service, the worker among them (and no other pod of the release)
+	var sel []string
 	for _, e := range np.PodSelector.MatchExpressions {
-		if e.Key == "app.kubernetes.io/component" && strings.Contains(strings.Join(e.Values, ","), "worker") {
-			t.Error("the scrape rule selects the worker")
+		if e.Key == "app.kubernetes.io/component" {
+			sel = append(sel, e.Values...)
 		}
+	}
+	sort.Strings(sel)
+	if strings.Join(sel, ",") != "archiver,core,relay,worker" {
+		t.Errorf("the scrape rule selects components %v, want archiver, core, relay, worker", sel)
 	}
 	// the policy test and the image contract accept the render
 	opt := PolicyOptions{RequireDigest: true, CorePort: 8443, ApprovalPort: 8090, LinkPorts: []int{5432, 9092}}

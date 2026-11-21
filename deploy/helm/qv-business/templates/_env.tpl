@@ -37,6 +37,10 @@ QV_TEMPORAL_ADDR: {{ .Values.temporal.address | quote }}
 {{- if .Values.custody.autoApprover.enabled }}
 QV_AUTO_APPROVER_KEY_FILE: /etc/qv/approver/{{ .Values.custody.autoApprover.key }}
 {{- end }}
+{{- if .Values.metrics.enabled }}
+QV_METRICS_ALLOW_NON_LOOPBACK: "1"
+QV_WORKER_METRICS_LISTEN: {{ printf "0.0.0.0:%d" (int .Values.metrics.port) | quote }}
+{{- end }}
 {{- include "qv.tlsEnv" (dict "ctx" . "dir" "/etc/qv/tls") | nindent 0 }}
 {{- include "qv.healthEnv" .Values.worker.probes | nindent 0 }}
 {{- end -}}
