@@ -163,7 +163,7 @@ func TestSolHotStatesDecideWhatIsSigned(t *testing.T) {
 		cr = append(cr, sol.CreateNonceIxs(new2, i, sol.DefaultNonceRent)...)
 	}
 	g.refuse(g.job("setup-cand", setup, g.msg(new2, false, cr...), "alice"), "candidate")
-	g.sign(g.wdFrom("a1", old), g.s.hot)                          // generation 1 is untouched by the candidate
+	g.sign(g.wdFrom("a1", old), g.s.hot) // generation 1 is untouched by the candidate
 	bhA1 := g.s.bh
 
 	// draining generation 1 while 2 is still a candidate: a drain waits (a retry, not a refusal), and nothing else of generation 1 changes yet

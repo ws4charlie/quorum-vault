@@ -1,6 +1,6 @@
 # qv-monitoring: which cluster this release is for decides what it renders.
 #   central  - where the rules are evaluated (the central monitoring cluster, outside every signing cluster): PrometheusRule objects, and the AlertmanagerConfig if enabled.
-#   business - the business cluster: ServiceMonitor objects for core, relay and archiver (the business chart's metrics Services, qv-business `metrics.enabled`).
+#   business - the business cluster: ServiceMonitor objects for core, worker, relay and archiver (the business chart's metrics Services, qv-business `metrics.enabled`).
 #   signing  - a signing cluster (signing-core, party B, party C): renders NOTHING. Metrics leave these clusters only through the agent sidecar of qv-signing-core and qv-party,
 #              which remote-writes outward; no scrape object or inbound rule may exist there. The chart refuses values that would add one.
 clusterKind: central
@@ -17,7 +17,7 @@ serviceMonitors:
   businessNamespace: qv         # where the qv-business release runs
   clusterLabel: business        # added to every series as qv_cluster
   interval: 30s
-  components: [core, relay, archiver]   # the worker has no metrics port
+  components: [core, worker, relay, archiver]
 
 # A routing example for Alertmanager (AlertmanagerConfig, clusterKind central). Off by default. Placeholders only: receivers name Secrets, no URL or key is in values.
 # A party's alerts (label `party`) go to that party's operators; everything else goes to the default receiver.

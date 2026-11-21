@@ -1,0 +1,58 @@
+# The business-zone worker (qv-worker): it runs the Temporal workflows (deposit scan, sweeps, withdrawals, drains) and the activities that talk to the database and the chain.
+# Inputs: its metrics port (-metrics-listen, scraped as job "qv-worker" by the qv-monitoring ServiceMonitor), from internal/workermetrics:
+#   qv_worker_ready, qv_worker_stopping            the worker's state (stopping = SIGTERM arrived: no new tasks, running activities finish, see -stop-timeout)
+#   qv_worker_workflow_failed_total{workflow_type, task_queue, ...}                     counters of the Temporal SDK (name without "temporal_")
+#   qv_worker_workflow_task_schedule_to_start_latency_seconds / qv_worker_activity_schedule_to_start_latency_seconds   histograms: how long a task waited for a free worker = task-queue lag
+# The SDK creates a counter at its first event, so a series is absent until then and reads 1, 1, 1 after the first failure: the rule below uses the first-event form of
+# monitoring/attest-broker.rules.yml (increase() for a series that existed a window ago, the value itself for one that did not).
+groups:
+  - name: qv-worker
+    rules:
+      # the scrape itself fails: the pod is down, crash-looping or unreachable. Nothing is swept, planned or paid out meanwhile.
+      - alert: QVWorkerDown
+        expr: up{job="qv-worker"} == 0
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "A qv-worker cannot be scraped ({{ $labels.instance }})"
+          description: "No deposits are scanned, no sweeps or withdrawals move while no worker runs for the chain's task queue. Check the pod (kubectl describe, logs) and the database and Temporal it needs."
+      # no worker is scraped at all: a pod that is gone (deleted, never scheduled, its Service or ServiceMonitor removed) has no "up" series, so "up == 0" above never matches it.
+      # The same absent() form as monitoring/mpc-routing.rules.yml. Limit: it needs at least one worker series to ever have existed in this Prometheus; "fewer workers than the
+      # chain needs" is not detected (the expected count is a deployment fact, not a metric: a follow-up would add a qv-business replica-count rule on kube-state-metrics).
+      - alert: QVWorkerAbsent
+        expr: absent(up{job="qv-worker"})
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "No qv-worker is scraped at all"
+          description: "There is no 'up' series for job qv-worker: the pods are gone or not scheduled, or the scrape target was removed. Nothing is scanned, swept or paid out meanwhile. Check the Deployment, the worker Service and the ServiceMonitor."
+      # running but not polling: not ready for 10 minutes without a stop in progress (a stopping worker is not ready on purpose)
+      - alert: QVWorkerNotReady
+        expr: (qv_worker_ready == 0) unless (qv_worker_stopping == 1)
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "A qv-worker is up but not ready ({{ $labels.instance }})"
+          description: "Its readiness probe fails: the database, Temporal or the certificates are not usable. The pod's log and /readyz say which."
+      # tasks wait for a worker: the 95th percentile of the wait is over 30 s for 10 minutes (the normal wait is milliseconds)
+      - alert: QVWorkerWorkflowTaskLag
+        expr: histogram_quantile(0.95, sum by (le, task_queue) (rate(qv_worker_workflow_task_schedule_to_start_latency_seconds_bucket[10m]))) > 30
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Workflow tasks of {{ $labels.task_queue }} wait {{ $value | humanizeDuration }} for a worker"
+          description: "The workers of this task queue are too few, stuck, or busy with slow activities. Compare qv_worker_activity_schedule_to_start_latency_seconds and the pods' CPU and database load."
+      - alert: QVWorkerActivityTaskLag
+        expr: histogram_quantile(0.95, sum by (le, task_queue) (rate(qv_worker_activity_schedule_to_start_latency_seconds_bucket[10m]))) > 30
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Activities of {{ $labels.task_queue }} wait {{ $value | humanizeDuration }} for a worker"
+          description: "All activity slots of the task queue are busy or the workers poll no more. Check the pods and what the long activities wait for (the database, the chain node, the signing gateway)."
+      # a workflow ends in failure: the loops (scan, planners, reconciler) never end by design and a sweep or withdrawal retries, so a failed one needs a person
+      - alert: QVWorkerWorkflowFailed
+        expr: sum by (task_queue, workflow_type) ((increase(qv_worker_workflow_failed_total[15m]) unless (qv_worker_workflow_failed_total unless qv_worker_workflow_failed_total offset 15m)) or (qv_worker_workflow_failed_total unless qv_worker_workflow_failed_total offset 15m)) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "A {{ $labels.workflow_type }} workflow failed on {{ $labels.task_queue }}"
+          description: "Find it in Temporal (status Failed, type {{ $labels.workflow_type }}) and the worker log; the watchdog restarts a stalled loop, not a failed one."
