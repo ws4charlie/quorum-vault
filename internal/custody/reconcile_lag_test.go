@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
@@ -404,5 +405,33 @@ func TestReconcileBTCStuckScanAlerts(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "check=scan_caught_up") {
 		t.Fatalf("no ALERT: %s", buf.String())
+	}
+}
+
+// A held deposit (sweep_holds: credited, left below the sweep threshold) is a reading for operators and moves no money: Reconcile does not report it as a
+// difference, and a real difference beside it still alerts.
+func TestReconcileEVMSweepHoldsAreNotDifferencesAndHideNone(t *testing.T) {
+	ctx := context.Background()
+	buf := captureAlerts(t)
+	s, sc, m := lagWorld(t)
+	sc.res = chain.ScanResult{SafeHeadHeight: 100}
+	setCursor(t, s, 101)
+	// The 5 wei were credited (the scan booked them) and are held below the threshold.
+	if err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		return s.transfer(ctx, tx, "held", depAcct(testChain, "ETH"), custAcct("c1", testChain, "ETH"), big.NewInt(5), nil)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO sweep_holds (chain, address, asset, amount, value, cause) VALUES ($1,'0xADDR','ETH',5,5,'min_sweep')`, testChain); err != nil {
+		t.Fatal(err)
+	}
+	requireClean(t, "a held deposit", mustReconcile(t, s))
+	if strings.Contains(buf.String(), "ALERT") {
+		t.Fatalf("ALERT: %s", buf.String())
+	}
+	m.add("0xADDR", "ETH", 1) // a real difference at the held address
+	rep := mustReconcile(t, s)
+	if rep.Clean || len(failedNames(rep)) != 1 || failedNames(rep)[0] != "deposit_addresses" {
+		t.Fatalf("clean=%v %v", rep.Clean, failedNames(rep))
 	}
 }
