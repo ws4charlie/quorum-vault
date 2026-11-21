@@ -76,7 +76,11 @@ func TestEmergencyDrillStolenHotKey(t *testing.T) {
 	// cancel waits at the zone for the successor to be active. Before the zone signed no cancel for a compromised key, so the nonce stayed claimed and the
 	// drain's own transaction at it was refused for ever.
 	if mpcMode() {
-		s.applyToGuards([]string{"cosigner-b=" + s.cosGuardDSN, "cosigner-c=" + s.cosCGuardDSN}, cand, comp)
+		// The candidate everywhere first (the tool's own order), then the mark on the cosigners only: the state a kill between two applies leaves.
+		if out, err := emergency("-changes", cand); err == nil || !strings.Contains(out, "drain-start needs its signed record") {
+			t.Fatalf("run with the candidate only: %v\n%s", err, out)
+		}
+		s.applyToGuards([]string{"cosigner-b=" + s.cosGuardDSN, "cosigner-c=" + s.cosCGuardDSN}, comp)
 		c3 := s.newCustomer("c-em-claim")
 		s.sendETH(c3, eth(1))
 		s.waitFor(scaled(120*time.Second), "a sweep refused by a cosigner after the gateway claimed its nonce", func() bool {
