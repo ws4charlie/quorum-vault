@@ -39,6 +39,9 @@ In an emergency the thief's own copy of the key is not affected, so the time bef
 
 The core moves each token, then the coin itself, from the old key to the new one. No approver is needed: the zone operators' signatures that started the drain are the approval. The zone signs only a move to the named successor, within a total that the zone operators set in the same record, and counts only the moves it actually signed. A refused move costs nothing, so a broken planner cannot use up the allowance. One tool walks the whole replacement but signs nothing itself ([runbook](runbooks/key-replacement.md)).
 
+## A cold key is replaced by its own ceremony
+Cold funds never pass through the hot wallet. The old cold key, signed by M of N custodians offline, moves everything to the new cold address, which only the offline machine's own config names. The new address is pinned in the signing zone first, so new hot-to-cold moves go there; the old address stays watched and reconciled until it is empty and a watch window has passed, and then the old key is destroyed ([runbook](runbooks/cold-key-replacement.md)).
+
 ## Keys that protect the parties
 Three keys protect the parties themselves, and none of them moves funds when replaced. The administrators' keys change by a request that the current administrators sign and every party checks for itself; the recovery key for backups is replaced by a ceremony that a status command follows until every backup is under the new key, which is enough only if the old key and old backups were never seen by anyone else (if they may have been, a refresh does not help: whoever holds them can still rebuild the signing key, so the wallet keys themselves must be replaced and the funds moved, as for any stolen key); and the key in a party's HSM that seals its shares can be swapped for a new one in place ([key ceremony runbook](runbooks/key-ceremony.md), [backup runbook](runbooks/mpc-backup-restore.md)).
 

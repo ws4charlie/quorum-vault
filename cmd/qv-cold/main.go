@@ -169,7 +169,7 @@ func run(args []string, out, errw io.Writer) error {
 			apps = append(apps, a)
 		}
 		names, ignored := cfg.CountApprovals(rf.RequestHash, apps)
-		fmt.Fprintf(out, "APPROVALS  %d of %d required: %v\n", len(names), cfg.Threshold, names)
+		fmt.Fprintf(out, "APPROVALS  %d of %d required: %v\n", len(names), cfg.Required(r), names)
 		for _, ig := range ignored {
 			fmt.Fprintf(out, "  not counted: %s\n", ig)
 		}
@@ -286,7 +286,7 @@ func runBTC(cmd, cfgPath, reqPath string, approvals []string, out io.Writer, wri
 		apps = append(apps, a)
 	}
 	names, ignored := cfg.CountApprovals(rf.RequestHash, apps)
-	fmt.Fprintf(out, "APPROVALS  %d of %d required: %v\n", len(names), cfg.Threshold, names)
+	fmt.Fprintf(out, "APPROVALS  %d of %d required: %v\n", len(names), cfg.Required(r), names)
 	for _, ig := range ignored {
 		fmt.Fprintf(out, "  not counted: %s\n", ig)
 	}
@@ -369,7 +369,7 @@ func runSOL(cmd, cfgPath, reqPath string, approvals []string, out io.Writer, wri
 		apps = append(apps, a)
 	}
 	names, ignored := cfg.CountApprovals(rf.RequestHash, apps)
-	fmt.Fprintf(out, "APPROVALS  %d of %d required: %v\n", len(names), cfg.Threshold, names)
+	fmt.Fprintf(out, "APPROVALS  %d of %d required: %v\n", len(names), cfg.Required(r), names)
 	for _, ig := range ignored {
 		fmt.Fprintf(out, "  not counted: %s\n", ig)
 	}
