@@ -1,8 +1,8 @@
-{{- /* Metrics for the central monitoring (task D10). Off by default. One ClusterIP Service per component that has a metrics port (core, relay, archiver; the worker has none),
+{{- /* Metrics for the central monitoring (task D10). Off by default. One ClusterIP Service per component that has a metrics port (core, worker, relay, archiver),
        and one NetworkPolicy that lets the monitoring namespace reach that port: nothing else. The ServiceMonitor objects are in chart qv-monitoring. */}}
 {{- if .Values.metrics.enabled }}
 {{- $m := .Values.metrics }}
-{{- $comps := list "core" "relay" }}
+{{- $comps := list "core" "worker" "relay" }}
 {{- if .Values.archiver.enabled }}{{ $comps = append $comps "archiver" }}{{ end }}
 {{- range $c := $comps }}
 apiVersion: v1

@@ -1,0 +1,127 @@
+rule_files:
+  - worker.rules.yml
+evaluation_interval: 1m
+tests:
+  # a scrape that fails for 5 minutes pages; a healthy one does not
+  - interval: 1m
+    input_series:
+      - series: 'up{job="qv-worker",instance="w1"}'
+        values: '1x5 0x20'
+      - series: 'up{job="qv-worker",instance="w2"}'
+        values: '1x25'
+    alert_rule_test:
+      - {eval_time: 8m, alertname: QVWorkerDown, exp_alerts: []}
+      - eval_time: 12m
+        alertname: QVWorkerDown
+        exp_alerts:
+          - exp_labels: {severity: page, job: qv-worker, instance: w1}
+            exp_annotations:
+              summary: "A qv-worker cannot be scraped (w1)"
+              description: "No deposits are scanned, no sweeps or withdrawals move while no worker runs for the chain's task queue. Check the pod (kubectl describe, logs) and the database and Temporal it needs."
+  # not ready for 10 minutes pages; a stopping worker (SIGTERM) is not ready on purpose and does not
+  - interval: 1m
+    input_series:
+      - series: 'qv_worker_ready{instance="w1"}'
+        values: '1x3 0x30'
+      - series: 'qv_worker_stopping{instance="w1"}'
+        values: '0x33'
+      - series: 'qv_worker_ready{instance="w2"}'
+        values: '1x3 0x30'
+      - series: 'qv_worker_stopping{instance="w2"}'
+        values: '0x3 1x30'
+    alert_rule_test:
+      - {eval_time: 8m, alertname: QVWorkerNotReady, exp_alerts: []}
+      - eval_time: 20m
+        alertname: QVWorkerNotReady
+        exp_alerts:
+          - exp_labels: {severity: page, instance: w1}
+            exp_annotations:
+              summary: "A qv-worker is up but not ready (w1)"
+              description: "Its readiness probe fails: the database, Temporal or the certificates are not usable. The pod's log and /readyz say which."
+  # task-queue lag: tasks wait about 60 s (all in the 60 s bucket) for 10 minutes; the quiet queue does not alert
+  - interval: 1m
+    input_series:
+      - series: 'qv_worker_workflow_task_schedule_to_start_latency_seconds_bucket{task_queue="qv-core-eth",le="30"}'
+        values: '0+0x40'
+      - series: 'qv_worker_workflow_task_schedule_to_start_latency_seconds_bucket{task_queue="qv-core-eth",le="60"}'
+        values: '0+10x40'
+      - series: 'qv_worker_workflow_task_schedule_to_start_latency_seconds_bucket{task_queue="qv-core-eth",le="+Inf"}'
+        values: '0+10x40'
+      - series: 'qv_worker_workflow_task_schedule_to_start_latency_seconds_bucket{task_queue="qv-core-base",le="30"}'
+        values: '0+10x40'
+      - series: 'qv_worker_workflow_task_schedule_to_start_latency_seconds_bucket{task_queue="qv-core-base",le="+Inf"}'
+        values: '0+10x40'
+    alert_rule_test:
+      - {eval_time: 5m, alertname: QVWorkerWorkflowTaskLag, exp_alerts: []}
+      - eval_time: 30m
+        alertname: QVWorkerWorkflowTaskLag
+        exp_alerts:
+          - exp_labels: {severity: ticket, task_queue: qv-core-eth}
+            exp_annotations:
+              summary: "Workflow tasks of qv-core-eth wait 58.5s for a worker"
+              description: "The workers of this task queue are too few, stuck, or busy with slow activities. Compare qv_worker_activity_schedule_to_start_latency_seconds and the pods' CPU and database load."
+  - interval: 1m
+    input_series:
+      - series: 'qv_worker_activity_schedule_to_start_latency_seconds_bucket{task_queue="qv-core-eth",le="30"}'
+        values: '0+0x40'
+      - series: 'qv_worker_activity_schedule_to_start_latency_seconds_bucket{task_queue="qv-core-eth",le="60"}'
+        values: '0+10x40'
+      - series: 'qv_worker_activity_schedule_to_start_latency_seconds_bucket{task_queue="qv-core-eth",le="+Inf"}'
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QVWorkerActivityTaskLag
+        exp_alerts:
+          - exp_labels: {severity: ticket, task_queue: qv-core-eth}
+            exp_annotations:
+              summary: "Activities of qv-core-eth wait 58.5s for a worker"
+              description: "All activity slots of the task queue are busy or the workers poll no more. Check the pods and what the long activities wait for (the database, the chain node, the signing gateway)."
+  # the SDK creates the failure counter at the first failure: absent, then 1, 1, 1. That first failure must alert, and it resolves when the series is no longer new.
+  - interval: 1m
+    input_series:
+      - series: 'qv_worker_workflow_failed_total{task_queue="qv-core-eth",workflow_type="SweepWorkflow"}'
+        values: '_x5 1x40'
+    alert_rule_test:
+      - {eval_time: 4m, alertname: QVWorkerWorkflowFailed, exp_alerts: []}
+      - eval_time: 8m
+        alertname: QVWorkerWorkflowFailed
+        exp_alerts:
+          - exp_labels: {severity: ticket, task_queue: qv-core-eth, workflow_type: SweepWorkflow}
+            exp_annotations:
+              summary: "A SweepWorkflow workflow failed on qv-core-eth"
+              description: "Find it in Temporal (status Failed, type SweepWorkflow) and the worker log; the watchdog restarts a stalled loop, not a failed one."
+      - {eval_time: 35m, alertname: QVWorkerWorkflowFailed, exp_alerts: []}
+  # a counter that has been flat for longer than the window does not alert (three old failures)
+  - interval: 1m
+    input_series:
+      - series: 'qv_worker_workflow_failed_total{task_queue="qv-core-eth",workflow_type="ScanWorkflow"}'
+        values: '3x45'
+    alert_rule_test:
+      - {eval_time: 30m, alertname: QVWorkerWorkflowFailed, exp_alerts: []}
+  # the pod is gone: its "up" series ends (no up == 0 ever appears), and absent() pages after 5 minutes; a worker that is still scraped does not
+  - interval: 1m
+    input_series:
+      - series: 'up{job="qv-worker",instance="w1"}'
+        values: '1x5 stale _x19'
+      - series: 'up{job="qv-worker",instance="w2"}'
+        values: '1x25'
+      - series: 'up{job="qv-other",instance="x"}'
+        values: '1x25'
+    alert_rule_test:
+      - {eval_time: 10m, alertname: QVWorkerAbsent, exp_alerts: []} # w2 is still there
+      - {eval_time: 12m, alertname: QVWorkerDown, exp_alerts: []}   # and no "up == 0" series exists for the vanished pod
+  - interval: 1m
+    input_series:
+      - series: 'up{job="qv-worker",instance="w1"}'
+        values: '1x5 stale _x19'
+      - series: 'up{job="qv-other",instance="x"}'
+        values: '1x25'
+    alert_rule_test:
+      - {eval_time: 9m, alertname: QVWorkerAbsent, exp_alerts: []} # absent for under 5 minutes
+      - eval_time: 12m
+        alertname: QVWorkerAbsent
+        exp_alerts:
+          - exp_labels: {severity: page, job: qv-worker}
+            exp_annotations:
+              summary: "No qv-worker is scraped at all"
+              description: "There is no 'up' series for job qv-worker: the pods are gone or not scheduled, or the scrape target was removed. Nothing is scanned, swept or paid out meanwhile. Check the Deployment, the worker Service and the ServiceMonitor."

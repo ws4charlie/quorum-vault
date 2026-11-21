@@ -32,6 +32,8 @@ type Guard struct {
 	keysetIgnored atomic.Int64
 	// drainRefused counts the drains this process refused (keysets.go).
 	drainRefused atomic.Int64
+	// drainMetrics counts them by mode, chain and reason for qv_drain_refusals_total (drainmetrics.go).
+	drainMetrics drainCounts
 }
 
 // OpenGuard applies the schema to pool and returns the guard.
