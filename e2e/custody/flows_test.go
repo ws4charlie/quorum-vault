@@ -1,6 +1,7 @@
 package custody_test
 
 import (
+	"bytes"
 	"fmt"
 	"math/big"
 	"os"
@@ -8,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/workflow"
@@ -143,6 +146,77 @@ func TestInsufficientFundsIsRefused(t *testing.T) {
 	}
 	if code, _ := s.call("POST", "/v2/customers", nil, map[string]any{"id": "nobody"}); code != 401 {
 		t.Fatalf("no X-Actor: %d", code)
+	}
+	s.reconcileClean()
+}
+
+// A small deposit while the fee is high stays at its deposit address: credited, not swept, and said so (reason below_sweep_threshold with the value, the fee
+// and the line, in the reconcile output and the metrics). It is no difference for reconcile. It is swept by itself when the fee falls.
+func TestSmallDepositHeldAtHighFeeThenSwept(t *testing.T) {
+	s := newSystem(t, opts{})
+	setBase := func(gwei int64) {
+		t.Helper()
+		if err := s.rc.CallContext(s.ctx, nil, "anvil_setNextBlockBaseFeePerGas", (*hexutil.Big)(new(big.Int).Mul(big.NewInt(gwei), big.NewInt(1e9)))); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.rc.CallContext(s.ctx, nil, "anvil_mine", "0x1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { setBase(1) })
+	setBase(300) // a sweep of one address now costs about 0.03 ETH, and the rule asks for 20 times that
+	addr := s.newCustomer("c-held")
+	s.sendETH(addr, eth(1).Div(eth(1), big.NewInt(20))) // 0.05 ETH: over min_sweep, under the line
+	s.waitAvailable("c-held", "ETH", new(big.Int).Div(eth(1), big.NewInt(20)), 30*time.Second)
+
+	var held map[string]any
+	s.waitFor(60*time.Second, "reason below_sweep_threshold in the reconcile output", func() bool {
+		held = nil
+		code, out := s.call("GET", "/v2/reconcile", map[string]string{"X-Actor": "ops"}, nil)
+		if code != 200 {
+			return false
+		}
+		u, _ := out["unswept"].(map[string]any)
+		items, _ := u["items"].([]any)
+		for _, it := range items {
+			m := it.(map[string]any)
+			if strings.EqualFold(m["address"].(string), addr.Hex()) && m["reason"] == custody.ReasonBelowThreshold {
+				held = m
+			}
+		}
+		return held != nil
+	})
+	if held["cause"] != custody.CauseFee || held["fee"] == nil || held["threshold"] == nil || held["value"] != "50000000000000000" {
+		t.Fatalf("held state lacks the value, the fee or the line: %v", held)
+	}
+	fee, _ := new(big.Int).SetString(held["fee"].(string), 10)
+	line, _ := new(big.Int).SetString(held["threshold"].(string), 10)
+	if line.Cmp(new(big.Int).Mul(fee, big.NewInt(20))) != 0 || line.Cmp(eth(1).Div(eth(1), big.NewInt(20))) <= 0 {
+		t.Fatalf("fee %s line %s", fee, line)
+	}
+	s.waitPasses(workflow.PlannerID(s.chainName), 3) // looked at again and again, and still held
+	if n := s.count(`SELECT count(*) FROM sweeps`); n != 0 {
+		t.Fatalf("%d sweeps at a fee that makes the sweep a loss", n)
+	}
+	s.reconcileClean() // credited funds at a deposit address, held: not a difference
+	var m custody.SweepHoldMetrics
+	m.Use(s.pool)
+	var buf bytes.Buffer
+	m.Write(&buf)
+	for _, want := range []string{`qv_sweep_held_addresses{chain="` + s.chainName + `",asset="ETH",cause="fee"} 1`, `qv_sweep_held_amount{chain="` + s.chainName + `",asset="ETH",cause="fee"} 50000000000000000`} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("metrics lack %q:\n%s", want, buf.String())
+		}
+	}
+
+	setBase(1) // the fee falls: the next pass sweeps it and the record goes
+	s.waitFor(90*time.Second, "swept after the fee fell", func() bool { return s.sweepsConfirmed() >= 1 })
+	s.waitIdle(60 * time.Second)
+	if s.ethBalance(addr).Sign() != 0 {
+		t.Fatal("deposit address not emptied")
+	}
+	if n := s.count(`SELECT count(*) FROM sweep_holds`); n != 0 {
+		t.Fatalf("%d holds left after the sweep", n)
 	}
 	s.reconcileClean()
 }

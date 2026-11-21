@@ -1,0 +1,27 @@
+# Credited deposits that are not swept (docs/runbooks/unswept-deposits.md). A deposit is swept only when it is worth more than k times the fee of the sweep, so small deposits wait at
+# their deposit addresses while fees are high. That is normal for hours; funds that wait for a whole day mean a long fee spike, a planner that does not run, or a rule that is set too high.
+#
+#   qv_sweep_held_oldest_seconds{chain, asset, cause}   the age of the oldest address left below the line (internal/custody/sweepholds.go), served by qv-worker on its metrics port.
+#                                                       cause fee and fee_cap: the fee alone holds it. cause min_sweep: under the floor, waits for more funds: no alert.
+#   qv_sweep_held_metrics_error                         1 when the worker could not read the table at a scrape.
+# The age is a gauge that comes with the series, so the rule reads it as it is: a series that is already over the wait at its first scrape (a new pod) fires after `for`, there is no
+# counter to subtract (the first-event form of monitoring/drain.rules.yml is for counters). The series disappears when nothing is held, and the alert closes with it.
+# The wait is 86400 seconds (one day), written in the rule: change it here, run ci/helm/sync-monitoring-rules.sh and keep the runbook's number the same. Core and worker replicas
+# export the same table: max by.
+groups:
+  - name: qv-deposits
+    rules:
+      - alert: QVDepositsHeldTooLong
+        expr: max by (chain, asset) (qv_sweep_held_oldest_seconds{cause=~"fee|fee_cap"}) > 86400
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Credited deposits of {{ $labels.asset }} on {{ $labels.chain }} have waited over a day below the sweep threshold"
+          description: "The fee alone has held them for more than a day. Look at GET /v2/reconcile (unswept), the fee on the chain and the sweep-planner workflow. Runbook: docs/runbooks/unswept-deposits.md"
+      - alert: QVSweepHeldMetricsError
+        expr: max(qv_sweep_held_metrics_error) == 1
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "The held-deposit metrics cannot be read from the database"
+          description: "qv-worker could not read sweep_holds at its scrapes: the age alert is blind. Check the worker's database connection and the migration state. Runbook: docs/runbooks/unswept-deposits.md"

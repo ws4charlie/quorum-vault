@@ -14,7 +14,8 @@ Alerts are rules in `monitoring/`, evaluated centrally (chart `deploy/helm/qv-mo
 | 8 | `QVPinnedCertExpiringSoon`, `QVAttestBrokerCertExpiringSoon` (pending), `QVTLSCAExpiringSoon` | a pinned certificate or a CA runs out in 30 days; renewal is by hand | `kubectl get secret <name> -o json \| jq -r '.data["tls.crt"]' \| base64 -d \| openssl x509 -noout -enddate` | [certificates.md](certificates.md) |
 | 9 | `QVAuditArchiveLagging`, `QVAuditArchiveStoreErrors`, `QVAuditArchiveBadRecords`, `QVAuditArchiveSourceSilent` | audit heads are not reaching the archive, or a record is bad | `kubectl logs deploy/<release>-archiver --tail=100` | [audit-archive.md](audit-archive.md) |
 | 10 | `QVMpcGatewayPair*Failures`, `QVMpcLinkUnhealthy` | the gateway cannot sign with a pair, or a party link is down | `kubectl logs deploy/<gateway> -c gateway \| grep ALERT` | [mpc-failures.md](mpc-failures.md) |
-| 11 | log line `ALERT: the books and the chain disagree` with `check=scan_caught_up`; rule on `qv_scan_lag_blocks` (see below) | the deposit scan is stuck, or far behind the chain's safe head | `kubectl logs deploy/<core> \| grep "check=scan_caught_up"`, then the worker's log for `scan` errors (a halted scan names its reason) | (this page) |
+| 11 | `QVDepositsHeldTooLong`, `QVSweepHeldMetricsError` | credited deposits wait below the sweep threshold for over a day, or the metric cannot be read | `curl` `GET /v2/reconcile` as an operator and read `unswept` | [unswept-deposits.md](unswept-deposits.md) |
+| 12 | log line `ALERT: the books and the chain disagree` with `check=scan_caught_up`; rule on `qv_scan_lag_blocks` (see below) | the deposit scan is stuck, or far behind the chain's safe head | `kubectl logs deploy/<core> \| grep "check=scan_caught_up"`, then the worker's log for `scan` errors (a halted scan names its reason) | (this page) |
 
 ## Reconcile and a scan that is behind
 
