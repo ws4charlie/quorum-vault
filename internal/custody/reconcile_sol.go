@@ -3,6 +3,7 @@ package custody
 import (
 	"context"
 	"fmt"
+	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"math/big"
 	"sort"
 	"strings"
@@ -625,18 +626,23 @@ func (s *Service) solLandedNonceCloses(ctx context.Context, add func(string, *bi
 // solLandedColdOps adds the cold setups and closes that are final and not booked yet: they cost the cold address (or, for a close, gave it rent back) and the
 // books record that when the operation finishes.
 func (s *Service) solLandedColdOps(ctx context.Context, res *solLandedSet) ([]string, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT signature, cold FROM sol_cold_ops WHERE chain=$1 AND NOT booked ORDER BY signature`, s.Cfg.Chain)
+	rows, err := s.Pool.Query(ctx, `SELECT signature, cold, credit::text, kind FROM sol_cold_ops WHERE chain=$1 AND NOT booked ORDER BY signature`, s.Cfg.Chain)
 	if err != nil {
 		return nil, err
 	}
-	type op struct{ sig, cold string }
+	type op struct {
+		sig, cold, kind string
+		credit          *big.Int
+	}
 	var ops []op
 	for rows.Next() {
 		var o op
-		if err := rows.Scan(&o.sig, &o.cold); err != nil {
+		var credit string
+		if err := rows.Scan(&o.sig, &o.cold, &credit, &o.kind); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		o.credit = parseBig(credit)
 		ops = append(ops, o)
 	}
 	rows.Close()
@@ -649,14 +655,17 @@ func (s *Service) solLandedColdOps(ctx context.Context, res *solLandedSet) ([]st
 		if err != nil {
 			return nil, err
 		}
-		if st != chain.TxConfirmed {
+		if st != chain.TxConfirmed && !(st == chain.TxFailed && (o.kind == coldsign.KindSOLColdMove || o.kind == coldsign.KindSOLColdMoveClose)) {
 			continue
 		}
 		cost, err := s.Chain.TxFee(ctx, o.sig)
 		if err != nil {
 			return nil, err
 		}
-		k := [2]string{o.cold, s.Cfg.Native}
+		if st == chain.TxConfirmed { // rent a move of a cold key replacement sent to the new cold address (a failed transaction moved nothing)
+			cost = new(big.Int).Sub(cost, o.credit)
+		}
+		k := [2]string{s.currentColdOf(o.cold), s.Cfg.Native}
 		if res.coldIn[k] == nil {
 			res.coldIn[k] = new(big.Int)
 		}
@@ -700,6 +709,13 @@ func (s *Service) solColdRead(ctx context.Context) ([]solColdCell, error) {
 			got, err := s.Reader.Balance(ctx, addr, sym, 0)
 			if err != nil {
 				return nil, err
+			}
+			if old := c.ColdRetiring[pool]; old != "" { // a cold key being replaced counts with the new one
+				ob, err := s.Reader.Balance(ctx, old, sym, 0)
+				if err != nil {
+					return nil, err
+				}
+				got = new(big.Int).Add(got, ob)
 			}
 			out = append(out, solColdCell{pool: pool, addr: addr, asset: sym, books: want, chain: got})
 		}

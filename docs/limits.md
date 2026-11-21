@@ -45,6 +45,7 @@ This page lists what QuorumVault cannot do yet, so you don't have to find out th
 - **Bitcoin has one hot shard per pool,** so there is no rebalance. Taproot addresses are not supported, because the signing library cannot derive them ([spike note](spikes/btc-taproot.md)).
 - **Batched Bitcoin payments are visible.** The chain shows that the recipients were paid together.
 - **Solana is narrower.** Only the classic token program is credited, a very large customer base would need a different scan, and a cold ceremony that signs on a recent blockhash must finish within its short life.
+- **A cold address is pinned by configuration, not by a signed setting.** Switching to a new cold key is a reviewed deployment of the zone and the core with a restart; until both are changed, hot-to-cold moves are refused and tried again. A Bitcoin cold-to-cold move has no change output, so it is not fee-bumped, and an address with many outputs takes several rounds. On Solana, a payment that reaches the old address after its last step needs a new cold setup of that address before it can be moved ([runbook](runbooks/cold-key-replacement.md)).
 - **One refill per cold address at a time** on EVM and Bitcoin (on Solana, one per asset), and hot funding on Solana is booked by an operator call, not found by the scan.
 
 **Audit**
