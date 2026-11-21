@@ -24,4 +24,4 @@ Every new release of a party is a new program, so it needs its own place on the 
 
 ## What is simulated
 
-The broker, its checks, the sealed shares, the start gate and the tests with real party processes are real code. The enclave and its proof are not: a stand-in measures the program file and its settings. No vendor hardware has produced a proof, so nobody has shown that real hardware measures what the stand-in measures ([Limits](limits.md)).
+The broker, its checks, the sealed shares, the start gate and the tests with real party processes are real code. The enclave and its proof are not: a stand-in measures the program file and its settings. No vendor hardware has produced a proof, so nobody has shown that real hardware measures what the stand-in measures ([Limits](limits.md)). The path for AWS Nitro Enclaves with AWS KMS is written and tested against fakes and one real AWS proof document, and it has not run on hardware.
