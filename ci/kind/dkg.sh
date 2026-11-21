@@ -5,6 +5,7 @@
 # because the Job needs a signed file per call and a second Job image for the reads.)
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+trace_failures
 cd "$QV_KIND_ROOT"
 OUT="$WORK/keys.json"; [ -s "$OUT" ] && { echo "DKG done: $(cat "$OUT")"; exit 0; }
 g() { kn "$NS_SIGN" get secret qv-signing-gateway-party-tls -o jsonpath="{.data.$1}" | base64 -d; }
