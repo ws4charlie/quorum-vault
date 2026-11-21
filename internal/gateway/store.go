@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/audit"
@@ -36,24 +37,45 @@ type Guard struct {
 	drainMetrics drainCounts
 }
 
-// OpenGuard applies the schema to pool and returns the guard.
+// OpenGuard applies the schema to pool and returns the guard. The schema's statements are idempotent but take table locks even when they change nothing, so
+// opening a guard that a running gateway or cosigner is deciding on (an operator's tool, a test) can meet a decision's transaction in a deadlock: the database
+// ends one of the two. The schema is applied again then, a few times; a decision that lost is retried by its job.
 func OpenGuard(ctx context.Context, pool *pgxpool.Pool) (*Guard, error) {
+	var err error
+	for try := 0; try < 6; try++ {
+		if err = applyStoreSchema(ctx, pool); err == nil {
+			return &Guard{pool: pool}, nil
+		}
+		var pe *pgconn.PgError
+		if !errors.As(err, &pe) || (pe.Code != "40P01" && pe.Code != "40001") {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(time.Duration(try+1) * 200 * time.Millisecond):
+		}
+	}
+	return nil, err
+}
+
+func applyStoreSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	// Several instances may start at once on a fresh database: CREATE TYPE and friends race and fail. One at a time.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
 	defer tx.Rollback(context.Background())
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('qv-guard-schema'))`); err != nil {
-		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
 	if _, err := tx.Exec(ctx, storeSQL); err != nil {
-		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
-	return &Guard{pool: pool}, nil
+	return nil
 }
 
 // IntentRecord is a signed_intents row.
