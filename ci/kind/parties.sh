@@ -3,6 +3,7 @@
 # Operator work done from the host here (qv-migrate -zone signing, CREATE DATABASE, the DKG through kindctl) is what an operator does with a Job or `kubectl exec` in production.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+trace_failures
 cd "$QV_KIND_ROOT"
 S="$WORK/secrets"
 crt() { kn "$1" get secret "$2" -o jsonpath='{.data.tls\.crt}' | base64 -d; }
@@ -19,6 +20,8 @@ guard_setup() { # ns database role-name: roles from qv-migrate -zone signing (th
   pf_start "$ns" svc/qv-guard-rw 5432
   go run ./cmd/qv-migrate -zone signing -enable-login -dsn "postgres://qv@127.0.0.1:$PF_PORT/qv_signing?sslmode=verify-full&sslrootcert=$d/ca.crt&sslcert=$d/c.crt&sslkey=$d/c.key"
   pf_stop; rm -rf "$d"
+  # the primary pod must be Ready before an exec: the cluster's Ready condition and the pod can differ by a moment on a busy runner
+  kn "$ns" wait pod/qv-guard-1 --for=condition=Ready --timeout=180s > /dev/null
   pg() { kn "$ns" exec qv-guard-1 -c postgres -- psql -U postgres -v ON_ERROR_STOP=1 -Atqc "$1"; }
   [ "$(pg "SELECT 1 FROM pg_database WHERE datname='$db'")" = 1 ] || pg "CREATE DATABASE $db OWNER $owner"
   pg "REVOKE CONNECT ON DATABASE $db FROM PUBLIC"
