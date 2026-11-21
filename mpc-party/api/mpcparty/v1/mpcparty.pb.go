@@ -361,6 +361,7 @@ const (
 	Op_OP_FREEZE_NOTICE Op = 8  // 2-of-3: "I froze this keyset"; the receiver freezes too (Open.reason)
 	Op_OP_ADMIN_SET     Op = 9  // a change of the admin set, forwarded to B and C; every member verifies it itself
 	Op_OP_RECOVERY_KEY  Op = 10 // a change of the recovery-key registry, the same way
+	Op_OP_FREEZE_STATE  Op = 11 // 2-of-3, read only: "is this keyset frozen on your side?" Answer: a FIN with ok and result {1} (frozen) or {0}; nothing is recorded, signed or counted
 )
 
 // Enum value maps for Op.
@@ -377,6 +378,7 @@ var (
 		8:  "OP_FREEZE_NOTICE",
 		9:  "OP_ADMIN_SET",
 		10: "OP_RECOVERY_KEY",
+		11: "OP_FREEZE_STATE",
 	}
 	Op_value = map[string]int32{
 		"OP_UNSPECIFIED":   0,
@@ -390,6 +392,7 @@ var (
 		"OP_FREEZE_NOTICE": 8,
 		"OP_ADMIN_SET":     9,
 		"OP_RECOVERY_KEY":  10,
+		"OP_FREEZE_STATE":  11,
 	}
 )
 
@@ -2832,7 +2835,7 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\x0eFRAME_KIND_ACK\x10\x02\x12\x13\n" +
 	"\x0fFRAME_KIND_DATA\x10\x03\x12\x14\n" +
 	"\x10FRAME_KIND_ABORT\x10\x04\x12\x12\n" +
-	"\x0eFRAME_KIND_FIN\x10\x05*\xbd\x01\n" +
+	"\x0eFRAME_KIND_FIN\x10\x05*\xd2\x01\n" +
 	"\x02Op\x12\x12\n" +
 	"\x0eOP_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -2847,7 +2850,8 @@ const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\x10OP_FREEZE_NOTICE\x10\b\x12\x10\n" +
 	"\fOP_ADMIN_SET\x10\t\x12\x13\n" +
 	"\x0fOP_RECOVERY_KEY\x10\n" +
-	"2\xa4\x05\n" +
+	"\x12\x13\n" +
+	"\x0fOP_FREEZE_STATE\x10\v2\xa4\x05\n" +
 	"\bMpcParty\x12>\n" +
 	"\x03DKG\x12\x1a.qv.mpcparty.v1.DKGRequest\x1a\x1b.qv.mpcparty.v1.DKGResponse\x12A\n" +
 	"\x04Node\x12\x1b.qv.mpcparty.v1.NodeRequest\x1a\x1c.qv.mpcparty.v1.NodeResponse\x12G\n" +

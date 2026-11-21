@@ -80,6 +80,9 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 	if err := s.sealerReady(); err != nil {
 		return reject(pb.ErrorKind_ERROR_KIND_UNAVAILABLE, err.Error())
 	}
+	if open.Op == pb.Op_OP_FREEZE_STATE { // read only: no session slot, no rate token, no failure count, nothing recorded
+		return s.freezeStateFollow(stream, sid, &open, reject)
+	}
 	if !s.slots.acquire() {
 		return reject(pb.ErrorKind_ERROR_KIND_LIMIT, "too many concurrent sessions")
 	}

@@ -351,14 +351,36 @@ func (s *Server) signFollowT(ctx context.Context, stream pb.Peer_SessionServer, 
 	return nil
 }
 
-// probeBound is how long a coordinator waits for the peer's answer to a freeze probe.
+// probeBound is how long a coordinator waits for the peer's answer to a freeze query.
 const probeBound = 2 * time.Second
 
-// probeFreeze asks the peer of a signing session that broke after the protocol started whether it holds the keyset frozen. It
-// opens a signing session that cannot proceed (no expected public key), which the peer answers after its frozen check and
-// before anything else: FROZEN if the keyset is frozen there, any other refusal if not. It returns the peer's FROZEN answer, or
-// nil when the peer is not frozen or did not answer: "peer unreachable" never freezes (a party that can only cut the network must
-// not be able to freeze a keyset), and the state is then unknown, which is logged. Nothing is signed, no cosigner is asked.
+// freezeStateFollow answers OP_FREEZE_STATE: is this 2-of-3 keyset frozen here? Read only. It is answered before the session slot,
+// the rate limit, the cosigner, the replay and audit records and the failure counters, and it records nothing but the one-time
+// session id every session uses. Only a member that may coordinate a signing session of this keyset (A to B or C, B to C) is answered.
+func (s *Server) freezeStateFollow(stream pb.Peer_SessionServer, sid string, open *pb.Open, reject func(pb.ErrorKind, string) error) error {
+	from := s.callerRole(stream.Context())
+	if from == "" || (from != "A" && from != "B") || from == s.cfg.Role || (s.cfg.Role == "B" && from != "A") || open.Initiator != from {
+		return reject(pb.ErrorKind_ERROR_KIND_REFUSED, "freeze state is answered to a coordinating member only")
+	}
+	if !validID(open.KeysetId) {
+		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "invalid keyset id")
+	}
+	if st, err := s.store.State(stream.Context(), open.KeysetId); err != nil || !isTScheme(st.Scheme) {
+		return reject(pb.ErrorKind_ERROR_KIND_INTERNAL, "unknown 2-of-3 keyset on this party")
+	}
+	res := []byte{0}
+	if frozen, _ := s.freeze.Frozen(open.KeysetId); frozen {
+		res = []byte{1}
+	}
+	b, _ := proto.Marshal(&pb.Fin{Ok: true, Result: res})
+	stream.Send(&pb.Frame{SessionId: sid, Kind: pb.FrameKind_FRAME_KIND_FIN, Payload: b})
+	return nil
+}
+
+// probeFreeze asks the peer of a signing session that broke after the protocol started whether it holds the keyset frozen (OP_FREEZE_STATE:
+// a read-only query, not a signing attempt). It returns a FROZEN failure if it does, and nil if the peer says not frozen or did not
+// answer: "peer unreachable" never freezes (a party that can only cut the network must not be able to freeze a keyset), and an
+// unanswered query is logged as an unknown state. A peer that does not know the query refuses it and counts as "not frozen".
 func (s *Server) probeFreeze(ctx context.Context, open *pb.Open, peer string) *Fail {
 	l := s.link(peer)
 	if l == nil {
@@ -371,7 +393,7 @@ func (s *Server) probeFreeze(ctx context.Context, open *pb.Open, peer string) *F
 	pctx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
 	unknown := func(why string) *Fail {
-		s.log.Warn("sign: the session broke and the peer's freeze state is unknown (it did not answer the probe): answering as unavailable",
+		s.log.Warn("sign: the session broke and the peer's freeze state is unknown (it did not answer the freeze query): answering as unavailable",
 			"role", s.cfg.Role, "peer", peer, "keyset_id", open.KeysetId, "job_id", open.JobId, "why", why)
 		return nil
 	}
@@ -383,24 +405,20 @@ func (s *Server) probeFreeze(ctx context.Context, open *pb.Open, peer string) *F
 	sid := newSID()
 	tr := newSessTransport(sid, stream, s.cfg.Limits.MaxFrameBytes, &s.stats)
 	go tr.pump()
-	po := &pb.Open{Op: pb.Op_OP_SIGN, KeysetId: open.KeysetId, Scheme: open.Scheme, Generation: open.Generation, Initiator: s.cfg.Role,
-		Algorithm: open.Algorithm, Digest: open.Digest, JobId: "freeze-probe-" + sid[:8], KeyId: open.KeyId}
-	b, _ := proto.Marshal(po)
+	b, _ := proto.Marshal(&pb.Open{Op: pb.Op_OP_FREEZE_STATE, KeysetId: open.KeysetId, Scheme: open.Scheme, Initiator: s.cfg.Role})
 	if err := stream.Send(&pb.Frame{SessionId: sid, Kind: pb.FrameKind_FRAME_KIND_OPEN, Payload: b}); err != nil {
 		return unknown(err.Error())
 	}
-	err = tr.waitAck(pctx)
-	if err == nil {
-		tr.abortPeer("freeze probe")
-		return nil // the peer would run the session: it is not frozen
+	fin, err := tr.waitFin(pctx)
+	if err != nil {
+		return unknown(err.Error())
 	}
-	var f *Fail
-	if errors.As(err, &f) && f.Peer {
-		if f.Kind == pb.ErrorKind_ERROR_KIND_FROZEN {
-			f.Msg = "party " + peer + " holds the keyset frozen (learned after the session broke): " + f.Msg
-			return f
-		}
-		return nil // answered, not frozen
+	if !fin.GetOk() {
+		return nil // answered with a refusal (an older party, or not a coordinating member): not a "frozen"
 	}
-	return unknown(err.Error())
+	if len(fin.Result) == 1 && fin.Result[0] == 1 {
+		return failf(pb.ErrorKind_ERROR_KIND_FROZEN, codes.FailedPrecondition, "sign",
+			"party %s holds the keyset frozen (learned after the signing session broke)", peer).withPeer()
+	}
+	return nil
 }

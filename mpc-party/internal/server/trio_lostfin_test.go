@@ -53,10 +53,19 @@ func tamperUntilLost(t *testing.T, tr *trio, job string, setup func(px *tamperPr
 // B finds tampering and tells A in a FIN that never arrives. A must not answer "retryable" while it is the one member that does not
 // know: it asks B, freezes, and answers FROZEN. All three are frozen.
 func TestTrioLostVerdictFreezesTheCoordinator(t *testing.T) {
-	tr := startTrio(t, trioOpts{proxyAB: true})
+	bAuth := &countAuth{}
+	tr := startTrio(t, trioOpts{proxyAB: true, auth: map[string]server.Authorizer{"B": bAuth}})
 	tr.dkg(t, "k")
-	err := tamperUntilLost(t, tr, "lost", func(px *tamperProxy) { px.dropFinBA.Store(true) })
+	err := tamperUntilLost(t, tr, "lost", func(px *tamperProxy) { px.dropFinBA.Store(true); bAuth.n.Store(0) })
 	wantKind(t, err, codes.FailedPrecondition, pb.ErrorKind_ERROR_KIND_FROZEN)
+	// the freeze query is not a signing attempt: B's cosigner saw the one real session only, and the link carried the signing
+	// session plus the query
+	if n := bAuth.n.Load(); n != 1 {
+		t.Fatalf("B's cosigner was asked %d times, want 1 (the query must not reach it)", n)
+	}
+	if n := tr.Proxy["AB"].sessions.Load(); n != 2 {
+		t.Fatalf("the A-B link carried %d sessions, want 2 (sign and one freeze query)", n)
+	}
 	for _, role := range []string{"A", "B", "C"} {
 		tr.waitFrozen(t, role, "k", true)
 	}
