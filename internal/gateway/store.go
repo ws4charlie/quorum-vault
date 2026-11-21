@@ -247,6 +247,14 @@ func (t *GuardTx) SignedDrainCountFrom(ctx context.Context, sender string, pendi
 	return n, err
 }
 
+// SignedCancelCountFrom counts the cancels reserved or signed from sender in all (the bound of a compromised generation's cancels).
+func (t *GuardTx) SignedCancelCountFrom(ctx context.Context, sender string) (int, error) {
+	var n int
+	err := t.tx.QueryRow(ctx, `SELECT count(*) FROM signed_intents i WHERE i.chain=$1 AND i.kind='cancel' AND i.sender=$2
+		AND EXISTS (SELECT 1 FROM signed_digests d WHERE d.intent_id = i.intent_id)`, t.chain, sender).Scan(&n)
+	return n, err
+}
+
 // CountSince counts intents of kind on this chain first signed at or after since.
 func (t *GuardTx) CountSince(ctx context.Context, kind string, since time.Time) (int, error) {
 	var n int

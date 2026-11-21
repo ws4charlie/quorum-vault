@@ -8,6 +8,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
@@ -47,6 +48,10 @@ type TxInfo struct {
 	// output pays (0: it pays no hot shard of the partition). DepositGens (Solana) is the generation of each deposit key a sweep spends.
 	Gen, DestGen uint32
 	DepositGens  []uint32
+	// EVM only: what the transaction itself says (from the payload the digest was verified against), for the rule of a compromised generation's cancel.
+	To      string
+	Value   *big.Int
+	DataLen int
 }
 
 // ParentFacts is what the guard remembers about a signed transaction's change: its size and fee, and which output is the change and what it holds.
@@ -194,8 +199,16 @@ func (c *EVMCodec) Decode(u chain.UnsignedTx) (TxInfo, error) {
 		return TxInfo{}, fmt.Errorf("gateway: decode evm payload: %w", err)
 	}
 	sender := common.HexToAddress(p.From).Hex()
+	value, ok3 := new(big.Int).SetString(p.Value, 10)
+	if !ok3 {
+		return TxInfo{}, fmt.Errorf("gateway: decode evm payload: bad value")
+	}
+	data, err := hexutil.Decode(p.Data)
+	if err != nil && p.Data != "" && p.Data != "0x" {
+		return TxInfo{}, fmt.Errorf("gateway: decode evm payload: bad data")
+	}
 	return TxInfo{Sender: sender, Destination: dest.Hex(), Claims: []string{fmt.Sprintf("%s#%d", sender, p.Nonce)},
-		Fees: []*big.Int{feeCap, tip}}, nil
+		Fees: []*big.Int{feeCap, tip}, To: common.HexToAddress(p.To).Hex(), Value: value, DataLen: len(data)}, nil
 }
 
 // Canonical implements ChainCodec: the EIP-55 checksum form.

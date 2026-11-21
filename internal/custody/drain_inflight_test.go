@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ws4charlie/quorum-vault/internal/chain"
+
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -265,4 +267,50 @@ func TestSignedCancelKeepsItsNonce(t *testing.T) {
 	if kind != "sweep" {
 		t.Fatalf("a nonce with a signed cancel was handed over: %s", kind)
 	}
+}
+
+// A refusal by a cosigner AFTER the gateway reserved ("signer_refused") leaves the zone's claim on the nonce: a drain there is refused for ever, so the core
+// does not make a hole of it. It asks for the cancel (which the zone signs for a compromised generation), with a not_after so the zone can wait for the
+// successor to be active. A refusal by a rule (nothing claimed) still becomes a hole.
+func TestClaimedRefusalGetsACancelNotAHole(t *testing.T) {
+	ctx := context.Background()
+	s, _, put := compromisedWorld(t)
+	put("sweep", "sw-claimed", 3, "allocated", "own=rejected")
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET reject_reason='signer_refused: authorizer on B refused: keyset_state: compromised' WHERE id='sweep:sw-claimed:a1'`)
+	put("sweep", "sw-rule", 4, "allocated", "own=rejected")
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET reject_reason='keyset_state: compromised' WHERE id='sweep:sw-rule:a1'`)
+	if mv := plan(t, s); len(mv) != 0 {
+		t.Fatalf("the drain started under a claimed nonce: %+v", mv)
+	}
+	if _, why := drainState(t, s); !strings.Contains(why, "sw-claimed at nonce 3") || strings.Contains(why, "sw-rule") {
+		t.Fatalf("%q", why)
+	}
+	var kind string
+	s.Pool.QueryRow(ctx, `SELECT owner_kind FROM evm_nonce_allocations WHERE nonce=4`).Scan(&kind)
+	if kind != "hole" {
+		t.Fatalf("a refusal by a rule is a hole, got %s", kind)
+	}
+	o := Owner{Kind: "sweep", ID: "sw-claimed", PartitionID: s.Cfg.PartitionKey("ETH", 0).String()}
+	s.Chain = &evmCancelChain{drainChain: s.Chain.(*drainChain)}
+	id, err := s.EnqueueCancel(ctx, o)
+	if err != nil || id == "" {
+		t.Fatalf("the cancel of a claimed nonce was not asked for: %q %v", id, err)
+	}
+	var intent []byte
+	s.Pool.QueryRow(ctx, `SELECT intent FROM sign_jobs WHERE id=$1`, id).Scan(&intent)
+	var in signjob.Intent
+	json.Unmarshal(intent, &in)
+	if in.NotAfter <= s.Now().Unix() {
+		t.Fatalf("the cancel intent has no not_after: %+v", in)
+	}
+}
+
+// evmCancelChain builds a cancel as the EVM cell does (no Releaser: the nonce is cancelled, never released).
+type evmCancelChain struct{ *drainChain }
+
+func (c *evmCancelChain) BuildCancel(context.Context, pgx.Tx, string, string) (chain.UnsignedTx, error) {
+	return chain.UnsignedTx{Chain: testChain, Digest: []byte{9, 9}, Payload: []byte(`{}`), KeyRef: chain.KeyRef{Path: "k"}}, nil
+}
+func (c *evmCancelChain) Reservation(context.Context, chain.Querier, string, string) (chain.Reservation, error) {
+	return chain.Reservation{Open: true, Account: "0xold"}, nil
 }

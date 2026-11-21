@@ -64,6 +64,14 @@ func (s *Service) handOverUnsigned(ctx context.Context, tx pgx.Tx, o Owner) (boo
 	}
 	// A signature of the owner's transfer or of its cancel may exist: then the nonce is not free (the cancel can still be broadcast, and two valid
 	// signatures for one nonce must never exist). Both tracks are locked here, so a gateway cannot claim a queued job of either meanwhile.
+	// The zone's reason says whether it holds a claim on the nonce. Every rule runs before the gateway reserves anything, so a refusal by a rule claims nothing
+	// (the nonce is a hole the drain fills). A refusal by a cosigner after the gateway reserved ("signer_refused") leaves the gateway's claim in place, and a drain
+	// at that nonce is refused for ever: the zone signs the cancel of a compromised generation for exactly this case, so the cancel is asked for, not a hole made.
+	var claimed bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sign_jobs WHERE starts_with(id, $1) AND status='rejected' AND reject_reason LIKE 'signer_refused%')`,
+		string(OwnerTrack(o))+":").Scan(&claimed); err != nil || claimed {
+		return false, err
+	}
 	pending, may, err := jobStates(ctx, tx, o)
 	if err != nil || may {
 		return false, err

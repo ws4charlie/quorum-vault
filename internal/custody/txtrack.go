@@ -318,6 +318,11 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 		}
 		intent := signjob.Intent{Kind: "cancel", ID: string(t), PartitionID: o.PartitionID, Chain: s.Cfg.Chain,
 			Asset: s.Cfg.Native, To: res.Account, Amount: "0"}
+		if s.evmFamily() {
+			// The zone waits for a compromised generation's successor to be active only until the intent's not_after (a cancel signed after the mark needs the
+			// drain to be possible: gateway keysets.go, compromisedCancel). An hour is longer than the operators' signing of the activation.
+			intent.NotAfter = s.Now().Add(time.Hour).Unix()
+		}
 		ib, err := json.Marshal(intent)
 		if err != nil {
 			return err
