@@ -11,7 +11,7 @@ import (
 var feeCapsRefusals atomic.Int64
 
 // WriteFeeCapsMetrics writes the counter in the Prometheus text format; it is 0 until the first refusal, so an alert on its increase has a series
-// from the start. The worker's metrics endpoint serves it (the Metrics-B task wires it).
+// from the start. The worker's metrics endpoint serves it (cmd/qv-worker: workermetrics.Registry.AddWriter); monitoring/fee-caps.rules.yml alerts on it.
 func WriteFeeCapsMetrics(w io.Writer) {
 	fmt.Fprintln(w, "# HELP qv_btc_fee_caps_zone_refusals_total Withdrawals the signing zone refused because the core built them under other fee caps than the zone's, since process start.")
 	fmt.Fprintln(w, "# TYPE qv_btc_fee_caps_zone_refusals_total counter")

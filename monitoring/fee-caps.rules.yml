@@ -1,0 +1,26 @@
+# Bitcoin fee caps: the zone refused a withdrawal the core built (docs/runbooks/btc-fee-caps.md). The core reads its own fee-cap rows as a hint and the zone's own record is the rule,
+# so a refusal means the two are on different fee caps (a change applied to one side only, a forged or stale core row). Nothing was signed; the withdrawal waits, and after
+# one hour (FeeCapsHold) is parked with the zone's reason.
+#
+#   qv_btc_fee_caps_zone_refusals_total   counter since process start, published by qv-worker on its metrics port (internal/custody/feecaps_metrics.go, 0 from start).
+#   qv_btc_fee_caps_diverged              1 when the databases are on different sequence numbers: written by `qv-fee-caps metrics` to a node-exporter textfile (a timer in the
+#                                         signing tools image), per the runbook. The rule below reads it as a plain gauge.
+# The counter is published at 0 from process start, but Prometheus may scrape a new series first after a refusal (a new pod), and then increase() has nothing to subtract: the
+# first-event form of monitoring/drain.rules.yml (increase() for a series that existed a window ago, the value itself for one that did not). Limit: a scrape gap of over 5 minutes
+# makes a series look new once and re-reports its old total for one window.
+groups:
+  - name: qv-fee-caps
+    rules:
+      - alert: QVBtcFeeCapsZoneRefused
+        expr: sum by (job) ((increase(qv_btc_fee_caps_zone_refusals_total[15m]) unless (qv_btc_fee_caps_zone_refusals_total unless qv_btc_fee_caps_zone_refusals_total offset 15m)) or (qv_btc_fee_caps_zone_refusals_total unless qv_btc_fee_caps_zone_refusals_total offset 15m)) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "The signing zone refused a Bitcoin withdrawal built under other fee caps than its own"
+          description: "The worker log line 'ALERT btc fee caps' has the zone's reason. The core and the zone are on different fee caps: run 'qv-fee-caps show' (docs/runbooks/btc-fee-caps.md). After one hour the withdrawal is parked with the zone's reason."
+      - alert: QVBtcFeeCapsDiverged
+        expr: max(qv_btc_fee_caps_diverged) == 1
+        for: 1h
+        labels: {severity: page}
+        annotations:
+          summary: "The Bitcoin fee-cap databases are on different sequence numbers for an hour"
+          description: "A fee-cap change reached some databases and not others: withdrawals wait or are refused. Apply the change to every database (qv-fee-caps show, then apply; docs/runbooks/btc-fee-caps.md)."
