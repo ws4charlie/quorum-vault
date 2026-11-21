@@ -30,7 +30,7 @@ guard_setup "$NS_B" qv_cosigner_guard qv_cosigner_guard
 guard_setup "$NS_C" qv_cosigner_guard qv_cosigner_guard
 
 log "parties"
-ADMIN_PUB="$(go run ./ci/kind/tools/kindctl adminkey -seed "$S/admin.seed")"
+ADMIN_KEYS="$(go run ./ci/kind/tools/kindctl adminkey -seed "$S/admin.seed" | sed 's/.*/"&"/' | paste -sd, -)"  # three admin keys, two must sign (adminThreshold)
 for n in $NS_SIGN $NS_B $NS_C; do
   kn "$n" create secret generic qv-party-hsm-pin --from-literal=pin="$(rndpin hsm-pin-party-$n)" --dry-run=client -o yaml | k apply -f - >/dev/null
   kn "$n" create secret generic qv-party-hsm-so-pin --from-literal=so-pin="$(rndpin hsm-so-party-$n)" --dry-run=client -o yaml | k apply -f - >/dev/null
@@ -40,7 +40,8 @@ GW="$(pin $NS_SIGN qv-signing-gateway-party-tls)"
 addr_b="qv-party-b-peer.$NS_B.svc:7003"; addr_c="qv-party-c-peer.$NS_C.svc:7003"
 GWSEL="{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: $NS_SIGN } }, podSelector: { matchLabels: { app.kubernetes.io/component: gateway } } }"
 common() { cat <<Y
-adminKeys: ["$ADMIN_PUB"]
+adminKeys: [$ADMIN_KEYS]
+adminThreshold: 2
 hsm: { pinSecret: qv-party-hsm-pin, softhsm: { enabled: true, soPinSecret: qv-party-hsm-so-pin } }
 Y
 }

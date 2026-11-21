@@ -51,7 +51,8 @@ func (c *BTCCodec) overlay(v *KeysetView, cc *ChainConfig) (*BTCCodec, error) {
 	return &BTCCodec{Verifier: nv}, nil
 }
 
-// overlay is the Solana codec's.
+// overlay is the Solana codec's: it derives under every generation of the deposit tree the view knows, and accepts the fee payer of a hot job to be any
+// generation of the partition's shard (K4).
 func (c *SOLCodec) overlay(v *KeysetView, cc *ChainConfig) (*SOLCodec, error) {
 	var ns []sol.DepositNode
 	for g, e := range v.tree(cc.Name) {
@@ -64,12 +65,34 @@ func (c *SOLCodec) overlay(v *KeysetView, cc *ChainConfig) (*SOLCodec, error) {
 		}
 		ns = append(ns, sol.DepositNode{Gen: uint32(g), Node: n})
 	}
-	if len(ns) == 0 {
+	var hs []sol.HotGeneration
+	later := false
+	for _, shard := range v.Shards() {
+		if shard.IsDepositTree() {
+			continue
+		}
+		for _, e := range v.Generations(shard) {
+			if e.Chain != cc.Name {
+				continue
+			}
+			hs = append(hs, sol.HotGeneration{Shard: shard, Gen: uint32(e.Generation), Address: e.Address, Active: e.State == partition.StateActive})
+			later = later || e.Generation > 1
+		}
+	}
+	if len(ns) == 0 && !later {
 		return c, nil
 	}
-	nv, err := c.Verifier.WithGenerations(ns)
-	if err != nil {
-		return nil, err
+	nv := c.Verifier
+	var err error
+	if len(ns) > 0 {
+		if nv, err = nv.WithGenerations(ns); err != nil {
+			return nil, err
+		}
+	}
+	if later {
+		if nv, err = nv.WithHotGenerations(hs); err != nil {
+			return nil, err
+		}
 	}
 	return &SOLCodec{Verifier: nv}, nil
 }
@@ -198,11 +221,57 @@ func (d *Decider) btcGenRules(ctx context.Context, gt *GuardTx, kv *KeysetView, 
 	return reject(ReasonKeyset, "%s is %s: it signs nothing", label, e.State)
 }
 
-// solGenRules is the state rule of one Solana job: a sweep may spend the deposit keys of generations that are active, draining or compromised.
-func (d *Decider) solGenRules(kv *KeysetView, cc *ChainConfig, i signjob.Intent, info TxInfo) error {
-	if i.Kind != "sweep" {
+// solGenRules is the state rule of one Solana job: the deposit keys of a sweep (generations of the deposit tree that are active, draining or compromised),
+// and the generation of the hot shard that pays (K4).
+//
+//	Solana hot shard   the fee payer of a job is a generation of the partition's shard; what its state allows:
+//	  active       everything a hot shard signs
+//	  candidate    nothing (its nonce pool is created once it is active, from the SOL the first drain gives it)
+//	  draining     a drain to its successor, the closing of its nonce accounts to itself (nonce-close), the cancel and the replacement of work it already signed
+//	  compromised  a drain to its successor, nothing else
+//	  retired      nothing
+func (d *Decider) solGenRules(ctx context.Context, gt *GuardTx, kv *KeysetView, cc *ChainConfig, i signjob.Intent, info TxInfo, amount *big.Int, known bool, now time.Time) error {
+	if kv == nil {
+		if i.Kind == signjob.KindDrain {
+			return reject(ReasonKeyset, "chain %q has no keysets: a drain is for key replacements", i.Chain)
+		}
 		return nil
 	}
+	if i.Kind == "sweep" {
+		if err := d.solDepositRules(kv, cc, info); err != nil {
+			return err
+		}
+	}
+	shard, managed := kv.shardOf(i.PartitionID)
+	if !managed {
+		if i.Kind == signjob.KindDrain {
+			return reject(ReasonKeyset, "partition %q is not a hot shard with keysets: nothing to drain", i.PartitionID)
+		}
+		return nil
+	}
+	if i.Kind == signjob.KindDrain {
+		return d.drainRule(ctx, gt, kv, cc, shard, i, info, amount, known, now)
+	}
+	e := kv.byAddress(shard, info.Sender)
+	if e == nil {
+		return reject(ReasonKeyset, "%s is no generation of %s", info.Sender, shard)
+	}
+	switch e.State {
+	case partition.StateActive:
+		return nil
+	case partition.StateCandidate:
+		return reject(ReasonKeyset, "generation %d of %s is a candidate: it signs nothing until it is activated", e.Generation, shard)
+	case partition.StateDraining:
+		if i.Kind == "cancel" || i.Kind == sol.KindNonceClose || known {
+			return nil // finishing work already signed, or closing its own nonce accounts
+		}
+		return reject(ReasonKeyset, "generation %d of %s is draining: it signs only a drain to its successor, the closing of its nonce accounts, and the replacement or cancel of work already signed", e.Generation, shard)
+	}
+	return reject(ReasonKeyset, "generation %d of %s is %s: it signs nothing", e.Generation, shard, e.State)
+}
+
+// solDepositRules: a sweep may spend the deposit keys of generations that are active, draining or compromised.
+func (d *Decider) solDepositRules(kv *KeysetView, cc *ChainConfig, info TxInfo) error {
 	tree := kv.tree(cc.Name)
 	if tree == nil {
 		return nil

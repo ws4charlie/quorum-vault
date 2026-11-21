@@ -7,7 +7,6 @@ import (
 	"time"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
-	"github.com/ws4charlie/quorum-vault/mpc-party/internal/testenv"
 )
 
 // The crash matrix: kill a party (os.Exit(86) at a failpoint compiled only into -tags devauth builds, no cleanup, like a
@@ -36,7 +35,7 @@ var crashSteps = []crashStep{
 
 func (cl *cluster) health(t *testing.T) (a, b *pb.HealthResponse) {
 	t.Helper()
-	bc, _ := testenv.Dial(t, cl.callerB, cl.env.CertCaller, cl.env.CertB.Pin)
+	bc, _ := cl.env.DialAs(t, cl.callerB, cl.env.CertCaller, cl.env.CertB.Pin)
 	ha, err := cl.client.Health(ctx(t, 5*time.Second), &pb.HealthRequest{})
 	if err != nil {
 		return nil, nil

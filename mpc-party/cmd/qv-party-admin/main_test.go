@@ -154,3 +154,152 @@ func TestCompareOnlyTheTargetKeysetAndUnfreezeIgnoresTheFlag(t *testing.T) {
 		t.Fatal("unfreeze ignores a generation mismatch")
 	}
 }
+
+// The co-signing flow: one operator makes the request, two of three admins sign it, anyone verifies it against the party configuration, and
+// every refusal that needs no party happens before one is contacted.
+func TestCoSigningFlow(t *testing.T) {
+	dir := t.TempDir()
+	k1, p1 := keyFile(t)
+	k2, p2 := keyFile(t)
+	_, p3 := keyFile(t)
+	keys := []string{"-admin-key", hex.EncodeToString(p1), "-admin-key", hex.EncodeToString(p2), "-admin-key", hex.EncodeToString(p3)}
+	f := filepath.Join(dir, "req.json")
+	if code, msg := runCLI("request", "-op", "dkg", "-keyset", "ks", "-scheme", "ecdsa-2of3", "-domain", "prod", "-out", f); code != 0 {
+		t.Fatalf("request: %s", msg)
+	}
+	verify := func(extra ...string) (int, string) {
+		return runCLI(append([]string{"verify", "-in", f, "-domain", "prod"}, append(keys, extra...)...)...)
+	}
+	if code, msg := verify("-threshold", "2"); code == 0 || !strings.Contains(msg, "0 signatures") && !strings.Contains(msg, "no signatures") && !strings.Contains(msg, "0 signature(s), 2 needed") {
+		t.Fatalf("an unsigned request verified: %s", msg)
+	}
+	if code, msg := runCLI("sign", "-key", k1, "-in", f); code != 0 {
+		t.Fatalf("sign 1: %s", msg)
+	}
+	if code, msg := runCLI("sign", "-key", k1, "-in", f); code == 0 || !strings.Contains(msg, "already signed") {
+		t.Fatalf("the same admin signed twice: %d %s", code, msg)
+	}
+	if code, msg := verify("-threshold", "2"); code == 0 || !strings.Contains(msg, "1 signature(s), 2 needed") {
+		t.Fatalf("one of two verified: %s", msg)
+	}
+	if code, msg := verify("-threshold", "1"); code != 0 {
+		t.Fatalf("one of one refused: %s", msg)
+	}
+	// signing does not change what is signed
+	before, _ := readReq(f)
+	if code, msg := runCLI("sign", "-key", k2, "-in", f); code != 0 {
+		t.Fatalf("sign 2: %s", msg)
+	}
+	after, _ := readReq(f)
+	if before.BodyHash != after.BodyHash || before.Nonce != after.Nonce || before.IssuedUnix != after.IssuedUnix || len(after.Signatures) != 2 {
+		t.Fatal("signing changed the request")
+	}
+	if code, msg := verify("-threshold", "2"); code != 0 || !strings.Contains(msg, "OK") {
+		t.Fatalf("two of three refused: %s", msg)
+	}
+	if code, msg := runCLI("verify", "-in", f, "-admin-key", hex.EncodeToString(p1), "-admin-key", hex.EncodeToString(p3), "-threshold", "2", "-domain", "prod"); code == 0 || !strings.Contains(msg, "not a configured admin key") {
+		t.Fatalf("a signer that the party does not know: %s", msg)
+	}
+	if code, msg := runCLI("verify", "-in", f, "-domain", "staging", "-threshold", "2", "-admin-key", hex.EncodeToString(p1), "-admin-key", hex.EncodeToString(p2)); code == 0 || !strings.Contains(msg, "domain") {
+		t.Fatalf("another domain: %s", msg)
+	}
+	// an edited file is caught
+	raw, _ := os.ReadFile(f)
+	edited := filepath.Join(dir, "edited.json")
+	os.WriteFile(edited, []byte(strings.Replace(string(raw), "SCHEME_ECDSA_2OF3", "SCHEME_ED25519_2OF3", 1)), 0o600)
+	if code, msg := runCLI(append([]string{"verify", "-in", edited, "-domain", "prod", "-threshold", "2"}, keys...)...); code == 0 {
+		t.Fatalf("an edited request verified: %s", msg)
+	}
+	// a signer cannot sign a file that has expired
+	old := filepath.Join(dir, "old.json")
+	if code, msg := runCLI("request", "-op", "refresh", "-keyset", "ks", "-domain", "prod", "-valid-for", "1s", "-out", old); code != 0 {
+		t.Fatal(msg)
+	}
+	if code, msg := runCLI("sign", "-key", k1, "-in", old); code != 0 {
+		t.Fatal(msg)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if code, msg := runCLI("sign", "-key", k2, "-in", old); code == 0 || !strings.Contains(msg, "expired") {
+		t.Fatalf("signing an expired request: %s", msg)
+	}
+
+	// send: every refusal below happens before any network call (no certificate, nobody listens)
+	net := []string{"-party", "A=127.0.0.1:1@" + strings.Repeat("ab", 32), "-cert", "/nonexistent.crt", "-key", "/nonexistent.key"}
+	pol := append([]string{"-domain", "prod"}, keys...)
+	one := filepath.Join(dir, "one.json")
+	runCLI("request", "-op", "dkg", "-keyset", "ks", "-scheme", "ecdsa-2of3", "-domain", "prod", "-out", one)
+	runCLI("sign", "-key", k1, "-in", one)
+	for name, c := range map[string]struct {
+		args []string
+		want string
+	}{
+		"too few signatures":  {append(append([]string{"dkg", "-auth", one, "-threshold", "2"}, pol...), net...), "1 signature(s), 2 needed"},
+		"no policy given":     {append([]string{"dkg", "-auth", f}, net...), "say what the parties need"},
+		"wrong operation":     {append(append([]string{"refresh", "-auth", f, "-threshold", "2"}, pol...), net...), "not for refresh"},
+		"other keyset":        {append(append([]string{"dkg", "-auth", f, "-threshold", "2", "-keyset", "zz"}, pol...), net...), "nothing was sent"},
+		"scheme differs":      {append(append([]string{"dkg", "-auth", f, "-threshold", "2", "-scheme", "ed25519-2of3"}, pol...), net...), "the file decides"},
+		"keys and config mix": {append(append([]string{"dkg", "-auth", f, "-threshold", "2", "-config", "x.json"}, pol...), net...), "not both"},
+		"expired file":        {append(append([]string{"refresh", "-auth", old, "-threshold", "1"}, pol...), net...), "expired"},
+	} {
+		if code, msg := runCLI(c.args...); code == 0 || !strings.Contains(msg, c.want) {
+			t.Errorf("%s: exit %d, %q (want %q)", name, code, msg, c.want)
+		}
+	}
+}
+
+func TestVerifyReadsPartyConfigs(t *testing.T) {
+	dir := t.TempDir()
+	k1, p1 := keyFile(t)
+	k2, p2 := keyFile(t)
+	cfg := func(name string, threshold int, domain string) string {
+		p := filepath.Join(dir, name)
+		b := `{"admin_keys":["` + hex.EncodeToString(p1) + `","` + hex.EncodeToString(p2) + `"],"admin_threshold":` + string(rune('0'+threshold)) + `,"admin_domain":"` + domain + `"}`
+		os.WriteFile(p, []byte(b), 0o600)
+		return p
+	}
+	f := filepath.Join(dir, "r.json")
+	runCLI("request", "-op", "unfreeze", "-keyset", "ks", "-out", f)
+	runCLI("sign", "-key", k1, "-in", f)
+	if code, msg := runCLI("verify", "-in", f, "-config", cfg("a.json", 2, "")); code == 0 || !strings.Contains(msg, "1 signature(s), 2 needed") {
+		t.Fatalf("one of two: %s", msg)
+	}
+	runCLI("sign", "-key", k2, "-in", f)
+	if code, msg := runCLI("verify", "-in", f, "-config", cfg("a.json", 2, ""), "-config", cfg("b.json", 2, "")); code != 0 {
+		t.Fatalf("two of two on two parties: %s", msg)
+	}
+	// the strictest party decides: a party still configured for a domain refuses
+	if code, msg := runCLI("verify", "-in", f, "-config", cfg("a.json", 2, ""), "-config", cfg("c.json", 2, "prod")); code == 0 || !strings.Contains(msg, "a party 2 of 2 would refuse") {
+		t.Fatalf("one party of two configured differently: %s", msg)
+	}
+}
+
+func readReq(path string) (admin.Request, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return admin.Request{}, err
+	}
+	return admin.ParseRequest(raw)
+}
+
+func TestPubkeyPrintsWhatTheKeyFileHolds(t *testing.T) {
+	kf, pub := keyFile(t)
+	code, msg := runCLI("pubkey", "-key", kf)
+	if code != 0 || strings.TrimSpace(msg) != hex.EncodeToString(pub) {
+		t.Fatalf("%d %q", code, msg)
+	}
+}
+
+// A threshold above what one authorization can carry is refused before anything is signed or sent (the parties refuse such a config at start-up).
+func TestPolicyRefusesAThresholdNoRequestCouldReach(t *testing.T) {
+	var keys []string
+	for range admin.MaxSignatures + 1 {
+		pub, _, _ := ed25519.GenerateKey(rand.Reader)
+		keys = append(keys, hex.EncodeToString(pub))
+	}
+	if _, err := mkPolicy(keys, admin.MaxSignatures+1, "", 0, 0); err == nil || !strings.Contains(err.Error(), "signatures one authorization may carry") {
+		t.Errorf("threshold %d: %v", admin.MaxSignatures+1, err)
+	}
+	if _, err := mkPolicy(keys, admin.MaxSignatures, "", 0, 0); err != nil {
+		t.Errorf("threshold %d with %d keys is reachable: %v", admin.MaxSignatures, len(keys), err)
+	}
+}
