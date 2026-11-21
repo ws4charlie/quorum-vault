@@ -328,13 +328,29 @@ func (a *API) intent(w http.ResponseWriter, r *http.Request) {
 		"approvals_required": need})
 }
 
+// reconcileResponse is the reconcile report with, beside it, the credited funds that sit on deposit addresses and why (UnsweptDeposits): an operator who sees
+// credited funds at deposit addresses reads here whether they wait for a cheaper fee or something is stuck. They are not a difference, and the checks above
+// do not depend on them.
+type reconcileResponse struct {
+	Report
+	Unswept      *UnsweptReport `json:"unswept,omitempty"`
+	UnsweptError string         `json:"unswept_error,omitempty"`
+}
+
 func (a *API) reconcile(w http.ResponseWriter, r *http.Request) {
 	rep, err := a.svc.Reconcile(r.Context())
 	if err != nil {
 		a.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, rep)
+	out := reconcileResponse{Report: rep}
+	if u, uerr := a.svc.UnsweptDeposits(r.Context()); uerr != nil {
+		a.log.Error("unswept deposits could not be read", "error", uerr.Error())
+		out.UnsweptError = "could not be read"
+	} else {
+		out.Unswept = &u
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // rejecter is implemented by orchestrators that can deliver a human rejection.

@@ -187,6 +187,9 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 		amt := un[k]
 		value := s.valueWei(asset, amt)
 		if value.Cmp(c.MinSweepWei) < 0 {
+			if err := s.holdSweep(ctx, addr, asset, amt, value, nil, c.MinSweepWei); err != nil {
+				return created, err
+			}
 			continue
 		}
 		var open bool
@@ -195,6 +198,9 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 			return created, err
 		}
 		if open {
+			if err := s.releaseHold(ctx, addr, asset); err != nil {
+				return created, err
+			}
 			continue
 		}
 		if backoff, err := s.sweepBackoff(ctx, addr, asset); err != nil {
@@ -233,7 +239,14 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 			need = c.MinSweepWei
 		}
 		if value.Cmp(need) < 0 {
+			// Not worth it at this fee: left where it is, on the record. The next pass looks again, so it clears when the fee falls or more arrives.
+			if err := s.holdSweep(ctx, addr, asset, amt, value, fee, need); err != nil {
+				return created, err
+			}
 			continue
+		}
+		if err := s.releaseHold(ctx, addr, asset); err != nil {
+			return created, err
 		}
 		id := "sw-" + uuid.NewString()
 		tag, err := s.Pool.Exec(ctx, `INSERT INTO sweeps (id, chain, asset, from_address, to_partition_id, amount, status)
@@ -244,6 +257,9 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 		if tag.RowsAffected() == 1 {
 			created = append(created, Sweep{ID: id, Asset: asset, From: addr, PartitionID: c.SinkPartition(asset), Amount: amt, Status: "planned"})
 		}
+	}
+	if err := s.pruneHolds(ctx, un); err != nil {
+		return created, err
 	}
 	return created, nil
 }
