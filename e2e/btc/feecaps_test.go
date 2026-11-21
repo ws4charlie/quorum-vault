@@ -270,9 +270,10 @@ func TestFeeCapsRefusedChangesLeaveEverythingAsItWas(t *testing.T) {
 func (s *system) revokeApprover(name string, seq int) {
 	s.t.Helper()
 	var files []string
+	at := fmt.Sprint(time.Now().Unix()) // one signing time for both operators: two separate runs can fall in different seconds
 	for _, op := range []string{"op1", "op2"} {
 		out := filepath.Join(s.dir, fmt.Sprintf("revoke-%s-%s.json", name, op))
-		if o, err := s.tool("qv-approvers", "sign", "-operator", op, "-key", s.keyFile(op, s.ops[op]), "-seq", fmt.Sprint(seq), "-action", "revoke", "-name", name, "-out", out); err != nil {
+		if o, err := s.tool("qv-approvers", "sign", "-operator", op, "-key", s.keyFile(op, s.ops[op]), "-seq", fmt.Sprint(seq), "-signed-at", at, "-action", "revoke", "-name", name, "-out", out); err != nil {
 			s.t.Fatalf("qv-approvers sign: %v\n%s", err, o)
 		}
 		files = append(files, out)
@@ -395,9 +396,10 @@ func TestFeeCapsEnrolledApproverCounts(t *testing.T) {
 	s := feeCapsSystem(t, opts{feeCaps: &feeCapsOpts{operators: 3}})
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	var files []string
+	at := fmt.Sprint(time.Now().Unix()) // one signing time for both operators: two separate runs can fall in different seconds
 	for _, op := range []string{"op1", "op2"} {
 		out := filepath.Join(s.dir, "enrol-dave-"+op+".json")
-		if o, err := s.tool("qv-approvers", "sign", "-operator", op, "-key", s.keyFile(op, s.ops[op]), "-seq", "1", "-action", "enrol", "-name", "dave",
+		if o, err := s.tool("qv-approvers", "sign", "-operator", op, "-key", s.keyFile(op, s.ops[op]), "-seq", "1", "-signed-at", at, "-action", "enrol", "-name", "dave",
 			"-public-key", hex.EncodeToString(pub), "-out", out); err != nil {
 			t.Fatalf("qv-approvers sign: %v\n%s", err, o)
 		}
