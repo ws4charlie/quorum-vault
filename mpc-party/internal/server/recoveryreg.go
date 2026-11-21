@@ -197,6 +197,9 @@ func (r *recoveryStore) apply(b *pb.RecoveryKeyRequest, verify func() ([][]byte,
 		}
 	}
 	sort.Strings(next.Retired)
+	if len(next.Retired) > admin.MaxRetired {
+		return 0, cur, fmt.Errorf("%w: the registry would list %d retired recovery keys, at most %d", errAdmin, len(next.Retired), admin.MaxRetired)
+	}
 	if err := r.save(next, hash, signers); err != nil {
 		return 0, cur, fmt.Errorf("%w: cannot record the registry: %v", errAdmin, err)
 	}

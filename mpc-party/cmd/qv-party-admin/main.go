@@ -10,6 +10,9 @@
 //	qv-party-admin refresh  -auth F  (the same)
 //	qv-party-admin unfreeze -auth F  (the same)
 //	qv-party-admin status   (the same -party, -cert and -key flags; no -auth) [-keyset ID]
+//	qv-party-admin admin-set request|send, recovery-key request|send|status|registry   the admin set and the recovery-key registry (records.go)
+//
+// After a change of the admin set the parties' configuration lists only the bootstrap set: `dkg|refresh|unfreeze -live` checks the file against the set each party reports.
 //
 // The file carries the request (keyset and, for a DKG, scheme and curve), the deployment domain, the time it was issued and expires and a nonce;
 // every admin signs the same bytes, in any order, and a party rebuilds what was signed from the call it receives, so a changed field, keyset or
@@ -706,13 +709,17 @@ func sendCmd(op string, args []string, out, errw io.Writer) error {
 		if *expectKeyset != "" && *expectKeyset != r.Keyset {
 			return fmt.Errorf("%s is an authorisation for keyset %s, but this call is for keyset %s: nothing was sent", *authFile, r.Keyset, *expectKeyset)
 		}
-		pols, err := pf.policies()
-		if err != nil {
-			return err
-		}
-		for i, p := range pols { // too few signatures, an unknown key, another domain, a stale file: refused here, before any party is contacted
-			if err := r.Check(p, now); err != nil {
-				return fmt.Errorf("%s would be refused by the parties (configuration %d of %d): %w: nothing was sent", *authFile, i+1, len(pols), err)
+		if pf.live {
+			liveFile = &r // checked below, against what each party reports as its admin set now
+		} else {
+			pols, err := pf.policies()
+			if err != nil {
+				return err
+			}
+			for i, p := range pols { // too few signatures, an unknown key, another domain, a stale file: refused here, before any party is contacted
+				if err := r.Check(p, now); err != nil {
+					return fmt.Errorf("%s would be refused by the parties (configuration %d of %d): %w: nothing was sent", *authFile, i+1, len(pols), err)
+				}
 			}
 		}
 		if auth, err = r.Auth(); err != nil {

@@ -527,7 +527,7 @@ func recordSendCmd(group string, args []string, out, errw io.Writer) error {
 		if r.Op == admin.OpRecoveryKey {
 			hint = "send the same file again once the party is back, or make a new request (it names the registry's version)"
 		}
-		return fmt.Errorf("%d member(s) did not take the change. The parties that did keep it; the others stay on their old state, which `status` shows.\n  - %s\n%s", notDone, strings.Join(append(problems, "next: "+hint), "\n  - "), "")
+		return fmt.Errorf("%d member(s) did not take the change. The parties that did keep it; the others stay on their old state, which `status` shows.\n  - %s", notDone, strings.Join(append(problems, "next: "+hint), "\n  - "))
 	}
 	fmt.Fprintf(out, "OK %s: all %d parties are on the same state\n", r.Op, len(after))
 	return nil

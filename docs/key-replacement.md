@@ -36,6 +36,9 @@ In an emergency the thief's own copy of the key is not affected, so the time bef
 ## The old key is emptied by the system
 The core moves each token, then the coin itself, from the old key to the new one. No approver is needed: the operators' signatures that started the drain are the approval. The zone signs only a move to the named successor, within a total the operators set in the same record, and counts only the moves it actually signed. A refused move costs nothing, so a broken planner cannot use up the allowance. One tool walks the whole replacement but signs nothing itself ([runbook](runbooks/key-replacement.md)).
 
+## Keys that protect the parties
+Three keys protect the parties themselves, and none of them moves funds when replaced. The administrators' keys change by a request that the current administrators sign and every party checks for itself; the recovery key for backups is replaced by a ceremony that a status command follows until every backup is under the new key; and the key in a party's HSM that seals its shares can be swapped for a new one in place ([key ceremony runbook](runbooks/key-ceremony.md), [backup runbook](runbooks/mpc-backup-restore.md)).
+
 ## What a customer sees
 On EVM chains nothing: a deposit address is a forwarder that asks the factory where to send, so the address stays the same. On Bitcoin and Solana a deposit address comes from the key itself, so a new key means new addresses. The customer then gets an address per generation. After the new key takes over, the old addresses stay watched for a stated period, and what lands on them is swept into the new hot wallet, signed with the old key. The zone refuses to retire the old key inside that period, and the core refuses while anything is left on those addresses. On Bitcoin the hot wallet uses the same key, so it is replaced and emptied the same way ([Bitcoin](bitcoin.md), [Solana](solana.md)).
 

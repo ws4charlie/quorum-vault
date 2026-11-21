@@ -81,9 +81,13 @@ type SealerConfig struct {
 	Lib   string `json:"lib"`
 	// Provider selects the behaviour set for the module: "softhsm" (default) or "cloudhsm" (AWS CloudHSM: HSM-made IV, size limit, "user:password" PIN from pin_file only).
 	Provider string `json:"provider"`
-	PinEnv   string `json:"pin_env"`
-	PinFile  string `json:"pin_file"`
-	KeyFile  string `json:"key_file"` // devauth sealer only: hex, 32 bytes
+	// WrapKeyLabel is the label of the wrap key in the token that NEW envelopes are sealed under (default "qv-share-wrap"). Envelopes name the key they
+	// were sealed under, so shares sealed under another label still open while that key exists. `mpc-party reseal` moves a party's shares to a new
+	// label; the party is then started with this set to it (docs/runbooks/key-ceremony.md, "The wrap key").
+	WrapKeyLabel string `json:"wrap_key_label"`
+	PinEnv       string `json:"pin_env"`
+	PinFile      string `json:"pin_file"`
+	KeyFile      string `json:"key_file"` // devauth sealer only: hex, 32 bytes
 
 	// attested (research/TEE.md): the party holds no key of its own. At start it proves what it runs to the broker (qv-attest-broker) and gets
 	// one data key per generation back, kept in memory only.
@@ -347,6 +351,13 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Errorf("admin_threshold: %d is more than the %d signatures one authorization may carry (more admin_keys than that are fine; the threshold must stay within it)", c.AdminThreshold, admin.MaxSignatures))
 	}
 	req("sealer.type", c.Sealer.Type)
+	if c.Sealer.WrapKeyLabel != "" {
+		if c.Sealer.Type != "pkcs11" {
+			errs = append(errs, errors.New("sealer.wrap_key_label is only for sealer.type pkcs11 (the attested sealer's key is the broker's)"))
+		} else if !wrapKeyLabelRE.MatchString(c.Sealer.WrapKeyLabel) {
+			errs = append(errs, fmt.Errorf("sealer.wrap_key_label %q: letters, digits, dot, dash and underscore, 1 to 64 characters", c.Sealer.WrapKeyLabel))
+		}
+	}
 	if c.Sealer.Type == AttestedSealerType {
 		if c.Sealer.BrokerCertFile == "" && !c.TLSSealed { // a sealed TLS key cannot open the link that releases the keys: that link has its own files
 			c.Sealer.BrokerCertFile = c.CertFile

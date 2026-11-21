@@ -50,6 +50,10 @@ func main() {
 		migrateMain(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "reseal" {
+		resealMain(os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "tls-init" {
 		tlsInitMain(os.Args[2:])
 		return

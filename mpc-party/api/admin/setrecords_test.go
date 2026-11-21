@@ -2,6 +2,7 @@ package admin
 
 import (
 	"crypto/ed25519"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,19 @@ func TestSetRequestNeedsBothQuorums(t *testing.T) {
 	// a v1 file or another operation is no admin-set request
 	if _, err := (Request{Op: OpRefresh}).SetChange(); err == nil {
 		t.Error("SetChange of another operation")
+	}
+}
+
+func TestRecoveryRecordBounds(t *testing.T) {
+	var many []string
+	for i := 0; i <= MaxRetiredPerRequest; i++ {
+		many = append(many, fmt.Sprintf("%064x", i))
+	}
+	if err := CheckRecoveryRecord("", many); err == nil {
+		t.Error("more fingerprints than one request may retire")
+	}
+	if err := CheckRecoveryRecord("", many[:MaxRetiredPerRequest]); err != nil {
+		t.Error(err)
 	}
 }
 

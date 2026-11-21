@@ -101,9 +101,19 @@ func CheckAdminSet(keys [][]byte, threshold int) error {
 	return nil
 }
 
+// MaxRetiredPerRequest bounds the fingerprints one registry change may retire, and MaxRetired the registry in all (a registry grows with every
+// replacement of the recovery key; a thousand is more than a deployment will ever need).
+const (
+	MaxRetiredPerRequest = 64
+	MaxRetired           = 1024
+)
+
 // CheckRecoveryRecord validates the content of a registry change: a current fingerprint (or none) and retired fingerprints, all 64 hex, the
 // current one not among the retired.
 func CheckRecoveryRecord(current string, retire []string) error {
+	if len(retire) > MaxRetiredPerRequest {
+		return fmt.Errorf("%d fingerprints to retire in one request, at most %d", len(retire), MaxRetiredPerRequest)
+	}
 	if current != "" && !fingerprintRE.MatchString(current) {
 		return fmt.Errorf("%q is not a recovery key fingerprint (64 hex characters)", current)
 	}
