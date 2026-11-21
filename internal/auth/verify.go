@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,14 +59,26 @@ func (a *Authenticator) Verify(ctx context.Context, raw string) (*Principal, err
 	if len(jws.Signatures) != 1 {
 		return nil, errors.New("exactly one signature is required")
 	}
-	kid := jws.Signatures[0].Header.KeyID
-	key, err := a.key(ctx, kid, jws.Signatures[0].Header.Algorithm)
-	if err != nil {
-		return nil, err
-	}
-	payload, err := jws.Verify(key)
-	if err != nil {
-		return nil, errors.New("bad signature")
+	// The digest covers the whole token (header, payload, signature), so a token with the same claims and another signature is another
+	// entry. The lookup is by the full 32-byte digest in a map: nothing compares secret bytes with an early exit, and the digest of a
+	// token one does not hold cannot be guessed, so a hit or a miss tells a caller only about the token they sent themselves.
+	digest := sha256.Sum256([]byte(raw))
+	var payload []byte
+	cached := a.sigs.has(digest, a.cfg.Now())
+	gen := uint64(0)
+	if cached {
+		payload = jws.UnsafePayloadWithoutVerification() // the signature was verified when this exact token was stored
+	} else {
+		gen = a.sigs.generation() // before the key lookup: a refetch after it must stop this token being stored
+		kid := jws.Signatures[0].Header.KeyID
+		key, err := a.key(ctx, kid, jws.Signatures[0].Header.Algorithm)
+		if err != nil {
+			return nil, err
+		}
+		payload, err = jws.Verify(key)
+		if err != nil {
+			return nil, errors.New("bad signature")
+		}
 	}
 	var c claims
 	if err := json.Unmarshal(payload, &c); err != nil {
@@ -126,6 +139,9 @@ func (a *Authenticator) Verify(ctx context.Context, raw string) (*Principal, err
 		}
 	}
 	p.Roles = a.roles(all[a.cfg.RolesClaim])
+	if !cached { // only a token that passed every check is remembered; a failure is never stored
+		a.sigs.store(digest, unixTime(*c.Exp), now, gen)
+	}
 	return p, nil
 }
 
@@ -213,6 +229,7 @@ func (a *Authenticator) fetchLocked(ctx context.Context) error {
 		return errors.New("empty key set")
 	}
 	a.keys, a.fetchedAt = &ks, a.cfg.Now()
+	a.sigs.clear() // a key the provider removed must stop being honoured
 	return nil
 }
 
