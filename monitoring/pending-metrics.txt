@@ -1,10 +1,7 @@
 # Metrics that a rule in monitoring/ reads but no program emits yet: one name per line, then "#" and who must add it. monitoring/metrics_test.go fails on a rule metric that no
 # program emits and is not listed here, and on a line here that a program now emits (delete the line then: the rule is live). The exact specification is in reports/D10-r1.md.
-qv_drain_refusals_total                   # counter{mode="gateway"|"cosigner"} from Guard.DrainRefusals(): the gateway's metrics file and the cosigner's metrics port (internal/gateway: K6; cmd/qv-gateway, cmd/qv-cosigner: Gateway-PIN)
-qv_attest_broker_cert_seconds_to_expiry   # gauge: seconds until the broker's server certificate expires, in its /metrics (mpc-party/internal/attest/broker: TEE-T4)
 #
 # Request to the owners of the programs (not a pending metric: the rules work without it, and are simpler and exact with it): publish each counter below at 0 from process start, not at its first event.
 #   qv_attest_broker_events_total{event}  every event name at 0 (mpc-party/internal/attest/broker/server.go: TEE-T4)
 #   qv_mpc_party_attest_exchanges_total{party,outcome}  every outcome at 0 (mpc-party/internal/server/sealer_gate.go: TEE-T4)
 #   qv_mpc_party_session_failures_total  the combinations are open-ended (peer, op, side, kind): publish at least the kinds per peer at 0 (mpc-party/internal/server/failstats.go: Party-replay owns admin.go only; ask the lead)
-#   qv_drain_refusals_total{mode}  publish at 0 when it is added
