@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,6 +70,21 @@ func TestEmergencyDrillStolenHotKey(t *testing.T) {
 	comp := s.signed(2, "-action", "mark-compromised", "-generation", "1", "-successor", "2", "-cap", capETH, "-cap", capUSDT)
 	act := s.signed(3, "-action", "activate", "-generation", "2")
 	mark("three records signed by two operators", t1)
+
+	// The race that left a nonce claimed with no signature (docs/runbooks/stolen-hot-key.md, "Work in flight"), made deterministic: the cosigners have the
+	// mark and the gateway has not yet. A sweep that the gateway admits (it claims the nonce) is refused by party B's cosigner ("signer_refused"), and its
+	// cancel waits at the zone for the successor to be active. Before the zone signed no cancel for a compromised key, so the nonce stayed claimed and the
+	// drain's own transaction at it was refused for ever.
+	if mpcMode() {
+		s.applyToGuards([]string{"cosigner-b=" + s.cosGuardDSN, "cosigner-c=" + s.cosCGuardDSN}, cand, comp)
+		c3 := s.newCustomer("c-em-claim")
+		s.sendETH(c3, eth(1))
+		s.waitFor(scaled(120*time.Second), "a sweep refused by a cosigner after the gateway claimed its nonce", func() bool {
+			var n int
+			s.pool.QueryRow(s.ctx, `SELECT count(*) FROM sign_jobs WHERE id LIKE 'sweep:%' AND status='rejected' AND reject_reason LIKE 'signer_refused%'`).Scan(&n)
+			return n > 0
+		})
+	}
 
 	// Run 2 with the candidate and the mark only: it ends at "activate", which is how a kill at that point looks. The mark is in the zone now.
 	t2 := time.Now()
@@ -165,6 +181,14 @@ func TestEmergencyDrillStolenHotKey(t *testing.T) {
 	if o, err := s.rekeyErr(dir, "retire"); err == nil || !strings.Contains(o+err.Error(), "compromised") {
 		t.Fatalf("retire: %v\n%s", err, o)
 	}
+	if mpcMode() {
+		// The refused sweep's nonce was cancelled by the zone (the compromised key's own cancel), not left claimed.
+		var cancelled int
+		s.pool.QueryRow(s.ctx, `SELECT count(*) FROM sign_jobs WHERE id LIKE 'cancel:sweep:%' AND status='done'`).Scan(&cancelled)
+		if cancelled == 0 {
+			t.Fatal("no cancel of a refused sweep was signed: the claimed nonce was not freed by the cancel path")
+		}
+	}
 	s.requireAudit("keyset.compromised")
 	t.Logf("drill times: summary %s", fmt.Sprint(times))
 	log := mustReadFile(t, filepath.Join(dir, "emergency.log"))
@@ -212,5 +236,21 @@ func (s *system) strandNonce(kind, id string, from common.Address) {
 	}
 	if err := tx.Commit(s.ctx); err != nil {
 		s.t.Fatal(err)
+	}
+}
+
+// applyToGuards applies signed keyset records, in order, to the named guard databases only (name=DSN): the gateway keeps its own view. This is how a test makes
+// the zone's parts differ, as they do for the moments between one apply and the next.
+func (s *system) applyToGuards(guards []string, files ...string) {
+	s.t.Helper()
+	for _, f := range files {
+		args := []string{"apply", "-config", s.gwPath}
+		for _, g := range guards {
+			args = append(args, "-guard-dsn", g)
+		}
+		args = append(args, f)
+		if out, err := exec.Command(filepath.Join(binDir, "qv-keysets"), args...).CombinedOutput(); err != nil {
+			s.t.Fatalf("qv-keysets %v: %v\n%s", args, err, out)
+		}
 	}
 }
