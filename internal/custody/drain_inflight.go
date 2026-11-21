@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
 // Work in flight at the moment a generation is marked compromised (docs/runbooks/stolen-hot-key.md, "Work in flight").
@@ -62,16 +63,44 @@ func (s *Service) handOverUnsigned(ctx context.Context, tx pgx.Tx, o Owner) (boo
 	if err != nil || !bad {
 		return false, err
 	}
-	// A signature of the owner's transfer or of its cancel may exist: then the nonce is not free (the cancel can still be broadcast, and two valid
-	// signatures for one nonce must never exist). Both tracks are locked here, so a gateway cannot claim a queued job of either meanwhile.
-	pending, may, err := jobStates(ctx, tx, o)
-	if err != nil || may {
+	// The job rows of both tracks are locked FIRST, and everything below is read from the locked rows. A gateway that is writing its answer holds the row
+	// until it commits, so the lock waits for it and returns the committed row: a refusal that arrived a moment ago is seen as it is. (Reading the reasons
+	// before the lock could see a job still "signing" and then lock a row that is already rejected "signer_refused", and make a hole of a claimed nonce.)
+	// A signature of the owner's transfer or of its cancel may exist when a job is being signed, done or failed: then the nonce is not free (the cancel can
+	// still be broadcast, and two valid signatures for one nonce must never exist).
+	// The zone's reason says whether it holds a claim on the nonce. Every rule runs before the gateway reserves anything, so a refusal by a rule claims nothing
+	// (the nonce is a hole the drain fills). A refusal by a cosigner after the gateway reserved ("signer_refused") leaves the gateway's claim in place, and a drain
+	// at that nonce is refused for ever: the zone signs the cancel of a compromised generation for exactly this case, so the cancel is asked for, not a hole made.
+	rows, err := tx.Query(ctx, `SELECT id, status, COALESCE(reject_reason, '') FROM sign_jobs WHERE starts_with(id, $1) OR starts_with(id, $2) ORDER BY id FOR UPDATE`,
+		string(OwnerTrack(o))+":", string(CancelTrack(o))+":")
+	if err != nil {
 		return false, err
 	}
-	cpending, cmay, err := trackJobStates(ctx, tx, CancelTrack(o))
-	if err != nil || cmay {
+	var queued []string
+	for rows.Next() {
+		var id, st, why string
+		if err := rows.Scan(&id, &st, &why); err != nil {
+			rows.Close()
+			return false, err
+		}
+		switch {
+		case st == signjob.StatusPending:
+			queued = append(queued, id)
+		case st == signjob.StatusRejected && strings.HasPrefix(why, "signer_refused"):
+			rows.Close()
+			return false, nil // the gateway holds a claim: ask for the cancel
+		case st == signjob.StatusRejected:
+		default: // signing, done, failed: a signature may exist
+			rows.Close()
+			return false, nil
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
 		return false, err
 	}
+	pending := queued
+	var cpending []string
 	for _, id := range append(pending, cpending...) {
 		if _, err := tx.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='keyset_state: the generation of this address was marked compromised: it signs nothing but its drain', updated_at=now()
 			WHERE id=$1 AND status='pending'`, id); err != nil {

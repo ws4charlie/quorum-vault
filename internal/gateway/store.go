@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/audit"
@@ -36,24 +39,94 @@ type Guard struct {
 	drainMetrics drainCounts
 }
 
-// OpenGuard applies the schema to pool and returns the guard.
+// storeVersion identifies the schema this binary needs: the hash of store.sql. The guard database records the version it was last brought to (guard_schema),
+// and OpenGuard applies the schema only when that record is missing or different.
+var storeVersion = func() string { h := sha256.Sum256([]byte(storeSQL)); return hex.EncodeToString(h[:8]) }()
+
+// schemaCurrent reports whether the database is already at this binary's schema, with plain reads that take no table lock (to_regclass and a select take
+// at most an ACCESS SHARE lock on one small table). Any error counts as "not current": the schema is then applied, as before the marker existed (a role that
+// may not read the marker, a marker table that does not exist yet).
+func schemaCurrent(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) bool {
+	var reg *string
+	if err := q.QueryRow(ctx, `SELECT to_regclass('guard_schema')::text`).Scan(&reg); err != nil || reg == nil {
+		return false
+	}
+	var v string
+	if err := q.QueryRow(ctx, `SELECT version FROM guard_schema WHERE id=1`).Scan(&v); err != nil {
+		return false
+	}
+	return v == storeVersion
+}
+
+// OpenGuard returns the guard of pool, applying the schema first only when the database is behind it. The schema's statements are idempotent but take table
+// locks even when they change nothing, so an operator's tool (qv-rekey, qv-keysets, qv-approvers, qv-route, qv-fee-caps) that ran them at every start could
+// block or deadlock the gateway's and the cosigners' decisions at the very moment it is used (a key ceremony, an emergency). The services apply the schema at
+// their own start, as before; a tool finds it current and runs no DDL. When it is behind, the apply runs under an advisory lock, so two openers never race,
+// and is tried again a few times if it still meets a decision in a deadlock.
 func OpenGuard(ctx context.Context, pool *pgxpool.Pool) (*Guard, error) {
+	if schemaCurrent(ctx, pool) {
+		return &Guard{pool: pool}, nil
+	}
+	var err error
+	for try := 0; try < 6; try++ {
+		if err = applyStoreSchema(ctx, pool); err == nil {
+			return &Guard{pool: pool}, nil
+		}
+		var pe *pgconn.PgError
+		if !errors.As(err, &pe) || (pe.Code != "40P01" && pe.Code != "40001") {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(time.Duration(try+1) * 200 * time.Millisecond):
+		}
+	}
+	return nil, err
+}
+
+func applyStoreSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	// Several instances may start at once on a fresh database: CREATE TYPE and friends race and fail. One at a time.
+	// Everything below runs on the ONE connection of this transaction: an opener that holds a connection while it waits for the lock must never need a second
+	// one from the pool to finish (a small pool, several openers at once, would deadlock). Checks and the marker use savepoints, so a refused statement
+	// does not abort the transaction.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
 	defer tx.Rollback(context.Background())
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('qv-guard-schema'))`); err != nil {
-		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+		return fmt.Errorf("gateway: apply store schema: %w", err)
+	}
+	if sp, err := tx.Begin(ctx); err == nil { // another opener finished while this one waited for the lock
+		current := schemaCurrent(ctx, sp)
+		sp.Rollback(ctx)
+		if current {
+			return nil
+		}
 	}
 	if _, err := tx.Exec(ctx, storeSQL); err != nil {
-		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+		return fmt.Errorf("gateway: apply store schema: %w", err)
+	}
+	// The marker is best effort: a role that may create tables but not write a marker table that belongs to another role must still open the guard, as it
+	// always did (the next open then applies the schema again).
+	if sp, err := tx.Begin(ctx); err == nil {
+		if _, err := sp.Exec(ctx, `CREATE TABLE IF NOT EXISTS guard_schema (id int PRIMARY KEY CHECK (id = 1), version text NOT NULL)`); err == nil {
+			if _, err := sp.Exec(ctx, `INSERT INTO guard_schema (id, version) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version`, storeVersion); err == nil {
+				sp.Commit(ctx)
+			} else {
+				sp.Rollback(ctx)
+			}
+		} else {
+			sp.Rollback(ctx)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("gateway: apply store schema: %w", err)
+		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
-	return &Guard{pool: pool}, nil
+	return nil
 }
 
 // IntentRecord is a signed_intents row.
@@ -247,6 +320,17 @@ func (t *GuardTx) SignedDrainCountFrom(ctx context.Context, sender string, pendi
 	return n, err
 }
 
+// SignedCancelCountFrom counts the cancels reserved or signed from sender in all while its generation was compromised in this guard's own view (the bound of a
+// compromised generation's cancels). The state is the one the guard saw and recorded with the reservation (Release.GenState), never a label from the business
+// side: a routine cancel signed while the key was active does not use up the emergency allowance, and the guard's own log of signed records decides when the
+// state changed.
+func (t *GuardTx) SignedCancelCountFrom(ctx context.Context, sender string) (int, error) {
+	var n int
+	err := t.tx.QueryRow(ctx, `SELECT count(*) FROM signed_intents i WHERE i.chain=$1 AND i.kind='cancel' AND i.sender=$2 AND i.gen_state='compromised'
+		AND EXISTS (SELECT 1 FROM signed_digests d WHERE d.intent_id = i.intent_id)`, t.chain, sender).Scan(&n)
+	return n, err
+}
+
 // CountSince counts intents of kind on this chain first signed at or after since.
 func (t *GuardTx) CountSince(ctx context.Context, kind string, since time.Time) (int, error) {
 	var n int
@@ -298,6 +382,9 @@ func (t *GuardTx) Parent(ctx context.Context, txid string) (*ParentRecord, error
 // Release is everything recorded when a digest is reserved, before the signer
 // runs. Signature stays nil until Guard.Finish stores it.
 type Release struct {
+	// GenState is the state of the sender's keyset generation as THIS guard's own view had it when the intent was admitted (EVM; empty elsewhere). It is
+	// recorded with the intent, so the bound of a compromised generation's cancels counts only cancels admitted under that state.
+	GenState    string
 	IntentID    string
 	IntentHash  []byte
 	Kind        string
@@ -358,9 +445,9 @@ func (t *GuardTx) IdentityConflict(ctx context.Context, identity string, payload
 // claim make a double release fail even if the lock were bypassed.
 func (t *GuardTx) Record(ctx context.Context, r Release) error {
 	if r.NewIntent {
-		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10)`,
-			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.PartitionID, r.At); err != nil {
+		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at, gen_state)
+			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10, NULLIF($11,''))`,
+			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.PartitionID, r.At, r.GenState); err != nil {
 			return fmt.Errorf("record intent: %w", err)
 		}
 		for _, m := range r.Members {

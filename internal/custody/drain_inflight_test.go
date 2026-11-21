@@ -6,8 +6,11 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/ws4charlie/quorum-vault/internal/chain"
 
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
@@ -264,5 +267,148 @@ func TestSignedCancelKeepsItsNonce(t *testing.T) {
 	s.Pool.QueryRow(ctx, `SELECT owner_kind FROM evm_nonce_allocations WHERE nonce=3`).Scan(&kind)
 	if kind != "sweep" {
 		t.Fatalf("a nonce with a signed cancel was handed over: %s", kind)
+	}
+}
+
+// A refusal by a cosigner AFTER the gateway reserved ("signer_refused") leaves the zone's claim on the nonce: a drain there is refused for ever, so the core
+// does not make a hole of it. It asks for the cancel (which the zone signs for a compromised generation), with a not_after so the zone can wait for the
+// successor to be active. A refusal by a rule (nothing claimed) still becomes a hole.
+func TestClaimedRefusalGetsACancelNotAHole(t *testing.T) {
+	ctx := context.Background()
+	s, _, put := compromisedWorld(t)
+	put("sweep", "sw-claimed", 3, "allocated", "own=rejected")
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET reject_reason='signer_refused: authorizer on B refused: keyset_state: compromised' WHERE id='sweep:sw-claimed:a1'`)
+	put("sweep", "sw-rule", 4, "allocated", "own=rejected")
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET reject_reason='keyset_state: compromised' WHERE id='sweep:sw-rule:a1'`)
+	if mv := plan(t, s); len(mv) != 0 {
+		t.Fatalf("the drain started under a claimed nonce: %+v", mv)
+	}
+	if _, why := drainState(t, s); !strings.Contains(why, "sw-claimed at nonce 3") || strings.Contains(why, "sw-rule") {
+		t.Fatalf("%q", why)
+	}
+	var kind string
+	s.Pool.QueryRow(ctx, `SELECT owner_kind FROM evm_nonce_allocations WHERE nonce=4`).Scan(&kind)
+	if kind != "hole" {
+		t.Fatalf("a refusal by a rule is a hole, got %s", kind)
+	}
+	o := Owner{Kind: "sweep", ID: "sw-claimed", PartitionID: s.Cfg.PartitionKey("ETH", 0).String()}
+	s.Chain = &evmCancelChain{drainChain: s.Chain.(*drainChain)}
+	id, err := s.EnqueueCancel(ctx, o)
+	if err != nil || id == "" {
+		t.Fatalf("the cancel of a claimed nonce was not asked for: %q %v", id, err)
+	}
+	var intent []byte
+	s.Pool.QueryRow(ctx, `SELECT intent FROM sign_jobs WHERE id=$1`, id).Scan(&intent)
+	var in signjob.Intent
+	json.Unmarshal(intent, &in)
+	if in.NotAfter <= s.Now().Unix() {
+		t.Fatalf("the cancel intent has no not_after: %+v", in)
+	}
+}
+
+// evmCancelChain builds a cancel as the EVM cell does (no Releaser: the nonce is cancelled, never released).
+type evmCancelChain struct{ *drainChain }
+
+func (c *evmCancelChain) BuildCancel(context.Context, pgx.Tx, string, string) (chain.UnsignedTx, error) {
+	return chain.UnsignedTx{Chain: testChain, Digest: []byte{9, 9}, Payload: []byte(`{}`), KeyRef: chain.KeyRef{Path: "k"}}, nil
+}
+func (c *evmCancelChain) Reservation(context.Context, chain.Querier, string, string) (chain.Reservation, error) {
+	return chain.Reservation{Open: true, Account: "0xold"}, nil
+}
+
+// A refusal that the gateway commits while the core is deciding must be seen as it is: the job rows are locked before their reasons are read, so the hand-over
+// waits for the gateway's write and then judges the committed row. Both orders: the gateway's refusal says "signer_refused" (it holds a claim: no hole), or a
+// rule refused (nothing claimed: a hole).
+func TestHandOverWaitsForAGatewayAnswerThatIsBeingWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		wantHole     bool
+	}{{"claimed", "signer_refused: authorizer on B refused: keyset_state: compromised", false}, {"rule", "keyset_state: compromised", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, _, put := compromisedWorld(t)
+			put("sweep", "sw-race", 3, "allocated", "own=signing")
+			gw, err := s.Pool.Begin(ctx) // the gateway, writing its answer
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer gw.Rollback(ctx)
+			if _, err := gw.Exec(ctx, `UPDATE sign_jobs SET updated_at=now() WHERE id='sweep:sw-race:a1'`); err != nil {
+				t.Fatal(err)
+			}
+			res := make(chan bool, 1)
+			o := Owner{Kind: "sweep", ID: "sw-race", PartitionID: s.Cfg.PartitionKey("ETH", 0).String()}
+			go func() {
+				var handed bool
+				InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+					var err error
+					handed, err = s.handOverUnsigned(ctx, tx, o)
+					return err
+				})
+				res <- handed
+			}()
+			select {
+			case <-res:
+				t.Fatal("the hand-over did not wait for the row the gateway holds")
+			case <-time.After(400 * time.Millisecond):
+			}
+			if _, err := gw.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason=$1 WHERE id='sweep:sw-race:a1'`, tc.reason); err != nil {
+				t.Fatal(err)
+			}
+			if err := gw.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if handed := <-res; handed != tc.wantHole {
+				t.Fatalf("handed over = %v, want %v", handed, tc.wantHole)
+			}
+		})
+	}
+}
+
+// A cancel refused only because its deadline passed (an emergency run paused longer than the window) is renewed when the run resumes: a new attempt with a new
+// deadline, under an intent of its own, and only while no job of the track or of the owner may be signed and the gateway holds no claim for the cancel itself.
+func TestExpiredUnsignedCancelIsRenewedAndNothingElseIs(t *testing.T) {
+	ctx := context.Background()
+	s, _, put := compromisedWorld(t)
+	o := Owner{Kind: "sweep", ID: "sw-exp", PartitionID: s.Cfg.PartitionKey("ETH", 0).String()}
+	put("sweep", "sw-exp", 3, "allocated", "own=rejected", "cancel=rejected")
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET reject_reason='signer_refused: authorizer on B refused: keyset_state: compromised' WHERE id='sweep:sw-exp:a1'`)
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET reject_reason='keyset_state: the successor of generation 1 is not active here, and the intent has expired' WHERE id='cancel:sweep:sw-exp:a1'`)
+	s.Chain = &evmCancelChain{drainChain: s.Chain.(*drainChain)}
+	id, err := s.EnqueueCancel(ctx, o)
+	if err != nil || id != "cancel:sweep:sw-exp:a3" {
+		t.Fatalf("no renewal: %q %v", id, err)
+	}
+	var ib []byte
+	s.Pool.QueryRow(ctx, `SELECT intent FROM sign_jobs WHERE id=$1`, id).Scan(&ib)
+	var in signjob.Intent
+	json.Unmarshal(ib, &in)
+	if in.ID != id || in.NotAfter < s.Now().Add(CancelWindow-time.Minute).Unix() {
+		t.Fatalf("the renewal is not a new intent with a new deadline: %+v", in)
+	}
+	// repeating it follows the renewal and makes no second one while it may be signed
+	if again, err := s.EnqueueCancel(ctx, o); err != nil || again != id {
+		t.Fatalf("a second renewal while the first is pending: %q %v", again, err)
+	}
+	// the renewal expires too: the next attempt
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='intent_expired: intent expired at 1, now 2' WHERE id=$1`, id)
+	if again, err := s.EnqueueCancel(ctx, o); err != nil || again != "cancel:sweep:sw-exp:a4" {
+		t.Fatalf("the next renewal: %q %v", again, err)
+	}
+	// a cancel that may be signed is never renewed
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='intent_expired: x' WHERE id='cancel:sweep:sw-exp:a4'`)
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET status='signing' WHERE id='cancel:sweep:sw-exp:a3'`)
+	if again, err := s.EnqueueCancel(ctx, o); err != nil || again != "cancel:sweep:sw-exp:a4" {
+		t.Fatalf("renewed while a job is being signed: %q %v", again, err)
+	}
+	var n int
+	s.Pool.QueryRow(ctx, `SELECT count(*) FROM sign_jobs WHERE starts_with(id,'cancel:sweep:sw-exp:')`).Scan(&n)
+	if n != 3 {
+		t.Fatalf("%d cancel jobs", n)
+	}
+	// a refusal by a cosigner after the gateway reserved the cancel (signer_refused) is not an expiry that can be renewed: the gateway holds its claim
+	s.Pool.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='signer_refused: authorizer on B refused: the intent has expired' WHERE starts_with(id,'cancel:sweep:sw-exp:')`)
+	if again, err := s.EnqueueCancel(ctx, o); err != nil || again != "cancel:sweep:sw-exp:a4" {
+		t.Fatalf("renewed a cancel the gateway may hold: %q %v", again, err)
 	}
 }

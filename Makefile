@@ -157,10 +157,10 @@ test-e2e-evm-flows:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' ./e2e/custody/...
 # The drain of a shard and the emergency drill (a hot key may be stolen, with a withdrawal and a sweep in flight): their own group, so a stall in the
 # emergency path ends at this group's own time limit and not inside the flows. 12 minutes is about three times a quiet run.
-# QV_DRILL_COUNT=30 QV_DRILL_TIMEOUT=90m repeats the three tests (a soak of the race).
+# QV_DRILL_COUNT=30 QV_DRILL_TIMEOUT=90m repeats the three tests (a soak of the race); QV_DRILL_RUN=TestEmergencyDrillStolenHotKey repeats one.
 E2E_EVM_DRILL := TestDrainMovesAShardToItsSuccessor|TestDrainCrashBetweenBroadcastAndConfirmAndBetweenAssets|TestEmergencyDrillStolenHotKey
 test-e2e-evm-drill:
-	$(E2E_EVM_ENV) go test -count=$(or $(QV_DRILL_COUNT),1) -p 1 -timeout $(or $(QV_DRILL_TIMEOUT),12m) -v -run '$(E2E_EVM_DRILL)' ./e2e/custody/...
+	$(E2E_EVM_ENV) go test -count=$(or $(QV_DRILL_COUNT),1) -p 1 -timeout $(or $(QV_DRILL_TIMEOUT),12m) -v -run '$(or $(QV_DRILL_RUN),$(E2E_EVM_DRILL))' ./e2e/custody/...
 # Real identity provider: a two-approver withdrawal with tokens from the dev Keycloak (docker compose profile identity; `make keycloak-up` first).
 test-e2e-evm-identity:
 	./scripts/keycloak-env.sh

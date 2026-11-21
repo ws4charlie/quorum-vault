@@ -94,6 +94,8 @@ const (
 	ReasonDrainCap  = "policy_drain_cap"  // 4 the drains of this source and asset would exceed the cap of the signed record
 	// ReasonDrainGas: this source has had the most drains the zone allows in all (the gas bound).
 	ReasonDrainGas = "policy_drain_gas"
+	// ReasonCancelGas: this source has had the most cancels the zone allows a compromised generation in all.
+	ReasonCancelGas = "policy_cancel_gas"
 )
 
 // KeysetLagNote ends the reason of a decision that waits because this zone's keyset view may be behind the other side's.
@@ -920,7 +922,63 @@ func (d *Decider) keysetRules(ctx context.Context, gt *GuardTx, kv *KeysetView, 
 		}
 		return reject(ReasonKeyset, "generation %d of %s is draining: it signs only a drain to its successor, and the replacement or cancel of work already signed", e.Generation, shard)
 	}
+	if e.State == partition.StateCompromised && i.Kind == "cancel" {
+		return d.compromisedCancel(ctx, gt, kv, cc, shard, e, i, info, known, now)
+	}
 	return reject(ReasonKeyset, "generation %d of %s is %s: it signs nothing", e.Generation, shard, e.State)
+}
+
+// compromisedCancel is the one thing besides its drain that a compromised generation may sign: the cancel of its own pending transaction. A transaction the
+// zone refused after the mark (a cosigner saw the mark before the gateway did) can leave its nonce claimed in the guard with no signature, and then neither
+// a drain nor anything else can use the nonce: the lane of the old address is dead and what lies above it cannot leave. A cancel takes over the claim (the guard
+// then refuses every other intent at that nonce, kind "cancel") and is a transaction that fills the nonce on chain, so it is the one safe way out. It is a
+// zero-value transfer to the sender itself with no data, judged from the decoded transaction and not from the label of the intent, after the drain's own
+// precondition (a successor the drain may go to), and bounded in all (max_cancels_per_source). The gateway also requires the nonce to be a claim it holds for
+// an intent of this same sender; a cosigner, which stores no signatures and may never have seen the refused intent, does not (it refused it before it claimed).
+func (d *Decider) compromisedCancel(ctx context.Context, gt *GuardTx, kv *KeysetView, cc *ChainConfig, shard partition.ShardID, src *KeysetEntry, i signjob.Intent, info TxInfo, known bool, now time.Time) error {
+	if info.Value == nil || info.Value.Sign() != 0 || info.DataLen != 0 || info.To != info.Sender {
+		return reject(ReasonKeyset, "generation %d of %s is compromised: it may cancel its own pending transaction only (a zero-value transfer to itself with no data), nothing else", src.Generation, shard)
+	}
+	if src.Successor == 0 {
+		return reject(ReasonKeyset, "generation %d of %s is compromised with no successor named: it signs nothing, not even a cancel", src.Generation, shard)
+	}
+	succ := kv.entry(shard, src.Successor)
+	if succ == nil || succ.State != partition.StateActive {
+		return d.keysetLag(i, now, "the successor of generation %d of %s is not active here: a compromised key signs its cancel only once its drain may start", src.Generation, shard)
+	}
+	if len(info.Claims) != 1 {
+		return reject(ReasonKeyset, "a cancel names one nonce")
+	}
+	cl, err := gt.Claim(ctx, info.Claims[0])
+	if err != nil {
+		return err
+	}
+	switch {
+	case cl != nil && cl.Kind == signjob.KindDrain:
+		// In both modes: a drain's claim is never cancellable by this rule, so a compromised gateway cannot use it to knock out the drain's own transactions.
+		return reject(ReasonKeyset, "%s is claimed by a drain: a compromised key's cancel does not take over a drain", info.Claims[0])
+	case cl == nil && d.mode != ModeCosigner:
+		return reject(ReasonKeyset, "%s is not a nonce this zone signed for: a compromised key cancels only what the guard claimed", info.Claims[0])
+	case cl != nil && cl.Kind != "cancel" && d.mode != ModeCosigner:
+		held, err := gt.Intent(ctx, cl.IntentID)
+		if err != nil {
+			return err
+		}
+		if held == nil || held.Sender != info.Sender {
+			return reject(ReasonKeyset, "%s is claimed by an intent of another sender", info.Claims[0])
+		}
+	}
+	if known {
+		return nil // another attempt of a cancel already admitted: counted then
+	}
+	made, err := gt.SignedCancelCountFrom(ctx, info.Sender)
+	if err != nil {
+		return err
+	}
+	if made >= cc.maxCancelsPerSource() {
+		return reject(ReasonCancelGas, "%d cancels already signed from %s, the most the zone allows a compromised generation in all (max_cancels_per_source %d)", made, info.Sender, cc.maxCancelsPerSource())
+	}
+	return nil
 }
 
 // pendingSince is how far back a reserved, unsigned drain still counts as in progress: the gateway's sign timeout (after that the signer has given up or
