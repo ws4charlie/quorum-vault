@@ -168,7 +168,7 @@ cosigner:
   config: { chains: [], approvers: [] }
   socketPins: ["$(sockpin "$(ns_of $r)")"]
   partyPins: ["$(vv PIN $r)"]
-  database: { host: qv-guard-rw, port: 5432, name: qv_cosigner_guard, role: qv_cosigner_guard }
+  database: { host: qv-guard-rw, port: 5432, name: qv_cosigner_guard, role: qv_cosigner_${r}_guard }
   kafka: { brokers: "redpanda.$NS_BIZ.svc:9092" }
 network:
   broker: { to: [ $(sel qv-broker-$r) ], ports: [8443] }

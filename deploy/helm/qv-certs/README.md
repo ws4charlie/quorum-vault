@@ -8,7 +8,7 @@ The list of identities is **generated from the catalog** (`internal/pki/catalog.
 |---|---|---|
 | `business` | core, worker, relay, archiver, guardian, migrator, and the servers (Postgres, Temporal, Kafka, Keycloak, SeaweedFS) | `qv-business` |
 | `signing-core` | gateway, party A, the guard database, the pinned links of A, `gateway-link` | `qv-signing`, `qv-business-link` |
-| `party-b`, `party-c` | party and cosigner, the guard database, the cosigner socket, `cosigner-link` | `qv-signing`, `qv-business-link` |
+| `party-b`, `party-c` | party and cosigner, the guard database, the cosigner socket, `cosigner-link-<role>` | `qv-signing`, `qv-business-link` |
 | `broker` | the attestation broker's server certificate | `qv-signing` |
 | `all` | everything (kind and CI only; needs `issuers.mode: ca`) | `qv-business`, `qv-signing` |
 
@@ -23,7 +23,7 @@ Each Certificate writes one Secret with `tls.crt`, `tls.key`, `ca.crt`. The name
 
 Charts that need a certificate copy the rule and read the Secret as a **volume, never `subPath`** (a subPath mount does not update; the services re-read the files every minute). The business chart's names (`qv-core-tls`, `qv-worker-tls`, `qv-relay-tls`, `qv-archiver-tls`) are unchanged; its migration Job now takes `qv-migrator-tls` (certificate name `migrator`, Postgres role `qv`). A test checks every Secret the business chart asks for in production against this chart's business render.
 
-Pods that use a certificate in a party cluster: party `mpc-party-<role>` (peer port, caller port, and the channel to its cosigner), cosigner `cosigner` (client of the audit heads is `cosigner-link`; its socket certificate is `cosigner-socket`), gateway `gateway` (signing CA), `gateway-link` (business databases and Kafka) and `gateway-party` (pinned client certificate on the parties' caller ports). The broker's callers use `attest-caller-<role>`.
+Pods that use a certificate in a party cluster: party `mpc-party-<role>` (peer port, caller port, and the channel to its cosigner), cosigner `cosigner-b` or `cosigner-c` (each its own name; client of the audit heads is `cosigner-link-b` or `-c`; its socket certificate is `cosigner-socket`), gateway `gateway` (signing CA), `gateway-link` (business databases and Kafka) and `gateway-party` (pinned client certificate on the parties' caller ports). The broker's callers use `attest-caller-<role>`.
 
 ## Trust: the bundle, not `ca.crt`
 
@@ -33,7 +33,7 @@ Mount the ConfigMap `qv-trust-<zone>-<hash>` (key `ca.crt`; label `quorumvault.i
 
 - **Production (`issuers.mode: vault`)**: one cert-manager `Issuer` per zone, talking to Vault or OpenBao PKI with the cluster's own login (cert-manager asks Kubernetes for a token of a dedicated service account, which the chart makes with the minimal Role). **No CA key is in any cluster**, no Secret is rendered, no AppRole or token is in values. The chart refuses `http://` Vault addresses and empty settings.
 - **kind and CI (`issuers.mode: ca`)**: a self-signed bootstrap, then a CA certificate per zone made by cert-manager when the chart is installed (key in a Secret of that cluster), then a CA issuer per zone. Nothing is in the repository.
-- **Link certificates** (`gateway-link` in signing-core, `cosigner-link` in party-b and party-c) are signed by the **business** authority for a workload in a signing cluster. They use a second issuer, `qv-business-link`, that points at a Vault role which can sign only that cluster's link names. In `ca` mode, outside kind's single cluster, it points at the business CA Secret named by `issuers.ca.linkSecretName` (development only: the business CA key would be in that cluster).
+- **Link certificates** (`gateway-link` in signing-core, `cosigner-link-b` in party-b, `cosigner-link-c` in party-c) are signed by the **business** authority for a workload in a signing cluster. They use a second issuer, `qv-business-link`, that points at a Vault role which can sign only that cluster's link names. In `ca` mode, outside kind's single cluster, it points at the business CA Secret named by `issuers.ca.linkSecretName` (development only: the business CA key would be in that cluster).
 
 ### Vault roles (one per cluster and zone)
 
@@ -43,9 +43,9 @@ The restriction is Vault's, not the chart's: a cluster's cert-manager can ask fo
 |---|---|---|
 | `business-cluster` (business) | `spiffe://quorumvault/business/<name>` for the business names | those names and the DNS names of the servers |
 | `signing-core` (signing PKI) | `spiffe://quorumvault/signing/{gateway,gateway-party,mpc-party-a,attest-caller-a,signing-db,admin}` | the same CNs |
-| `party-b`, `party-c` (signing PKI) | `.../signing/{cosigner,cosigner-socket,mpc-party-<role>,attest-caller-<role>,signing-db,admin}` | the same CNs |
+| `party-b`, `party-c` (signing PKI) | ``.../signing/{cosigner-<role>,cosigner-socket,mpc-party-<role>,attest-caller-<role>,signing-db,admin}` | the same CNs |
 | `broker` (signing PKI) | `.../signing/attest-broker` | `attest-broker` |
-| `link-signing-core`, `link-party-b`, `link-party-c` (business PKI) | `spiffe://quorumvault/business/gateway-link` (signing-core), `.../business/cosigner-link` (party-b, party-c) | `gateway-link`, `cosigner-link` only |
+| `link-signing-core`, `link-party-b`, `link-party-c` (business PKI) | `spiffe://quorumvault/business/gateway-link` (signing-core), `.../business/cosigner-link-b` (party-b), `.../business/cosigner-link-c` (party-c) | `gateway-link` (signing-core); `cosigner-link-b` (party-b); `cosigner-link-c` (party-c): only that cluster's own name |
 
 Because the CN is part of what Postgres and Kafka read, a role that can sign `core` as a CN must never be given to a signing cluster: keep the link roles on their own names.
 

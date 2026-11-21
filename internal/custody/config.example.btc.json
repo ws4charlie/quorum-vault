@@ -1,5 +1,5 @@
 {
-  "_comment": "PLACEHOLDER business-zone config for a Bitcoin chain. Every key and address is a dummy (the same placeholders as internal/gateway/config.example.json: the hot addresses derive from its account_xpub). The fee caps here (max_tx_fee_sats, max_fee_rate, max_inputs) must EQUAL the signing zone's, and fee_caps_change.approvers must be the zone's enabled approvers with the same names, keys and identities: the zone's section has the bounds no signature can lift (docs/runbooks/btc-fee-caps.md). A test (TestShippedConfigsAgreeOnBitcoinFeeCaps) keeps the two files in step.",
+  "_comment": "PLACEHOLDER business-zone config for a Bitcoin chain. Every key and address is a dummy (the same placeholders as internal/gateway/config.example.json: the hot addresses derive from its account_xpub). The fee caps here (max_tx_fee_sats, max_fee_rate, max_inputs) must EQUAL the signing zone's, and fee_caps_change is {}: the core keeps no approver list, the zone's registry is the rule, and the zone's section has the bounds no signature can lift (docs/runbooks/btc-fee-caps.md). A test (TestShippedConfigsAgreeOnBitcoinFeeCaps) keeps the two files in step.",
   "entity": "qv-us",
   "chain": {
     "family": "btc",
@@ -17,15 +17,7 @@
       "max_tx_fee_sats": 150000,
       "max_fee_rate": 100,
       "max_inputs": 20,
-      "fee_caps_change": {
-        "min_approvers": 2,
-        "max_change_age": "10m",
-        "approvers": {
-          "alice": { "key": "0000000000000000000000000000000000000000000000000000000000000001", "identity": "alice" },
-          "bob":   { "key": "0000000000000000000000000000000000000000000000000000000000000002", "identity": "bob" },
-          "auto":  { "key": "0000000000000000000000000000000000000000000000000000000000000003", "identity": "auto" }
-        }
-      }
+      "fee_caps_change": {}
     },
     "assets": {
       "BTC": { "decimals": 8, "min_deposit": "1000" }

@@ -106,6 +106,10 @@ seccompProfile:
 {{- end -}}
 
 {{- define "qp.partySecret" -}}{{ default (printf "qv-signing-mpc-party-%s-tls" (include "qp.role" . | lower)) .Values.tls.party.secretName }}{{- end -}}
+{{/* The cosigner's names are its own per role (catalog cosigner-b|c, cosigner-link-b|c; internal/pki/catalog.go): a certificate of the other cosigner is not accepted. */}}
+{{- define "qp.cosignerSecret" -}}{{ default (printf "qv-signing-cosigner-%s-tls" (include "qp.role" . | lower)) .Values.tls.cosigner.secretName }}{{- end -}}
+{{- define "qp.cosignerLinkSecret" -}}{{ default (printf "qv-cosigner-link-%s-tls" (include "qp.role" . | lower)) .Values.tls.cosignerLink.secretName }}{{- end -}}
+{{- define "qp.cosignerGuard" -}}{{ printf "qv_cosigner_%s_guard" (include "qp.role" . | lower) }}{{- end -}}
 {{- define "qp.token" -}}{{ default (get (dict "A" "qv-party-1" "B" "qv-party-2" "C" "qv-party-3") (include "qp.role" .)) .Values.hsm.token }}{{- end -}}
 
 {{/* Probes: the health listener of the container (plain http, GET /livez and /readyz). Ready never depends on the other parties. */}}

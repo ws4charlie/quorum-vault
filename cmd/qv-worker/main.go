@@ -92,6 +92,8 @@ func run(log *slog.Logger) error {
 	}
 	// The SDK reports its metrics to reg; the listener publishes them with the worker's state and the certificate expiry.
 	reg := workermetrics.New(*stopTimeout)
+	// qv_btc_fee_caps_zone_refusals_total is 0 from start, so a rule on its increase has a series (monitoring/fee-caps.rules.yml, docs/runbooks/btc-fee-caps.md).
+	reg.AddWriter(custody.WriteFeeCapsMetrics)
 	reg.SetReadyFunc(probe.Ready) // qv_worker_ready is what /readyz answers now: the same checks, not a flag set once at start
 	if *metricsListen != "" {
 		if err := pki.CheckMetricsAddr(*metricsListen, pki.ZoneBusiness); err != nil {

@@ -27,7 +27,7 @@ Same steps with `-action disable|enable|revoke -name <approver>` and no key.
 - **Revoke** is permanent. Use it for a leaver or a lost or stolen key.
 
 ## Lost or stolen key
-Revoke the key's approver at once. Signatures from it stop counting for every decision after the apply, including jobs already queued. Enrol the person again with a new name and new key. If the key could also sign Bitcoin fee-cap changes, remove it from `fee_caps_change.approvers` of the core config too (see below).
+Revoke the key's approver at once. Signatures from it stop counting for every decision after the apply, including jobs already queued. Enrol the person again with a new name and new key.
 
 ## While the databases differ
 The gateway and each cosigner judge by their own verified log. Until a change reaches all of them:
@@ -41,4 +41,4 @@ The gateway and each cosigner judge by their own verified log. Until a change re
 - `sequence N is not higher than the current`: someone applied a change first; run `show` and sign again with the next number.
 
 ## Limits
-Route changes and Bitcoin fee-cap changes in the zone use the effective approver set. The **core** keeps a static copy of the approver keys for fee caps (`fee_caps_change.approvers` in the core config) and does not read the log. So a newly enrolled approver cannot sign a fee-cap change until the core config lists them, and a revoked one must be removed from it by hand.
+Route changes and Bitcoin fee-cap changes use the effective approver set: the zone's configuration with the signed log applied. The **core keeps no approver list**: `qv-fee-caps apply` reads the approvers in force from the zone databases (it needs at least one `-guard-dsn`) and refuses a change that the zone would refuse, before it writes anywhere. A newly enrolled approver can sign a fee-cap change at once; a revoked one is refused at that pre-check with the names of the approvers in force. The core reads its own fee-cap rows by shape only; the zone's check is the rule. If a revoked approver's signature carried the change in force, the zone ignores that change and the core does not: `qv-fee-caps show` flags the different sequence numbers, and one new change signed by the approvers who are left, applied to all databases, ends it.

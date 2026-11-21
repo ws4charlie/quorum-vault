@@ -55,6 +55,7 @@ type Registry struct {
 	stopping atomic.Bool
 	stopTO   time.Duration
 	started  time.Time
+	extra    []func(io.Writer) // writers of other packages' own metrics (AddWriter), run at each scrape after the registry's own
 }
 
 var _ client.MetricsHandler = (*Registry)(nil)
@@ -82,6 +83,9 @@ func (r *Registry) isReady() bool {
 	defer cancel()
 	return r.readyFn(ctx) == nil
 }
+
+// AddWriter adds the metrics of another package: fn writes Prometheus text at each scrape (for example custody.WriteFeeCapsMetrics). Call it before the listener starts.
+func (r *Registry) AddWriter(fn func(io.Writer)) { r.extra = append(r.extra, fn) }
 
 // SetStopping records that SIGTERM arrived: the worker polls no more and waits for its running activities.
 func (r *Registry) SetStopping() { r.stopping.Store(true) }
@@ -230,6 +234,9 @@ func (r *Registry) Write(w io.Writer) {
 	fmt.Fprintf(&buf, "# TYPE qv_worker_stop_timeout_seconds gauge\nqv_worker_stop_timeout_seconds %g\n", r.stopTO.Seconds())
 	fmt.Fprintf(&buf, "# TYPE qv_worker_start_time_seconds gauge\nqv_worker_start_time_seconds %d\n", r.started.Unix())
 	r.render(&buf)
+	for _, fn := range r.extra {
+		fn(&buf)
+	}
 	w.Write(buf.Bytes())
 }
 

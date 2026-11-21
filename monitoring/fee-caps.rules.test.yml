@@ -1,0 +1,54 @@
+rule_files:
+  - fee-caps.rules.yml
+evaluation_interval: 1m
+tests:
+  # published at 0 from start, then one refusal that stays: one refusal opens the ticket and it closes when the refusal leaves the 15-minute window
+  - interval: 1m
+    input_series:
+      - series: 'qv_btc_fee_caps_zone_refusals_total{job="qv-worker"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: QVBtcFeeCapsZoneRefused, exp_alerts: []}
+      - eval_time: 8m
+        alertname: QVBtcFeeCapsZoneRefused
+        exp_alerts:
+          - exp_labels: {severity: ticket, job: qv-worker}
+            exp_annotations:
+              summary: "The signing zone refused a Bitcoin withdrawal built under other fee caps than its own"
+              description: "The worker log line 'ALERT btc fee caps' has the zone's reason. The core and the zone are on different fee caps: run 'qv-fee-caps show' (docs/runbooks/btc-fee-caps.md). After one hour the withdrawal is parked with the zone's reason."
+      - {eval_time: 45m, alertname: QVBtcFeeCapsZoneRefused, exp_alerts: []}
+  # a counter at 0 never fires
+  - interval: 1m
+    input_series:
+      - series: 'qv_btc_fee_caps_zone_refusals_total{job="qv-worker"}'
+        values: '0x60'
+    alert_rule_test:
+      - {eval_time: 50m, alertname: QVBtcFeeCapsZoneRefused, exp_alerts: []}
+  # the first sample is already above 0 (the refusal came before the first scrape of a new pod): it still fires
+  - interval: 1m
+    input_series:
+      - series: 'qv_btc_fee_caps_zone_refusals_total{job="qv-worker"}'
+        values: '2+0x60'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: QVBtcFeeCapsZoneRefused
+        exp_alerts:
+          - exp_labels: {severity: ticket, job: qv-worker}
+            exp_annotations:
+              summary: "The signing zone refused a Bitcoin withdrawal built under other fee caps than its own"
+              description: "The worker log line 'ALERT btc fee caps' has the zone's reason. The core and the zone are on different fee caps: run 'qv-fee-caps show' (docs/runbooks/btc-fee-caps.md). After one hour the withdrawal is parked with the zone's reason."
+      - {eval_time: 40m, alertname: QVBtcFeeCapsZoneRefused, exp_alerts: []}
+  # divergence pages only after an hour
+  - interval: 1m
+    input_series:
+      - series: 'qv_btc_fee_caps_diverged{job="qv-fee-caps"}'
+        values: '0 0 1x120'
+    alert_rule_test:
+      - {eval_time: 50m, alertname: QVBtcFeeCapsDiverged, exp_alerts: []}
+      - eval_time: 70m
+        alertname: QVBtcFeeCapsDiverged
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "The Bitcoin fee-cap databases are on different sequence numbers for an hour"
+              description: "A fee-cap change reached some databases and not others: withdrawals wait or are refused. Apply the change to every database (qv-fee-caps show, then apply; docs/runbooks/btc-fee-caps.md)."

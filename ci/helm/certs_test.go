@@ -394,7 +394,7 @@ func checkZones(objs []Obj, cluster string) []string {
 		switch {
 		case cluster == "business" && (strings.Contains(uri, "/signing/") || s.IssuerRef.Name != "qv-business"):
 			bad = append(bad, "business cluster: "+uri+" signed by "+s.IssuerRef.Name)
-		case cluster != "business" && strings.Contains(uri, "/business/") && !(strings.HasSuffix(uri, "-link") && s.IssuerRef.Name == "qv-business-link"):
+		case cluster != "business" && strings.Contains(uri, "/business/") && !(isLinkURI(uri) && s.IssuerRef.Name == "qv-business-link"):
 			bad = append(bad, cluster+": business-zone name "+uri+" that is not a link, or not signed by the link issuer")
 		case cluster != "business" && strings.Contains(uri, "/signing/") && s.IssuerRef.Name != "qv-signing":
 			bad = append(bad, cluster+": "+uri+" signed by "+s.IssuerRef.Name)
@@ -403,6 +403,29 @@ func checkZones(objs []Obj, cluster string) []string {
 		}
 	}
 	return bad
+}
+
+// A link name ends in -link, or in -link-b / -link-c for the two cosigners (each cosigner has its own names).
+func isLinkURI(uri string) bool {
+	return strings.HasSuffix(uri, "-link") || strings.HasSuffix(uri, "-link-b") || strings.HasSuffix(uri, "-link-c")
+}
+
+// Cosigners B and C have names of their own: party-b issues cosigner-b and party-c issues cosigner-c, never the other's and never the retired shared name.
+func TestCosignerNamesAreOwnPerCluster(t *testing.T) {
+	want := map[string][]string{"party-b": {"cosigner-b", "cosigner-link-b"}, "party-c": {"cosigner-c", "cosigner-link-c"}}
+	for _, c := range certClusters {
+		var got []string
+		for _, o := range leafCerts(mustRender(t, "values.yaml", "--set", "cluster="+c)) {
+			u := certSpecOf(o).URIs[0]
+			if strings.Contains(u, "/cosigner") && !strings.HasSuffix(u, "/cosigner-socket") {
+				got = append(got, u[strings.LastIndex(u, "/")+1:])
+			}
+		}
+		sort.Strings(got)
+		if strings.Join(got, ",") != strings.Join(want[c], ",") {
+			t.Errorf("%s: cosigner certificate names %v, want %v", c, got, want[c])
+		}
+	}
 }
 
 func TestCertsZonesStayApart(t *testing.T) {
@@ -418,11 +441,11 @@ func TestCertsZonesStayApart(t *testing.T) {
 			}
 		}
 	}
-	// the link certificates by cluster: the gateway's in signing-core, the cosigner's in parties B and C, none elsewhere
+	// the link certificates by cluster: the gateway's in signing-core, cosigner B's in party B and cosigner C's in party C (each its own name), none elsewhere
 	want := map[string][]string{
 		"signing-core": {"spiffe://quorumvault/business/gateway-link"},
-		"party-b":      {"spiffe://quorumvault/business/cosigner-link"},
-		"party-c":      {"spiffe://quorumvault/business/cosigner-link"},
+		"party-b":      {"spiffe://quorumvault/business/cosigner-link-b"},
+		"party-c":      {"spiffe://quorumvault/business/cosigner-link-c"},
 	}
 	for _, c := range certClusters {
 		sort.Strings(links[c])

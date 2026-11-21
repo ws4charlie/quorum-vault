@@ -9,7 +9,7 @@ acl() { rpk security acl create "${X[@]}" "$@" >/dev/null; }
 acl --allow-principal User:relay --operation write,describe,create --topic qv. --resource-pattern-type prefixed
 acl --allow-principal User:relay --operation idempotent_write --cluster
 # the signing zone's programs publish their audit chain heads, through their business-issued link certificates, and nothing else
-for who in gateway-link cosigner-link; do
+for who in gateway-link cosigner-link-b cosigner-link-c; do
   acl --allow-principal "User:$who" --operation write,describe,create --topic qv.audit.heads
   acl --allow-principal "User:$who" --operation idempotent_write --cluster
 done

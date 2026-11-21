@@ -25,7 +25,7 @@ import (
 // as an operator runs them (separate processes, the databases' own connection strings), and readers of what they leave behind.
 
 // feeCapsOpts turns on fee_caps_change in the core's and the zone's config. The zone's bounds are fcMin*..fcMax* (no signature goes outside them);
-// the approvers are the four of the harness (alice, bob, carol, auto), the same in the core and the zone, identity = name.
+// the approvers are the four of the harness (alice, bob, carol, auto) in the zone's config; the core has none.
 type feeCapsOpts struct {
 	minApprovers int // default 2
 	// operators > 0 adds the operators section (that many operator keys, min_operators 2): approvers can then be revoked with signatures.
@@ -44,15 +44,12 @@ func (o *feeCapsOpts) min() int {
 	return 2
 }
 
-// feeCapsCore puts the section in the core's config: the approvers' keys. Called once the approvers exist.
+// feeCapsCore turns the feature on in the core's config. The core keeps no approver list: the zone's registry is the rule.
 func (s *system) feeCapsCore(o opts) {
 	if o.feeCaps == nil {
 		return
 	}
-	fc := &custody.FeeCapsChangeFile{Approvers: map[string]custody.FeeCapsApproverFile{}, MinApprovers: o.feeCaps.min()}
-	for name, priv := range s.approv {
-		fc.Approvers[name] = custody.FeeCapsApproverFile{Key: hex.EncodeToString(priv.Public().(ed25519.PublicKey)), Identity: name}
-	}
+	fc := &custody.FeeCapsChangeFile{}
 	s.cf.Chain.BTC.FeeCapsChange = fc
 }
 

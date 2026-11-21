@@ -5,14 +5,15 @@
 --
 --   CREATE DATABASE qv_gateway_guard OWNER qv_gateway_guard;
 --   REVOKE CONNECT ON DATABASE qv_gateway_guard FROM PUBLIC;
---   CREATE DATABASE qv_cosigner_guard OWNER qv_cosigner_guard;
+--   CREATE DATABASE qv_cosigner_guard OWNER qv_cosigner_b_guard;   (in cluster B; OWNER qv_cosigner_c_guard in cluster C: one database per cluster, the name kept)
 --   REVOKE CONNECT ON DATABASE qv_cosigner_guard FROM PUBLIC;
 --
--- Cosigners B and C share one certificate name (signing/cosigner), so they share one role; they are not separated from each other here.
+-- Cosigners B and C have their own certificate names (signing/cosigner-b, signing/cosigner-c) and their own roles: B cannot open C's guard database
+-- on a server both use, and a certificate of one maps to the other's role nowhere (deploy/postgres/signing.pg_ident.conf).
 DO $$
 DECLARE r text;
 BEGIN
-    FOREACH r IN ARRAY ARRAY['qv_gateway_guard', 'qv_cosigner_guard'] LOOP
+    FOREACH r IN ARRAY ARRAY['qv_gateway_guard', 'qv_cosigner_b_guard', 'qv_cosigner_c_guard'] LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
             BEGIN
                 EXECUTE format('CREATE ROLE %I NOLOGIN', r);
