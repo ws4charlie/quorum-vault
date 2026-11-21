@@ -184,3 +184,37 @@ func TestCompromisedCancelNeverTakesADrainsClaim(t *testing.T) {
 		t.Fatalf("cosigner without a claim: %v", err)
 	}
 }
+
+// Routine cancels signed while the key was active do not use up the emergency allowance: only cancels admitted under the compromised state, as this guard saw it,
+// count. Both sides of the mark, in the gateway and in a cosigner.
+func TestRoutineCancelsBeforeTheMarkDoNotCountAgainstTheBound(t *testing.T) {
+	r := newKSRig(t)
+	r.cfg.Chains[testChain].MaxCancelsPerSource = 2
+	cosGuard := mustGuard(t, r.harness)
+	cos := NewDecider(r.cfg, r.gw.codecs, cosGuard, ModeCosigner, r.clock)
+	pub := r.signer.PublicKey()
+	for i := uint64(0); i < 6; i++ {
+		r.mustSign(r.withdrawalShard1(fmt.Sprintf("w%d", i), 100, i))
+	}
+	// three routine cancels while the key is active: more than the bound, in the gateway and in the cosigner
+	for i := uint64(0); i < 3; i++ {
+		r.mustSign(r.cancelJob(fmt.Sprintf("routine%d", i), i))
+		if _, err := cos.Decide(t.Context(), r.cancelJob(fmt.Sprintf("routine%d", i), i), pub); err != nil {
+			t.Fatalf("routine cancel in the cosigner: %v", err)
+		}
+	}
+	r.compromised(r.guard, cosGuard)
+	// the allowance is intact: two emergency cancels are admitted on both sides, the third is the bound
+	for i := uint64(3); i < 5; i++ {
+		r.mustSign(r.cancelJob(fmt.Sprintf("em%d", i), i))
+		if v, err := cos.Decide(t.Context(), r.cancelJob(fmt.Sprintf("em%d", i), i), pub); err != nil || !v.NeedSign {
+			t.Fatalf("emergency cancel %d in the cosigner: %v", i, err)
+		}
+	}
+	r.mustReject(r.cancelJob("em5", 5), ReasonCancelGas)
+	if _, err := cos.Decide(t.Context(), r.cancelJob("em5", 5), pub); err == nil {
+		t.Fatal("the cosigner admitted a cancel beyond the bound")
+	} else if why, ok := IsRejection(err); !ok || !contains(why, ReasonCancelGas) {
+		t.Fatalf("%v", err)
+	}
+}

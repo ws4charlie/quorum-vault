@@ -269,12 +269,20 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 
 		// 4. Policy. Caps and rates are admitted once per intent; a known
 		// intent (resubmission, replacement) is not counted again.
-		if err := d.policy(ctx, gt, cc, intent, codec, info, amount, valid, known, now); err != nil {
+		genState := ""
+		if kv != nil && cc.Family != FamilyBTC && cc.Family != FamilySOL {
+			if shard, ok := kv.shardOf(intent.PartitionID); ok {
+				if e := kv.byAddress(shard, info.Sender); e != nil {
+					genState = e.State
+				}
+			}
+		}
+		if err := d.policy(ctx, gt, cc, intent, codec, info, amount, valid, known, genState == "compromised", now); err != nil {
 			return err
 		}
 
 		// 5. Replay guard.
-		rel := Release{IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
+		rel := Release{GenState: genState, IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
 			Sender: info.Sender, PartitionID: intent.PartitionID, Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: guardKey, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
 		if intent.Kind == "withdrawal" || intent.Kind == "to-cold" {
 			rel.Parent = info.Parent // kinds that keep a change: a child may pull them in later
@@ -423,7 +431,7 @@ func (d *Decider) checkRequester(set *ApproverSet, i signjob.Intent, approvers [
 }
 
 func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i signjob.Intent, codec ChainCodec,
-	info TxInfo, amount *big.Int, valid int, known bool, now time.Time) error {
+	info TxInfo, amount *big.Int, valid int, known, compromised bool, now time.Time) error {
 	switch i.Kind {
 	case "withdrawal":
 		if !known { // a known intent may be replaced after it expired
@@ -578,7 +586,9 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 		if !codec.OwnsSender(info.Sender) {
 			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
 		}
-		if !known {
+		// The hourly rate is for routine cancels, counted over the whole chain. A compromised generation's cancels are the emergency's: they are bounded in all
+		// per source (max_cancels_per_source, keysets.go), and a rate shared with routine cancels would let those use up the emergency's hour.
+		if !known && !compromised {
 			n, err := gt.CountSince(ctx, "cancel", now.Add(-time.Hour))
 			if err != nil {
 				return err

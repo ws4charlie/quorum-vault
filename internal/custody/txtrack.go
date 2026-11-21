@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -276,7 +277,21 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 			return err
 		}
 		if have {
-			return nil
+			if !s.evmFamily() {
+				return nil
+			}
+			// EVM: the cancel's job may have been refused only because its deadline passed before the zone could sign it (the successor was not active
+			// in some guard in time). Then, and only then, a new attempt is enqueued (renewCancel); otherwise the latest attempt is the one to follow.
+			latest, renew, err := s.cancelAttempt(ctx, tx, o, t)
+			if err != nil {
+				return err
+			}
+			if !renew {
+				id = latest
+				return nil
+			}
+			id = latest
+			// falls through to build the renewal under the new id
 		}
 		// EVM, a compromised generation: its cancel would be refused like everything but its drain. Without a signature there is nothing to cancel:
 		// the nonce becomes a hole that the next drain move fills (drain_inflight.go).
@@ -320,8 +335,11 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 			Asset: s.Cfg.Native, To: res.Account, Amount: "0"}
 		if s.evmFamily() {
 			// The zone waits for a compromised generation's successor to be active only until the intent's not_after (a cancel signed after the mark needs the
-			// drain to be possible: gateway keysets.go, compromisedCancel). An hour is longer than the operators' signing of the activation.
-			intent.NotAfter = s.Now().Add(time.Hour).Unix()
+			// drain to be possible: gateway keysets.go, compromisedCancel). A day is longer than any pause of an emergency run (CancelWindow); a cancel refused because even that passed is renewed (cancelAttempt).
+			intent.NotAfter = s.Now().Add(CancelWindow).Unix()
+			if id != t.FirstJob() {
+				intent.ID = id // a renewal is a new intent for the zone: the refused one was never reserved, so nothing of it exists there
+			}
 		}
 		ib, err := json.Marshal(intent)
 		if err != nil {
@@ -524,4 +542,52 @@ func (s *Service) releaseIfUnsignedTx(ctx context.Context, tx pgx.Tx, o Owner) (
 		return false, err
 	}
 	return true, nil
+}
+
+// CancelWindow is how long the zone may wait for a compromised generation's successor to be active before it refuses the cancel as expired.
+const CancelWindow = 24 * time.Hour
+
+// cancelAttempt looks at the attempts of the owner's cancel track. It returns the job to follow, and whether a renewal must be built: true only when every job of
+// both the owner's track and the cancel track is rejected and the latest cancel job was rejected because its deadline had passed BEFORE anything was reserved
+// (an expiry reason that does not come from a cosigner's refusal after the gateway reserved). The same rule as everywhere in this change: while any job may
+// be signed, or the gateway may hold a claim for the intent, no second cancel is made. The renewal's job id is the next "aN" of the track after a2 (a2 is the
+// retry of a failed job), and its intent id is the job's.
+func (s *Service) cancelAttempt(ctx context.Context, tx pgx.Tx, o Owner, t Track) (string, bool, error) {
+	rows, err := tx.Query(ctx, `SELECT id, status, COALESCE(reject_reason, '') FROM sign_jobs WHERE starts_with(id, $1) ORDER BY created_at, id FOR UPDATE`, string(t)+":")
+	if err != nil {
+		return "", false, err
+	}
+	var latest, latestStatus, latestWhy string
+	attempts := 0
+	allRejected := true
+	for rows.Next() {
+		var id, st, why string
+		if err := rows.Scan(&id, &st, &why); err != nil {
+			rows.Close()
+			return "", false, err
+		}
+		if st != signjob.StatusRejected {
+			allRejected = false // any job of the track (a replacement included) that is not rejected may be signed
+		}
+		if strings.HasPrefix(strings.TrimPrefix(id, string(t)+":"), "a") { // the attempts, not their replacements
+			attempts++
+			latest, latestStatus, latestWhy = id, st, why
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	if latest == "" {
+		return t.FirstJob(), false, nil
+	}
+	expired := strings.Contains(latestWhy, "intent has expired") || strings.HasPrefix(latestWhy, "intent_expired")
+	if latestStatus != signjob.StatusRejected || !allRejected || !expired || strings.HasPrefix(latestWhy, "signer_refused") {
+		return latest, false, nil
+	}
+	// the owner's own transfer must be unsignable too
+	if _, may, err := jobStates(ctx, tx, o); err != nil || may {
+		return latest, false, err
+	}
+	return string(t) + ":a" + strconv.Itoa(attempts+2), true, nil
 }

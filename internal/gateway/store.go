@@ -310,10 +310,13 @@ func (t *GuardTx) SignedDrainCountFrom(ctx context.Context, sender string, pendi
 	return n, err
 }
 
-// SignedCancelCountFrom counts the cancels reserved or signed from sender in all (the bound of a compromised generation's cancels).
+// SignedCancelCountFrom counts the cancels reserved or signed from sender in all while its generation was compromised in this guard's own view (the bound of a
+// compromised generation's cancels). The state is the one the guard saw and recorded with the reservation (Release.GenState), never a label from the business
+// side: a routine cancel signed while the key was active does not use up the emergency allowance, and the guard's own log of signed records decides when the
+// state changed.
 func (t *GuardTx) SignedCancelCountFrom(ctx context.Context, sender string) (int, error) {
 	var n int
-	err := t.tx.QueryRow(ctx, `SELECT count(*) FROM signed_intents i WHERE i.chain=$1 AND i.kind='cancel' AND i.sender=$2
+	err := t.tx.QueryRow(ctx, `SELECT count(*) FROM signed_intents i WHERE i.chain=$1 AND i.kind='cancel' AND i.sender=$2 AND i.gen_state='compromised'
 		AND EXISTS (SELECT 1 FROM signed_digests d WHERE d.intent_id = i.intent_id)`, t.chain, sender).Scan(&n)
 	return n, err
 }
@@ -369,6 +372,9 @@ func (t *GuardTx) Parent(ctx context.Context, txid string) (*ParentRecord, error
 // Release is everything recorded when a digest is reserved, before the signer
 // runs. Signature stays nil until Guard.Finish stores it.
 type Release struct {
+	// GenState is the state of the sender's keyset generation as THIS guard's own view had it when the intent was admitted (EVM; empty elsewhere). It is
+	// recorded with the intent, so the bound of a compromised generation's cancels counts only cancels admitted under that state.
+	GenState    string
 	IntentID    string
 	IntentHash  []byte
 	Kind        string
@@ -429,9 +435,9 @@ func (t *GuardTx) IdentityConflict(ctx context.Context, identity string, payload
 // claim make a double release fail even if the lock were bypassed.
 func (t *GuardTx) Record(ctx context.Context, r Release) error {
 	if r.NewIntent {
-		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at)
-			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10)`,
-			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.PartitionID, r.At); err != nil {
+		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at, gen_state)
+			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10, NULLIF($11,''))`,
+			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.PartitionID, r.At, r.GenState); err != nil {
 			return fmt.Errorf("record intent: %w", err)
 		}
 		for _, m := range r.Members {

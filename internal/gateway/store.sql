@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS signed_intents (
 CREATE INDEX IF NOT EXISTS signed_intents_window ON signed_intents (chain, kind, created_at);
 ALTER TABLE signed_intents ALTER COLUMN nonce DROP NOT NULL;
 ALTER TABLE signed_intents ADD COLUMN IF NOT EXISTS claims text[];
+-- The state of the sender's keyset generation in this guard's own view when the intent was admitted (EVM): the bound of a compromised generation's cancels counts only
+-- those admitted under that state.
+ALTER TABLE signed_intents ADD COLUMN IF NOT EXISTS gen_state text;
 
 -- One row per transaction digest. Reserved first (signature NULL), finished after signing. A transaction with several
 -- signatures has one row per digest, all with the same payload_hash; a replacement adds rows with another payload_hash
