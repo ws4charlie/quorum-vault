@@ -287,7 +287,7 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 				handed = true
 				return nil
 			}
-			if ok, err := s.noOpenAllocation(ctx, tx, o); err != nil {
+			if ok, err := s.handedOverBefore(ctx, tx, o); err != nil {
 				return err
 			} else if ok {
 				handed = true

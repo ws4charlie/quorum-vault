@@ -79,13 +79,21 @@ func (s *Service) handOverUnsigned(ctx context.Context, tx pgx.Tx, o Owner) (boo
 	return true, nil
 }
 
-// noOpenAllocation reports whether the owner holds no open nonce: its nonce was handed over (by the planner or an earlier try of the same activity) and
-// a drain move may have used it since. A refusal then has nothing left to free.
-func (s *Service) noOpenAllocation(ctx context.Context, tx pgx.Tx, o Owner) (bool, error) {
+// handedOverBefore reports whether the owner's nonce was handed over earlier (by the planner or an earlier try of the same activity) and a drain move may
+// have used it since: the owner holds no open nonce AND no job of it can have produced a signature (every one is rejected). Both are needed. A job
+// that is being signed, done or failed may have a signature on chain, and then the cancel must be built as before, whatever the allocation says.
+func (s *Service) handedOverBefore(ctx context.Context, tx pgx.Tx, o Owner) (bool, error) {
 	var open bool
-	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status IN ('allocated','broadcast'))`,
-		s.Cfg.Chain, o.Kind, o.ID).Scan(&open)
-	return !open, err
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM evm_nonce_allocations WHERE chain=$1 AND owner_kind=$2 AND owner_id=$3 AND status IN ('allocated','broadcast'))`,
+		s.Cfg.Chain, o.Kind, o.ID).Scan(&open); err != nil || open {
+		return false, err
+	}
+	var jobs, notRejected int
+	if err := tx.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE status <> 'rejected') FROM sign_jobs WHERE starts_with(id, $1)`,
+		string(OwnerTrack(o))+":").Scan(&jobs, &notRejected); err != nil {
+		return false, err
+	}
+	return jobs > 0 && notRejected == 0, nil
 }
 
 // inflightItem is one open allocation of the old address that is not a drain move's.
