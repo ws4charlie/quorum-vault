@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,10 @@ import (
 //	                                                   data, the envelope's random id (16 bytes, fresh per seal), the part index, the part
 //	                                                   count and the total plaintext length: parts cannot be mixed between seals, moved,
 //	                                                   dropped, duplicated or cut.
+//
+// Either version may carry "k": the label of the wrap key it was sealed under, written only when it is not the default label (pkcs11WrapKeyLabel). An
+// envelope without it is under the default key. The sealer opens an envelope under the key it names, whatever label the party writes new ones under
+// (`sealer.wrap_key_label`), which is what lets a party move its shares to a new wrap key one file at a time (mpc-party reseal).
 //
 // Both profiles open both versions, so a data directory sealed under one profile still opens under the other when the token holds the same key.
 const (
@@ -44,6 +49,7 @@ var ErrOpen = errors.New("sealer: cannot open envelope")
 
 type envelope struct {
 	V  int    `json:"v"`
+	K  string `json:"k,omitempty"` // label of the wrap key; absent: the default label (every envelope written before wrap keys could be replaced)
 	IV []byte `json:"iv"`
 	CT []byte `json:"ct"`
 }
@@ -55,6 +61,7 @@ type envelopePart struct {
 
 type envelopeHSM struct {
 	V     int            `json:"v"`
+	K     string         `json:"k,omitempty"` // label of the wrap key, as in envelope
 	P     string         `json:"p"`
 	ID    []byte         `json:"id"`  // random, one per seal: every part is bound to it, so parts of two seals cannot be mixed
 	Len   int            `json:"len"` // total plaintext length, bound into every part
@@ -81,6 +88,7 @@ type p11 interface {
 	FindObjects(sess pkcs11.SessionHandle, max int) ([]pkcs11.ObjectHandle, bool, error)
 	FindObjectsFinal(sess pkcs11.SessionHandle) error
 	GenerateKey(sess pkcs11.SessionHandle, tmpl []*pkcs11.Attribute) (pkcs11.ObjectHandle, error)
+	DestroyObject(sess pkcs11.SessionHandle, obj pkcs11.ObjectHandle) error
 	// GCMEncrypt returns the IV the HSM used (the one passed in when the HSM takes it, the HSM's own when it makes it) and the ciphertext with tag.
 	GCMEncrypt(sess pkcs11.SessionHandle, key pkcs11.ObjectHandle, iv, aad, plaintext []byte) (usedIV, ct []byte, err error)
 	GCMDecrypt(sess pkcs11.SessionHandle, key pkcs11.ObjectHandle, iv, aad, ct []byte) ([]byte, error)
@@ -149,7 +157,7 @@ type profile struct {
 	// pinFromEnvAllowed: pin_env is accepted.
 	pinFromEnvAllowed bool
 	// keyTemplate: attributes of the wrap key.
-	keyTemplate func() []*pkcs11.Attribute
+	keyTemplate func(label string) []*pkcs11.Attribute
 	// requireRW: sessions must be read-write (CloudHSM supports no read-only session). Always true for the sealer today; kept for the fake.
 	// tokenByLabelOnly: a token whose label does not match is an error; otherwise a lone token is accepted with a warning.
 	tokenByLabelOnly bool
@@ -160,10 +168,10 @@ type profile struct {
 	retryFunctionFailed bool
 }
 
-func baseKeyTemplate(private bool) []*pkcs11.Attribute {
+func baseKeyTemplate(private bool, label string) []*pkcs11.Attribute {
 	t := []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_SECRET_KEY), pkcs11.NewAttribute(pkcs11.CKA_KEY_TYPE, pkcs11.CKK_AES),
-		pkcs11.NewAttribute(pkcs11.CKA_VALUE_LEN, 32), pkcs11.NewAttribute(pkcs11.CKA_LABEL, pkcs11WrapKeyLabel),
+		pkcs11.NewAttribute(pkcs11.CKA_VALUE_LEN, 32), pkcs11.NewAttribute(pkcs11.CKA_LABEL, label),
 		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, true),
 		pkcs11.NewAttribute(pkcs11.CKA_SENSITIVE, true), pkcs11.NewAttribute(pkcs11.CKA_EXTRACTABLE, false), // non-exportable
 		pkcs11.NewAttribute(pkcs11.CKA_ENCRYPT, true), pkcs11.NewAttribute(pkcs11.CKA_DECRYPT, true),
@@ -177,7 +185,7 @@ func baseKeyTemplate(private bool) []*pkcs11.Attribute {
 var softHSMProfile = profile{
 	name: ProviderSoftHSM, writeVersion: envelopeVersion, pinFromEnvAllowed: true, tokenByLabelOnly: true,
 	pin:         func(SealerConfig, string) error { return nil },
-	keyTemplate: func() []*pkcs11.Attribute { return baseKeyTemplate(true) },
+	keyTemplate: func(l string) []*pkcs11.Attribute { return baseKeyTemplate(true, l) },
 	attempts:    1,
 }
 
@@ -194,7 +202,7 @@ var cloudHSMProfile = profile{
 		}
 		return nil
 	},
-	keyTemplate:         func() []*pkcs11.Attribute { return baseKeyTemplate(false) },
+	keyTemplate:         func(l string) []*pkcs11.Attribute { return baseKeyTemplate(false, l) },
 	attempts:            3,
 	backoff:             100 * time.Millisecond,
 	retryFunctionFailed: true,
@@ -216,7 +224,8 @@ type PKCS11Sealer struct {
 	api   p11
 	prof  profile
 	slot  uint
-	label string
+	label string // the token's label
+	wrap  string // the label of the wrap key new envelopes are sealed under
 	pin   string // kept so a lost login can be redone (reconnect); never logged, never in an error
 
 	mu    sync.Mutex // guards login
@@ -256,11 +265,25 @@ func NewPKCS11Sealer(c SealerConfig) (*PKCS11Sealer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newPKCS11SealerOn(realP11{ctx}, prof, lib, c.Token, pin)
+	return newPKCS11SealerLabel(realP11{ctx}, prof, lib, c.Token, pin, c.WrapKeyLabel)
 }
+
+// WrapKeyLabelRE is what a wrap key label may look like.
+var wrapKeyLabelRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // newPKCS11SealerOn is NewPKCS11Sealer on an already loaded module (tests give a fake).
 func newPKCS11SealerOn(api p11, prof profile, libPath, token, pin string) (*PKCS11Sealer, error) {
+	return newPKCS11SealerLabel(api, prof, libPath, token, pin, "")
+}
+
+// newPKCS11SealerLabel is newPKCS11SealerOn with the label of the wrap key new envelopes are sealed under ("" = the default label).
+func newPKCS11SealerLabel(api p11, prof profile, libPath, token, pin, wrap string) (*PKCS11Sealer, error) {
+	if wrap == "" {
+		wrap = pkcs11WrapKeyLabel
+	}
+	if !wrapKeyLabelRE.MatchString(wrap) {
+		return nil, fmt.Errorf("sealer pkcs11: wrap_key_label %q: letters, digits, dot, dash and underscore, 1 to 64 characters", wrap)
+	}
 	var libInfo pkcs11.Info
 	if info, err := api.GetInfo(); err == nil {
 		libInfo = info
@@ -292,11 +315,11 @@ func newPKCS11SealerOn(api p11, prof profile, libPath, token, pin string) (*PKCS
 			return nil, err
 		}
 	}
-	s := &PKCS11Sealer{api: api, prof: prof, slot: slot, label: token, pin: pin, sleep: time.Sleep}
+	s := &PKCS11Sealer{api: api, prof: prof, slot: slot, label: token, wrap: wrap, pin: pin, sleep: time.Sleep}
 	if err := s.relogin(); err != nil {
 		return nil, err
 	}
-	if err := s.withSession(func(sess pkcs11.SessionHandle) error { _, err := s.ensureKey(sess); return err }); err != nil {
+	if err := s.withSession(func(sess pkcs11.SessionHandle) error { _, err := s.ensureKey(sess, s.wrap); return err }); err != nil {
 		return nil, fmt.Errorf("sealer pkcs11: wrap key: %w", err)
 	}
 	return s, nil
@@ -371,8 +394,8 @@ func (s *PKCS11Sealer) withSessionOnce(f func(pkcs11.SessionHandle) error) error
 	return f(sess)
 }
 
-func (s *PKCS11Sealer) findKey(sess pkcs11.SessionHandle) (pkcs11.ObjectHandle, bool, error) {
-	tmpl := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_SECRET_KEY), pkcs11.NewAttribute(pkcs11.CKA_LABEL, pkcs11WrapKeyLabel)}
+func (s *PKCS11Sealer) findKey(sess pkcs11.SessionHandle, label string) (pkcs11.ObjectHandle, bool, error) {
+	tmpl := []*pkcs11.Attribute{pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_SECRET_KEY), pkcs11.NewAttribute(pkcs11.CKA_LABEL, label)}
 	if err := s.api.FindObjectsInit(sess, tmpl); err != nil {
 		return 0, false, opErr("C_FindObjectsInit", err)
 	}
@@ -389,20 +412,66 @@ func (s *PKCS11Sealer) findKey(sess pkcs11.SessionHandle) (pkcs11.ObjectHandle, 
 
 var createKeyMu sync.Mutex
 
-func (s *PKCS11Sealer) ensureKey(sess pkcs11.SessionHandle) (pkcs11.ObjectHandle, error) {
-	if h, ok, err := s.findKey(sess); err != nil || ok {
+func (s *PKCS11Sealer) ensureKey(sess pkcs11.SessionHandle, label string) (pkcs11.ObjectHandle, error) {
+	if h, ok, err := s.findKey(sess, label); err != nil || ok {
 		return h, err
 	}
 	createKeyMu.Lock()
 	defer createKeyMu.Unlock()
-	if h, ok, err := s.findKey(sess); err != nil || ok {
+	if h, ok, err := s.findKey(sess, label); err != nil || ok {
 		return h, err
 	}
-	h, err := s.api.GenerateKey(sess, s.prof.keyTemplate())
+	h, err := s.api.GenerateKey(sess, s.prof.keyTemplate(label))
 	if err != nil {
-		return 0, opErr("C_GenerateKey "+pkcs11WrapKeyLabel, err)
+		return 0, opErr("C_GenerateKey "+label, err)
 	}
 	return h, nil
+}
+
+// WrapLabel is the label of the wrap key new envelopes are sealed under.
+func (s *PKCS11Sealer) WrapLabel() string { return s.wrap }
+
+// HasKey says whether the token holds a wrap key with this label.
+func (s *PKCS11Sealer) HasKey(label string) (bool, error) {
+	var ok bool
+	err := s.withSession(func(sess pkcs11.SessionHandle) (e error) { _, ok, e = s.findKey(sess, label); return })
+	return ok, err
+}
+
+// DestroyKey removes the wrap key with this label from the token. It refuses the key this sealer seals under; the caller (reseal.go) checks that nothing
+// on disk is sealed under it before it asks.
+func (s *PKCS11Sealer) DestroyKey(label string) error {
+	if label == s.wrap {
+		return fmt.Errorf("sealer pkcs11: %q is the key this sealer seals under", label)
+	}
+	return s.withSession(func(sess pkcs11.SessionHandle) error {
+		h, ok, err := s.findKey(sess, label)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("sealer pkcs11: token %q has no wrap key %q", s.label, label)
+		}
+		if err := s.api.DestroyObject(sess, h); err != nil {
+			return opErr("C_DestroyObject "+label, err)
+		}
+		return nil
+	})
+}
+
+// envelopeKeyLabel is the label of the wrap key an envelope was sealed under ("" for what is not an envelope).
+func envelopeKeyLabel(sealed []byte) string {
+	var p struct {
+		V int    `json:"v"`
+		K string `json:"k"`
+	}
+	if json.Unmarshal(sealed, &p) != nil || (p.V != envelopeVersion && p.V != envelopeVersionHSM) {
+		return ""
+	}
+	if p.K == "" {
+		return pkcs11WrapKeyLabel
+	}
+	return p.K
 }
 
 // partAAD binds a part of a v3 envelope to its place: a part cannot be moved, dropped, duplicated or taken from another envelope.
@@ -449,16 +518,20 @@ func allZero(b []byte) bool {
 func (s *PKCS11Sealer) Seal(aad, plaintext []byte) ([]byte, error) {
 	var out []byte
 	err := s.withSession(func(sess pkcs11.SessionHandle) error {
-		key, err := s.ensureKey(sess)
+		key, err := s.ensureKey(sess, s.wrap)
 		if err != nil {
 			return err
+		}
+		k := ""
+		if s.wrap != pkcs11WrapKeyLabel {
+			k = s.wrap
 		}
 		if s.prof.writeVersion == envelopeVersion {
 			iv, ct, err := s.encrypt(sess, key, aad, plaintext)
 			if err != nil {
 				return err
 			}
-			out, err = json.Marshal(envelope{V: envelopeVersion, IV: iv, CT: ct})
+			out, err = json.Marshal(envelope{V: envelopeVersion, K: k, IV: iv, CT: ct})
 			return err
 		}
 		chunk := s.prof.chunk
@@ -479,7 +552,7 @@ func (s *PKCS11Sealer) Seal(aad, plaintext []byte) ([]byte, error) {
 			}
 			parts = append(parts, envelopePart{IV: iv, CT: ct})
 		}
-		out, err = json.Marshal(envelopeHSM{V: envelopeVersionHSM, P: s.prof.name, ID: id, Len: len(plaintext), Parts: parts})
+		out, err = json.Marshal(envelopeHSM{V: envelopeVersionHSM, K: k, P: s.prof.name, ID: id, Len: len(plaintext), Parts: parts})
 		return err
 	})
 	if err != nil {
@@ -527,14 +600,15 @@ func (s *PKCS11Sealer) Open(aad, sealed []byte) ([]byte, error) {
 		return nil, err
 	}
 	var pt []byte
+	keyLabel := envelopeKeyLabel(sealed)
 	err = s.withSession(func(sess pkcs11.SessionHandle) error {
 		pt = pt[:0]
-		key, ok, err := s.findKey(sess)
+		key, ok, err := s.findKey(sess, keyLabel)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return fmt.Errorf("%w: token %q has no %s key", ErrOpen, s.label, pkcs11WrapKeyLabel)
+			return fmt.Errorf("%w: token %q has no %s key", ErrOpen, s.label, keyLabel)
 		}
 		for i, p := range parts {
 			b, err := s.api.GCMDecrypt(sess, key, p.IV, aads[i], p.CT)

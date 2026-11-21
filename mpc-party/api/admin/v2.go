@@ -57,8 +57,6 @@ func isAuthField(fd protoreflect.FieldDescriptor) bool {
 	return fd.Message() != nil && fd.Message().FullName() == authMessageName
 }
 
-var opCodes = map[string]pb.Op{OpDKG: pb.Op_OP_DKG, OpRefresh: pb.Op_OP_REFRESH, OpUnfreeze: pb.Op_OP_UNFREEZE}
-
 func newBody(op string) (proto.Message, error) {
 	switch op {
 	case OpDKG:
@@ -67,8 +65,12 @@ func newBody(op string) (proto.Message, error) {
 		return &pb.RefreshRequest{}, nil
 	case OpUnfreeze:
 		return &pb.UnfreezeRequest{}, nil
+	case OpAdminSet:
+		return &pb.AdminSetRequest{}, nil
+	case OpRecoveryKey:
+		return &pb.RecoveryKeyRequest{}, nil
 	}
-	return nil, fmt.Errorf("unknown operation %q: want dkg, refresh or unfreeze", op)
+	return nil, fmt.Errorf("unknown operation %q: want dkg, refresh, unfreeze, admin-set or recovery-key", op)
 }
 
 // copyByName copies every field of the request message req (except the AdminAuth) to or from the field of other with the same name: to other
@@ -119,6 +121,10 @@ func OpenOf(req proto.Message) *pb.Open {
 		op = pb.Op_OP_REFRESH
 	case *pb.UnfreezeRequest:
 		op = pb.Op_OP_UNFREEZE
+	case *pb.AdminSetRequest:
+		op = pb.Op_OP_ADMIN_SET
+	case *pb.RecoveryKeyRequest:
+		op = pb.Op_OP_RECOVERY_KEY
 	default:
 		panic(fmt.Sprintf("OpenOf: %T is not an admin request", req))
 	}
@@ -164,8 +170,10 @@ func BodyOf(op, keyset string, scheme pb.Scheme, curve pb.Curve) (proto.Message,
 		return RefreshBody(keyset), nil
 	case OpUnfreeze:
 		return UnfreezeBody(keyset), nil
+	case OpAdminSet, OpRecoveryKey:
+		return nil, fmt.Errorf("%s has its own body constructor (AdminSetBody, RecoveryKeyBody)", op)
 	}
-	return nil, fmt.Errorf("unknown operation %q: want dkg, refresh or unfreeze", op)
+	return nil, fmt.Errorf("unknown operation %q: want dkg, refresh, unfreeze, admin-set or recovery-key", op)
 }
 
 // BodyHash is the SHA-256 of the complete request body in a canonical encoding, for the operation op. It walks the message by reflection in
@@ -339,7 +347,7 @@ func KeysetOf(body proto.Message) string {
 	case *pb.UnfreezeRequest:
 		return r.KeysetId
 	}
-	return ""
+	return "" // admin-set and recovery-key name no keyset
 }
 
 // Authorize signs a v2 authorization for (op, body) with every key in keys, valid from issued until expires, with a random nonce: what the

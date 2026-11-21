@@ -49,6 +49,6 @@ func migrateMain(args []string) {
 		fmt.Println("finished a migration that had been verified earlier")
 		return
 	}
-	fmt.Printf("migrated: %d keysets, %d generations, %d key records, %d stored signatures, %d freeze records; all verified before they replaced the old files\n",
-		rep.Keysets, rep.Generations, rep.Keys, rep.Jobs, rep.Freezes)
+	fmt.Printf("migrated: %d keysets, %d generations, %d key records, %d stored signatures, %d freeze records, %d admin records; all verified before they replaced the old files\n",
+		rep.Keysets, rep.Generations, rep.Keys, rep.Jobs, rep.Freezes, rep.Records)
 }

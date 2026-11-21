@@ -62,6 +62,12 @@ type adminVerifier struct {
 	store  *FileStore
 	path   string
 	loaded bool
+
+	// The admin set in effect (adminset.go): keys and threshold above are the bootstrap list of the configuration; cur is the durable state once
+	// one exists (a change was applied), and then wins.
+	setPath string
+	cur     *setSnap
+	cfgSet  setSnap // the configuration's list, for the "the configuration is ignored" warning
 }
 
 // adminSeenFile is the durable seen set, in the data directory root (listed in the state table in sealer_local.go).
@@ -76,6 +82,7 @@ type adminSeenDoc struct {
 // persistOn makes the seen set durable in dataDir; st, when it is a FileStore, seals the file with the local key (attested sealer).
 func (v *adminVerifier) persistOn(st any, dataDir string) {
 	v.path = filepath.Join(dataDir, adminSeenFile)
+	v.setPath = filepath.Join(dataDir, adminSetFile)
 	if fs, ok := st.(*FileStore); ok {
 		v.store = fs
 	}
@@ -86,6 +93,9 @@ func (v *adminVerifier) persistOn(st any, dataDir string) {
 func (v *adminVerifier) ensure() error {
 	if v.loaded || v.path == "" {
 		return nil
+	}
+	if err := v.loadSet(); err != nil {
+		return err
 	}
 	raw, err := os.ReadFile(v.path)
 	if err == nil {
@@ -156,6 +166,7 @@ func newAdminVerifier(c *Config) (*adminVerifier, error) {
 		}
 		v.keys = append(v.keys, ed25519.PublicKey(b))
 	}
+	v.cfgSet = v.bootSnap()
 	return v, nil
 }
 
@@ -165,9 +176,19 @@ const DefaultAdminMaxValidity = time.Hour
 
 var errAdmin = errors.New("admin authorization")
 
-func (v *adminVerifier) policy() admin.Policy {
-	p := admin.Policy{Threshold: v.threshold, MaxValidity: v.maxValidity, Skew: v.maxAge, Domain: v.domain}
-	for _, k := range v.keys {
+// policy is what the party needs of an authorization now: the admin set in effect (the durable one once a change was applied, else the
+// configuration's) and the configured limits. It fails when the durable set cannot be read: nothing is accepted then.
+func (v *adminVerifier) policy() (admin.Policy, error) {
+	sn, err := v.snap()
+	if err != nil {
+		return admin.Policy{}, err
+	}
+	return v.policyOf(sn), nil
+}
+
+func (v *adminVerifier) policyOf(sn setSnap) admin.Policy {
+	p := admin.Policy{Threshold: sn.threshold, MaxValidity: v.maxValidity, Skew: v.maxAge, Domain: v.domain}
+	for _, k := range sn.keys {
 		p.Keys = append(p.Keys, k)
 	}
 	return p
@@ -180,6 +201,14 @@ func (v *adminVerifier) writeMetrics(w io.Writer) {
 	}
 	fmt.Fprintf(w, "# HELP qv_mpc_party_admin_auth_accepted_total Admin authorizations this party accepted, by format. v1 is the old single-signature format that does not cover the request body: it should stay at 0 once admin_threshold is set.\n# TYPE qv_mpc_party_admin_auth_accepted_total counter\n")
 	fmt.Fprintf(w, "qv_mpc_party_admin_auth_accepted_total{version=\"v1\"} %d\nqv_mpc_party_admin_auth_accepted_total{version=\"v2\"} %d\n", v.v1Accepted.Load(), v.v2Accepted.Load())
+	if st := v.setStatus(); st != nil {
+		fmt.Fprintf(w, "# HELP qv_mpc_party_admin_set_version Version of this party's admin set (0 = the configuration's bootstrap list). Parties of one deployment must report the same value.\n# TYPE qv_mpc_party_admin_set_version gauge\nqv_mpc_party_admin_set_version %d\n", st.Version)
+		differs := 0
+		if st.ConfigDiffers {
+			differs = 1
+		}
+		fmt.Fprintf(w, "# HELP qv_mpc_party_admin_config_ignored 1 when this party has a durable admin set and its configuration lists another one (the configuration is ignored).\n# TYPE qv_mpc_party_admin_config_ignored gauge\nqv_mpc_party_admin_config_ignored %d\n", differs)
+	}
 }
 
 // check verifies a for (op, keyset, body): body is the request the party holds, WITHOUT its AdminAuth, in the canonical form of api/admin (DKGBody,
@@ -204,6 +233,9 @@ func (v *adminVerifier) checkOpen(op string, open *pb.Open) (string, error) {
 }
 
 func (v *adminVerifier) check(op, keysetID string, body proto.Message, a *pb.AdminAuth) (key string, err error) {
+	if op == admin.OpAdminSet || op == admin.OpRecoveryKey {
+		return "", fmt.Errorf("%w: internal: %s is checked by its own path", errAdmin, op)
+	}
 	switch {
 	case a.GetV2() != nil:
 		if len(a.PublicKey)+len(a.Signature) != 0 || a.UnixSeconds != 0 {
@@ -213,7 +245,10 @@ func (v *adminVerifier) check(op, keysetID string, body proto.Message, a *pb.Adm
 	case a == nil:
 		return "", fmt.Errorf("%w: missing", errAdmin)
 	}
-	if !v.allowV1 {
+	if _, err := v.snap(); err != nil { // an unreadable admin set refuses with its own reason, not with a misleading one about v1
+		return "", fmt.Errorf("%w: %v", errAdmin, err)
+	}
+	if !v.v1Allowed() {
 		return "", fmt.Errorf("%w: this party no longer accepts the v1 authorization format (it does not cover the request body or a quorum): sign a v2 request with qv-party-admin", errAdmin)
 	}
 	key, err = v.check1(op, keysetID, a)
@@ -237,7 +272,11 @@ func (v *adminVerifier) check2(op, keysetID string, body proto.Message, a *pb.Ad
 		return "", fmt.Errorf("%w: %v", errAdmin, err)
 	}
 	now := v.now()
-	if err := admin.CheckAuth2(op, keysetID, a.Domain, a, v.policy(), now); err != nil {
+	pol, err := v.policy()
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errAdmin, err)
+	}
+	if err := admin.CheckAuth2(op, keysetID, a.Domain, a, pol, now); err != nil {
 		return "", fmt.Errorf("%w: %v", errAdmin, err)
 	}
 	if a.IssuedUnix < v.start.Unix() {
@@ -279,8 +318,12 @@ func (v *adminVerifier) check1(op, keysetID string, a *pb.AdminAuth) (key string
 	if len(a.Signature) != ed25519.SignatureSize || len(a.PublicKey) != ed25519.PublicKeySize {
 		return "", fmt.Errorf("%w: missing or malformed signature", errAdmin)
 	}
+	sn, err := v.snap()
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errAdmin, err)
+	}
 	known := false
-	for _, k := range v.keys {
+	for _, k := range sn.keys {
 		if string(k) == string(a.PublicKey) {
 			known = true
 		}

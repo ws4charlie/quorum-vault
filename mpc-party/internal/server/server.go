@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/cbmpc"
 )
@@ -51,6 +52,7 @@ type Server struct {
 	}
 	fi         *FaultInjection
 	admin      *adminVerifier
+	recovery   *recoveryStore
 	freeze     FreezeStore
 	cert       tls.Certificate
 	cache      *keyCache
@@ -153,6 +155,10 @@ func New(o Options) (srv *Server, err error) {
 	}
 	adm.persistOn(st, c.DataDir)
 	adm.log = lg
+	rec := newRecoveryStore(st, c.DataDir)
+	if c.AdminThreshold > admin.MaxSignatures/2 {
+		lg.Warn("admin_threshold is above half of the signatures one request may carry: a change of the admin set needs the current threshold from the current keys AND the new threshold from the new ones, so the new set must keep at least 2 x threshold - 32 of the current keys (or the set must be changed in two steps)", "admin_threshold", c.AdminThreshold, "max_signatures", admin.MaxSignatures)
+	}
 	if adm.allowV1 && c.AdminThreshold > 0 {
 		lg.Warn("the v1 admin authorization is still accepted (admin_allow_v1): it covers no request field beyond the keyset and needs no quorum; switch it off after the roll-over", "admin_threshold", c.AdminThreshold)
 	}
@@ -183,7 +189,7 @@ func New(o Options) (srv *Server, err error) {
 			ia.SetIdentity(ident.get)
 		}
 	}
-	return &Server{gate: gate, ident: ident, dataLock: lock, cfg: c, log: lg, admin: adm, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
+	return &Server{gate: gate, ident: ident, dataLock: lock, cfg: c, log: lg, admin: adm, recovery: rec, freeze: fz, authz: o.Authorizer, store: st, fi: o.FaultInjection, cert: cert,
 		fails: newFailStats(c.Role), cache: newKeyCache(), tcache: newTKeyCache(), rts: map[string]*ksRT{}, kick: make(chan struct{}, 1), rl: newRateLimiter(c.Limits.SessionsPerSecKey), slots: newSlots(c.Limits.MaxPeerSessions),
 		replay: newReplayCache(c.Limits.ReplayCacheSize), inflight: map[string]*flight{}}, nil
 }

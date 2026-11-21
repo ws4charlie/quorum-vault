@@ -34,7 +34,7 @@ peers:
   b: { address: "", pins: [] }          # A: B's peer endpoint host:port; C: B's certificate (pins only)
   c: { address: "", pins: [] }          # A and B: C's peer endpoint host:port
 callerPins: []                          # certificates allowed on the caller port: the gateway (A; B and C for health), the operators' tool
-adminKeys: []                           # admins' Ed25519 public keys (64 hex): DKG, refresh and unfreeze need the signatures of adminThreshold of them (no key twice)
+adminKeys: []                           # admins' Ed25519 public keys (64 hex): the BOOTSTRAP set, used until the first admin-set change was applied (then the party's durable set wins and this list is ignored, with a warning). DKG, refresh and unfreeze need the signatures of adminThreshold of them (no key twice)
 adminMaxAgeSeconds: 300                 # clock skew the party tolerates for an authorization's issue time (and the age of an old v1 signature)
 adminThreshold: 0                       # 0 = unset: one signature is enough and the old v1 format is still accepted (roll-over); 1 or more: that many distinct admins, v1 refused
 adminAllowV1: null                      # null = follow adminThreshold; true only during the roll-over with adminThreshold set (each v1 acceptance is logged and counted)
@@ -178,8 +178,9 @@ operator:
   job:
     enabled: false
     name: manual                        # part of the Job name; change it for each run
-    command: ""                         # dkg, refresh, unfreeze or status
-    keysetId: ""                        # the keyset (dkg, refresh, unfreeze; status: optional filter)
+    command: ""                         # dkg, refresh, unfreeze, status, admin-set (send a change of the admin set), recovery-key (send a change of the recovery-key registry) or recovery-status
+    keysetId: ""                        # the keyset (dkg, refresh, unfreeze; status and recovery-status: optional filter)
+    live: false                         # dkg, refresh, unfreeze: check the file against the admin set the parties hold now (set it after the first admin-set change: adminKeys is only the bootstrap set)
     scheme: hd                          # dkg: hd, ecdsa-2of3 or ed25519-2of3
     curve: secp256k1                    # dkg, scheme hd: secp256k1 or ed25519
     authConfigMap: ""                   # ConfigMap whose key auth.json is the signed file (not for status)

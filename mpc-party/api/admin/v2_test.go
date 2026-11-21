@@ -39,6 +39,10 @@ func opOf(t *testing.T, d protoreflect.MessageDescriptor) string {
 		return OpRefresh
 	case "UnfreezeRequest":
 		return OpUnfreeze
+	case "AdminSetRequest":
+		return OpAdminSet
+	case "RecoveryKeyRequest":
+		return OpRecoveryKey
 	}
 	t.Fatalf("admin request %s is not known to this package: add its operation to BodyOf, Request.body and the parties' check, and extend this test", d.FullName())
 	return ""
@@ -96,8 +100,8 @@ func fill(m protoreflect.Message, fd protoreflect.FieldDescriptor, alt bool) {
 // added to DKGRequest, RefreshRequest or UnfreezeRequest later is picked up here at once; one that BodyHash cannot cover makes it fail.
 func TestEveryAdminRequestFieldIsSigned(t *testing.T) {
 	reqs := adminRequests(t)
-	if len(reqs) < 3 {
-		t.Fatalf("found %d admin requests, want at least DKG, Refresh and Unfreeze", len(reqs))
+	if len(reqs) < 5 {
+		t.Fatalf("found %d admin requests, want at least DKG, Refresh, Unfreeze, AdminSet and RecoveryKey", len(reqs))
 	}
 	for _, d := range reqs {
 		op := opOf(t, d)
@@ -154,6 +158,10 @@ func dynNew(d protoreflect.MessageDescriptor) proto.Message {
 		return &pb.RefreshRequest{}
 	case "UnfreezeRequest":
 		return &pb.UnfreezeRequest{}
+	case "AdminSetRequest":
+		return &pb.AdminSetRequest{}
+	case "RecoveryKeyRequest":
+		return &pb.RecoveryKeyRequest{}
 	}
 	return nil
 }

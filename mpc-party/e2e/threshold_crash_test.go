@@ -199,7 +199,7 @@ func TestThresholdBackupRestoreLostMember(t *testing.T) {
 		// current one is accepted; then a refresh moves all three on and every pair signs.
 		cl.stop("C")
 		must(t, os.RemoveAll(cl.cfgs["C"].DataDir))
-		mustCLI(t, "restore", "-config", cl.paths["C"], "-recovery-private", priv, "-file", g2["C"])
+		mustCLI(t, "restore", "-no-records", "-config", cl.paths["C"], "-recovery-private", priv, "-file", g2["C"])
 		cl.start(t, "C")
 		cl.waitReady(t)
 		waitLogText(t, cl.procs["A"].stderr, "party C is on generation 2 but another party is on 3", 30*time.Second)
@@ -216,7 +216,7 @@ func TestThresholdBackupRestoreLostMember(t *testing.T) {
 		cl.waitUp(t, "B")
 		cl.stop("C")
 		must(t, os.RemoveAll(cl.cfgs["C"].DataDir))
-		mustCLI(t, "restore", "-config", cl.paths["C"], "-recovery-private", priv, "-file", g3["C"])
+		mustCLI(t, "restore", "-no-records", "-config", cl.paths["C"], "-recovery-private", priv, "-file", g3["C"])
 		cl.start(t, "C")
 		cl.waitReady(t)
 		cl.waitConverged3(t, "k", true)
@@ -231,7 +231,7 @@ func TestThresholdBackupRestoreLostMember(t *testing.T) {
 		g4 := export("g4")
 		cl.stop("B")
 		must(t, os.RemoveAll(cl.cfgs["B"].DataDir))
-		mustCLI(t, "restore", "-config", cl.paths["B"], "-recovery-private", priv, "-file", g4["B"])
+		mustCLI(t, "restore", "-no-records", "-config", cl.paths["B"], "-recovery-private", priv, "-file", g4["B"])
 		cl.start(t, "B")
 		cl.waitReady(t)
 		cl.waitConverged3(t, "k", true)
@@ -252,9 +252,9 @@ func TestThresholdBackupRestoreLostMember(t *testing.T) {
 				t.Errorf("%s: crashed:\n%s", what, out)
 			}
 		}
-		bad("C's share with B's config", "wrong slot", "restore", "-config", cl.paths["B"], "-recovery-private", priv, "-file", g4["C"])
+		bad("C's share with B's config", "wrong slot", "restore", "-no-records", "-config", cl.paths["B"], "-recovery-private", priv, "-file", g4["C"])
 		bad("verify with another recovery key", "recovery key", "verify", "-file", g4["C"], "-recovery-public", otherPub)
-		bad("restore with another recovery key", "not the recovery key", "restore", "-config", cl.paths["C"], "-recovery-private", otherPriv, "-file", g4["C"])
+		bad("restore with another recovery key", "not the recovery key", "restore", "-no-records", "-config", cl.paths["C"], "-recovery-private", otherPriv, "-file", g4["C"])
 		raw, _ := os.ReadFile(g4["C"])
 		tam := filepath.Join(dir, "tampered.bk")
 		raw[len(raw)/2] ^= 1

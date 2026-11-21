@@ -35,6 +35,10 @@ type fakeHSM struct {
 
 	label    string
 	keys     map[string]cipher.AEAD // by label
+	handles  map[pkcs11.ObjectHandle]string
+	byLabel  map[string]pkcs11.ObjectHandle
+	nextObj  pkcs11.ObjectHandle
+	findLbl  string
 	attrs    map[string]map[uint]bool
 	sessions map[pkcs11.SessionHandle]bool
 	next     pkcs11.SessionHandle
@@ -48,7 +52,7 @@ type fakeHSM struct {
 }
 
 func newFakeHSM(label string, cloud bool) *fakeHSM {
-	f := &fakeHSM{label: label, keys: map[string]cipher.AEAD{}, attrs: map[string]map[uint]bool{}, sessions: map[pkcs11.SessionHandle]bool{}, next: 100,
+	f := &fakeHSM{label: label, keys: map[string]cipher.AEAD{}, handles: map[pkcs11.ObjectHandle]string{}, byLabel: map[string]pkcs11.ObjectHandle{}, nextObj: 0, attrs: map[string]map[uint]bool{}, sessions: map[pkcs11.SessionHandle]bool{}, next: 100,
 		badTagCode: pkcs11.CKR_ENCRYPTED_DATA_INVALID, calls: map[string]int{}}
 	if cloud {
 		f.hsmIV, f.maxData, f.rejectPrivate, f.badTagCode = true, cloudhsmMaxData, true, pkcs11.CKR_FUNCTION_FAILED
@@ -121,16 +125,41 @@ func (f *fakeHSM) FindObjectsInit(s pkcs11.SessionHandle, t []*pkcs11.Attribute)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls["find"]++
+	f.findLbl = pkcs11WrapKeyLabel
+	for _, a := range t {
+		if a.Type == pkcs11.CKA_LABEL {
+			f.findLbl = string(a.Value)
+		}
+	}
 	return f.check(s)
 }
 func (f *fakeHSM) FindObjects(s pkcs11.SessionHandle, _ int) ([]pkcs11.ObjectHandle, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.keys[pkcs11WrapKeyLabel]; ok {
-		return []pkcs11.ObjectHandle{1}, false, nil
+	if h, ok := f.byLabel[f.findLbl]; ok {
+		return []pkcs11.ObjectHandle{h}, false, nil
 	}
 	return nil, false, nil
 }
+
+func (f *fakeHSM) DestroyObject(s pkcs11.SessionHandle, h pkcs11.ObjectHandle) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.check(s); err != nil {
+		return err
+	}
+	label, ok := f.handles[h]
+	if !ok {
+		return pkcs11.Error(pkcs11.CKR_OBJECT_HANDLE_INVALID)
+	}
+	delete(f.handles, h)
+	delete(f.byLabel, label)
+	delete(f.keys, label)
+	delete(f.attrs, label)
+	return nil
+}
+
+func (f *fakeHSM) keyOf(h pkcs11.ObjectHandle) cipher.AEAD     { return f.keys[f.handles[h]] }
 func (f *fakeHSM) FindObjectsFinal(pkcs11.SessionHandle) error { return nil }
 
 func (f *fakeHSM) GenerateKey(s pkcs11.SessionHandle, tmpl []*pkcs11.Attribute) (pkcs11.ObjectHandle, error) {
@@ -140,7 +169,11 @@ func (f *fakeHSM) GenerateKey(s pkcs11.SessionHandle, tmpl []*pkcs11.Attribute) 
 		return 0, err
 	}
 	have := map[uint]bool{}
+	label := pkcs11WrapKeyLabel
 	for _, a := range tmpl {
+		if a.Type == pkcs11.CKA_LABEL {
+			label = string(a.Value)
+		}
 		if a.Type == pkcs11.CKA_PRIVATE && f.rejectPrivate {
 			return 0, pkcs11.Error(pkcs11.CKR_ATTRIBUTE_TYPE_INVALID)
 		}
@@ -148,16 +181,19 @@ func (f *fakeHSM) GenerateKey(s pkcs11.SessionHandle, tmpl []*pkcs11.Attribute) 
 			have[a.Type] = a.Value[0] == 1
 		}
 	}
-	f.attrs[pkcs11WrapKeyLabel] = have
+	f.attrs[label] = have
 	k := make([]byte, 32)
 	rand.Read(k)
 	blk, _ := aes.NewCipher(k)
 	g, _ := cipher.NewGCM(blk)
-	f.keys[pkcs11WrapKeyLabel] = g
-	return 1, nil
+	f.keys[label] = g
+	f.nextObj++
+	f.handles[f.nextObj] = label
+	f.byLabel[label] = f.nextObj
+	return f.nextObj, nil
 }
 
-func (f *fakeHSM) GCMEncrypt(s pkcs11.SessionHandle, _ pkcs11.ObjectHandle, iv, aad, pt []byte) ([]byte, []byte, error) {
+func (f *fakeHSM) GCMEncrypt(s pkcs11.SessionHandle, h pkcs11.ObjectHandle, iv, aad, pt []byte) ([]byte, []byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls["encrypt"]++
@@ -178,10 +214,10 @@ func (f *fakeHSM) GCMEncrypt(s pkcs11.SessionHandle, _ pkcs11.ObjectHandle, iv, 
 			rand.Read(used)
 		}
 	}
-	return used, f.keys[pkcs11WrapKeyLabel].Seal(nil, used, pt, aad), nil
+	return used, f.keyOf(h).Seal(nil, used, pt, aad), nil
 }
 
-func (f *fakeHSM) GCMDecrypt(s pkcs11.SessionHandle, _ pkcs11.ObjectHandle, iv, aad, ct []byte) ([]byte, error) {
+func (f *fakeHSM) GCMDecrypt(s pkcs11.SessionHandle, h pkcs11.ObjectHandle, iv, aad, ct []byte) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls["decrypt"]++
@@ -192,7 +228,7 @@ func (f *fakeHSM) GCMDecrypt(s pkcs11.SessionHandle, _ pkcs11.ObjectHandle, iv, 
 		f.throttleDecInit--
 		return nil, opErr("C_DecryptInit", pkcs11.Error(pkcs11.CKR_FUNCTION_FAILED))
 	}
-	pt, err := f.keys[pkcs11WrapKeyLabel].Open(nil, iv, ct, aad)
+	pt, err := f.keyOf(h).Open(nil, iv, ct, aad)
 	if err != nil {
 		return nil, opErr("C_Decrypt", pkcs11.Error(f.badTagCode))
 	}

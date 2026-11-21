@@ -19,6 +19,10 @@ const (
 	OpDKG      = "dkg"
 	OpRefresh  = "refresh"
 	OpUnfreeze = "unfreeze"
+	// OpAdminSet changes the set of admin keys and the threshold; OpRecoveryKey changes the recovery-key registry. Neither names a keyset (the
+	// keyset field of their requests is empty) and neither exists in the v1 format.
+	OpAdminSet    = "admin-set"
+	OpRecoveryKey = "recovery-key"
 )
 
 // DefaultMaxAge is the parties' default `admin_max_age_seconds`. The parties' own setting decides; this is what tools assume.
@@ -48,8 +52,13 @@ func NewFile(priv ed25519.PrivateKey, op, keysetID string, now time.Time) (File,
 func checkOpKeyset(op, keysetID string) error {
 	switch op {
 	case OpDKG, OpRefresh, OpUnfreeze:
+	case OpAdminSet, OpRecoveryKey:
+		if keysetID != "" {
+			return fmt.Errorf("%s does not name a keyset", op)
+		}
+		return nil
 	default:
-		return fmt.Errorf("unknown operation %q: want dkg, refresh or unfreeze", op)
+		return fmt.Errorf("unknown operation %q: want dkg, refresh, unfreeze, admin-set or recovery-key", op)
 	}
 	if !keysetRE.MatchString(keysetID) {
 		return errors.New("the keyset ID must match [A-Za-z0-9._-]{1,64}")

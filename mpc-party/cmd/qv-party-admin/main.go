@@ -10,6 +10,9 @@
 //	qv-party-admin refresh  -auth F  (the same)
 //	qv-party-admin unfreeze -auth F  (the same)
 //	qv-party-admin status   (the same -party, -cert and -key flags; no -auth) [-keyset ID]
+//	qv-party-admin admin-set request|send, recovery-key request|send|status|registry   the admin set and the recovery-key registry (records.go)
+//
+// After a change of the admin set the parties' configuration lists only the bootstrap set: `dkg|refresh|unfreeze -live` checks the file against the set each party reports.
 //
 // The file carries the request (keyset and, for a DKG, scheme and curve), the deployment domain, the time it was issued and expires and a nonce;
 // every admin signs the same bytes, in any order, and a party rebuilds what was signed from the call it receives, so a changed field, keyset or
@@ -49,7 +52,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errw, "usage: qv-party-admin request|sign|verify|pubkey|dkg|refresh|unfreeze|status (see the file header and docs/runbooks/key-ceremony.md)")
+		fmt.Fprintln(errw, "usage: qv-party-admin request|sign|verify|pubkey|dkg|refresh|unfreeze|status|admin-set|recovery-key (see the file header and docs/runbooks/key-ceremony.md)")
 		return 2
 	}
 	var err error
@@ -66,6 +69,8 @@ func run(args []string, out, errw io.Writer) int {
 		err = sendCmd(args[0], args[1:], out, errw)
 	case "status":
 		err = statusCmd(args[1:], out)
+	case "admin-set", "recovery-key", "records":
+		err = recordsCmd(args[0], args[1:], out, errw)
 	default:
 		err = fmt.Errorf("unknown command %q", args[0])
 	}
@@ -117,6 +122,15 @@ func requestCmd(args []string, out, errw io.Writer) error {
 
 // describe says in words what the signatures cover, so a signer reads what they sign.
 func describe(r admin.Request) string {
+	if r.Op == admin.OpAdminSet {
+		if ch, err := r.SetChange(); err == nil {
+			s := fmt.Sprintf("  covers: operation %q, domain %q, issued %s, nonce %s\n  admin set version %d, threshold %d, replaces the set with hash %s, keys:", r.Op, r.Domain, time.Unix(r.IssuedUnix, 0).Format("15:04:05"), r.Nonce, ch.SetVersion, ch.SetThreshold, hex.EncodeToString(ch.SetPrevHash)[:12])
+			for _, k := range ch.SetKeys {
+				s += "\n    " + hex.EncodeToString(k)
+			}
+			return s
+		}
+	}
 	s := fmt.Sprintf("  covers: operation %q, keyset %q, domain %q, issued %s, nonce %s\n  request body: %s", r.Op, r.Keyset, r.Domain,
 		time.Unix(r.IssuedUnix, 0).Format("15:04:05"), r.Nonce, r.Body)
 	return s
@@ -218,6 +232,7 @@ type policyFlags struct {
 	domain      string
 	maxValidity time.Duration
 	skew        time.Duration
+	live        bool
 }
 
 type stringList []string
@@ -232,6 +247,7 @@ func (p *policyFlags) flags(fs *flag.FlagSet) {
 	fs.StringVar(&p.domain, "domain", "", "with -admin-key: the parties' admin_domain")
 	fs.DurationVar(&p.maxValidity, "max-validity", time.Hour, "with -admin-key: the parties' admin_max_validity_seconds")
 	fs.DurationVar(&p.skew, "window", admin.DefaultMaxAge, "the parties' admin_max_age_seconds (the clock skew they tolerate)")
+	fs.BoolVar(&p.live, "live", false, "send commands: check the file against the admin set each party reports now (after an admin-set change the configuration files list only the bootstrap set); instead of -config or -admin-key")
 }
 
 // policies gives one policy per party config, or the single one from the flags. It refuses to guess: without either there is nothing to check against.
@@ -554,6 +570,7 @@ func printStatus(out io.Writer, vs []view, want string) {
 			peers = fmt.Sprintf(" peer=%v", h.PeerReachable)
 		}
 		fmt.Fprintf(out, "party %s: role %s, version %s, links%s, %d active sessions\n", v.name, h.Role, h.Version, peers, h.ActiveSessions)
+		printRecords(out, h)
 		ks := keysetMap(h)
 		var ids []string
 		for id := range ks {
@@ -602,7 +619,7 @@ func statusCmd(args []string, out io.Writer) error {
 	defer closeAll(cs)
 	vs := healthOf(context.Background(), cs)
 	printStatus(out, vs, *keyset)
-	bad := compare(vs, *keyset, false)
+	bad := append(compare(vs, *keyset, false), recordProblems(vs)...)
 	if *keyset != "" { // unrelated disagreements are a warning, not a failure
 		for _, w := range compare(vs, "", false) {
 			if !contains(bad, w) {
@@ -674,10 +691,11 @@ func sendCmd(op string, args []string, out, errw io.Writer) error {
 		return err
 	}
 	var (
-		fkeyset string
-		auth    *pb.AdminAuth
-		req     dkgRequest
-		now     = time.Now()
+		fkeyset  string
+		auth     *pb.AdminAuth
+		req      dkgRequest
+		now      = time.Now()
+		liveFile *admin.Request
 	)
 	switch admin.FileVersion(raw) {
 	case 2:
@@ -691,13 +709,17 @@ func sendCmd(op string, args []string, out, errw io.Writer) error {
 		if *expectKeyset != "" && *expectKeyset != r.Keyset {
 			return fmt.Errorf("%s is an authorisation for keyset %s, but this call is for keyset %s: nothing was sent", *authFile, r.Keyset, *expectKeyset)
 		}
-		pols, err := pf.policies()
-		if err != nil {
-			return err
-		}
-		for i, p := range pols { // too few signatures, an unknown key, another domain, a stale file: refused here, before any party is contacted
-			if err := r.Check(p, now); err != nil {
-				return fmt.Errorf("%s would be refused by the parties (configuration %d of %d): %w: nothing was sent", *authFile, i+1, len(pols), err)
+		if pf.live {
+			liveFile = &r // checked below, against what each party reports as its admin set now
+		} else {
+			pols, err := pf.policies()
+			if err != nil {
+				return err
+			}
+			for i, p := range pols { // too few signatures, an unknown key, another domain, a stale file: refused here, before any party is contacted
+				if err := r.Check(p, now); err != nil {
+					return fmt.Errorf("%s would be refused by the parties (configuration %d of %d): %w: nothing was sent", *authFile, i+1, len(pols), err)
+				}
 			}
 		}
 		if auth, err = r.Auth(); err != nil {
@@ -754,6 +776,16 @@ func sendCmd(op string, args []string, out, errw io.Writer) error {
 
 	// before: every named party answers, and they agree
 	before := healthOf(ctx, cs)
+	if liveFile != nil { // checked against what each party reports as its admin set now
+		for _, v := range answered(before) {
+			if v.health.AdminSet == nil {
+				return fmt.Errorf("party %s reports no admin set: -live cannot check the file against it", v.name)
+			}
+			if err := liveFile.Check(policyOfStatus(v.health.AdminSet), now); err != nil {
+				return fmt.Errorf("%s would be refused by party %s (its admin set is version %d): %w: nothing was sent", *authFile, v.name, v.health.AdminSet.Version, err)
+			}
+		}
+	}
 	// only the keyset this call is about matters: another keyset's trouble does not block it (status shows it as a warning)
 	if op == admin.OpDKG {
 		for _, v := range before {

@@ -2,21 +2,26 @@
 {{- include "qp.guards" . -}}
 {{- $v := .Values -}}
 {{- $j := $v.operator.job -}}
-{{- if not (has $j.command (list "dkg" "refresh" "unfreeze" "status")) }}{{ fail "operator.job.command must be dkg, refresh, unfreeze or status" }}{{ end -}}
+{{- if not (has $j.command (list "dkg" "refresh" "unfreeze" "status" "admin-set" "recovery-key" "recovery-status")) }}{{ fail "operator.job.command must be dkg, refresh, unfreeze, status, admin-set, recovery-key or recovery-status" }}{{ end -}}
 {{- if not $j.partyPin }}{{ fail "operator.job.partyPin is required: the pin (SHA-256 of the public key) of this party's certificate" }}{{ end -}}
 {{- if not (regexMatch "^[0-9a-f]{64}$" $j.partyPin) }}{{ fail "operator.job.partyPin must be 64 lowercase hex characters" }}{{ end -}}
 {{- if not $j.callerCertSecret }}{{ fail "operator.job.callerCertSecret is required: a Secret (tls.crt, tls.key) with the caller certificate this party pins, made for the ceremony" }}{{ end -}}
-{{- $signed := ne $j.command "status" -}}
+{{- /* admin-set and recovery-key SEND a change of the admin set / the recovery-key registry (qv-party-admin admin-set send, recovery-key send); recovery-status is `qv-party-admin recovery-key status` against THIS party only: it prints LOCAL CHECK ONLY, never COMPLETE (the completion check needs every party) */ -}}
+{{- $record := has $j.command (list "admin-set" "recovery-key") -}}
+{{- $signed := not (has $j.command (list "status" "recovery-status")) -}}
+{{- $keyed := has $j.command (list "dkg" "refresh" "unfreeze" "status" "recovery-status") -}}
 {{- if $signed }}
 {{- if not $j.authConfigMap }}{{ fail "operator.job.authConfigMap is required: a ConfigMap whose key auth.json is the request file `qv-party-admin request` made and adminThreshold admins signed with `qv-party-admin sign`" }}{{ end -}}
 {{- end }}
 {{- if and (eq $j.command "dkg") (not (has $j.scheme (list "hd" "ecdsa-2of3" "ed25519-2of3"))) }}{{ fail "operator.job.scheme must be hd, ecdsa-2of3 or ed25519-2of3" }}{{ end -}}
-{{- if and (ne $j.command "status") (not $j.keysetId) }}{{ fail "operator.job.keysetId is required" }}{{ end -}}
+{{- if and (has $j.command (list "dkg" "refresh" "unfreeze")) (not $j.keysetId) }}{{ fail "operator.job.keysetId is required" }}{{ end -}}
 {{- /*
   The operator's tool, in this party's cluster, for ONE call: `qv-party-admin <command>` against this party's caller Service. `send` holds no signing key: the admins signed on their own
   machines and the file arrives as a ConfigMap (public data, valid until the expiry it was made with and once per party; the tool refuses it before any call when it has too few signatures). The caller certificate is a
   Secret made for the ceremony and deleted after it. The pod carries the operator label, not the party's labels: the policies admit it to the caller port, nothing routes to it.
-  Run it in the cluster of each party that takes part (A coordinates dkg, refresh and unfreeze; `status` in B's and C's clusters shows what they see).
+  Run it in the cluster of each party that takes part (A coordinates dkg, refresh, unfreeze, admin-set and recovery-key, which A forwards to B and C; `status` in B's and C's clusters shows what they see).
+  admin-set and recovery-key carry no policy flags: the tool asks the parties for the admin set they hold now and checks the file against it (adminKeys in the values are only the bootstrap set).
+  After the first admin-set change set operator.job.live=true for dkg, refresh and unfreeze, so those files are checked against the live set too, not against adminKeys.
 */ -}}
 apiVersion: batch/v1
 kind: Job
@@ -54,7 +59,15 @@ spec:
           imagePullPolicy: {{ $v.imagePullPolicy }}
           command: ["/usr/local/bin/qv-party-admin"]
           args:
+            {{- if eq $j.command "recovery-status" }}
+            - recovery-key
+            - status
+            {{- else if $record }}
             - {{ $j.command }}
+            - send
+            {{- else }}
+            - {{ $j.command }}
+            {{- end }}
             {{- if $signed }}
             - -auth
             - /etc/qv/admin/auth.json
@@ -67,9 +80,12 @@ spec:
             - /etc/qv/caller/tls.key
             - -timeout
             - {{ printf "%ds" (int $j.timeoutSeconds) | quote }}
-            {{- if $signed }}
+            {{- if and $signed (not $record) }}
             - -window
             - {{ printf "%ds" (int $v.adminMaxAgeSeconds) | quote }}
+            {{- if $j.live }}
+            - -live
+            {{- else }}
             {{- /* what the parties need of a v2 file: the tool refuses a file they would refuse (too few signatures, an unknown key, expired, another domain) before it calls any party */}}
             - -threshold
             - {{ max 1 (int $v.adminThreshold) | quote }}
@@ -84,7 +100,8 @@ spec:
             - {{ . | quote }}
             {{- end }}
             {{- end }}
-            {{- if $j.keysetId }}
+            {{- end }}
+            {{- if and $keyed $j.keysetId }}
             - -keyset
             - {{ $j.keysetId | quote }}
             {{- end }}
