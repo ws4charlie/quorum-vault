@@ -74,18 +74,77 @@ func NewRequest(op, keyset, domain string, scheme pb.Scheme, curve pb.Curve, now
 		IssuedUnix: now.Unix(), ExpiresUnix: now.Add(validFor).Unix(), Nonce: hex.EncodeToString(nonce[:])}, nil
 }
 
+// NewSetRequest makes an unsigned request for a change of the admin set: the party's current version and set hash say which step it is.
+func NewSetRequest(domain string, curVersion uint64, curHash [32]byte, keys [][]byte, threshold int, now time.Time, validFor time.Duration) (Request, error) {
+	if err := CheckAdminSet(keys, threshold); err != nil {
+		return Request{}, err
+	}
+	return newRequestBody(OpAdminSet, domain, AdminSetBody(curVersion+1, keys, threshold, curHash), now, validFor)
+}
+
+// NewRecoveryRequest makes an unsigned request for a change of the recovery-key registry.
+func NewRecoveryRequest(domain string, curVersion uint64, curHash [32]byte, current string, retire []string, now time.Time, validFor time.Duration) (Request, error) {
+	if err := CheckRecoveryRecord(current, retire); err != nil {
+		return Request{}, err
+	}
+	return newRequestBody(OpRecoveryKey, domain, RecoveryKeyBody(curVersion+1, current, retire, curHash), now, validFor)
+}
+
+func newRequestBody(op, domain string, body proto.Message, now time.Time, validFor time.Duration) (Request, error) {
+	if validFor <= 0 {
+		return Request{}, errors.New("the validity must be positive")
+	}
+	hash, err := BodyHash(op, body)
+	if err != nil {
+		return Request{}, err
+	}
+	raw, err := protojson.MarshalOptions{EmitUnpopulated: true}.Marshal(body)
+	if err != nil {
+		return Request{}, err
+	}
+	var nonce [NonceSize]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return Request{}, err
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return Request{}, err
+	}
+	return Request{Version: Version2, Op: op, Keyset: "", Domain: domain, Body: compact.Bytes(), BodyHash: hex.EncodeToString(hash[:]),
+		IssuedUnix: now.Unix(), ExpiresUnix: now.Add(validFor).Unix(), Nonce: hex.EncodeToString(nonce[:])}, nil
+}
+
+// SetChange reads the change an admin-set request asks for (an error for other operations).
+func (r Request) SetChange() (*pb.AdminSetRequest, error) {
+	m, _, err := r.body()
+	if err != nil {
+		return nil, err
+	}
+	x, ok := m.(*pb.AdminSetRequest)
+	if !ok {
+		return nil, errors.New("not an admin-set request")
+	}
+	return x, nil
+}
+
+// RecoveryChange reads the change a recovery-key request asks for (an error for other operations).
+func (r Request) RecoveryChange() (*pb.RecoveryKeyRequest, error) {
+	m, _, err := r.body()
+	if err != nil {
+		return nil, err
+	}
+	x, ok := m.(*pb.RecoveryKeyRequest)
+	if !ok {
+		return nil, errors.New("not a recovery-key request")
+	}
+	return x, nil
+}
+
 // body parses `request` into the message for the operation and returns it with its hash.
 func (r Request) body() (proto.Message, [32]byte, error) {
-	var m proto.Message
-	switch r.Op {
-	case OpDKG:
-		m = &pb.DKGRequest{}
-	case OpRefresh:
-		m = &pb.RefreshRequest{}
-	case OpUnfreeze:
-		m = &pb.UnfreezeRequest{}
-	default:
-		return nil, [32]byte{}, fmt.Errorf("unknown operation %q: want dkg, refresh or unfreeze", r.Op)
+	m, err := newBody(r.Op)
+	if err != nil {
+		return nil, [32]byte{}, err
 	}
 	if err := (protojson.UnmarshalOptions{}).Unmarshal(r.Body, m); err != nil {
 		return nil, [32]byte{}, fmt.Errorf("request: %w", err)
@@ -105,6 +164,8 @@ func equalKeyset(m proto.Message, keyset string) bool {
 		return x.KeysetId == keyset
 	case *pb.UnfreezeRequest:
 		return x.KeysetId == keyset
+	case *pb.AdminSetRequest, *pb.RecoveryKeyRequest:
+		return keyset == ""
 	}
 	return false
 }
@@ -253,6 +314,19 @@ func (r Request) Check(p Policy, now time.Time) error {
 	a, err := r.Auth()
 	if err != nil {
 		return err
+	}
+	if r.Op == OpAdminSet {
+		ch, err := r.SetChange()
+		if err != nil {
+			return err
+		}
+		if err := CheckAdminSet(ch.SetKeys, int(ch.SetThreshold)); err != nil {
+			return err
+		}
+		if err := CheckAuth2(r.Op, r.Keyset, r.Domain, a.V2, UnionPolicy(p, ch.SetKeys), now); err != nil {
+			return err
+		}
+		return CheckSetSignatures(a.V2, p, ch.SetKeys, int(ch.SetThreshold))
 	}
 	return CheckAuth2(r.Op, r.Keyset, r.Domain, a.V2, p, now)
 }

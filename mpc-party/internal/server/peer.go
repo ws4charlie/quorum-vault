@@ -92,6 +92,9 @@ func (s *Server) Session(stream pb.Peer_SessionServer) error {
 		return reject(pb.ErrorKind_ERROR_KIND_LIMIT, "session rate limit exceeded for this key")
 	}
 
+	if open.Op == pb.Op_OP_ADMIN_SET || open.Op == pb.Op_OP_RECOVERY_KEY { // a change of the admin set or the recovery-key registry: B and C alike
+		return s.followRecord(stream, sid, &open, reject)
+	}
 	if s.cfg.Role == "C" || open.Scheme != pb.Scheme_SCHEME_UNSPECIFIED {
 		return s.sessionT(ctx, stream, sid, &open, start, rejectCode)
 	}

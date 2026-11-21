@@ -19,13 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MpcParty_DKG_FullMethodName      = "/qv.mpcparty.v1.MpcParty/DKG"
-	MpcParty_Node_FullMethodName     = "/qv.mpcparty.v1.MpcParty/Node"
-	MpcParty_Derive_FullMethodName   = "/qv.mpcparty.v1.MpcParty/Derive"
-	MpcParty_Sign_FullMethodName     = "/qv.mpcparty.v1.MpcParty/Sign"
-	MpcParty_Refresh_FullMethodName  = "/qv.mpcparty.v1.MpcParty/Refresh"
-	MpcParty_Health_FullMethodName   = "/qv.mpcparty.v1.MpcParty/Health"
-	MpcParty_Unfreeze_FullMethodName = "/qv.mpcparty.v1.MpcParty/Unfreeze"
+	MpcParty_DKG_FullMethodName         = "/qv.mpcparty.v1.MpcParty/DKG"
+	MpcParty_Node_FullMethodName        = "/qv.mpcparty.v1.MpcParty/Node"
+	MpcParty_Derive_FullMethodName      = "/qv.mpcparty.v1.MpcParty/Derive"
+	MpcParty_Sign_FullMethodName        = "/qv.mpcparty.v1.MpcParty/Sign"
+	MpcParty_Refresh_FullMethodName     = "/qv.mpcparty.v1.MpcParty/Refresh"
+	MpcParty_Health_FullMethodName      = "/qv.mpcparty.v1.MpcParty/Health"
+	MpcParty_Unfreeze_FullMethodName    = "/qv.mpcparty.v1.MpcParty/Unfreeze"
+	MpcParty_AdminSet_FullMethodName    = "/qv.mpcparty.v1.MpcParty/AdminSet"
+	MpcParty_RecoveryKey_FullMethodName = "/qv.mpcparty.v1.MpcParty/RecoveryKey"
 )
 
 // MpcPartyClient is the client API for MpcParty service.
@@ -45,6 +47,12 @@ type MpcPartyClient interface {
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
 	// Admin: lift a keyset freeze. Needs an operator signature; audited in the log on both parties.
 	Unfreeze(ctx context.Context, in *UnfreezeRequest, opts ...grpc.CallOption) (*UnfreezeResponse, error)
+	// Admin: change the set of admin keys (and the threshold). Signed by the CURRENT set at the current threshold and by the new set at its
+	// threshold; every member verifies and applies it itself, and the answer says per member what happened (a member that was down stays behind and is
+	// finished by sending the same change again).
+	AdminSet(ctx context.Context, in *AdminSetRequest, opts ...grpc.CallOption) (*AdminSetResponse, error)
+	// Admin: register the current recovery key (by fingerprint) and retire others. A party refuses to export a backup under a retired key.
+	RecoveryKey(ctx context.Context, in *RecoveryKeyRequest, opts ...grpc.CallOption) (*RecoveryKeyResponse, error)
 }
 
 type mpcPartyClient struct {
@@ -125,6 +133,26 @@ func (c *mpcPartyClient) Unfreeze(ctx context.Context, in *UnfreezeRequest, opts
 	return out, nil
 }
 
+func (c *mpcPartyClient) AdminSet(ctx context.Context, in *AdminSetRequest, opts ...grpc.CallOption) (*AdminSetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdminSetResponse)
+	err := c.cc.Invoke(ctx, MpcParty_AdminSet_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *mpcPartyClient) RecoveryKey(ctx context.Context, in *RecoveryKeyRequest, opts ...grpc.CallOption) (*RecoveryKeyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecoveryKeyResponse)
+	err := c.cc.Invoke(ctx, MpcParty_RecoveryKey_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MpcPartyServer is the server API for MpcParty service.
 // All implementations must embed UnimplementedMpcPartyServer
 // for forward compatibility.
@@ -142,6 +170,12 @@ type MpcPartyServer interface {
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
 	// Admin: lift a keyset freeze. Needs an operator signature; audited in the log on both parties.
 	Unfreeze(context.Context, *UnfreezeRequest) (*UnfreezeResponse, error)
+	// Admin: change the set of admin keys (and the threshold). Signed by the CURRENT set at the current threshold and by the new set at its
+	// threshold; every member verifies and applies it itself, and the answer says per member what happened (a member that was down stays behind and is
+	// finished by sending the same change again).
+	AdminSet(context.Context, *AdminSetRequest) (*AdminSetResponse, error)
+	// Admin: register the current recovery key (by fingerprint) and retire others. A party refuses to export a backup under a retired key.
+	RecoveryKey(context.Context, *RecoveryKeyRequest) (*RecoveryKeyResponse, error)
 	mustEmbedUnimplementedMpcPartyServer()
 }
 
@@ -172,6 +206,12 @@ func (UnimplementedMpcPartyServer) Health(context.Context, *HealthRequest) (*Hea
 }
 func (UnimplementedMpcPartyServer) Unfreeze(context.Context, *UnfreezeRequest) (*UnfreezeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Unfreeze not implemented")
+}
+func (UnimplementedMpcPartyServer) AdminSet(context.Context, *AdminSetRequest) (*AdminSetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AdminSet not implemented")
+}
+func (UnimplementedMpcPartyServer) RecoveryKey(context.Context, *RecoveryKeyRequest) (*RecoveryKeyResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecoveryKey not implemented")
 }
 func (UnimplementedMpcPartyServer) mustEmbedUnimplementedMpcPartyServer() {}
 func (UnimplementedMpcPartyServer) testEmbeddedByValue()                  {}
@@ -320,6 +360,42 @@ func _MpcParty_Unfreeze_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MpcParty_AdminSet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdminSetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MpcPartyServer).AdminSet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MpcParty_AdminSet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MpcPartyServer).AdminSet(ctx, req.(*AdminSetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MpcParty_RecoveryKey_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecoveryKeyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MpcPartyServer).RecoveryKey(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MpcParty_RecoveryKey_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MpcPartyServer).RecoveryKey(ctx, req.(*RecoveryKeyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MpcParty_ServiceDesc is the grpc.ServiceDesc for MpcParty service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -354,6 +430,14 @@ var MpcParty_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Unfreeze",
 			Handler:    _MpcParty_Unfreeze_Handler,
+		},
+		{
+			MethodName: "AdminSet",
+			Handler:    _MpcParty_AdminSet_Handler,
+		},
+		{
+			MethodName: "RecoveryKey",
+			Handler:    _MpcParty_RecoveryKey_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

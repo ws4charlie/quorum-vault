@@ -37,6 +37,7 @@ type MigrateReport struct {
 	Keys        int
 	Jobs        int
 	Freezes     int
+	Records     int  // the admin set and the recovery-key registry, when the party has them
 	Resumed     bool // the marker existed: only the moves were run
 }
 
@@ -216,6 +217,24 @@ func MigrateSeal(ctx context.Context, from, to *Config, opt MigrateOptions) (Mig
 			*d.count++
 		}
 	}
+	// the versioned records of the data directory root (plain under pkcs11, sealed under attested): a plain one would be refused by the attested
+	// sealer, and a party must not fall back to its configuration's admin list because its state could not be read
+	for _, f := range []struct{ file, kind string }{{adminSetFile, "admin-set"}, {recoveryRegFile, "recovery-key"}} {
+		raw, err := os.ReadFile(filepath.Join(dir, f.file))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return rep, err
+		}
+		sealed, err := ns.sealLocal(ctx, f.kind, f.file, raw)
+		if err != nil {
+			return rep, err
+		}
+		if err := writeAtomic(filepath.Join(stg, f.file), sealed); err != nil {
+			return rep, err
+		}
+		rep.Records++
+	}
 	if err := stage("staged"); err != nil {
 		return rep, err
 	}
@@ -266,6 +285,17 @@ func MigrateSeal(ctx context.Context, from, to *Config, opt MigrateOptions) (Mig
 }
 
 func verifyLocal(ctx context.Context, ns *FileStore, stg string, rep MigrateReport) error {
+	for _, f := range []struct{ file, kind string }{{adminSetFile, "admin-set"}, {recoveryRegFile, "recovery-key"}} {
+		raw, err := os.ReadFile(filepath.Join(stg, f.file))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if _, err := ns.openLocal(ctx, f.kind, f.file, raw); err != nil {
+			return fmt.Errorf("migrate-seal: verification: %s: %w", f.file, err)
+		}
+	}
 	for _, d := range []struct{ dir, kind string }{{"keys", "key"}, {"jobs", "job"}, {"freeze", "freeze"}} {
 		files, err := os.ReadDir(filepath.Join(stg, d.dir))
 		if errors.Is(err, os.ErrNotExist) {
