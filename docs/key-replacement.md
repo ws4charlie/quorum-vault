@@ -20,7 +20,7 @@ Each place that holds a key, such as one hot shard, numbers its keys: generation
 | Active | Normal payments |
 | Draining | Only a move of everything to its successor, and the completion of work already signed |
 | Retired | Nothing |
-| Compromised | Only the move to its successor |
+| Compromised | Only the move to its successor, and the cancel of its own pending payment |
 
 Only zone operators change a state. Several of them sign each change, the zone writes it into its own log, and the business side cannot make one.
 

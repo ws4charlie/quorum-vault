@@ -25,7 +25,7 @@ An approver signs with a software key or a passkey (WebAuthn). The zone verifies
 
 The approver list is more than a settings file. Enrolling, disabling or revoking an approver needs signatures from several zone operators, who hold a different set of keys from the approvers. Each change is audited and written to a log that the gateway and every cosigner keep separately, and it applies to the next decision without a restart ([runbook](runbooks/approvers.md)).
 
-Each hot key also has a state (new, active, draining, retired). The zone learns it only from records that zone operators have signed, never from the business side. The state decides what the key may sign. A key that is being replaced can only move its funds to its successor, and the zone operators' signatures that start the move count as its approval ([Key replacement](key-replacement.md)).
+Each hot key also has a state (new, active, draining, retired). The zone learns it only from records that zone operators have signed, never from the business side. The state decides what the key may sign. A key that is being replaced can only move its funds to its successor, and the zone operators' signatures that start the move count as its approval ([Key replacement](key-replacement.md)). A key marked as stolen may also cancel its own pending payment, so that a payment refused around the moment of the mark cannot block the move of its funds.
 
 ## Two cosigners that do not trust each other
 

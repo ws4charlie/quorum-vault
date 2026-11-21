@@ -75,10 +75,13 @@ A withdrawal or a sweep built a moment before the mark may be in any state. The 
 | built, or queued for signing | the core rejects the queued job at once; the withdrawal is voided (its hold is released), the sweep fails | nothing waits |
 | being signed | the zone answers at its next decision: refused, as above; signed, as the next two rows | a wait of seconds |
 | refused, no signature (the zone refuses the cancel too: a compromised key signs only its drain) | the nonce becomes a hole; the next drain transfer uses it, so the nonce lane stays gapless | nothing waits |
+| refused after the gateway claimed the nonce (a cosigner that already had the mark refused: `signer_refused`) | the core asks for the cancel; the zone signs a compromised key's own cancel of a nonce it claimed (zero value, to itself, within `max_cancels_per_source`, default 16, once the successor is active); the cancel fills the nonce and the drain goes on | the sweep or withdrawal ends cancelled; a short wait until the activation |
 | signed, not broadcast | the worker broadcasts it; the drain waits for it to confirm | the wait names it |
 | broadcast, not confirmed | real: it can still mine, so the drain waits. The old key cannot sign a fee bump (the zone refuses it), so it confirms at the fee it has | the wait names it and its nonce |
 
 Sweeps are not planned while the sweep destination is the compromised address (until step 5 is done); funds that arrive meanwhile wait in the forwarders. A sweep that confirms after the mark puts funds on the old address: the drain looks at the balance again when every transaction is final, and the driver checks twice before it says `drained`.
+
+**Rollout.** The gateway and every cosigner must run the version that signs this cancel. A cosigner on the old binary refuses it (the failure is safe: the old residual returns, the nonce stays claimed and the drain of that address stays blocked, with `policy`/`keyset_state` refusals of the cancel in the gateway log): upgrade them together before relying on it.
 
 **If the wait does not end** (`STALLED` names the transaction): read the sign jobs on the line.
 1. A job `failed` or `signing` for longer than a few minutes: the signer had a fault, not a refusal. Fix the signer (gateway and cosigner logs); the job completes or is rejected, and the wait ends. Never mark it rejected by hand: a signature may exist.
