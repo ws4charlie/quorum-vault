@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -148,5 +150,18 @@ func TestStalledScraperDoesNotBlockUpdates(t *testing.T) {
 	case <-wrote:
 		t.Fatal("test setup: the writer should still be blocked")
 	default:
+	}
+}
+
+func TestAddedWriterIsServedAtEachScrape(t *testing.T) {
+	r := New(time.Second)
+	r.SetReady(true)
+	n := 0
+	r.AddWriter(func(w io.Writer) { n++; fmt.Fprintf(w, "# TYPE qv_added_total counter\nqv_added_total %d\n", n) })
+	var a, b bytes.Buffer
+	r.Write(&a)
+	r.Write(&b)
+	if !strings.Contains(a.String(), "qv_added_total 1\n") || !strings.Contains(b.String(), "qv_added_total 2\n") {
+		t.Fatalf("scrapes:\n%s\n%s", a.String(), b.String())
 	}
 }

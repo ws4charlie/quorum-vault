@@ -11,10 +11,17 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 )
+
+// feeCapsHoldForTest is the hold of the runs below (0: the production hour).
+var feeCapsHoldForTest time.Duration
+
+// feeCapsOldHistory makes the run behave as an execution that started on the code before the bound existed: GetVersion answers DefaultVersion.
+var feeCapsOldHistory bool
 
 const feeCapsRefusal = "tx_mismatch: btc: transaction does not match intent: " + btc.FeeCapsSeqNote
 
@@ -50,6 +57,7 @@ func feeCapsRun(t *testing.T, rebuild func(n int) (bool, error)) (calls []string
 		rebuiltOK = rebuiltOK || (ok && err == nil)
 		return ok, err
 	})
+	reg("Park", func(_ context.Context, o OwnerArg, reason string) error { rec("Park:" + reason); return nil })
 	reg("BroadcastJob", func(context.Context, OwnerArg, string) (string, error) { rec("Broadcast"); return "h1", nil })
 	reg("RecordBroadcast", func(context.Context, OwnerArg, string) error { rec("RecordBroadcast"); return nil })
 	reg("WaitNonce", func(context.Context, OwnerArg, time.Duration) (NonceResult, error) {
@@ -63,7 +71,10 @@ func feeCapsRun(t *testing.T, rebuild func(n int) (bool, error)) (calls []string
 		rec("NothingToFree")
 		return FreeResult{Free: true}, nil
 	})
-	env.ExecuteWorkflow(WithdrawalWorkflow, Input{ID: "w1", T: Timings{SignTimeout: time.Second, StuckAfter: time.Hour, MaxReplacements: 1, HotPoll: time.Second}})
+	if feeCapsOldHistory {
+		env.OnGetVersion("feecaps-hold", workflow.DefaultVersion, 1).Return(workflow.DefaultVersion)
+	}
+	env.ExecuteWorkflow(WithdrawalWorkflow, Input{ID: "w1", T: Timings{SignTimeout: time.Second, StuckAfter: time.Hour, MaxReplacements: 1, HotPoll: time.Second, FeeCapsHold: feeCapsHoldForTest}})
 	if !env.IsWorkflowCompleted() {
 		t.Fatal("workflow did not complete")
 	}
@@ -123,5 +134,52 @@ func TestFeeCapsRefusalThatCannotBeRebuiltTakesTheOldPath(t *testing.T) {
 		if count(calls, "Rebuild") != 1 || count(calls, "EnqueueCancel") != 1 || count(calls, "Void") != 1 || count(calls, "Settle") != 0 || strings.Contains(strings.Join(calls, ","), "Broadcast") {
 			t.Fatalf("%s: activities %v", name, calls)
 		}
+	}
+}
+
+// The zone keeps refusing for fee caps (a forged or stale row in the core): the withdrawal is rebuilt and waits, and after the hold it is PARKED with the zone's
+// reason, which is its visible state; nothing was signed, so nothing is voided and no cancel runs. It does not retry for ever.
+func TestFeeCapsRefusalThatNeverClearsIsParkedWithTheZonesReason(t *testing.T) {
+	feeCapsHoldForTest = 10 * time.Second
+	defer func() { feeCapsHoldForTest = 0 }()
+	calls, err := feeCapsRun(t, func(int) (bool, error) {
+		return false, temporal.NewNonRetryableApplicationError("not enough available outputs", errNoOutputs, nil)
+	})
+	_ = err
+	parked := ""
+	for _, c := range calls {
+		if strings.HasPrefix(c, "Park:") {
+			parked = c
+		}
+	}
+	if parked == "" || !strings.Contains(parked, "core and zone are on different fee-cap changes") {
+		t.Fatalf("not parked with the zone's reason (calls %v, err %v)", calls, err)
+	}
+	if count(calls, "Void") != 0 || count(calls, "EnqueueCancel") != 0 || count(calls, "Broadcast") != 0 {
+		t.Fatalf("parked, but also: %v", calls)
+	}
+}
+
+// An execution that started before the bound (no version marker) keeps the old behaviour: it is never parked, however long it waits, and it ends the way
+// it did (here the test lets the rebuild succeed after the old hold would have passed). A new execution is parked, see the test above.
+func TestFeeCapsOldExecutionIsNotParked(t *testing.T) {
+	feeCapsHoldForTest, feeCapsOldHistory = 10*time.Second, true
+	defer func() { feeCapsHoldForTest, feeCapsOldHistory = 0, false }()
+	calls, err := feeCapsRun(t, func(n int) (bool, error) {
+		if n < 15 { // well past the 10 s hold at one poll a second
+			return false, temporal.NewNonRetryableApplicationError("not enough available outputs", errNoOutputs, nil)
+		}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("%v (calls %v)", err, calls)
+	}
+	for _, c := range calls {
+		if strings.HasPrefix(c, "Park:") {
+			t.Fatalf("an old execution was parked: %v", calls)
+		}
+	}
+	if count(calls, "Settle") != 1 {
+		t.Fatalf("not settled: %v", calls)
 	}
 }

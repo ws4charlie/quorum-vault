@@ -14,24 +14,27 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
 
-// The signing zone's Postgres maps the gateway's certificate to qv_gateway_guard and the cosigner's to qv_cosigner_guard (deploy/postgres/
-// signing.pg_ident.conf). Each role owns its own guard database and cannot connect to the other's.
+// The signing zone's Postgres maps the gateway's certificate to qv_gateway_guard and each cosigner's own certificate name to its own role,
+// cosigner-b to qv_cosigner_b_guard and cosigner-c to qv_cosigner_c_guard (deploy/postgres/signing.pg_ident.conf). Each role owns its own guard
+// database and cannot connect to the other's; C's certificate at B's database is refused, with C's role name or B's.
 func TestGuardRolesAreSeparated(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	gwDB := dbtest.CreateGuardDB(t, "qv_guard_")
 	csDB := dbtest.CreateGuardDB(t, "qv_guard_")
+	ccDB := dbtest.CreateGuardDB(t, "qv_guard_")
 	gwAs := dbtest.GuardDSN(t, gwDB, dbtest.RoleGatewayGuard)
-	csAs := dbtest.GuardDSN(t, csDB, dbtest.RoleCosignerGuard)
+	csAs := dbtest.GuardDSN(t, csDB, dbtest.RoleCosignerBGuard)
+	ccAs := dbtest.GuardDSN(t, ccDB, dbtest.RoleCosignerCGuard)
 	_, _, ca := pkitest.Files(pki.ZoneSigning, "admin")
 	with := func(dsn, cert string) string {
 		c, k, _ := pkitest.Files(pki.ZoneSigning, cert)
 		return db.WithClientCert(dsn, c, k, ca)
 	}
-	gw, cs := with(gwAs, "gateway"), with(csAs, "cosigner")
+	gw, cs, cc := with(gwAs, "gateway"), with(csAs, "cosigner-b"), with(ccAs, "cosigner-c")
 
 	// each applies the real replay-guard schema to its own database, with its own certificate
-	for name, dsn := range map[string]string{"gateway": gw, "cosigner": cs} {
+	for name, dsn := range map[string]string{"gateway": gw, "cosigner-b": cs, "cosigner-c": cc} {
 		p, err := pgxpool.New(ctx, dsn)
 		if err != nil {
 			t.Fatal(err)
@@ -80,15 +83,21 @@ func TestGuardRolesAreSeparated(t *testing.T) {
 		}
 	}
 	refused("gateway -> cosigner's guard", with(db.Rewrite(csAs, dbtest.RoleGatewayGuard, ""), "gateway"))
-	refused("cosigner -> gateway's guard", with(db.Rewrite(gwAs, dbtest.RoleCosignerGuard, ""), "cosigner"))
-	refused("gateway cert as the cosigner role", with(db.Rewrite(csAs, dbtest.RoleCosignerGuard, ""), "gateway"))
-	refused("cosigner cert as the gateway role", with(db.Rewrite(gwAs, dbtest.RoleGatewayGuard, ""), "cosigner"))
+	refused("cosigner B -> gateway's guard", with(db.Rewrite(gwAs, dbtest.RoleCosignerBGuard, ""), "cosigner-b"))
+	refused("gateway cert as the cosigner B role", with(db.Rewrite(csAs, dbtest.RoleCosignerBGuard, ""), "gateway"))
+	refused("cosigner B cert as the gateway role", with(db.Rewrite(gwAs, dbtest.RoleGatewayGuard, ""), "cosigner-b"))
+	// the two cosigners are apart: neither role's name opens the other's database with its own certificate, and a certificate of one does not pass as the other
+	refused("cosigner C cert at B's database, as B's role", with(csAs, "cosigner-c"))
+	refused("cosigner B cert at C's database, as C's role", with(ccAs, "cosigner-b"))
+	refused("cosigner C -> B's guard, as C's role", with(db.Rewrite(csAs, dbtest.RoleCosignerCGuard, ""), "cosigner-c"))
+	refused("cosigner B -> C's guard, as B's role", with(db.Rewrite(ccAs, dbtest.RoleCosignerBGuard, ""), "cosigner-b"))
 	refused("gateway cert as the owner", with(db.Rewrite(gwAs, "qv", ""), "gateway"))
 	refused("gateway -> bootstrap database", with(db.Rewrite(gwAs, "", "qv_signing"), "gateway"))
-	refused("cosigner -> bootstrap database", with(db.Rewrite(csAs, "", "qv_signing"), "cosigner"))
+	refused("cosigner B -> bootstrap database", with(db.Rewrite(csAs, "", "qv_signing"), "cosigner-b"))
+	refused("cosigner C -> bootstrap database", with(db.Rewrite(ccAs, "", "qv_signing"), "cosigner-c"))
 
 	// the right to alter stops at its own database: no cluster-level or other-role change
-	for name, dsn := range map[string]string{"gateway": gw, "cosigner": cs} {
+	for name, dsn := range map[string]string{"gateway": gw, "cosigner-b": cs, "cosigner-c": cc} {
 		c, err := pgx.Connect(ctx, dsn)
 		if err != nil {
 			t.Fatal(err)

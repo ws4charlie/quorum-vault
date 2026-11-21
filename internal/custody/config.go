@@ -5,8 +5,6 @@
 package custody
 
 import (
-	"crypto/ed25519"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -330,16 +328,17 @@ type BTCFile struct {
 	// Batching is the default for every hot shard: several withdrawals in one transaction. Off unless it says enabled. A shard may override it.
 	Batching *BatchingFile `json:"batching,omitempty"`
 	// FeeCapsChange lets the zone's approvers change max_tx_fee_sats and max_fee_rate with signatures (docs/runbooks/btc-fee-caps.md). The core
-	// checks the signatures itself against the approver keys listed here, which must be the zone's (same names, keys and identities). max_tx_fee_sats and
-	// max_fee_rate above are the caps until the first change. Absent: the core uses those two and nothing else.
+	// keeps no approver list: the zone checks the signatures against the approvers in force, and qv-fee-caps checks a change against the zone before it
+	// writes to the core. Write the section as {}. max_tx_fee_sats and max_fee_rate above are the caps until the first change. Absent: the core uses those two and nothing else.
 	FeeCapsChange *FeeCapsChangeFile `json:"fee_caps_change,omitempty"`
 }
 
 // FeeCapsChangeFile is the core's fee_caps_change section.
+// The three fields are retired: they are read only to refuse an old config with a clear message.
 type FeeCapsChangeFile struct {
-	Approvers    map[string]FeeCapsApproverFile `json:"approvers"`
-	MinApprovers int                            `json:"min_approvers,omitempty"`  // default 1; the zone's must be the same or lower
-	MaxChangeAge string                         `json:"max_change_age,omitempty"` // default "10m"
+	Approvers    map[string]FeeCapsApproverFile `json:"approvers,omitempty"`
+	MinApprovers int                            `json:"min_approvers,omitempty"`
+	MaxChangeAge string                         `json:"max_change_age,omitempty"`
 }
 
 // FeeCapsApproverFile is one approver: the Ed25519 public key (hex, 32 bytes) and the person.
@@ -511,19 +510,10 @@ func (c *Config) buildBTC(cf ChainFile) error {
 		MaxTxFeeSats: b.MaxTxFeeSats, SweepMaxFeeRate: b.SweepMaxFeeRate, SweepUrgentValue: b.SweepUrgentValue,
 		ConsolidateAbove: b.ConsolidateAbove, ConsolidateMaxFeeRate: b.ConsolidateMaxFeeRate}
 	if fc := b.FeeCapsChange; fc != nil {
-		c.BTC.FeeCaps = &btc.FeeCapsConfig{Approvers: map[string]btc.FeeCapsApprover{}, MinApprovers: fc.MinApprovers}
-		for n, a := range fc.Approvers {
-			k, err := hex.DecodeString(a.Key)
-			if err != nil || len(k) != ed25519.PublicKeySize {
-				return fmt.Errorf("custody: config: fee_caps_change.approvers.%s.key must be 32 bytes of hex", n)
-			}
-			c.BTC.FeeCaps.Approvers[n] = btc.FeeCapsApprover{Key: k, Identity: a.Identity}
+		if len(fc.Approvers) > 0 || fc.MinApprovers != 0 || fc.MaxChangeAge != "" {
+			return errors.New("custody: config: fee_caps_change.approvers, min_approvers and max_change_age are retired: the core keeps no approver list (the zone's registry is the rule); write \"fee_caps_change\": {} (docs/runbooks/btc-fee-caps.md)")
 		}
-		age, err := dur("fee_caps_change.max_change_age", fc.MaxChangeAge, 10*time.Minute)
-		if err != nil {
-			return err
-		}
-		c.BTC.FeeCaps.MaxAge = age
+		c.BTC.FeeCaps = &btc.FeeCapsConfig{}
 	}
 	base, err := b.Batching.build("batching", Batching{})
 	if err != nil {

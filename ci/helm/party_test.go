@@ -543,6 +543,11 @@ func checkParty(objs []Obj, role string, kind bool) []string {
 		if secrets["party-tls"] == "" || secrets["cosigner-tls"] == "" || secrets["cosigner-socket-tls"] == "" || secrets["cosigner-link-tls"] == "" {
 			add("a role %s pod needs the party, cosigner, cosigner-socket and cosigner-link certificate Secrets", role)
 		}
+		// each cosigner has its own names (catalog cosigner-b|c, cosigner-link-b|c): the default Secrets are the role's, never the other's
+		r := strings.ToLower(role)
+		if secrets["cosigner-tls"] != "qv-signing-cosigner-"+r+"-tls" || secrets["cosigner-link-tls"] != "qv-cosigner-link-"+r+"-tls" {
+			add("role %s: cosigner Secrets are %q and %q, want qv-signing-cosigner-%s-tls and qv-cosigner-link-%s-tls", role, secrets["cosigner-tls"], secrets["cosigner-link-tls"], r, r)
+		}
 	} else {
 		for _, n := range []string{"cosigner-tls", "cosigner-link-tls", "cosigner-socket-tls", "cosigner-config"} {
 			if _, ok := mountsOrVolume(sts, n); ok {
@@ -1410,6 +1415,35 @@ func TestPartyOperatorJobFlagsMatchTheTool(t *testing.T) {
 		}
 		if !sawKeyset {
 			t.Errorf("%s: the Job does not pass -keyset: a file for another keyset would be accepted", cmd)
+		}
+	}
+}
+
+// The cosigner's guard DATABASE keeps its name on upgrade (it holds the replay records and the audit chain); only the role (the owner, the certificate's
+// map target) is per cosigner. A new install may set another database name explicitly.
+func TestCosignerGuardDatabaseKeepsItsNameOnUpgrade(t *testing.T) {
+	dsn := func(out string) string {
+		i := strings.Index(out, "QV_COSIGNER_GUARD_DSN")
+		if i < 0 {
+			t.Fatal("no QV_COSIGNER_GUARD_DSN in the render")
+		}
+		j := strings.Index(out[i:], "postgres://")
+		return out[i+j : i+j+strings.IndexAny(out[i+j:], "?\"")]
+	}
+	for role, owner := range map[string]string{"B": "qv_cosigner_b_guard", "C": "qv_cosigner_c_guard"} {
+		out, err := partyRender(false, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := dsn(out), "postgres://"+owner+"@qv-signing-db-rw:5432/qv_cosigner_guard"; got != want {
+			t.Errorf("role %s upgrade path: %s, want %s", role, got, want)
+		}
+		out, err = partyRender(false, role, "--set", "cosigner.database.name=qv_cosigner_new", "--set", "cosigner.database.role=qv_x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := dsn(out), "postgres://qv_x@qv-signing-db-rw:5432/qv_cosigner_new"; got != want {
+			t.Errorf("role %s explicit values: %s, want %s", role, got, want)
 		}
 	}
 }

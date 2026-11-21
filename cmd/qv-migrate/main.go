@@ -23,7 +23,7 @@ import (
 // ServiceRoles are the login roles of each zone that -enable-login switches on (migration 0030 and signing_roles.sql create them).
 var serviceRoles = map[string][]string{
 	"business": {"qv_core", "qv_worker", "qv_relay", "qv_archiver", "qv_gateway"},
-	"signing":  {"qv_gateway_guard", "qv_cosigner_guard"},
+	"signing":  {"qv_gateway_guard", "qv_cosigner_b_guard", "qv_cosigner_c_guard"},
 }
 
 func main() {

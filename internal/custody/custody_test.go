@@ -1,11 +1,12 @@
 package custody
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"math/big"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -442,7 +443,7 @@ func TestShippedConfigsAgreeOnBitcoinFeeCaps(t *testing.T) {
 		t.Fatal("the gateway example has no Bitcoin chain to check")
 	}
 	// The core's Bitcoin example sets the caps itself and must set the same ones as the zone's, and the same signed-change rules: the approvers
-	// are the zone's enabled Ed25519 approvers (name, key, identity), min_approvers is not below the zone's.
+	// are not copied: the core's fee_caps_change is {} and holds no approver list.
 	// Both files must also load: the start-up checks run on them (the zone checks its caps against its bounds there).
 	core, err := LoadConfig("config.example.btc.json")
 	if err != nil {
@@ -463,24 +464,28 @@ func TestShippedConfigsAgreeOnBitcoinFeeCaps(t *testing.T) {
 		if core.BTC.FeeCaps == nil {
 			t.Fatal("core btc example has no fee_caps_change")
 		}
-		rules := zone.FeeCapsRules(name)
-		if rules == nil {
+		if zone.FeeCapsRules(name) == nil {
 			t.Fatalf("zone example chain %q accepts no fee-cap change", name)
 		}
-		if len(core.BTC.FeeCaps.Approvers) != len(rules.Approvers) {
-			t.Errorf("core fee_caps_change has %d approvers, the zone has %d enabled", len(core.BTC.FeeCaps.Approvers), len(rules.Approvers))
-		}
-		for n, za := range rules.Approvers {
-			ca, ok := core.BTC.FeeCaps.Approvers[n]
-			if !ok || !bytes.Equal(ca.Key, za.Key) || ca.Identity != za.Identity {
-				t.Errorf("approver %q of the zone is not the same in the core's fee_caps_change", n)
-			}
-		}
-		if core.BTC.FeeCaps.MinApprovers < ch.BTC.FeeCaps.MinApprovers {
-			t.Errorf("core min_approvers %d is below the zone's %d", core.BTC.FeeCaps.MinApprovers, ch.BTC.FeeCaps.MinApprovers)
-		}
-		if core.BTC.FeeCaps.MaxAge != ch.BTC.FeeCaps.MaxAge {
-			t.Errorf("core max_change_age %s, zone %s", core.BTC.FeeCaps.MaxAge, ch.BTC.FeeCaps.MaxAge)
-		}
+		// the core keeps no approver list (the zone's registry is the rule): nothing to compare
+	}
+}
+
+// An old core config that still lists approvers is refused with a message that says what to do: the core keeps no approver list any more.
+func TestCoreConfigWithAnApproverListIsRefused(t *testing.T) {
+	b, err := os.ReadFile("config.example.btc.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := strings.Replace(string(b), `"fee_caps_change": {}`, `"fee_caps_change": {"min_approvers": 1, "approvers": {"alice": {"key": "0000000000000000000000000000000000000000000000000000000000000001", "identity": "alice"}}}`, 1)
+	if old == string(b) {
+		t.Fatal("the example has no fee_caps_change to change")
+	}
+	path := filepath.Join(t.TempDir(), "core.json")
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("a config with approvers: %v", err)
 	}
 }

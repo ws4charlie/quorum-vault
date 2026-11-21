@@ -1,0 +1,61 @@
+{
+  "name": "evm-mixed",
+  "note": "Deposits at many addresses (5 deposits to 6 withdrawals, as the DESIGN_SCALE day: 50,000 sweeps to 60,000 withdrawals), 96% of withdrawals auto-approved and small, 4% with two approvers, and a Reconcile every 10 s. Rate scale 1 is 4.4 operations a second. The rates rise in steps to find the first limit.",
+  "seed": 11,
+  "mode": "open",
+  "setup": {
+    "withdraw_customers": 60,
+    "fund_each_eth": 40,
+    "deposit_customers": 600
+  },
+  "ramp_s": 10,
+  "step_s": 40,
+  "steps": [
+    0.25,
+    0.5,
+    1,
+    1.5,
+    2,
+    3
+  ],
+  "drain_s": 120,
+  "background_reconcile_s": 10,
+  "streams": [
+    {
+      "op": "deposit",
+      "rate": 2,
+      "amount_eth": [
+        0.05,
+        2
+      ]
+    },
+    {
+      "op": "withdraw",
+      "tier": "auto",
+      "rate": 2.3,
+      "amount_eth": [
+        0.001,
+        0.05
+      ]
+    },
+    {
+      "op": "withdraw",
+      "tier": "two",
+      "rate": 0.1,
+      "amount_eth": [
+        1,
+        1.5
+      ]
+    }
+  ],
+  "objectives": {
+    "withdraw_p95_ms": 5000,
+    "approved_to_broadcast_p95_ms": 3000,
+    "deposit_credit_p95_ms": 5000,
+    "sweep_p95_ms": 30000,
+    "error_rate": 0.001,
+    "achieved_of_offered": 0.99
+  },
+  "max_inflight": 200,
+  "settle_s": 900
+}

@@ -1,0 +1,42 @@
+{
+  "name": "smoke",
+  "note": "A handful of operations, seconds long. Asserts correctness only: no timing is judged. Runs in CI as a smoke test.",
+  "seed": 7,
+  "mode": "open",
+  "setup": {
+    "withdraw_customers": 4,
+    "fund_each_eth": 5,
+    "deposit_customers": 6
+  },
+  "ramp_s": 1,
+  "hold_s": 4,
+  "drain_s": 60,
+  "streams": [
+    {
+      "op": "deposit",
+      "rate": 1,
+      "amount_eth": [
+        0.2,
+        0.5
+      ]
+    },
+    {
+      "op": "withdraw",
+      "tier": "auto",
+      "rate": 1,
+      "amount_eth": [
+        0.001,
+        0.05
+      ]
+    },
+    {
+      "op": "withdraw",
+      "tier": "two",
+      "rate": 0.5,
+      "amount_eth": [
+        1,
+        1.2
+      ]
+    }
+  ]
+}

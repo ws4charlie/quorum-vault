@@ -20,6 +20,12 @@ service MpcParty {
   rpc Health(HealthRequest) returns (HealthResponse);
   // Admin: lift a keyset freeze. Needs an operator signature; audited in the log on both parties.
   rpc Unfreeze(UnfreezeRequest) returns (UnfreezeResponse);
+  // Admin: change the set of admin keys (and the threshold). Signed by the CURRENT set at the current threshold and by the new set at its
+  // threshold; every member verifies and applies it itself, and the answer says per member what happened (a member that was down stays behind and is
+  // finished by sending the same change again).
+  rpc AdminSet(AdminSetRequest) returns (AdminSetResponse);
+  // Admin: register the current recovery key (by fingerprint) and retire others. A party refuses to export a backup under a retired key.
+  rpc RecoveryKey(RecoveryKeyRequest) returns (RecoveryKeyResponse);
 }
 
 enum Curve {
@@ -135,6 +141,63 @@ message UnfreezeRequest {
 }
 message UnfreezeResponse {}
 
+// A change of the admin set. set_version is the version the set gets (the party's version plus one); set_prev_hash is the hash of the set it replaces.
+// The signatures (admin, v2) cover every field here, so a request is good for exactly one step of one party's history.
+message AdminSetRequest {
+  uint64 set_version = 1;
+  repeated bytes set_keys = 2;   // the new admin keys, 32 bytes each
+  uint32 set_threshold = 3;      // how many distinct keys of the new set must sign an authorization
+  bytes set_prev_hash = 4;
+  AdminAuth admin = 5;
+}
+
+// A change of the recovery-key registry: rk_current becomes the current key, every fingerprint in rk_retire becomes retired.
+message RecoveryKeyRequest {
+  uint64 rk_version = 1;
+  string rk_current = 2;         // fingerprint (hex) of a recovery public key
+  repeated string rk_retire = 3;
+  bytes rk_prev_hash = 4;
+  AdminAuth admin = 5;
+}
+
+enum RecordOutcome {
+  RECORD_OUTCOME_UNSPECIFIED = 0;
+  RECORD_OUTCOME_APPLIED = 1;     // this member took the change now
+  RECORD_OUTCOME_ALREADY = 2;     // this member already had exactly this state
+  RECORD_OUTCOME_REFUSED = 3;     // this member refused (detail says why): it did not change
+  RECORD_OUTCOME_UNREACHABLE = 4; // the coordinator could not reach it: it did not change
+}
+
+message RecordMember {
+  string name = 1;
+  RecordOutcome outcome = 2;
+  string detail = 3;
+  uint64 version = 4; // the member's version after the call, when it answered
+  bytes hash = 5;     // and the hash of its state
+}
+message AdminSetResponse { repeated RecordMember members = 1; }
+message RecoveryKeyResponse { repeated RecordMember members = 1; }
+
+// What a party holds as its admin set (version 0 = the configuration's bootstrap list, nothing applied yet).
+message AdminSetStatus {
+  uint64 version = 1;
+  bytes set_hash = 2;
+  uint32 threshold = 3;
+  repeated bytes keys = 4;
+  bool from_state = 5;              // the set comes from the party's durable state; false: the bootstrap list of the configuration
+  bool config_differs = 6;          // state exists and the configuration lists another set (the configuration is ignored)
+  string domain = 7;
+  int64 max_validity_seconds = 8;
+  int64 max_age_seconds = 9;
+}
+
+message RecoveryKeyStatus {
+  uint64 version = 1;
+  string current = 2;
+  repeated string retired = 3;
+  bytes hash = 4;
+}
+
 message KeysetStatus {
   string keyset_id = 1;
   uint64 generation = 2;        // current generation
@@ -144,6 +207,8 @@ message KeysetStatus {
   bool frozen = 6;
   Scheme scheme = 7;
   bytes public_key = 8;         // 2-of-3 keysets: the group public key (compressed), empty for 2-party HD keysets
+  string backup_recovery_key = 9; // fingerprint of the recovery key the last verified backup is under ("" = none, or recorded before this field)
+  bool backup_key_retired = 10;   // that backup is under a retired recovery key, or another one than the registry's current one
 }
 
 // State of one peer link as seen from this party.
@@ -161,6 +226,8 @@ message HealthResponse {
   string cbmpc_commit = 5;
   repeated KeysetStatus keysets = 6;
   repeated PeerStatus peers = 7; // the links this party dials (A: B and C; B: C; C: none)
+  AdminSetStatus admin_set = 8;
+  RecoveryKeyStatus recovery_key = 9;
 }
 
 // ---- Typed error detail, attached to every gRPC status the service returns for protocol failures ----
@@ -216,6 +283,8 @@ enum Op {
   OP_UNFREEZE = 6;
   OP_RECONCILE = 7; // after a restart: agree on one generation, prove it with a SelfTest
   OP_FREEZE_NOTICE = 8; // 2-of-3: "I froze this keyset"; the receiver freezes too (Open.reason)
+  OP_ADMIN_SET = 9;     // a change of the admin set, forwarded to B and C; every member verifies it itself
+  OP_RECOVERY_KEY = 10; // a change of the recovery-key registry, the same way
 }
 
 message Open {
@@ -241,6 +310,15 @@ message Open {
   string group = 16;
   bool link = 17;      // this is the B -> C link stream of group `group`
   string reason = 18;  // FREEZE_NOTICE: why the sender froze
+  // ---- ADMIN_SET and RECOVERY_KEY: the request fields, by the same names (api/admin copies them by name) ----
+  uint64 set_version = 19;
+  repeated bytes set_keys = 20;
+  uint32 set_threshold = 21;
+  bytes set_prev_hash = 22;
+  uint64 rk_version = 23;
+  string rk_current = 24;
+  repeated string rk_retire = 25;
+  bytes rk_prev_hash = 26;
 }
 
 message Fin {

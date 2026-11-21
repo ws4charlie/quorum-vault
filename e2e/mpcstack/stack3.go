@@ -385,7 +385,7 @@ func (s *Stack3) RouteFile(interval string, failCount int, window string, recove
 func (s *Stack3) StartCosigner(cfgPath, guardDSN, gatewayGuardDSN string) {
 	s.t.Helper()
 	crt, key := s.CertCosB.Write(s.t, s.Dir)
-	s.Cos = NewProc(s.t, "cosigner-B", filepath.Join(s.Dir, "cosigner-B.log"), s.Bin.Cosigner, nil,
+	s.Cos = NewCosignerProc(s.t, "cosigner-B", filepath.Join(s.Dir, "cosigner-B.log"), s.Bin.Cosigner, "b",
 		"-config", cfgPath, "-guard-dsn", guardDSN, "-gateway-guard-dsn", gatewayGuardDSN, "-socket", s.SockB,
 		"-socket-cert", crt, "-socket-key", key, "-party-pins", s.CertB.Pin)
 	s.StartCosignerAgain()
@@ -394,7 +394,7 @@ func (s *Stack3) StartCosigner(cfgPath, guardDSN, gatewayGuardDSN string) {
 func (s *Stack3) StartCosignerC(cfgPath, guardDSN, gatewayGuardDSN string) {
 	s.t.Helper()
 	crt, key := s.CertCosC.Write(s.t, s.Dir)
-	s.CosC = NewProc(s.t, "cosigner-C", filepath.Join(s.Dir, "cosigner-C.log"), s.Bin.Cosigner, nil,
+	s.CosC = NewCosignerProc(s.t, "cosigner-C", filepath.Join(s.Dir, "cosigner-C.log"), s.Bin.Cosigner, "c",
 		"-config", cfgPath, "-guard-dsn", guardDSN, "-gateway-guard-dsn", gatewayGuardDSN, "-socket", s.SockC,
 		"-socket-cert", crt, "-socket-key", key, "-party-pins", s.CertC.Pin)
 	s.StartCosignerCAgain()

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/backup"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/cbmpc"
 )
@@ -214,5 +215,30 @@ func TestBackupNegatives(t *testing.T) {
 	}
 	if err := backup.Verify(f1, []byte("garbage")); err == nil {
 		t.Error("garbage public key accepted")
+	}
+}
+
+// qv-party-admin reads the fingerprint of a recovery public key without linking this package; the two must agree with what every backup records.
+func TestFingerprintOfPublicKeyFileMatchesBackups(t *testing.T) {
+	priv, pub, err := backup.GenRecoveryKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = priv
+	fpr, err := admin.RecoveryFingerprint(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k1, _ := dkg(t, cbmpc.ECDSA)
+	defer k1.Wipe()
+	f, err := backup.Export(k1, "k", 1, "A", pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.RecoveryKeyFpr != fpr {
+		t.Errorf("a backup records fingerprint %s, the tool computes %s", f.RecoveryKeyFpr, fpr)
+	}
+	if _, err := admin.RecoveryFingerprint([]byte("{}")); err == nil {
+		t.Error("a file that is no recovery key")
 	}
 }

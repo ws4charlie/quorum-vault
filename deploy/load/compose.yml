@@ -1,0 +1,30 @@
+# Prometheus and Grafana for a live load run (make load-dash-up; deploy/load/dash.sh). A separate compose project from the e2e stack, so a run does not
+# start or stop it. Prometheus scrapes the generator (qvload_*) and the stack's sampler (qvstack_*) at the addresses the load test writes into
+# data/load/targets (file service discovery), Grafana reads Prometheus and ships with the dashboard "QuorumVault load run". Local only: both listen on
+# loopback, Grafana has no login (anonymous admin) because there is nothing in it but this run's numbers, and no credential is in this file.
+# Pinned: prom/prometheus v3.5.0 (as docker-compose.yml), grafana/grafana 11.6.0.
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${QV_LOAD_TARGETS_DIR:-../../data/load/targets}:/targets:ro
+    ports:
+      - "127.0.0.1:${QV_LOAD_PROM_PORT:-19190}:9090"
+  grafana:
+    image: grafana/grafana:11.6.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${QV_LOAD_GRAFANA_PORT:-13000}:3000"
+    depends_on: [prometheus]

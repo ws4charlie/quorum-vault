@@ -66,7 +66,7 @@ Referenced, not bundled: a CloudNativePG cluster in the **same namespace**, with
 | Item | Value |
 |---|---|
 | Database and owner | `qv_gateway_guard`, owned by the role `qv_gateway_guard` (`deploy/postgres/signing_roles.sql`). The gateway applies its own schema at start (`gateway.OpenGuard`, advisory-locked) with that role, so no migration Job is needed for tables |
-| Roles | `qv_gateway_guard` (and `qv_cosigner_guard` for the cosigners, in their clusters). Created by `qv-migrate -zone signing`, run as a Job by this cluster's operators with the owner credentials (never `-enable-login` in production: the database operator enables login) |
+| Roles | `qv_gateway_guard` (and `qv_cosigner_b_guard` / `qv_cosigner_c_guard` for the cosigners, in their clusters). Created by `qv-migrate -zone signing`, run as a Job by this cluster's operators with the owner credentials (never `-enable-login` in production: the database operator enables login) |
 | Login | certificate only: `pg_hba` `hostssl ... cert`, `hostnossl reject`, and a `pg_ident` map from certificate name `signing/gateway` to the role `qv_gateway_guard` (certificate name `gateway`, issued by the **signing** CA) |
 | Server certificate | issued by the signing CA, DNS names include `guard.host` (`verify-full`) |
 | Pod labels | `cnpg.io/cluster: qv-guard` (change `network.guardDb.peers` to match) so the chart's rule that admits the gateway applies |

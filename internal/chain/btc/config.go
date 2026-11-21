@@ -275,11 +275,6 @@ func (c Config) validated() (*validatedConfig, error) {
 	if err := CheckFeeCaps("config", c.MaxTxFeeSats, c.MaxFeeRate, c.MaxInputs, max(1, c.MaxBatchOutputs)); err != nil {
 		return nil, err
 	}
-	if c.FeeCaps != nil {
-		if _, err := c.FeeCaps.rules(c.Chain, c.MaxInputs, max(1, c.MaxBatchOutputs)); err != nil {
-			return nil, err
-		}
-	}
 	// The form of an address this config derives must belong to the network it names.
 	probe, err := v.addressAt(0)
 	if err != nil {

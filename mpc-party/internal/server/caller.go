@@ -197,6 +197,11 @@ func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthRes
 	if s.peerCConn != nil {
 		h.Peers = append(h.Peers, &pb.PeerStatus{Name: "C", Reachable: s.peerCConn.GetState() == connectivity.Ready})
 	}
+	reg, regErr := s.recovery.get()
+	if regErr == nil {
+		h.RecoveryKey = reg.status()
+	}
+	h.AdminSet = s.admin.setStatus()
 	ids, _ := s.store.List(ctx)
 	for _, id := range ids {
 		st, err := s.store.State(ctx, id)
@@ -207,7 +212,10 @@ func (s *Server) Health(ctx context.Context, _ *pb.HealthRequest) (*pb.HealthRes
 		frozen, _ := s.freeze.Frozen(id)
 		ks := &pb.KeysetStatus{KeysetId: id, Generation: st.Current, Resolved: s.rt(id).isResolved(),
 			BackupGeneration: bk.Generation, BackupStale: st.Current != 0 && bk.Generation < st.Current, Frozen: frozen,
-			Scheme: pb.Scheme(st.Scheme)}
+			Scheme: pb.Scheme(st.Scheme), BackupRecoveryKey: bk.RecoveryKeyFpr}
+		if regErr == nil && bk.Generation > 0 {
+			ks.BackupKeyRetired = reg.IsRetired(bk.RecoveryKeyFpr) || (reg.Current != "" && bk.RecoveryKeyFpr != reg.Current)
+		}
 		if isTScheme(st.Scheme) && st.PubKey != "" {
 			ks.PublicKey, _ = hex.DecodeString(st.PubKey)
 		}

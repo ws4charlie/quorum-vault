@@ -42,7 +42,7 @@ func TestRestoreDrill(t *testing.T) {
 	}
 
 	step("4/7 restore B from its backup with the recovery private key, sealing for B's HSM token")
-	mustCLI(t, "restore", "-config", cl.cfgB, "-recovery-private", priv, "-file", bk[1])
+	mustCLI(t, "restore", "-no-records", "-config", cl.cfgB, "-recovery-private", priv, "-file", bk[1])
 
 	step("5/7 start B: it reconciles with A and proves the keyset with a self-test")
 	cl.restartB(t)

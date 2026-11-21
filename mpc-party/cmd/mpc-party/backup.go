@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/backup"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/server"
 )
@@ -20,11 +22,14 @@ const backupUsage = `usage: mpc-party backup <command> [flags]
         never goes to a party host; the public file is what 'export' and 'verify' need.
   export  -config CFG -keyset ID -recovery-public FILE -out FILE
         On the party's host: unseals the current generation through the party's HSM, writes the backup file, then verifies it
-        automatically and records the verified generation (shown by Health).
+        automatically and records the verified generation and the recovery key it is under (shown by Health). Refuses a recovery key
+        the party's registry has RETIRED, or another one than the registry's current key (qv-party-admin recovery-key).
   verify  -file FILE -recovery-public FILE
         Public data only. Checks the backup without any secret.
-  restore -config CFG -recovery-private FILE -file FILE
-        OFFLINE. Decrypts the backup with the recovery private key and writes a keyset sealed for the TARGET party's HSM
+  restore -config CFG -recovery-private FILE -file FILE (-records FILE | -no-records) [-registry FILE]
+        OFFLINE. With -registry (written by qv-party-admin recovery-key registry) a backup under a retired or not-current recovery key is
+        refused; without it the tool says it cannot tell. -records (qv-party-admin records export) brings back the admin set and registry the other
+        parties hold; -no-records says the deployment never changed them. Decrypts the backup with the recovery private key and writes a keyset sealed for the TARGET party's HSM
         (the config names its token and an empty data directory). On start the party reconciles with its peer and proves the
         keyset with a self-test before it serves.
 `
@@ -137,6 +142,19 @@ func cmdExport(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The party's registry of recovery keys (changed only by a quorum-signed admin request) decides which key a backup may be made under. An
+	// unreadable registry stops the export: a damaged record must not become permission.
+	fpr, err := admin.RecoveryFingerprint(pub)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *pubPath, err)
+	}
+	reg, err := server.ReadRecoveryRegistry(st)
+	if err != nil {
+		return fmt.Errorf("the recovery-key registry of this party cannot be read, so no backup is made: %w", err)
+	}
+	if err := reg.Allows(fpr); err != nil {
+		return fmt.Errorf("refusing to export: %w", err)
+	}
 	var f *backup.File
 	if state.Scheme == 1 || state.Scheme == 2 { // a 2-of-3 share (ECDSA or Ed25519): this party's own scalar
 		tk, err := st.GetTKey(ctx, *id, state.Current)
@@ -172,10 +190,10 @@ func cmdExport(args []string) error {
 		return err
 	}
 	sum := sha256.Sum256(raw)
-	if err := server.RecordBackup(cfg.DataDir, server.BackupState{KeysetID: *id, Generation: state.Current, VerifiedAt: f.CreatedAt, FileSHA256: hex.EncodeToString(sum[:])}); err != nil {
+	if err := server.RecordBackup(cfg.DataDir, server.BackupState{KeysetID: *id, Generation: state.Current, VerifiedAt: f.CreatedAt, FileSHA256: hex.EncodeToString(sum[:]), RecoveryKeyFpr: fpr}); err != nil {
 		return err
 	}
-	fmt.Printf("backup of keyset %s generation %d (party %s) written to %s and VERIFIED (public data only)\n", *id, state.Current, cfg.Role, *out)
+	fmt.Printf("backup of keyset %s generation %d (party %s) written to %s and VERIFIED (public data only), under recovery key %s\n", *id, state.Current, cfg.Role, *out, fpr)
 	fmt.Println("store it away from the other party's backup; both backups plus the recovery key equal the whole signing key")
 	return nil
 }
@@ -205,7 +223,7 @@ func cmdVerify(args []string) error {
 	if err := backup.Verify(f, pub); err != nil {
 		return err
 	}
-	fmt.Printf("OK: backup of keyset %s generation %d party %s (%s), root public key %s, created %s\n", f.KeysetID, f.Generation, f.Role, f.Alg, f.RootPublicKey, f.CreatedAt.Format("2006-01-02T15:04:05Z"))
+	fmt.Printf("OK: backup of keyset %s generation %d party %s (%s), root public key %s, created %s, recovery key %s\n", f.KeysetID, f.Generation, f.Role, f.Alg, f.RootPublicKey, f.CreatedAt.Format("2006-01-02T15:04:05Z"), f.RecoveryKeyFpr)
 	return nil
 }
 
@@ -214,11 +232,17 @@ func cmdRestore(args []string) error {
 	cfgPath := fs.String("config", "", "the TARGET party's config (its own token and an EMPTY data directory)")
 	privPath := fs.String("recovery-private", "", "recovery PRIVATE key file")
 	file := fs.String("file", "", "backup file")
+	recPath := fs.String("records", "", "the admin set and recovery-key registry the other parties hold (qv-party-admin records export): written into the restored directory")
+	noRecords := fs.Bool("no-records", false, "restore without them: only when the deployment never changed its admin set or its recovery-key registry (the party then starts on the configuration's bootstrap admins and no registry)")
+	regPath := fs.String("registry", "", "the recovery-key registry (qv-party-admin recovery-key registry): refuse a backup under a retired or not-current recovery key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *cfgPath == "" || *privPath == "" || *file == "" {
 		return fmt.Errorf("-config, -recovery-private and -file are required")
+	}
+	if (*recPath == "") == !*noRecords {
+		return fmt.Errorf("give exactly one of -records FILE (from qv-party-admin records export: the restored party gets the admin set and registry the others hold) and -no-records (the deployment never changed them)")
 	}
 	cfg, st, err := openStore(*cfgPath)
 	if err != nil {
@@ -234,6 +258,32 @@ func cmdRestore(args []string) error {
 	}
 	if f.Role != cfg.Role {
 		return fmt.Errorf("this backup is for party %s but the config is for party %s: a share restored into the wrong slot is refused", f.Role, cfg.Role)
+	}
+	if *regPath != "" || *recPath == "" {
+		if err := checkRestoreRegistry(*regPath, f); err != nil {
+			return err
+		}
+	}
+	if *recPath != "" { // the records first: they are harmless without a share, and a share without them is the state this guards against
+		rawRec, err := os.ReadFile(*recPath)
+		if err != nil {
+			return err
+		}
+		rec, err := server.ParseRecordsFile(rawRec)
+		if err != nil {
+			return err
+		}
+		if *regPath == "" { // the registry inside the records file decides what this backup may be under
+			if err := rec.Registry.Allows(f.RecoveryKeyFpr); rec.Registry.Version > 0 && err != nil {
+				return fmt.Errorf("refusing to restore: this backup is under recovery key %s: %w", f.RecoveryKeyFpr, err)
+			}
+		}
+		if err := server.WriteRestoredRecords(context.Background(), st, rec); err != nil {
+			return err
+		}
+		fmt.Printf("restored the admin set (version %d) and the recovery-key registry (version %d) from %s\n", rec.AdminSet.Version, rec.Registry.Version, *recPath)
+	} else {
+		fmt.Fprintln(os.Stderr, "WARNING: -no-records: the party starts on the configuration's bootstrap admins with no recovery-key registry; if either was ever changed it will refuse the current admins and accept a backup under a retired key")
 	}
 	ctx := context.Background()
 	priv, err := os.ReadFile(*privPath)
@@ -276,4 +326,42 @@ func cmdRestore(args []string) error {
 	fmt.Printf("restored keyset %s generation %d for party %s into %s, sealed under token %q\n", f.KeysetID, f.Generation, cfg.Role, cfg.DataDir, cfg.Sealer.Token)
 	fmt.Println("start the party: it reconciles with its peer and proves the keyset with a self-test before serving; a backup older than the peer's generation is refused")
 	return nil
+}
+
+// checkRestoreRegistry refuses to restore a backup under a recovery key that was retired (or is not the current one). The decision is the registry's,
+// which the parties hold and qv-party-admin writes out; the offline machine has no data directory to read it from. Without a registry the tool cannot
+// tell, says so, and relies on the party: a backup of a generation the keyset has left is refused when the party reconciles with its peers (it never
+// signs with it), and nothing can make a backup of an old generation pair with the refreshed peers again.
+func checkRestoreRegistry(path string, f *backup.File) error {
+	if path == "" {
+		fmt.Fprintf(os.Stderr, "WARNING: no -registry given: this tool cannot tell whether recovery key %s was retired. the party itself refuses a backup of an older generation when it starts (it never signs with it), but that does not protect against anyone who holds the old key and old backups; give -registry to refuse a retired key here\n", fprOrUnrecorded(f.RecoveryKeyFpr))
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var d struct {
+		Version uint64   `json:"version"`
+		Current string   `json:"current"`
+		Retired []string `json:"retired"`
+	}
+	if err := json.Unmarshal(raw, &d); err != nil {
+		return fmt.Errorf("registry %s: %w", path, err)
+	}
+	reg := server.RecoveryRegistry{Version: d.Version, Current: d.Current, Retired: d.Retired}
+	if f.RecoveryKeyFpr == "" && (reg.Current != "" || len(reg.Retired) > 0) {
+		return fmt.Errorf("this backup records no recovery key fingerprint and the registry (version %d) names one: it predates the registry; refusing", reg.Version)
+	}
+	if err := reg.Allows(f.RecoveryKeyFpr); err != nil {
+		return fmt.Errorf("refusing to restore: this backup is under recovery key %s: %w", f.RecoveryKeyFpr, err)
+	}
+	return nil
+}
+
+func fprOrUnrecorded(f string) string {
+	if f == "" {
+		return "(this backup records none)"
+	}
+	return f
 }

@@ -14,6 +14,8 @@ type BackupState struct {
 	Generation uint64    `json:"generation"`
 	VerifiedAt time.Time `json:"verified_at"`
 	FileSHA256 string    `json:"file_sha256"`
+	// RecoveryKeyFpr is the fingerprint of the recovery key the backup is made under ("" in a record written before this field existed).
+	RecoveryKeyFpr string `json:"recovery_key_fingerprint,omitempty"`
 }
 
 func backupStatePath(dataDir, id string) string { return filepath.Join(dataDir, "backups", id+".json") }

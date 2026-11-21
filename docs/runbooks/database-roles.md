@@ -31,14 +31,14 @@ The roles are created `NOLOGIN` and without a password; the certificate is the o
 
 ## Signing zone
 
-The signing zone's Postgres has two roles, `qv_gateway_guard` and `qv_cosigner_guard`, made by `qv-migrate -zone signing` (`deploy/postgres/signing_roles.sql`). The gateway and the cosigner apply their schema at start, so each role owns its own guard database and may alter it. That right stops there: `CONNECT` is revoked from `PUBLIC` on every guard database and given to its own role, so neither can open the other's. Make a guard database like this:
+The signing zone's Postgres has three roles, `qv_gateway_guard`, `qv_cosigner_b_guard` and `qv_cosigner_c_guard`, made by `qv-migrate -zone signing` (`deploy/postgres/signing_roles.sql`). The gateway and the cosigner apply their schema at start, so each role owns its own guard database and may alter it. That right stops there: `CONNECT` is revoked from `PUBLIC` on every guard database and given to its own role, so none can open another's (cosigner C's certificate cannot open B's guard database, even on a server both use). Make a guard database like this:
 
 ```sql
 CREATE DATABASE qv_gateway_guard OWNER qv_gateway_guard;
 REVOKE CONNECT ON DATABASE qv_gateway_guard FROM PUBLIC;
 ```
 
-Cosigners B and C share one certificate name, so they share one role and are not separated from each other here; distinct names would fix that.
+Cosigners B and C have their own certificate names and roles (`cosigner-b` → `qv_cosigner_b_guard`, `cosigner-c` → `qv_cosigner_c_guard`), each the owner of its own guard database. The cosigner's database keeps the name `qv_cosigner_guard` (one per cluster): `CREATE DATABASE qv_cosigner_guard OWNER qv_cosigner_b_guard;` in cluster B, with `qv_cosigner_c_guard` in cluster C.
 
 ## Temporal's database
 

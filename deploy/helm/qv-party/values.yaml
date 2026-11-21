@@ -34,7 +34,7 @@ peers:
   b: { address: "", pins: [] }          # A: B's peer endpoint host:port; C: B's certificate (pins only)
   c: { address: "", pins: [] }          # A and B: C's peer endpoint host:port
 callerPins: []                          # certificates allowed on the caller port: the gateway (A; B and C for health), the operators' tool
-adminKeys: []                           # admins' Ed25519 public keys (64 hex): DKG, refresh and unfreeze need the signatures of adminThreshold of them (no key twice)
+adminKeys: []                           # admins' Ed25519 public keys (64 hex): the BOOTSTRAP set, used until the first admin-set change was applied (then the party's durable set wins and this list is ignored, with a warning). DKG, refresh and unfreeze need the signatures of adminThreshold of them (no key twice)
 adminMaxAgeSeconds: 300                 # clock skew the party tolerates for an authorization's issue time (and the age of an old v1 signature)
 adminThreshold: 0                       # 0 = unset: one signature is enough and the old v1 format is still accepted (roll-over); 1 or more: that many distinct admins, v1 refused
 adminAllowV1: null                      # null = follow adminThreshold; true only during the roll-over with adminThreshold set (each v1 acceptance is logged and counted)
@@ -109,8 +109,8 @@ tls:
   # ca.crt cert-manager put into the Secret (development only). signing: the peers and callers, the guard database; business: the link certificate's peers (Kafka).
   trust: { signing: "", business: "" }
   party:         { secretName: "" }     # empty = qv-signing-mpc-party-<role>-tls (catalog name mpc-party-a|b|c; pinned by the other parties, long-lived)
-  cosigner:      { secretName: qv-signing-cosigner-tls }          # signing identity of the cosigner (guard database client)
-  cosignerLink:  { secretName: qv-cosigner-link-tls }     # business-CA link certificate, publishes audit heads
+  cosigner:      { secretName: "" }                       # empty = qv-signing-cosigner-<role>-tls (catalog name cosigner-b|c: signing identity of the cosigner, guard database client)
+  cosignerLink:  { secretName: "" }                       # empty = qv-cosigner-link-<role>-tls (catalog name cosigner-link-b|c: business-CA link certificate, publishes audit heads)
   cosignerSocket: { secretName: qv-signing-cosigner-socket-tls }  # the certificate the cosigner presents to its party on the socket (pinned by the party)
 
 # --- The cosigner (roles B and C only; ignored for A) ---
@@ -121,11 +121,11 @@ cosigner:
   partyPins: []                         # pins of this party's certificate: the cosigner answers nobody else (-party-pins)
   timeoutMs: 5000
   auditSource: ""                       # empty = cosigner-<role in lower case>
-  database:                             # the cosigner's OWN guard database (never the gateway's), certificate name `cosigner` maps to this role
+  database:                             # the cosigner's OWN guard database (never the gateway's), certificate name `cosigner-<role>` maps to this role
     host: qv-signing-db-rw
     port: 5432
-    name: qv_cosigner_guard
-    role: qv_cosigner_guard
+    name: qv_cosigner_guard             # the DATABASE keeps its name (it holds the replay records and the audit chain; renaming it would start an empty one). New installs may set another
+    role: ""                            # empty = qv_cosigner_<role in lower case>_guard (B: qv_cosigner_b_guard, C: qv_cosigner_c_guard), the owner of the database
     sslmode: verify-full
   kafka: { brokers: "redpanda.business.example.invalid:9092" }  # the business Kafka, over the explicit link; PLACEHOLDER
   resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { cpu: "1", memory: 512Mi } }
@@ -178,8 +178,9 @@ operator:
   job:
     enabled: false
     name: manual                        # part of the Job name; change it for each run
-    command: ""                         # dkg, refresh, unfreeze or status
-    keysetId: ""                        # the keyset (dkg, refresh, unfreeze; status: optional filter)
+    command: ""                         # dkg, refresh, unfreeze, status, admin-set (send a change of the admin set), recovery-key (send a change of the recovery-key registry) or recovery-status
+    keysetId: ""                        # the keyset (dkg, refresh, unfreeze; status and recovery-status: optional filter)
+    live: false                         # dkg, refresh, unfreeze: check the file against the admin set the parties hold now (set it after the first admin-set change: adminKeys is only the bootstrap set)
     scheme: hd                          # dkg: hd, ecdsa-2of3 or ed25519-2of3
     curve: secp256k1                    # dkg, scheme hd: secp256k1 or ed25519
     authConfigMap: ""                   # ConfigMap whose key auth.json is the signed file (not for status)

@@ -29,8 +29,9 @@ guard_setup() { # ns database role-name: roles from qv-migrate -zone signing (th
 
 log "guard databases"
 guard_setup "$NS_SIGN" qv_gateway_guard qv_gateway_guard
-guard_setup "$NS_B" qv_cosigner_guard qv_cosigner_guard
-guard_setup "$NS_C" qv_cosigner_guard qv_cosigner_guard
+# each cosigner has its own certificate name and role (cosigner-b, cosigner-c); the database keeps the name qv_cosigner_guard (docs/runbooks/certificates.md, "Cosigner names")
+guard_setup "$NS_B" qv_cosigner_guard qv_cosigner_b_guard
+guard_setup "$NS_C" qv_cosigner_guard qv_cosigner_c_guard
 
 log "parties"
 ADMIN_KEYS="$(go run ./ci/kind/tools/kindctl adminkey -seed "$S/admin.seed" | sed 's/.*/"&"/' | paste -sd, -)"  # three admin keys, two must sign (adminThreshold)
@@ -75,7 +76,7 @@ cosigner:
   config: { chains: [], approvers: [] }
   socketPins: ["$SOCK"]
   partyPins: ["$ME"]
-  database: { host: qv-guard-rw, port: 5432, name: qv_cosigner_guard, role: qv_cosigner_guard }
+  database: { host: qv-guard-rw, port: 5432, name: qv_cosigner_guard, role: qv_cosigner_${l}_guard }
   kafka: { brokers: "redpanda.$NS_BIZ.svc:9092" }
 network:
   callerIngress: { from: [ $GWSEL ] }
