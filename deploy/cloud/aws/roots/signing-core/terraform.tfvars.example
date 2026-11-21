@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars (git-ignored) in YOUR config repository. Values below are shapes, not real ids.
+region             = "eu-central-1"
+availability_zones = ["eu-central-1a", "eu-central-1b", "eu-central-1c"]   # two zones for the small footprint
+bucket_prefix      = "acme"                                                 # same in every root
+account_ids = {
+  business     = "111111111111"
+  signing-core = "222222222222"
+  party-b      = "333333333333"
+  party-c      = "444444444444"
+  audit        = "555555555555"
+}
+operators = {
+  # at least one: nobody has access otherwise. Principals are IAM Identity Center roles of THIS account.
+  platform = { principal_arn = "arn:aws:iam::111111111111:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_QvOperator_0000000000000000", policy = "AmazonEKSClusterAdminPolicy" }
+}
+ecr_upstream_credential_arn = "arn:aws:secretsmanager:eu-central-1:111111111111:secret:ecr-pullthroughcache/ghcr-AbCdEf"
+# PHASE 2 only:
+# nlb_services           = { ... }
+# endpoint_service_names = { ... }

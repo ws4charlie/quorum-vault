@@ -26,9 +26,12 @@ func sweepLegs(s chain.SweepIntent) []chain.SweepLeg {
 
 // BuildSweep builds the sweep of s on a free nonce account of the shard that serves s.ToPartition. The allocation commits or rolls back with tx.
 func (a *Adapter) BuildSweep(ctx context.Context, tx pgx.Tx, s chain.SweepIntent) (chain.UnsignedTx, error) {
-	hot, ok := a.cfg.hot[s.ToPartition]
-	if !ok {
-		return chain.UnsignedTx{}, fmt.Errorf("sol: partition %q has no hot shard", s.ToPartition)
+	hot, err := a.activeHot(ctx, tx, s.ToPartition)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	if err := a.ensurePoolFor(ctx, tx, hot); err != nil {
+		return chain.UnsignedTx{}, err
 	}
 	if s.ID == "" {
 		return chain.UnsignedTx{}, errors.New("sol: empty owner id")

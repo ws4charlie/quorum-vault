@@ -1,0 +1,28 @@
+{
+  "paths": [
+    { "id": "gateway-jobs-db", "from": "signing-core", "to": "business", "service": "postgres", "ports": [5432], "dns": "business-postgres.qv.internal", "optional": false,
+      "purpose": "the gateway fetches signing jobs from the business database (link certificate gateway-link, role qv_gateway)" },
+    { "id": "gateway-heads", "from": "signing-core", "to": "business", "service": "kafka", "ports": [9092, 9093, 9094], "dns": "business-kafka.qv.internal", "optional": false,
+      "purpose": "the gateway publishes audit heads (ACL: publish qv.audit.heads); one listener port per broker" },
+    { "id": "cosigner-b-heads", "from": "party-b", "to": "business", "service": "kafka", "ports": [9092, 9093, 9094], "dns": "business-kafka.qv.internal", "optional": false,
+      "purpose": "cosigner B publishes audit heads (link certificate cosigner-link)" },
+    { "id": "cosigner-c-heads", "from": "party-c", "to": "business", "service": "kafka", "ports": [9092, 9093, 9094], "dns": "business-kafka.qv.internal", "optional": false,
+      "purpose": "cosigner C publishes audit heads (link certificate cosigner-link)" },
+    { "id": "gateway-party-b-caller", "from": "signing-core", "to": "party-b", "service": "caller", "ports": [7002], "dns": "party-b-caller.qv.internal", "optional": false,
+      "purpose": "gateway to party B caller port (pinned mutual TLS passes through)" },
+    { "id": "gateway-party-c-caller", "from": "signing-core", "to": "party-c", "service": "caller", "ports": [7003], "dns": "party-c-caller.qv.internal", "optional": false,
+      "purpose": "gateway route monitor to party C caller port" },
+    { "id": "a-party-b-peer", "from": "signing-core", "to": "party-b", "service": "peer", "ports": [7003], "dns": "party-b-peer.qv.internal", "optional": false,
+      "purpose": "party A dials party B (peer port)" },
+    { "id": "a-party-c-peer", "from": "signing-core", "to": "party-c", "service": "peer", "ports": [7003], "dns": "party-c-peer.qv.internal", "optional": false,
+      "purpose": "party A dials party C (peer port)" },
+    { "id": "b-party-c-peer", "from": "party-b", "to": "party-c", "service": "peer", "ports": [7003], "dns": "party-c-peer.qv.internal", "optional": false,
+      "purpose": "party B dials party C (peer port)" },
+    { "id": "metrics-signing-core", "from": "signing-core", "to": "business", "service": "monitoring", "ports": [443], "dns": "business-monitoring.qv.internal", "optional": true,
+      "purpose": "remote-write of metrics, outward only (agent sidecar)" },
+    { "id": "metrics-party-b", "from": "party-b", "to": "business", "service": "monitoring", "ports": [443], "dns": "business-monitoring.qv.internal", "optional": true,
+      "purpose": "remote-write of metrics, outward only (agent sidecar)" },
+    { "id": "metrics-party-c", "from": "party-c", "to": "business", "service": "monitoring", "ports": [443], "dns": "business-monitoring.qv.internal", "optional": true,
+      "purpose": "remote-write of metrics, outward only (agent sidecar)" }
+  ]
+}

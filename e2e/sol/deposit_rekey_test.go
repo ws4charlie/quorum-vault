@@ -79,6 +79,12 @@ func (s *wdSys) partyAuthFor(keyset string) string {
 	return s.m3.Admins.DKGRequestFile(s.t, s.dir, keyset, pb.Scheme_SCHEME_UNSPECIFIED, pb.Curve_CURVE_ED25519)
 }
 
+// partyAuthHotFor is the same for a hot shard's 2-of-3 Ed25519 keyset (the scheme is part of what the admins sign; the curve is the scheme's).
+func (s *wdSys) partyAuthHotFor(keyset string) string {
+	s.t.Helper()
+	return s.m3.Admins.DKGRequestFile(s.t, s.dir, keyset, pb.Scheme_SCHEME_ED25519_2OF3, pb.Curve_CURVE_UNSPECIFIED)
+}
+
 func (s *wdSys) keyRefs() []string {
 	rows, err := s.pool.Query(s.ctx, `SELECT key_ref FROM sign_jobs WHERE chain=$1 ORDER BY created_at, id`, s.chain)
 	if err != nil {

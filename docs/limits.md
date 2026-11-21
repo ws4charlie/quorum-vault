@@ -37,7 +37,8 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **A new key is not test-signed before it takes over.** The first real signature after activation is the first proof that it works ([Key replacement](key-replacement.md)).
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
-- **A Solana hot wallet cannot be replaced yet.** Every other key can ([Key replacement](key-replacement.md)).
+- **Replacing a Solana hot wallet pauses its withdrawals briefly.** The new key cannot create its nonce accounts before it is active and funded, so new withdrawals wait between the switch and an operator creating them. Tokens of a kind the config does not list, and token accounts that are not the standard one, are reported and never moved ([Key replacement](key-replacement.md)).
+- **A Solana emergency drain moves tokens in the order of the asset list, not by value,** and has run on a local validator only; the SOL goes first among the rest, and the new nonce pool is created by an operator afterwards ([stolen hot key](runbooks/stolen-hot-key.md)).
 - **An emergency cannot save what a thief moves first.** The old key stays valid on chain until its funds are moved; only the signing zone refuses it. The cold ceremony that points deposits at the new key takes hours and sweeps wait meanwhile; the emergency drill has run on local chains only ([stolen hot key](runbooks/stolen-hot-key.md)).
 
 **Chains**
@@ -48,5 +49,8 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 
 **Audit**
 - **The write-once store used in tests has no independent compliance assessment.** It proves our code against the storage interface, not a regulatory claim; production is meant to use AWS S3 Object Lock ([spike note](spikes/audit-worm.md)).
+
+**Deployment**
+- **The AWS reference deployment has never been applied.** It is code checked without an account (format, validation, a mocked test of the isolation rules, lint and a scan). Its first real run, its costs and what only an account can show are in the [runbook](runbooks/aws-first-deploy.md).
 
 [DESIGN_SCALE.md](../DESIGN_SCALE.md) works out what scaling would need.

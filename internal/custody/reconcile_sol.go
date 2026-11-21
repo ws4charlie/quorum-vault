@@ -179,6 +179,8 @@ func (s *Service) solStamp(ctx context.Context) (string, error) {
 		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM sweeps WHERE chain=$1),
 		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM cold_moves WHERE chain=$1),
 		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM rebalance_moves WHERE chain=$1),
+		(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM drain_moves WHERE chain=$1),
+		(SELECT COALESCE(string_agg(shard_id || generation::text || state, ',' ORDER BY shard_id, generation), '') FROM keysets),
 			(SELECT COALESCE(string_agg(id || status, ',' ORDER BY id), '') FROM refills WHERE chain=$1))`, s.Cfg.Chain).Scan(&st)
 	return st, err
 }
@@ -188,17 +190,34 @@ type solHot struct {
 	balance                   *big.Int
 }
 
-// solHotBalances reads the finalized balance of every hot shard and asset.
+// solHotBalances reads the finalized balance of every hot shard and asset: the sum over every generation of the shard that is not retired (while an old
+// generation drains into its successor the shard's money is at both addresses; the shard has one ledger account).
 func (s *Service) solHotBalances(ctx context.Context) ([]solHot, error) {
 	c := s.Cfg
 	var out []solHot
-	for i, addr := range c.SOLHot {
-		for _, sym := range c.AssetList {
-			b, err := s.Reader.Balance(ctx, addr, sym, 0)
-			if err != nil {
-				return nil, err
+	for i, active := range c.SOLHot {
+		addrs := []string{active}
+		if wl, err := s.WatchList(ctx, s.Pool, i); err != nil {
+			return nil, err
+		} else if len(wl) > 0 {
+			addrs = addrs[:0]
+			for _, k := range wl {
+				addrs = append(addrs, k.Address)
+				if k.State == partition.StateActive {
+					active = k.Address
+				}
 			}
-			out = append(out, solHot{partition: c.PartitionKey(sym, i).String(), asset: sym, address: addr, balance: b})
+		}
+		for _, sym := range c.AssetList {
+			sum := new(big.Int)
+			for _, addr := range addrs {
+				b, err := s.Reader.Balance(ctx, addr, sym, 0)
+				if err != nil {
+					return nil, err
+				}
+				sum.Add(sum, b)
+			}
+			out = append(out, solHot{partition: c.PartitionKey(sym, i).String(), asset: sym, address: active, balance: sum})
 		}
 	}
 	return out, nil
@@ -311,7 +330,11 @@ func (s *Service) solLanded(ctx context.Context) (solLandedSet, error) {
 	if err != nil {
 		return res, err
 	}
-	res.key = strings.Join(append(append(append(append(append(key, sk...), mk...), rk...), nk...), ok...), ",")
+	dk, err := s.solLandedDrains(ctx, add)
+	if err != nil {
+		return res, err
+	}
+	res.key = strings.Join(append(append(append(append(append(append(key, sk...), mk...), rk...), nk...), ok...), dk...), ",")
 	return res, nil
 }
 
@@ -585,12 +608,7 @@ func (s *Service) solLandedNonceCloses(ctx context.Context, add func(string, *bi
 		if st != chain.TxConfirmed {
 			continue
 		}
-		part := ""
-		for i, h := range c.SOLHot {
-			if h == x.hot {
-				part = c.PartitionKey(c.Native, i).String()
-			}
-		}
+		part := s.nativePartOfHot(ctx, x.hot)
 		if part == "" {
 			continue
 		}
@@ -699,4 +717,63 @@ func (s *Service) solColdChecks(rep *Report, cells []solColdCell, landed solLand
 		rep.add(Check{Name: "cold_balance", Asset: cell.asset, Subject: cell.addr, Ledger: want.String(), Chain: cell.chain.String(), OK: want.Cmp(cell.chain) == 0,
 			Detail: fmt.Sprintf("cold address of pool %s at finalized commitment", cell.pool)})
 	}
+}
+
+// nativePartOfHot is the native partition of the shard a hot address belongs to, in any generation ("" for none).
+func (s *Service) nativePartOfHot(ctx context.Context, hot string) string {
+	c := s.Cfg
+	for i, h := range c.SOLHot {
+		if h == hot {
+			return c.PartitionKey(c.Native, i).String()
+		}
+	}
+	var shard string
+	if err := s.Pool.QueryRow(ctx, `SELECT shard_id FROM keysets WHERE address=$1 LIMIT 1`, hot).Scan(&shard); err != nil {
+		return ""
+	}
+	return c.PartitionKey(c.Native, partition.ShardID(shard).Shard()).String()
+}
+
+// solLandedDrains adds the drain transactions that are final and not booked yet: they cost the shard their fee, less the rent a pool account or a token
+// account brought back to the successor, and the books record that when the move is settled.
+func (s *Service) solLandedDrains(ctx context.Context, add func(string, *big.Int)) ([]string, error) {
+	sd, ok := s.Chain.(solDrainer)
+	if !ok {
+		return nil, nil
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT id, shard_id, tx_hash, from_address, to_address FROM drain_moves WHERE chain=$1 AND status='broadcast' AND COALESCE(tx_hash,'')<>'' ORDER BY id`, s.Cfg.Chain)
+	if err != nil {
+		return nil, err
+	}
+	type mv struct{ id, shard, tx, from, to string }
+	var ms []mv
+	for rows.Next() {
+		var m mv
+		if err := rows.Scan(&m.id, &m.shard, &m.tx, &m.from, &m.to); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ms = append(ms, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var key []string
+	for _, m := range ms {
+		st, err := s.Chain.Status(ctx, m.tx)
+		if err != nil {
+			return nil, err
+		}
+		if st != chain.TxConfirmed && st != chain.TxFailed {
+			continue
+		}
+		cost, err := sd.DrainCost(ctx, m.tx, m.from, m.to)
+		if err != nil {
+			return nil, err
+		}
+		add(s.Cfg.PartitionKey(s.Cfg.Native, partition.ShardID(m.shard).Shard()).String(), cost)
+		key = append(key, "drain:"+m.id)
+	}
+	return key, nil
 }
