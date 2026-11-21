@@ -134,6 +134,9 @@ func (s *Service) coldAddressList() []string {
 	for _, a := range s.Cfg.EVM.ColdAddresses {
 		out = append(out, strings.ToLower(a.Hex()))
 	}
+	for _, a := range s.Cfg.ColdRetiring {
+		out = append(out, strings.ToLower(a))
+	}
 	return out
 }
 

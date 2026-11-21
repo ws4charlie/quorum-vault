@@ -67,6 +67,28 @@ type Config struct {
 	NewGuardians    []string `json:"new_guardians"`    // set-guardian
 	NewAdmins       []string `json:"new_admins"`       // transfer-admin: the other cold keys
 	MaxActionGas    uint64   `json:"max_action_gas"`   // default 100000
+
+	// ColdMove allows the cold-to-cold ceremony of a key replacement: this cold key sends funds to its successor. Absent: this signer signs no cold-move.
+	ColdMove *ColdMoveConfig `json:"cold_move,omitempty"`
+}
+
+// ColdMoveConfig pins the successor cold address and bounds a cold-to-cold move. The destination is only ever NewCold: it is written on the offline
+// machine, by people in the room, and no request can name another.
+type ColdMoveConfig struct {
+	NewCold string `json:"new_cold"`
+	// MaxAmount caps one move per asset (base units; an asset with no entry cannot be moved). A move is the whole balance of an asset, so this is the
+	// treasury's size, not a refill's.
+	MaxAmount map[string]string `json:"max_amount"`
+	// MinApprovals is how many operators a cold-move needs (default and floor: the config's threshold). Moving everything may ask for more people than a refill.
+	MinApprovals int `json:"min_approvals,omitempty"`
+}
+
+// approvalsNeeded is how many distinct operators a request needs.
+func (c *Config) approvalsNeeded(r Request) int {
+	if r.Kind == KindColdMove && c.ColdMove != nil && c.ColdMove.MinApprovals > c.Threshold {
+		return c.ColdMove.MinApprovals
+	}
+	return c.Threshold
 }
 
 // LoadConfig reads and checks a config file. Unknown fields are errors.
@@ -141,6 +163,44 @@ func (c *Config) Validate() error {
 	if _, err := c.ColdAddress(); err != nil {
 		return err
 	}
+	return c.validateColdMove()
+}
+
+func (c *Config) validateColdMove() error {
+	m := c.ColdMove
+	if m == nil {
+		return nil
+	}
+	nc, err := parseAddr("cold_move.new_cold", m.NewCold)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	cold, _ := c.ColdAddress()
+	if nc == cold {
+		return errors.New("config: cold_move.new_cold is this signer's own cold address")
+	}
+	for _, d := range c.Destinations {
+		if common.HexToAddress(d) == nc {
+			return errors.New("config: cold_move.new_cold is a pinned hot address")
+		}
+	}
+	if c.Factory != "" && common.HexToAddress(c.Factory) == nc {
+		return errors.New("config: cold_move.new_cold is the factory")
+	}
+	if len(m.MaxAmount) == 0 {
+		return errors.New("config: cold_move needs max_amount per asset")
+	}
+	for a, v := range m.MaxAmount {
+		if _, ok := c.Assets[a]; !ok {
+			return fmt.Errorf("config: cold_move.max_amount names asset %q, which is not configured", a)
+		}
+		if _, err := parseAmt("cold_move max_amount "+a, v); err != nil {
+			return fmt.Errorf("config: %w", err)
+		}
+	}
+	if m.MinApprovals < 0 || m.MinApprovals > len(c.Operators) {
+		return fmt.Errorf("config: cold_move.min_approvals %d with %d operators", m.MinApprovals, len(c.Operators))
+	}
 	return nil
 }
 
@@ -180,21 +240,30 @@ func (c *Config) Check(rf RequestFile) (Request, *types.Transaction, error) {
 	if from, err := parseAddr("from", r.From); err != nil || from != cold {
 		return r, nil, refuse("request is from %s, this signer's cold address is %s", r.From, cold)
 	}
-	if r.Kind != "" && r.Kind != KindRefill {
+	if r.Kind != "" && r.Kind != KindRefill && r.Kind != KindColdMove {
 		return c.checkAdmin(r)
 	}
 	to, err := parseAddr("destination", r.To)
 	if err != nil {
 		return r, nil, refuse("%v", err)
 	}
-	pinned := false
-	for _, d := range c.Destinations {
-		if common.HexToAddress(d) == to {
-			pinned = true
+	if r.Kind == KindColdMove {
+		if c.ColdMove == nil {
+			return r, nil, refuse("this signer's config has no cold_move: it signs no cold-to-cold move")
 		}
-	}
-	if !pinned {
-		return r, nil, refuse("destination %s is not one of the pinned hot addresses", to)
+		if to != common.HexToAddress(c.ColdMove.NewCold) {
+			return r, nil, refuse("a cold-to-cold move may only go to the pinned new cold address %s, the request says %s", c.ColdMove.NewCold, to)
+		}
+	} else {
+		pinned := false
+		for _, d := range c.Destinations {
+			if common.HexToAddress(d) == to {
+				pinned = true
+			}
+		}
+		if !pinned {
+			return r, nil, refuse("destination %s is not one of the pinned hot addresses", to)
+		}
 	}
 	pol, ok := c.Assets[r.Asset]
 	if !ok {
@@ -208,6 +277,13 @@ func (c *Config) Check(rf RequestFile) (Request, *types.Transaction, error) {
 		return r, nil, refuse("%v", err)
 	}
 	max, _ := parseAmt("max_amount", pol.MaxAmount)
+	if r.Kind == KindColdMove {
+		mv, ok := c.ColdMove.MaxAmount[r.Asset]
+		if !ok {
+			return r, nil, refuse("asset %q has no cold_move max_amount: this signer does not move it", r.Asset)
+		}
+		max, _ = parseAmt("cold_move max_amount", mv)
+	}
 	if amount.Sign() == 0 || amount.Cmp(max) > 0 {
 		return r, nil, refuse("amount %s %s is zero or above the per-ceremony cap %s", Human(amount, pol.Decimals), r.Asset, Human(max, pol.Decimals))
 	}
@@ -332,8 +408,8 @@ func (c *Config) Sign(ctx context.Context, rf RequestFile, approvals []Approval,
 		return Signed{}, nil, err
 	}
 	names, ignored := c.CountApprovals(rf.RequestHash, approvals)
-	if len(names) < c.Threshold {
-		return Signed{}, ignored, refuse("%d valid approval(s) from distinct configured operators, %d required%s", len(names), c.Threshold, ignoredNote(ignored))
+	if need := c.approvalsNeeded(r); len(names) < need {
+		return Signed{}, ignored, refuse("%d valid approval(s) from distinct configured operators, %d required%s", len(names), need, ignoredNote(ignored))
 	}
 	rec, err := openRecord(c.RecordDir, c.Chain, r)
 	if err != nil {
@@ -503,3 +579,6 @@ func (rec *record) store(r Request, s Signed) error {
 	}
 	return werr
 }
+
+// Required is how many distinct operators this request needs: the config's threshold, or more for a cold-to-cold move that asks for more.
+func (c *Config) Required(r Request) int { return c.approvalsNeeded(r) }

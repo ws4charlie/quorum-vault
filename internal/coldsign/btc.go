@@ -57,15 +57,18 @@ type BTCOutput struct {
 // BTCRequest is a refill of a hot shard from the cold address, as the online side exports it. The offline tool builds the transaction from these
 // fields itself. Outputs[0] is the payment to a hot shard; Outputs[1], when there is one, is the change back to the cold address.
 type BTCRequest struct {
-	Version  string      `json:"version"`
-	ID       string      `json:"id"`
-	Revision int         `json:"revision"` // grows with every re-export (a higher fee)
-	Network  string      `json:"network"`  // mainnet, testnet3, signet or regtest
-	Chain    string      `json:"chain"`
-	Pool     string      `json:"pool"`
-	From     string      `json:"from"` // the cold address
-	Inputs   []BTCInput  `json:"inputs"`
-	Outputs  []BTCOutput `json:"outputs"`
+	Version  string `json:"version"`
+	ID       string `json:"id"`
+	Revision int    `json:"revision"` // grows with every re-export (a higher fee)
+	Network  string `json:"network"`  // mainnet, testnet3, signet or regtest
+	Chain    string `json:"chain"`
+	Pool     string `json:"pool"`
+	From     string `json:"from"` // the cold address
+	// Kind is "" or "refill" for a refill, "cold-move" for the cold-to-cold ceremony of a key replacement: every input (up to max_inputs) goes to ONE output,
+	// the pinned new cold address, with no change. Part of the hash only when set, so a refill's hash is what it always was.
+	Kind    string      `json:"kind,omitempty"`
+	Inputs  []BTCInput  `json:"inputs"`
+	Outputs []BTCOutput `json:"outputs"`
 }
 
 // BTCRequestFile is what is carried to the offline machine.
@@ -95,7 +98,11 @@ func IsBTCRequest(raw []byte) bool {
 }
 
 func (r BTCRequest) fields() []string {
-	f := []string{r.Version, r.ID, strconv.Itoa(r.Revision), r.Network, r.Chain, r.Pool, strings.ToLower(r.From), strconv.Itoa(len(r.Inputs))}
+	f := []string{r.Version, r.ID, strconv.Itoa(r.Revision), r.Network, r.Chain, r.Pool, strings.ToLower(r.From)}
+	if r.Kind != "" {
+		f = append(f, "kind:"+r.Kind)
+	}
+	f = append(f, strconv.Itoa(len(r.Inputs)))
 	for _, in := range r.Inputs {
 		f = append(f, strings.ToLower(in.TxID), strconv.FormatUint(uint64(in.Vout), 10), strconv.FormatUint(in.Value, 10), strings.ToLower(in.Address))
 	}
@@ -132,6 +139,9 @@ func (r BTCRequest) Intent() string {
 	}
 	sort.Strings(ops)
 	b := []byte(btcIntentTag)
+	if r.Kind != "" {
+		b = lp(b, r.Kind)
+	}
 	for _, f := range append([]string{r.Network, strings.ToLower(r.From)}, ops...) {
 		b = lp(b, f)
 	}
@@ -169,12 +179,18 @@ func (r BTCRequest) Summary() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  request   %s (revision %d)\n", r.ID, r.Revision)
 	fmt.Fprintf(&b, "  chain     %s (%s), pool %s\n", r.Chain, r.Network, r.Pool)
+	if r.Kind == KindColdMove {
+		fmt.Fprintf(&b, "  action    COLD-TO-COLD MOVE: the old cold key sends these outputs, whole and without change, to the NEW cold address (a key replacement)\n")
+	}
 	fmt.Fprintf(&b, "  from      %s (the cold address), %d input(s):\n", r.From, len(r.Inputs))
 	for _, in := range r.Inputs {
 		fmt.Fprintf(&b, "              %s:%d  %s sats (the online side's figure: this tool cannot check it)\n", in.TxID, in.Vout, strconv.FormatUint(in.Value, 10))
 	}
 	for i, o := range r.Outputs {
 		role := "to the hot shard"
+		if r.Kind == KindColdMove {
+			role = "to the NEW cold address"
+		}
 		if i == 1 {
 			role = "change, back to the cold address"
 		}
@@ -453,6 +469,26 @@ type BTCConfig struct {
 	PublicKey  string    `json:"public_key"` // the cold key, compressed secp256k1, hex
 	HSM        HSMConfig `json:"hsm"`
 	RecordDir  string    `json:"record_dir"` // durable record of every outpoint ever signed
+
+	// ColdMove allows the cold-to-cold ceremony of a key replacement. Absent: this signer signs none.
+	ColdMove *BTCColdMoveConfig `json:"cold_move,omitempty"`
+}
+
+// BTCColdMoveConfig pins the successor cold address of a Bitcoin cold key. A move spends up to max_inputs outputs of the cold address into one output
+// there, no change, so a cold address with more outputs takes several ceremonies.
+type BTCColdMoveConfig struct {
+	NewCold string `json:"new_cold"`
+	// MaxAmount caps the one output of a move, in satoshis (the treasury's size, not a refill's).
+	MaxAmount uint64 `json:"max_amount"`
+	// MinApprovals is how many operators a move needs (default and floor: the config's threshold).
+	MinApprovals int `json:"min_approvals,omitempty"`
+}
+
+func (c *BTCConfig) approvalsNeeded(r BTCRequest) int {
+	if r.Kind == KindColdMove && c.ColdMove != nil && c.ColdMove.MinApprovals > c.Threshold {
+		return c.ColdMove.MinApprovals
+	}
+	return c.Threshold
 }
 
 // IsBTCConfig reports whether a config file's JSON is a Bitcoin config.
@@ -518,6 +554,25 @@ func (c *BTCConfig) Validate() error {
 			return errors.New("config: a hot shard is the cold address")
 		}
 	}
+	if m := c.ColdMove; m != nil {
+		if _, err := p2wpkhHash(c.Network, m.NewCold); err != nil {
+			return fmt.Errorf("config: cold_move.new_cold: %w", err)
+		}
+		if m.NewCold == cold {
+			return errors.New("config: cold_move.new_cold is this signer's own cold address")
+		}
+		for _, h := range c.HotShards {
+			if h == m.NewCold {
+				return errors.New("config: cold_move.new_cold is a hot shard")
+			}
+		}
+		if m.MaxAmount == 0 {
+			return errors.New("config: cold_move.max_amount is required")
+		}
+		if m.MinApprovals < 0 || m.MinApprovals > len(c.Operators) {
+			return fmt.Errorf("config: cold_move.min_approvals %d with %d operators", m.MinApprovals, len(c.Operators))
+		}
+	}
 	return nil
 }
 
@@ -576,27 +631,46 @@ func (c *BTCConfig) Check(rf BTCRequestFile) (BTCRequest, *btcTx, error) {
 		}
 		seen[k] = true
 	}
-	if len(r.Outputs) < 1 || len(r.Outputs) > 2 {
-		return r, nil, refuse("%d outputs; a refill has the payment and at most one change output", len(r.Outputs))
+	if r.Kind != "" && r.Kind != "refill" && r.Kind != KindColdMove {
+		return r, nil, refuse("request kind %q is not known", r.Kind)
 	}
-	pay := r.Outputs[0]
-	pinned := false
-	for _, h := range c.HotShards {
-		pinned = pinned || h == pay.Address
-	}
-	if !pinned {
-		return r, nil, refuse("the payment goes to %s, which is not one of the pinned hot shards", pay.Address)
-	}
-	if pay.Value < btcDust || pay.Value > c.MaxAmount {
-		return r, nil, refuse("the payment of %d sats is below dust or above the per-ceremony cap %d", pay.Value, c.MaxAmount)
-	}
-	if len(r.Outputs) == 2 {
-		ch := r.Outputs[1]
-		if ch.Address != cold {
-			return r, nil, refuse("the change goes to %s; it must go to the cold address %s", ch.Address, cold)
+	if r.Kind == KindColdMove {
+		if c.ColdMove == nil {
+			return r, nil, refuse("this signer's config has no cold_move: it signs no cold-to-cold move")
 		}
-		if ch.Value < btcDust {
-			return r, nil, refuse("the change of %d sats is dust", ch.Value)
+		if len(r.Outputs) != 1 {
+			return r, nil, refuse("%d outputs; a cold-to-cold move has exactly one, to the new cold address, and no change", len(r.Outputs))
+		}
+		out := r.Outputs[0]
+		if out.Address != c.ColdMove.NewCold {
+			return r, nil, refuse("a cold-to-cold move may only go to the pinned new cold address %s, the request says %s", c.ColdMove.NewCold, out.Address)
+		}
+		if out.Value < btcDust || out.Value > c.ColdMove.MaxAmount {
+			return r, nil, refuse("the move of %d sats is below dust or above the cold_move cap %d", out.Value, c.ColdMove.MaxAmount)
+		}
+	} else {
+		if len(r.Outputs) < 1 || len(r.Outputs) > 2 {
+			return r, nil, refuse("%d outputs; a refill has the payment and at most one change output", len(r.Outputs))
+		}
+		pay := r.Outputs[0]
+		pinned := false
+		for _, h := range c.HotShards {
+			pinned = pinned || h == pay.Address
+		}
+		if !pinned {
+			return r, nil, refuse("the payment goes to %s, which is not one of the pinned hot shards", pay.Address)
+		}
+		if pay.Value < btcDust || pay.Value > c.MaxAmount {
+			return r, nil, refuse("the payment of %d sats is below dust or above the per-ceremony cap %d", pay.Value, c.MaxAmount)
+		}
+		if len(r.Outputs) == 2 {
+			ch := r.Outputs[1]
+			if ch.Address != cold {
+				return r, nil, refuse("the change goes to %s; it must go to the cold address %s", ch.Address, cold)
+			}
+			if ch.Value < btcDust {
+				return r, nil, refuse("the change of %d sats is dust", ch.Value)
+			}
 		}
 	}
 	fee, err := r.Fee()
@@ -629,8 +703,8 @@ func (c *BTCConfig) Sign(ctx context.Context, rf BTCRequestFile, approvals []App
 		return BTCSigned{}, nil, err
 	}
 	names, ignored := c.CountApprovals(rf.RequestHash, approvals)
-	if len(names) < c.Threshold {
-		return BTCSigned{}, ignored, refuse("%d valid approval(s) from distinct configured operators, %d required%s", len(names), c.Threshold, ignoredNote(ignored))
+	if need := c.approvalsNeeded(r); len(names) < need {
+		return BTCSigned{}, ignored, refuse("%d valid approval(s) from distinct configured operators, %d required%s", len(names), need, ignoredNote(ignored))
 	}
 	rec, err := openOutpointRecord(c.RecordDir)
 	if err != nil {
@@ -964,3 +1038,6 @@ func (rs *recordStore) storeSigned(hash string, s BTCSigned) error {
 	b, _ := json.Marshal(s)
 	return writeFileSync(filepath.Join(rs.dir, "signed", hash+".json"), b)
 }
+
+// Required is how many distinct operators this request needs: the config's threshold, or more for a cold-to-cold move that asks for more.
+func (c *BTCConfig) Required(r BTCRequest) int { return c.approvalsNeeded(r) }
