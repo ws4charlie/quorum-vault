@@ -281,14 +281,13 @@ func (s *Service) planDrain(ctx context.Context, log *slog.Logger, shardIdx int,
 		return nil, nil // the zone's refusal is being waited out
 	}
 	// Work from the old address that is not ours to drain (a withdrawal or sweep built before the replacement) finishes first: the drain would spend
-	// the balance it needs and share its nonces.
-	var busy int
-	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM evm_nonce_allocations WHERE chain=$1 AND lower(address)=lower($2) AND status IN ('allocated','broadcast') AND owner_kind <> $3`,
-		c.Chain, from.Address, OwnerKindDrain).Scan(&busy); err != nil {
+	// the balance it needs and share its nonces. What the zone refused and can no longer be signed is not in flight (drain_inflight.go).
+	busy, err := s.drainInflight(ctx, from)
+	if err != nil {
 		return nil, err
 	}
-	if busy > 0 {
-		return wait(fmt.Sprintf("%d transactions built from the old address are still in flight; the drain starts when they are final", busy))
+	if len(busy) > 0 {
+		return wait(inflightReason(busy))
 	}
 	bal, err := s.balancesAt(ctx, from.Address)
 	if err != nil {
@@ -356,6 +355,9 @@ func (s *Service) BuildDrainJob(ctx context.Context, id string) (string, error) 
 		}
 		if m.JobID != "" || m.Status != "planned" {
 			return nil
+		}
+		if err := s.adoptHole(ctx, tx, m); err != nil {
+			return err
 		}
 		u, err := db.BuildDrain(ctx, tx, evm.DrainRequest{ID: id, PartitionID: m.PartitionID, From: m.From, To: m.To, Asset: m.Asset, Amount: m.Amount})
 		if err != nil {

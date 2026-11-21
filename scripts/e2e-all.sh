@@ -21,10 +21,11 @@ ROOT="$PWD"
 # name|services|weight (seconds in a CI run, for balancing)|QV_E2E_TIMEOUT_SCALE (CI's value)|command
 # services: p postgres, a anvil, b bitcoind, s solana-test-validator, i Temporal and Redpanda, k Keycloak (one, shared like Temporal). Ordered by weight, heaviest first.
 GROUP_TABLE="
-e2e-evm-flows|pai|351|3|make test-e2e-evm-flows
+e2e-evm-flows|pai|240|3|make test-e2e-evm-flows
 e2e-btc-recovery|pbi|345|3|make test-e2e-btc-recovery
 e2e-btc-sweeps|pbi|287|3|make test-e2e-btc-sweeps
 e2e-btc-refill-stuck|pbi|262|3|make test-e2e-btc-refill-stuck
+e2e-evm-drill|pai|200|3|make test-e2e-evm-drill
 e2e-evm-recovery|pai|212|3|make test-e2e-evm-recovery
 e2e-btc-consolidate|pbi|201|3|make test-e2e-btc-consolidate
 e2e-btc-batching|pbi|140|3|make test-e2e-btc-batching
