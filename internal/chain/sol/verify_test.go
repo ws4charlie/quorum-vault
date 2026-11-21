@@ -771,3 +771,27 @@ func TestNonceCloseShape(t *testing.T) {
 	w := f.wIntent("SOL", f.partSOL, "1447680")
 	f.mustFail("a withdrawal that is a nonce close", job(f.adv(), f.cbLimit(10_000), wnd(f.nonce0, f.hot, f.hot, 1_447_680)), w, "")
 }
+
+// A sweep may spend the deposit keys of the old and of the new generation together (the planner batches whatever is waiting): the payload then names every
+// key's generation, generation 1 as 1. A list of generation 1 only is not the form of such a transaction.
+func TestMixedGenerationSweep(t *testing.T) {
+	f := newFx(t)
+	v2, err := f.v.WithGenerations([]DepositNode{{Gen: 2, Node: Node{PublicKey: pub(t)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.v = v2
+	k1, _ := f.v.DepositKeyAt(1, 3)
+	k2, _ := f.v.DepositKeyAt(2, 5)
+	msg := compile(f.hot, f.nv, f.adv(), f.cbLimit(30_000), f.sysTransfer(k1, f.hot, 1_000_000), f.sysTransfer(k2, f.hot, 2_000_000))
+	in := signjob.Intent{Kind: "sweep", ID: "sb", PartitionID: f.partSOL, Chain: "sol-1", Asset: "SOL", From: Address(k1) + "," + Address(k2), To: Address(f.hot), Amount: "3000000"}
+	job := func(gens []uint32, path string) chain.UnsignedTx {
+		p, _ := json.Marshal(Payload{Message: msg, DepositIndices: []uint32{3, 5}, DepositGens: gens})
+		return chain.UnsignedTx{Chain: "sol-1", Digest: msg, Payload: p, KeyRef: chain.KeyRef{PartitionID: f.partSOL, Path: path}}
+	}
+	f.mustPass("mixed, the hot shard's job", job([]uint32{1, 2}, PathHot), in)
+	f.mustPass("mixed, the old key's job", job([]uint32{1, 2}, DepositPath(3)), in)
+	f.mustPass("mixed, the new key's job", job([]uint32{1, 2}, chain.KeyPathAt(2, DepositPath(5))), in)
+	f.mustFail("generation 1 only, written as a list", job([]uint32{1, 1}, PathHot), in, "written as no generation")
+	f.mustFail("generation 0 in a list", job([]uint32{0, 2}, PathHot), in, "generation 0")
+}

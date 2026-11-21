@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -190,6 +191,32 @@ func newWdSystem(t *testing.T, o wdOpts) *wdSys {
 	tm.Phase("chain")
 	s.pool = dbtest.New(t)
 	s.bizDSN = dbtest.DSN(s.pool)
+	// a failed test shows what the jobs and the sweeps ended as, with the reasons: they are gone with the database, and the process logs do not carry them
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		var out strings.Builder
+		if rows, err := s.pool.Query(context.Background(), `SELECT id, status, coalesce(reject_reason,''), key_ref, created_at::text FROM sign_jobs ORDER BY created_at`); err == nil {
+			for rows.Next() {
+				var id, st, why, kr, at string
+				if rows.Scan(&id, &st, &why, &kr, &at) == nil {
+					fmt.Fprintf(&out, "job %s %s key=%s at=%s reason=%q\n", id, st, kr, at, why)
+				}
+			}
+			rows.Close()
+		}
+		if rows, err := s.pool.Query(context.Background(), `SELECT id, status, from_address, updated_at::text FROM sweeps ORDER BY created_at`); err == nil {
+			for rows.Next() {
+				var id, st, from, at string
+				if rows.Scan(&id, &st, &from, &at) == nil {
+					fmt.Fprintf(&out, "sweep %s %s from=%s updated=%s\n", id, st, from, at)
+				}
+			}
+			rows.Close()
+		}
+		t.Logf("---- sign jobs and sweeps at the end ----\n%s", out.String())
+	})
 	dbtest.GatewayLogin(s.t) // the gateway reads the job queue as the restricted role qv_gateway
 	s.guard = s.newGuardDB()
 	tm.Phase("db")

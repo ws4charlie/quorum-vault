@@ -22,7 +22,7 @@ export DATABASE_URL
 QV_SIGNING_DB_URL ?= postgres://qv@localhost:$(or $(QV_SIGNING_DB_PORT),55433)/qv_signing?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/signing/admin/ca.crt&sslcert=$(QV_PKI_DIR)/signing/admin/tls.crt&sslkey=$(QV_PKI_DIR)/signing/admin/tls.key
 export QV_SIGNING_DB_URL
 
-.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery test-e2e-tee-sim mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images e2e-lane e2e-clean e2e-clean-stale e2e-slots
+.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-identity test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery test-e2e-tee-sim mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images e2e-lane e2e-clean e2e-clean-stale e2e-slots e2e-repeat
 
 setup: softhsm pki db-up chain-up
 
@@ -316,6 +316,12 @@ mpc-build:
 .PHONY: test-archive
 test-archive:
 	QV_REQUIRE_DB=1 QV_REQUIRE_INFRA=1 QV_REQUIRE_WORM=1 go test -count=1 -p 1 -timeout 15m -v ./internal/auditchain/...
+
+# One named e2e test N times, with the pass count (scripts/e2e-repeat.sh; CONTRIBUTING.md: every new e2e test runs 20 times before review):
+#   make e2e-repeat GROUP=mpc-signing TEST=TestLocalRefusalsAndDisagreement N=20
+e2e-repeat:
+	@test -n "$(GROUP)" -a -n "$(TEST)" || { echo "usage: make e2e-repeat GROUP=<ci group, or core> TEST=<name or regexp> [N=20]"; exit 2; }
+	scripts/e2e-repeat.sh -n $(or $(N),20) '$(GROUP)' '$(TEST)'
 
 test-mpc:
 	QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=$${QV_ANVIL_RPC:-http://127.0.0.1:18545} go test -count=1 -p 1 -timeout 20m -v ./e2e/mpcsign/... ./e2e/partyadmin/...

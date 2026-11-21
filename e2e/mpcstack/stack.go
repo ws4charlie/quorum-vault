@@ -17,6 +17,7 @@ import (
 	"fmt"
 	wire "github.com/ws4charlie/quorum-vault/mpc-party/api/cosigner"
 	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -347,21 +348,35 @@ var (
 	freeGiven = map[string]bool{}
 )
 
-// FreeAddr returns 127.0.0.1:port for a port that was free a moment ago. The kernel may hand out a port again as soon as it is closed,
-// so an address is never returned twice in a test binary: two processes must not be given the same port.
+// FreeAddr returns 127.0.0.1:port for a port that was free a moment ago. Two things can still take it before the party binds it: the kernel,
+// which hands the same port to another listener or, above all, to the outgoing connection of any process (the ports of the dynamic range, 32768 and
+// up on Linux, 49152 and up on macOS, are what a client socket gets), and this binary asking twice. So the port is looked for below the dynamic
+// range first, where only another listener can be in the way, and an address is never returned twice in a test binary. (A party that could not
+// bind its port failed in CI with "address already in use" and the test waited for ever for it: parties not ready.)
 func FreeAddr(t testing.TB) string {
 	freeMu.Lock()
 	defer freeMu.Unlock()
-	for {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
+	try := func(addr string) string {
+		l, err := net.Listen("tcp", addr)
 		if err != nil {
-			t.Fatal(err)
+			return ""
 		}
-		addr := l.Addr().String()
+		got := l.Addr().String()
 		l.Close()
-		if !freeGiven[addr] {
-			freeGiven[addr] = true
-			return addr
+		if freeGiven[got] {
+			return ""
+		}
+		freeGiven[got] = true
+		return got
+	}
+	for i := 0; i < 300; i++ {
+		if a := try(fmt.Sprintf("127.0.0.1:%d", 20000+mrand.IntN(12000))); a != "" {
+			return a
+		}
+	}
+	for {
+		if a := try("127.0.0.1:0"); a != "" {
+			return a
 		}
 	}
 }

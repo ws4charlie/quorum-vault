@@ -33,6 +33,8 @@ make dev-env && make setup && make mpc-build
 
 Each group writes a log under `data/e2e-all/`. Pull requests run the light groups; the heavy crash and failure groups run nightly or from the Actions tab. `QV_CRASH_BOUNDARIES` picks crash points, and `make test-e2e-evm TEST=<name>` runs a single test. The `mpc-party` module has its own tests (`cd mpc-party && go test ./...`).
 
+**A new end-to-end test is run 20 times before it is reviewed.** One green run says little: a test that fails one run in ten turns unrelated pull requests red for weeks. `make e2e-repeat GROUP=<ci group> TEST=<name or regexp> N=20` starts the services of that group once (as `make test-e2e-all` does, one lane) and runs the test N times, each time as a new `go test -count=1`; it prints one line per run (result, seconds, the machine's load) and the number that passed, and keeps the log of every run that did not (`data/e2e-repeat/<time>/`). `GROUP=core` repeats a test of the `mpc-party` module as CI runs it (`-race -tags teesim`). A run that skips counts as a failure. Put the pass count in the pull request. Run it on a busy machine if you can (other worktrees' stacks are a good load): most flakes in this repository were waits that held on an idle laptop and not under load. The script is `scripts/e2e-repeat.sh`; no CI job runs it.
+
 `make db-up` also applies the migrations as the owner role (`make migrate` does it alone): `qv-core` and `qv-worker` only check that they are applied and refuse to start otherwise. See [docs/runbooks/database-roles.md](docs/runbooks/database-roles.md).
 
 ## When CI skips jobs
