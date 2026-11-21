@@ -113,6 +113,9 @@ func (s *Service) planSweepsSOL(ctx context.Context, log *slog.Logger) ([]Sweep,
 		amt := un[k]
 		value := s.valueWei(asset, amt)
 		if value.Cmp(c.MinSweepWei) < 0 {
+			if err := s.holdSweep(ctx, addr, asset, amt, value, nil, c.MinSweepWei, CauseMinSweep); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if backoff, err := s.sweepBackoff(ctx, addr, asset); err != nil {
@@ -135,7 +138,13 @@ func (s *Service) planSweepsSOL(ctx context.Context, log *slog.Logger) ([]Sweep,
 			need = c.MinSweepWei
 		}
 		if value.Cmp(need) < 0 {
+			if err := s.holdSweep(ctx, addr, asset, amt, value, fee, need, CauseFee); err != nil {
+				return nil, err
+			}
 			continue
+		}
+		if err := s.releaseHold(ctx, addr, asset); err != nil {
+			return nil, err
 		}
 		leg := chain.SweepLeg{From: addr, Amount: amt}
 		if asset != c.Native && c.CloseQuiet > 0 {
@@ -181,6 +190,9 @@ func (s *Service) planSweepsSOL(ctx context.Context, log *slog.Logger) ([]Sweep,
 			created = append(created, Sweep{ID: id, Asset: asset, From: batch[0].From, PartitionID: c.SinkPartition(asset), Amount: total, Status: "planned"})
 			room--
 		}
+	}
+	if err := s.pruneHolds(ctx, un); err != nil {
+		return created, err
 	}
 	return created, nil
 }
