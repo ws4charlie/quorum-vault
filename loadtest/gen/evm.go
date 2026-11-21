@@ -31,8 +31,9 @@ type chain struct {
 }
 
 func newChain(ctx context.Context, t *EVMTarget) (*chain, error) {
-	// no connection reuse: anvil closes idle connections, and a request on a closed one fails with EOF (seen at 300 deposits a minute)
-	hc := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	// Connections are reused (a connection per poll runs out of ports through a port-forward); one that the node closed fails with EOF or a reset, and the
+	// calls below try again.
+	hc := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{MaxIdleConnsPerHost: 64, IdleConnTimeout: 5 * time.Second}}
 	rc, err := rpc.DialOptions(ctx, t.RPC, rpc.WithHTTPClient(hc))
 	if err != nil {
 		return nil, err

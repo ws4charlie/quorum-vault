@@ -48,7 +48,7 @@ func NewClient(t *Target, obs *Observer) (*Client, error) {
 		return nil, err
 	}
 	hc := &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{TLSClientConfig: tc, MaxIdleConnsPerHost: 512, MaxIdleConns: 1024, IdleConnTimeout: 90 * time.Second,
-		DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext}}
+		DialContext: dialer(t.DialAddr)}}
 	return &Client{t: t, hc: hc, tok: tk, Obs: obs}, nil
 }
 

@@ -17,8 +17,8 @@ key="$(openssl rand -hex 32)"; ( umask 077; printf %s "$key" > "$WORK/load/funde
 addr="$(go run ./loadtest/cmd/qv-load addr -key-file "$WORK/load/funder.key")"
 curl -fsS -X POST -H 'content-type: application/json' --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_setBalance\",\"params\":[\"$addr\",\"0x$(printf '%x' 1000000)000000000000000000\"]}" "http://127.0.0.1:$P_ANVIL" > /dev/null
 cat > "$WORK/load/target.json" <<JSON
-{"api": ["https://127.0.0.1:$P_CORE"], "ca_file": "$S/ca-business.crt", "tls_server_name": "qv-core.qv.svc",
- "token": {"kind": "keycloak", "url": "https://127.0.0.1:$P_KC", "ca_file": "$S/ca-business.crt", "tls_server_name": "keycloak", "secrets_dir": "$S"},
+{"api": ["https://qv-core.qv.svc:8443"], "dial_addr": "127.0.0.1:$P_CORE", "ca_file": "$S/ca-business.crt", "tls_server_name": "qv-core.qv.svc",
+ "token": {"kind": "keycloak", "url": "https://keycloak:8443", "dial_addr": "127.0.0.1:$P_KC", "ca_file": "$S/ca-business.crt", "tls_server_name": "keycloak", "secrets_dir": "$S"},
  "actors": {"initiator": "alice", "ops": "ops", "approvers": []},
  "evm": {"chain": "evm-kind", "rpc": "http://127.0.0.1:$P_ANVIL", "funder_key_file": "$WORK/load/funder.key", "chain_id": 11155111}}
 JSON

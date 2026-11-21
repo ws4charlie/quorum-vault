@@ -70,49 +70,48 @@ Second in line, at higher rates, is Temporal: its container and its Postgres tog
 
 ### Deposits only: scan, credit, sweep
 
-Rates 1 to 12 a second (`evm-deposit`), arrivals stopped when more than 250 operations were open.
+Rates 1 to 12 a second (`evm-deposit`), arrivals stopped when more than 250 operations were open (here at 168 s, 3 s into the last step).
 
 | Step (rate scale) | deposit:ETH: offered /s | ended well /s | p50 s | p95 s | Objectives broken |
 |---|---:|---:|---:|---:|---|
-| ramp | 0.60 | 0.60 | 1.5 | 1.8 |  |
-| 0 (x1) | 1.37 | 1.37 | 1.7 | 2.2 |  |
-| 1 (x2) | 1.57 | 1.57 | 1.9 | 2.5 |  |
-| 2 (x4) | 4.37 | 4.37 | 2.5 | 3.5 |  |
-| 3 (x6) | 6.23 | 6.23 | 3.3 | 97.0 | ETH sent to swept p95 96966 ms over 60000 ms |
-| 4 (x8) | 9.30 | 9.20 | 10.5 | 70.4 | ETH error rate 1.1% over 0.1%; ETH only 99% of what arrived ended well; ETH sent to swept p95 70391 ms over 60000 ms |
-| 5 (x12) | 11.91 | 11.81 | 10.3 | 45.6 | ETH error rate 0.8% over 0.1% |
+| ramp | 0.60 | 0.60 | 1.4 | 1.4 |  |
+| 0 (x1) | 1.37 | 1.37 | 2.0 | 2.6 |  |
+| 1 (x2) | 1.57 | 1.57 | 1.7 | 2.4 |  |
+| 2 (x4) | 4.37 | 4.37 | 2.4 | 3.8 |  |
+| 3 (x6) | 6.23 | 6.23 | 3.1 | 93.5 | ETH sent to swept p95 93457 ms over 60000 ms |
+| 4 (x8) | 9.30 | 9.30 | 5.9 | 68.5 | ETH sent to swept p95 68549 ms over 60000 ms |
+| 5 (x12) | 11.96 | 11.96 | 11.6 | 45.6 |  |
 
-**Credit is not the limit; the sweep is.** Time to *credited* stays at 1.1 to 1.6 s p95 in every step (the scan every 500 ms), while time to *swept* jumps at 6 deposits a second (p50 3.3 s, p95 97 s). Over the same steps the sweeps open at once sit at 7 to 8 and the sign jobs waiting at 2 to 3, the gateway at 1.6% of a core: the signing queue is not what limits sweeps. What is left is the sweep planner's own rules (a planning pass every 300 ms in the test configuration, at most 12 open sweeps, each one deploying a forwarder, signing, broadcasting and waiting for the block; [closed-loop](closed-loop.md) describes the cap) together with the chain: anvil's container rises from 8% to 60% of a core as every deposit, deployment and sweep is a block. That is an inference from the queue figures, not a measurement of the planner: it was not profiled. Every address was swept after the run.
+**Credit is not the limit; the sweep is.** Time to *credited* stays at 1.1 to 1.6 s p95 in every step (the scan every 500 ms), while time to *swept* jumps at 6 deposits a second (p50 3.1 s, p95 93 s). Over the same steps the sweeps open at once sit at 7 to 8 and the sign jobs waiting at 3, the gateway at 1.5% of a core: the signing queue is not what limits sweeps. What is left is the sweep planner's own rules (a planning pass every 300 ms in the test configuration, at most 12 open sweeps, each one deploying a forwarder, signing, broadcasting and waiting for the block; [closed-loop](closed-loop.md) describes the cap) together with the chain: anvil's container rises from 12% to 73% of a core as every deposit, deployment and sweep is a block. That is an inference from the queue figures, not a measurement of the planner: it was not profiled. Every address was swept after the run.
 
 ### The mixed workload
 
-The reference mix (`evm-mixed`): 2.0 deposits, 2.3 auto and 0.1 two-approver withdrawals a second at scale 1, scales 0.25 to 3, a Reconcile every 10 s. Arrivals were stopped at 212 s, 2 s into the last step, when 200 operations were open.
+The reference mix (`evm-mixed`): 2.0 deposits, 2.3 auto and 0.1 two-approver withdrawals a second at scale 1, scales 0.25 to 3, a Reconcile every 10 s. Arrivals were stopped at 219 s, 9 s into the last step, when 200 operations were open.
 
 | Step (rate scale) | deposit:ETH: offered /s | ended well /s | p50 s | p95 s | withdraw:auto: offered /s | ended well /s | p50 s | p95 s | withdraw:two: offered /s | ended well /s | p50 s | p95 s | Objectives broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| ramp | - | - | - | - | 0.20 | 0.20 | 0.8 | 1.8 | - | - | - | - |  |
-| 0 (x0.25) | 0.23 | 0.23 | 1.4 | 2.0 | 0.57 | 0.57 | 0.6 | 0.9 | - | - | - | - |  |
-| 1 (x0.5) | 1.12 | 1.12 | 1.8 | 2.6 | 1.07 | 1.07 | 0.7 | 1.1 | 0.05 | 0.05 | 0.7 | 0.7 |  |
-| 2 (x1) | 2.20 | 2.20 | 2.0 | 3.0 | 1.88 | 1.88 | 0.9 | 1.9 | 0.10 | 0.10 | 0.7 | 1.2 |  |
-| 3 (x1.5) | 2.40 | 2.40 | 3.1 | 6.0 | 3.98 | 3.98 | 2.2 | 4.6 | 0.05 | 0.05 | 2.8 | 3.8 | auto approved to broadcast p95 3989 ms over 3000 ms; two approved to broadcast p95 3495 ms over 3000 ms |
-| 4 (x2) | 4.10 | 4.10 | 36.1 | 73.9 | 4.75 | 4.75 | 8.5 | 19.1 | 0.20 | 0.20 | 8.6 | 23.2 | ETH sent to swept p95 73898 ms over 30000 ms; auto request to confirmed p95 19100 ms over 5000 ms; auto approved to broadcast p95 11897 ms over 3000 ms; two request to confirmed p95 23206 ms over 5000 ms; two approved to broadcast p95 11910 ms over 3000 ms |
-| 5 (x3) | 6.45 | 6.45 | 25.1 | 47.6 | 10.14 | 10.14 | 18.9 | 22.4 | 6.91 | 6.91 | 7.1 | 22.2 | ETH sent to swept p95 47594 ms over 30000 ms; auto request to confirmed p95 22389 ms over 5000 ms; auto approved to broadcast p95 8164 ms over 3000 ms; two request to confirmed p95 22177 ms over 5000 ms; two approved to broadcast p95 3150 ms over 3000 ms |
+| ramp | - | - | - | - | 0.20 | 0.20 | 0.5 | 1.3 | - | - | - | - |  |
+| 0 (x0.25) | 0.23 | 0.23 | 2.1 | 2.6 | 0.57 | 0.57 | 0.5 | 0.8 | - | - | - | - |  |
+| 1 (x0.5) | 1.12 | 1.12 | 1.8 | 2.2 | 1.07 | 1.07 | 0.6 | 1.0 | 0.05 | 0.05 | 0.6 | 0.9 |  |
+| 2 (x1) | 2.20 | 2.20 | 2.0 | 2.7 | 1.88 | 1.88 | 0.8 | 1.5 | 0.10 | 0.10 | 0.6 | 1.2 |  |
+| 3 (x1.5) | 2.40 | 2.40 | 2.7 | 4.1 | 3.98 | 3.98 | 1.5 | 2.6 | 0.05 | 0.05 | 1.9 | 2.0 |  |
+| 4 (x2) | 4.10 | 4.10 | 7.7 | 57.7 | 4.75 | 4.75 | 4.7 | 7.4 | 0.20 | 0.20 | 4.6 | 6.5 | ETH sent to swept p95 57697 ms over 30000 ms; auto request to confirmed p95 7406 ms over 5000 ms; auto approved to broadcast p95 6892 ms over 3000 ms; two request to confirmed p95 6549 ms over 5000 ms; two approved to broadcast p95 5930 ms over 3000 ms |
+| 5 (x3) | 7.28 | 7.28 | 23.1 | 38.4 | 8.98 | 8.98 | 10.6 | 12.9 | 1.71 | 1.71 | 5.6 | 12.5 | ETH sent to swept p95 38412 ms over 30000 ms; auto request to confirmed p95 12870 ms over 5000 ms; auto approved to broadcast p95 12099 ms over 3000 ms; two request to confirmed p95 12477 ms over 5000 ms; two approved to broadcast p95 11051 ms over 3000 ms |
 
-The last step ran only 2 s before the stop, so its rates rest on few operations.
+The last step ran only 9 s before the stop, so its rates rest on few operations.
 
-**The first objective broken is approved-to-broadcast on both withdrawal tiers at scale 1.5 (2.4 deposits and 4.0 withdrawals a second), by 1 s (p95 4.0 s against 3.0 s); at scale 2 the sweeps lag by 74 s and withdrawals by 19 s.** Sweeps and withdrawals share the one signing loop, so the mixed limit is lower than either alone: from scale 1.5 the sign jobs waiting go from 1 to 8, 32 and 34 while the gateway stays at 2% of a core. Temporal's container reaches 116% and its Postgres 89% at scale 2, and the workflow-task queue starts to wait at scale 3 (26 tasks, the oldest 4.6 s). The business Postgres is at 32 to 41% of a core and waits on locks in no sample: no lock contention was seen at any rate.
+**The first objectives broken are at scale 2 (4.1 deposits and 4.9 withdrawals a second): sweeps lag by 58 s (p95), withdrawals take 7.4 s (p95) and approved-to-broadcast 6.9 s. At scale 1.5 (2.4 and 4.0 a second) all objectives held, but the signing queue had begun to fill.** Sweeps and withdrawals share the one signing loop, so the mixed limit is lower than either alone: from scale 1.5 the sign jobs waiting go from 1 to 5, 21 and 53 while the gateway stays at 2% of a core. Temporal's container reaches 98% and its Postgres 67% at scale 2, and 153% and 115% at scale 3. The business Postgres is at 17 to 38% of a core and waits on locks in no sample: no lock contention was seen at any rate.
 
 | Mean over the step | x0.25 | x0.5 | x1 | x1.5 | x2 | x3 |
 |---|---:|---:|---:|---:|---:|---:|
-| sign jobs waiting | 0.1 | 0.4 | 1.1 | 8.0 | 31.9 | 33.5 |
-| withdrawals in `signing` | 0.2 | 0.5 | 1.2 | 6.4 | 25.8 | 32.5 |
-| sweeps open | 0.1 | 0.8 | 2.0 | 4.5 | 10.6 | 10.5 |
-| Temporal workflow tasks waiting | 0 | 0 | 0 | 0 | 1.6 | 26.0 |
-| `qv-gateway` CPU (% of one core) | 0.4 | 0.7 | 1.2 | 1.8 | 1.9 | 1.5 |
-| `mpc-party-b` CPU | 6.7 | 18.4 | 34.8 | 51.1 | 49.5 | 44.0 |
-| Temporal container CPU | 22.5 | 39.0 | 56.5 | 91.3 | 116.0 | 80.5 |
-| Temporal's Postgres CPU | 12.2 | 21.4 | 33.2 | 60.7 | 89.3 | 75.6 |
-| `qv-core` CPU | 1.8 | 3.5 | 5.0 | 9.1 | 17.5 | 28.5 |
+| sign jobs waiting | 0.1 | 0.3 | 1.0 | 5.2 | 20.9 | 53.3 |
+| withdrawals in `signing` | 0.2 | 0.4 | 1.0 | 4.5 | 15.7 | 47.4 |
+| sweeps open | 0.1 | 0.8 | 1.8 | 3.7 | 8.8 | 10.6 |
+| `qv-gateway` CPU (% of one core) | 0.5 | 0.7 | 1.1 | 1.8 | 2.0 | 1.9 |
+| `mpc-party-b` CPU | 6.6 | 17.7 | 33.5 | 52.9 | 55.8 | 52.7 |
+| Temporal container CPU | 14.2 | 25.1 | 45.3 | 80.3 | 98.3 | 152.5 |
+| Temporal's Postgres CPU | 8.5 | 15.8 | 28.3 | 53.6 | 66.9 | 115.2 |
+| `qv-core` CPU | 1.6 | 2.6 | 4.7 | 7.6 | 12.3 | 25.2 |
 
 <p align="center"><img src="images/load-dashboard.png" width="80%" alt="The live dashboard during the mixed run: offered and completed operations, operations in flight, latencies by stage, CPU and queues"></p>
 
@@ -134,20 +133,48 @@ The dashboard above is the live view of this run (Grafana over the generator's a
 
 ### Delay between the parties
 
-The research for the cluster ([K8s deployment, section 12]) models a signature as `190 ms + 6 x RTT`. The stack has a knob that adds a delay to every frame between parties A and B, each way (`DELAY_MS`); with 20 ms the round trip is 40 ms and the model gives 430 ms. The gateway's per-job time, measured as the inverse of the queue's drain rate with 4.2 jobs a second offered, was **293 ms with no delay (arrival-limited, so a lower bound on what a job costs) and 788 ms with 20 ms**, 2.5 times the model's prediction for the signature alone: the sign job has more round trips than six, or the other steps of a job (guard, audit, record) add up. At that delay the jobs left the queue at 1.3 a second, the withdrawal p50 was 54 s, and the gateway logged three alerts that a sign timed out and that the first coordinator did not answer, as it should; every withdrawal was still paid once. **On a network with 1.5 ms between zones the same model predicts 205 ms; with 65 ms between regions, 580 ms plus the rest: the single signing loop turns every millisecond of round trip into a loss of throughput.**
+[DESIGN_SCALE.md](../../DESIGN_SCALE.md) models a signature as `190 ms + 6 x RTT`. The stack has a knob that adds a delay to every frame between parties A and B, each way (`DELAY_MS`); with 20 ms the round trip is 40 ms and the model gives 430 ms. The gateway's per-job time, measured as the inverse of the queue's drain rate with 4.2 jobs a second offered, was **293 ms with no delay (arrival-limited, so a lower bound on what a job costs) and 788 ms with 20 ms**, 2.5 times the model's prediction for the signature alone: the sign job has more round trips than six, or the other steps of a job (guard, audit, record) add up. At that delay the jobs left the queue at 1.3 a second, the withdrawal p50 was 54 s, and the services logged alerts that a sign timed out and that the first coordinator did not answer, as they should (the run's no-alert check fails on them, rightly); every withdrawal was still paid once. **On a network with 1.5 ms between zones the same model predicts 205 ms; with 65 ms between regions, 580 ms plus the rest: the single signing loop turns every millisecond of round trip into a loss of throughput.**
+
+### On the kind lane (the charts)
+
+`make kind-up` installs the real charts on one kind node (business zone, gateway, three parties by pods, Temporal, Keycloak, Postgres by CloudNativePG; [kind lane](../../ci/kind/README.md)); `make load-kind` runs the same generator against it through port-forwards (`loadtest/kind/run.sh`), with Keycloak's real tokens. Only auto-approved withdrawals and deposits (the lane has no keys for people approvers). Two runs of `evm-kind`, scales 0.25 to 2, one right after the other, on a quieter machine (load average about 6) with the generator, anvil and the port-forwards outside the cluster. The first run (the table; its 52 "chain" errors are the generator's own: it opened a connection per poll through the port-forward and ran out of ports, fixed before the second run):
+
+| Step (rate scale) | deposit:ETH: offered /s | ended well /s | p50 s | p95 s | withdraw:auto: offered /s | ended well /s | p50 s | p95 s | Objectives broken |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| ramp | - | - | - | - | 0.40 | 0.40 | 0.7 | 1.3 |  |
+| 0 (x0.25) | 0.60 | 0.60 | 4.8 | 79.6 | 0.55 | 0.55 | 1.1 | 1.4 | ETH sent to swept p95 79601 ms over 30000 ms |
+| 1 (x0.5) | 0.93 | 0.90 | 4.7 | 59.8 | 1.30 | 1.30 | 1.1 | 1.8 | ETH error rate 2.7% over 0.1%; ETH only 97% of what arrived ended well; ETH sent to swept p95 59777 ms over 30000 ms |
+| 2 (x1) | 1.88 | 1.77 | 5.1 | 8.1 | 2.35 | 2.35 | 1.5 | 2.6 | ETH error rate 5.3% over 0.1%; ETH only 95% of what arrived ended well |
+| 3 (x1.5) | 3.38 | 2.60 | 9.3 | 75.9 | 3.27 | 3.27 | 4.1 | 7.3 | ETH error rate 23.0% over 0.1%; ETH only 77% of what arrived ended well; ETH sent to swept p95 75923 ms over 30000 ms; auto request to confirmed p95 7291 ms over 5000 ms; auto approved to broadcast p95 6448 ms over 3000 ms |
+| 4 (x2) | 4.28 | 1.76 | 17.5 | 43.7 | 5.71 | 5.38 | 9.3 | 10.7 | ETH error rate 59.0% over 0.1%; ETH only 41% of what arrived ended well; ETH sent to swept p95 43691 ms over 30000 ms; auto error rate 5.8% over 0.1%; auto only 94% of what arrived ended well; auto request to confirmed p95 10748 ms over 5000 ms; auto approved to broadcast p95 10299 ms over 3000 ms |
+
+What the kind shape costs, as far as one run says: **withdrawals through the pods answer as fast as the process stack up to about 2.4 a second (p50 1.1 to 1.5 s; the compose stack at the same rate: 0.8 to 1.5 s) and start to queue at 3.3 a second (p95 7.3 s)**, a lower rate than the 4 to 5 a second at which the compose stack broke the same objective, with one hot shard instead of two and Temporal, Postgres and the parties in a VM that also runs everything else. Deposits are credited as fast (the scan runs every 2 s there, 500 ms in compose) but **swept slowly: p50 4.7 to 6.7 s and p95 60 to 80 s at every step**, because the lane's sweep planner runs every 5 s (the production default; compose uses 300 ms) and the zone allows 600 sweeps and 600 withdrawals an hour.
+
+**The zone's hourly limits are what the second run hit.** An hour after the first run's 350 withdrawals, 60 withdrawals of the second were refused by the gateway with `policy_withdrawal_rate: 600 withdrawals in the last hour, limit 600`, and 123 deposit addresses were left unswept. Correctness held: the 60 refused withdrawals paid nothing and their holds were released, 247 paid exactly once, 28 were still open after 15 minutes (their destinations held nothing or the full amount), the customers' books matched, Reconcile was clean and the audit chain verified. The lane's limits are a test setting, not a capacity: they show that the limit a deployment sets is a rate limit on throughput like any other, and that the limit works under load.
+
+This is one node and one run each: it does not show what four clusters cost.
 
 ### Closed loop, for comparison
 
-CLOSED_PLACEHOLDER
+`evm-closed`: the mixed workload with 16 users, each starting its next operation when the last one ended (a deposit ends when credited), 60 s, one run:
+
+| Operation | Done | Per second | p50 / p95 (s) |
+|---|---:|---:|---|
+| auto withdrawal | 234 | 3.90 | 3.6 / 4.1 |
+| two-approver withdrawal | 11 | 0.18 | 3.5 / 4.5 |
+| deposit, to credited | 157 | 2.62 | 1.0 / 1.2 |
+
+The closed loop settles at **about 4.1 withdrawals and 2.6 deposits a second with every withdrawal taking 3.5 s**: the 16 users keep the system just busy enough that its queues hold a few seconds of work, and the system cannot be driven into the collapse the open loop shows (p95 of 60 s and more) because the users wait. The two modes answer different questions. The closed loop says what the system does with this many people; it hides the limit, since a slower system just lowers the rate. The open loop says what happens to arrivals that do not wait: at 4 withdrawals a second the same system answered in 1.5 s p50 in the open loop, and at 8.6 a second in tens of seconds. Withdrawals reaching a steady 4.1 a second under 16 users agrees with the 4.1 to 4.7 a second at which the open-loop runs' queues drained.
 
 ## The first limit, per scenario
 
 | Scenario | First limit | Offered at the first broken objective | What shows it |
 |---|---|---|---|
 | Withdrawals only | the gateway signs one job at a time | 5.6 to 8.6 a second (the machine's load decides) | sign jobs waiting 2 to 32, withdrawals in `signing` 4 to 35, gateway 2% of a core, parties 44 to 57%, workflow-task queue empty; the gateway's samples show it waiting; more workers and cores change nothing |
-| Deposits only | the sweep pipeline (sweeps open stuck at 7 to 8, sign jobs not waiting) | 6.2 a second | credit p95 1.1 to 1.6 s at every step, sweep p95 from 3.5 s to 97 s |
-| Mixed | the same signing loop, shared by sweeps and withdrawals | 6.4 operations a second (scale 1.5) | sign jobs waiting 1 to 8 to 32 |
+| Deposits only | the sweep pipeline (sweeps open stuck at 7 to 8, sign jobs not waiting) | 6.2 a second | credit p95 1.1 to 1.6 s at every step, sweep p95 from 3.8 s to 93 s |
+| Mixed | the same signing loop, shared by sweeps and withdrawals | 9 operations a second (scale 2; the queue starts to fill at 6.4, scale 1.5) | sign jobs waiting 1.0, 5.2, 20.9, 53.3 |
 | Parties 20 ms apart | the same signing loop, 790 ms a job | below 4.2 withdrawals a second | 1.3 jobs a second |
+| On kind | withdrawals queue from 3.3 a second; sweeps are slow from the start (5 s planner) and capped by the zone's 600 an hour | 3.3 withdrawals a second | p95 7.3 s; sweep p95 60 to 80 s; gateway refusals in the second run |
 | Behind all of them | Temporal (server and its database use about 2 cores together) and the chain node (anvil, a block per transaction) | at 8 or more operations a second | their CPU and the workflow-task queue |
 
 ## Findings in the product
@@ -156,8 +183,12 @@ These came out of running it under load. None is fixed here (this task changes n
 
 1. **Reconcile reports a difference while the chain moves.** In every run, between 40% and 90% of the Reconcile calls made during the load reported `scan_caught_up` (the books' scan cursor 2 to 5 blocks behind the chain) or `deposit_addresses` (funds on an address that the ledger has not yet credited), and logged `ALERT: the books and the chain disagree`. Each was clean a few seconds later and every end-of-run Reconcile was clean. On the local chain a block is mined per transaction, so the chain moves faster than any real one; but the check has no allowance for a scan that is a few blocks behind, so on a busy chain an operator would see this alert repeatedly. It is why the "no alert fired" check counts these two kinds apart.
 2. **A deposit worth little is left unswept while gas is high, by design.** In a first mixed run a 0.018 ETH deposit was credited at once and not swept in 9 minutes: the sweep planner sweeps only when the value exceeds `K` (20) times the sweep's fee, and the fee rose under load. The deposit scenarios therefore start at 0.05 ETH. A real deployment will hold small deposits at the addresses until the fee drops or an operator moves them.
-3. **Every API request verifies a signature.** A sample of `qv-core` under load shows its active CPU time mostly in P-256 arithmetic (the bearer token's ES256 signature, checked on each request including every status poll). At rate scale 3 the core uses 29% of a core for 20 requests a second. Not a limit here, and a cache of verified tokens would remove it.
+3. **Every API request verifies a signature.** A sample of `qv-core` under load shows its active CPU time mostly in P-256 arithmetic (the bearer token's ES256 signature, checked on each request including every status poll). At rate scale 3 the core uses 25% of a core. Not a limit here, and a cache of verified tokens would remove it.
 4. **The gateway waits, not works.** See the first limit: 2% CPU while the queue grows.
+
+## The smoke scenario
+
+`make load-smoke` (CI job `e2e-load-smoke`): 4 withdrawing customers, 6 deposit addresses, about 5 s of arrivals (deposits, small and two-approver withdrawals), then every check above. It asserts correctness only and no time. It was run 20 times in a row on the final code: **20 of 20 passed** (about 80 s each, start-up included). A first series of 20 on earlier code had 2 failures, both the same: a 0.01 ETH deposit left unswept (finding 2), so the smoke deposits are now 0.2 to 0.5 ETH.
 
 ## What a laptop run can and cannot tell
 
@@ -174,7 +205,7 @@ These came out of running it under load. None is fixed here (this task changes n
 - **Bitcoin and Solana are not driven.** The generator's operation layer is written for the EVM deposit and withdrawal; a Bitcoin driver (xpub addresses, batched withdrawals, consolidation) and a Solana driver (durable nonces, token deposits) need their own stack launchers: the Bitcoin and Solana end-to-end harnesses are separate and were not reused. The workload model above says what they would run.
 - **No profile with a Go profiler.** The services expose no pprof endpoint, and adding one is service code, which this task does not change. The profiles are macOS `sample` call graphs of the gateway, the parties, the worker and the core (kept in `data/load/profiles` of the run, not committed: about 180 KB each).
 - **Hot-to-cold moves and the audit archive were not exercised under load.**
-- KIND_PLACEHOLDER
+- **The kind run is two runs on one node**, with the lane's own configuration (5 s planner, 600 an hour limits), not tuned; scale-out and delay were not run on kind.
 
 ## Backlog from the measurements
 

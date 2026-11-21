@@ -24,6 +24,8 @@ go run ./loadtest/cmd/qv-load run -scenario loadtest/scenarios/evm-mixed.json -t
 
 `target.json` (written by whoever sets up the target; this repository holds none): core URLs (round robin), the CA file, how tokens are obtained (`endpoint`: a URL that returns a token for `?actor=NAME`; or `keycloak`: the dev realm's login page, passwords in a secrets directory), the actors (an initiator, an operator, approvers), the approvers' seed files, and the chain (RPC, a funded key, chain ID). See `gen/target.go`. The kind lane and, later, the cloud use this file; the checklist for the cloud run is in the measurement page.
 
+`make load-kind` (`loadtest/kind/run.sh`) runs it against the kind lane's pods: port-forwards, Keycloak's dev-realm tokens, a funded key made on the lane's anvil; no secret leaves the lane's work directory.
+
 ## Scenarios
 
 A scenario (`scenarios/*.json`) has streams of operations (a deposit paid on the chain and followed to credited and swept; a withdrawal followed to confirmed, with the approvals of the tier signed by the named approvers), a ramp, then a hold or a list of steps that multiply every rate, then a drain. `mode` is `open` (Poisson arrivals at the rate, from a fixed seed and the run identifier; an arrival is never delayed by a slow system) or `closed` (a fixed number of users). `objectives` mark the pass lines of a step; the first step that breaks one is the first limit.
@@ -34,6 +36,8 @@ A scenario (`scenarios/*.json`) has streams of operations (a deposit paid on the
 | `evm-mixed.json` | deposits, small and two-approver withdrawals, a Reconcile every 10 s; rates in steps |
 | `evm-withdraw.json`, `evm-deposit.json` | one side each, to find each limit |
 | `evm-closed.json` | the mix with a fixed number of users, for comparison |
+| `evm-withdraw-fixed.json` | one fixed rate, for comparing shapes of the stack (workers and cores, delay) |
+| `evm-kind.json` | auto-approved withdrawals and deposits for the kind lane |
 
 ## What a run checks
 

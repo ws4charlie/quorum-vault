@@ -1,13 +1,16 @@
 package gen
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -25,9 +28,11 @@ type Target struct {
 	API    []string `json:"api"`     // base URLs of the core API; requests go round robin (several copies of the core)
 	CAFile string   `json:"ca_file"` // trust root of the API's certificate, if https
 	// ServerName is the name the API's certificate carries, when the URL is an address (a port-forward to a cluster: https://127.0.0.1:PORT, name qv-core.qv.svc)
-	ServerName string   `json:"tls_server_name,omitempty"`
-	Token      TokenCfg `json:"token"`
-	Actors     struct {
+	ServerName string `json:"tls_server_name,omitempty"`
+	// DialAddr: connect here whatever host the URL names (a port-forward: the URL says qv-core.qv.svc, the connection goes to 127.0.0.1:PORT)
+	DialAddr string   `json:"dial_addr,omitempty"`
+	Token    TokenCfg `json:"token"`
+	Actors   struct {
 		Initiator string   `json:"initiator"` // requests withdrawals
 		Ops       string   `json:"ops"`       // creates customers, reads, reconciles
 		Approvers []string `json:"approvers"` // sign approvals (tier "two": the first two that are not the initiator)
@@ -54,6 +59,7 @@ type TokenCfg struct {
 	URL        string `json:"url"`
 	CAFile     string `json:"ca_file,omitempty"`
 	ServerName string `json:"tls_server_name,omitempty"`
+	DialAddr   string `json:"dial_addr,omitempty"`
 	SecretsDir string `json:"secrets_dir,omitempty"`
 	Realm      string `json:"realm,omitempty"`
 }
@@ -111,10 +117,11 @@ func tlsConfig(caFile, serverName string) (*tls.Config, error) {
 
 // tokens hands out bearer tokens, a fresh one for an actor at least every 45 seconds (an approval needs a recent login: the core's window is five minutes).
 type tokens struct {
-	cfg TokenCfg
-	hc  *http.Client
-	mu  sync.Mutex
-	c   map[string]cached
+	cfg   TokenCfg
+	hc    *http.Client
+	mu    sync.Mutex
+	login sync.Mutex
+	c     map[string]cached
 }
 
 type cached struct {
@@ -127,10 +134,19 @@ func newTokens(cfg TokenCfg) (*tokens, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &tokens{cfg: cfg, c: map[string]cached{}, hc: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: tc, MaxIdleConnsPerHost: 8}}}, nil
+	return &tokens{cfg: cfg, c: map[string]cached{}, hc: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: tc, MaxIdleConnsPerHost: 8, DialContext: dialer(cfg.DialAddr)}}}, nil
 }
 
 func (t *tokens) bearer(actor string) (string, error) {
+	t.mu.Lock()
+	if c, ok := t.c[actor]; ok && time.Since(c.at) < 45*time.Second {
+		t.mu.Unlock()
+		return c.tok, nil
+	}
+	t.mu.Unlock()
+	// one login at a time per actor: sixteen callers that find the token stale at once make one login, not sixteen
+	t.login.Lock()
+	defer t.login.Unlock()
 	t.mu.Lock()
 	if c, ok := t.c[actor]; ok && time.Since(c.at) < 45*time.Second {
 		t.mu.Unlock()
@@ -194,14 +210,16 @@ func (t *tokens) fromKeycloak(user string) (string, error) {
 	if m == nil {
 		return "", fmt.Errorf("keycloak: no login form (HTTP %d)", resp.StatusCode)
 	}
-	resp, err = hc.PostForm(strings.ReplaceAll(string(m[1]), "&amp;", "&"), url.Values{"username": {user}, "password": {strings.TrimSpace(string(pw))}, "credentialId": {""}})
+	resp, err = hc.PostForm(html.UnescapeString(string(m[1])), url.Values{"username": {user}, "password": {strings.TrimSpace(string(pw))}, "credentialId": {""}})
 	if err != nil {
 		return "", err
 	}
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	loc, err := resp.Location()
 	if err != nil || loc.Query().Get("code") == "" {
-		return "", fmt.Errorf("keycloak: login did not redirect with a code (HTTP %d)", resp.StatusCode)
+		msg := regexp.MustCompile(`(?s)kc-feedback-text">(.*?)<`).FindSubmatch(body)
+		return "", fmt.Errorf("keycloak: login of %s did not redirect with a code (HTTP %d) %s", user, resp.StatusCode, msg)
 	}
 	resp, err = hc.PostForm(base+"token", url.Values{"grant_type": {"authorization_code"}, "client_id": {"qv-e2e"}, "code": {loc.Query().Get("code")}, "redirect_uri": {redirect}})
 	if err != nil {
@@ -216,4 +234,15 @@ func (t *tokens) fromKeycloak(user string) (string, error) {
 		return "", fmt.Errorf("keycloak: token: HTTP %d", resp.StatusCode)
 	}
 	return out.AccessToken, nil
+}
+
+// dialer connects to addr whatever address is asked for; empty: the ordinary dialer.
+func dialer(addr string) func(ctx context.Context, network, a string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if addr == "" {
+		return d.DialContext
+	}
+	return func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return d.DialContext(ctx, network, addr)
+	}
 }
