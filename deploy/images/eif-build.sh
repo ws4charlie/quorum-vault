@@ -14,10 +14,12 @@
 # give the same PCRs, whoever builds (shown by `eif-build.sh --repro`, and in docs/runbooks/nitro-first-run.md). The file times matter: PCR0 and PCR2 changed when
 # only SOURCE_DATE_EPOCH changed in the test, so the epoch is an input, recorded in build-info.json, and the layers' times are rewritten to it.
 #   --repro   build twice from scratch (no cache) and fail unless the PCRs are equal
+#   --probe   make the first-hardware probe image instead of a party: the same released image, entry point `mpc-party nitro-probe -config /etc/qv/config/probe.json`
+#             (config dir holds probe.json). Its PCRs are NOT the party's: its configuration differs. docs/runbooks/nitro-first-run.md says when to use it.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-party="" cfg="" out="" key="" cert="" epoch="" repro=0
+party="" cfg="" out="" key="" cert="" epoch="" repro=0 probe=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --party-image) party="$2"; shift 2 ;;
@@ -27,13 +29,15 @@ while [ $# -gt 0 ]; do
     --sign-cert) cert="$2"; shift 2 ;;
     --epoch) epoch="$2"; shift 2 ;;
     --repro) repro=1; shift ;;
+    --probe) probe=1; shift ;;
     *) echo "eif-build: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 die() { echo "eif-build: $*" >&2; exit 1; }
 [[ "$party" =~ ^[A-Za-z0-9./_:-]+@sha256:[0-9a-f]{64}$ ]] || die "--party-image must be REPOSITORY@sha256:<64 hex>: a tag names no content"
 [[ "$party" =~ @sha256:0{64}$ ]] && die "an all-zero digest is a placeholder"
-[ -d "$cfg" ] && [ -f "$cfg/party.json" ] || die "--config-dir must hold party.json"
+want_cfg=party.json; [ "$probe" = 1 ] && want_cfg=probe.json
+[ -d "$cfg" ] && [ -f "$cfg/$want_cfg" ] || die "--config-dir must hold $want_cfg"
 [ -n "$out" ] || die "--out is required"
 [ -z "$key$cert" ] || { [ -n "$key" ] && [ -n "$cert" ]; } || die "--sign-key and --sign-cert go together"
 : "${epoch:=$(git log -1 --format=%ct 2>/dev/null || echo 0)}"
@@ -48,6 +52,10 @@ docker buildx build --provenance=false --sbom=false --load -t "$builder" -f depl
 one() { # one <tag> <dir>
   local tag="$1" dir="$2" ctx; ctx="$(mktemp -d)"
   mkdir -p "$ctx/config"; cp -R "$cfg/." "$ctx/config/"; cp deploy/images/Dockerfile.eif "$ctx/Dockerfile"
+  if [ "$probe" = 1 ]; then
+    grep -v '^ENTRYPOINT' deploy/images/Dockerfile.eif > "$ctx/Dockerfile"
+    echo 'ENTRYPOINT ["/usr/local/bin/mpc-party", "nitro-probe", "-config", "/etc/qv/config/probe.json"]' >> "$ctx/Dockerfile"
+  fi
   docker buildx build --no-cache --provenance=false --sbom=false --build-arg "PARTY_IMAGE=$party" --build-arg "SOURCE_DATE_EPOCH=$epoch" \
     --output "type=docker,name=$tag,rewrite-timestamp=true" "$ctx" >/dev/null
   rm -rf "$ctx"

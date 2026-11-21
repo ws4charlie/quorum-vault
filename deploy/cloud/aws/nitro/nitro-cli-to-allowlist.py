@@ -5,7 +5,7 @@
 
 `nitro-cli build-enclave` prints (to stdout, after some progress lines) a JSON object:
   {"Measurements": {"HashAlgorithm": "Sha384 { ... }", "PCR0": "<96 hex>", "PCR1": "...", "PCR2": "...", "PCR8": "..."}}
-PCR8 is there only when the image was signed (--private-key and --signing-certificate). [AWS-DOC] https://docs.aws.amazon.com/enclaves/latest/user/cmd-nitro-build-enclave.html
+PCR8 is there only when the image was signed (--private-key and --signing-certificate). (AWS Nitro Enclaves user guide, page "nitro-cli build-enclave")
 The script prints one line, `qv-attest-broker allowlist add ... -measurement PCR0 -pcr 1=... -pcr 2=... [-pcr 8=...]`, and refuses anything that is not a
 clean Nitro measurement: a missing PCR0, a value that is not 96 hex characters, an all-zero value (a debug-mode build reports zeros).
 """

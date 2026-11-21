@@ -11,7 +11,7 @@ obvious slip.
 Rules (the broker's, as far as a static policy can follow them):
   - only this party's entries; an entry with status "revoked" removes every entry of the same PCR0;
   - an entry whose not_after has passed, or whose not_before has not come, is left out (a KMS key policy has no clock: the file is regenerated and applied to
-    follow time, where the broker follows it by itself; docs/limits.md says so);
+    follow time, where the broker follows it by itself; the limits page says so);
   - an entry without PCRs other than PCR0 is allowed and gives a policy on PCR0 alone, which is weaker than a Nitro entry with PCR1, PCR2 and PCR8: a warning is
     printed to stderr;
   - nothing active left is an error: a key policy with no PCR condition is never written.

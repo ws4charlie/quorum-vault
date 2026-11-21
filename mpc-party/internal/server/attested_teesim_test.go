@@ -33,7 +33,7 @@ type attRig struct {
 	*teetest.Rig
 	t     *testing.T
 	env   *testenv.Env
-	certs map[string]*server.Config // role -> a config that names the party's certificate files
+	certs map[string]*server.Config                   // role -> a config that names the party's certificate files
 	kms   func(role, pcr0 string) server.SealerConfig // when set, the parties are released by (a fake) KMS instead of the broker (attested_kms_teesim_test.go)
 }
 
