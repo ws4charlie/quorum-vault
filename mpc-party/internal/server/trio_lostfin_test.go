@@ -23,7 +23,18 @@ func tamperUntilLost(t *testing.T, tr *trio, job string, setup func(px *tamperPr
 			continue
 		}
 		if k, _ := server.KindOfStatus(err); k != pb.ErrorKind_ERROR_KIND_CRYPTOGRAPHIC {
-			return err
+			// A flipped byte can also be harmless to B, and then the dropped FIN was B's "ok": that is no lost verdict. Only a
+			// run in which B froze itself counts.
+			if k == pb.ErrorKind_ERROR_KIND_FROZEN {
+				return err
+			}
+			for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+				if tr.frozen(t, "B", "k") {
+					return err
+				}
+			}
+			px.set(0, -1)
+			continue
 		}
 		px.set(0, -1)
 		for _, role := range []string{"A", "B", "C"} {
