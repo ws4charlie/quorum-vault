@@ -8,7 +8,8 @@ cd "$QV_KIND_ROOT"
 rc=0; bad() { echo "FAIL: $*"; rc=1; }
 S="$WORK/secrets"
 trap 'pf_stop; kn "$NS_BIZ" delete pod qv-core-expired --wait=false >/dev/null 2>&1; kn "$NS_BIZ" delete secret qv-core-tls-expired >/dev/null 2>&1' EXIT
-core_pod() { kn "$NS_BIZ" get pod -l app.kubernetes.io/component=core --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}'; }
+# the one core pod that is not being deleted: a pod of the previous ReplicaSet can still be terminating (and Running) right after the upgrade case
+core_pod() { for _ in $(seq 60); do n="$(kn "$NS_BIZ" get pod -l app.kubernetes.io/component=core -o json | jq -r '[.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")] | if length == 1 then .[0].metadata.name else empty end')"; [ -n "$n" ] && { echo "$n"; return; }; sleep 2; done; }
 serial() { # the serial of the certificate the core serves now
   pf_start "$NS_BIZ" "pod/$1" 8443 || return 1
   echo | openssl s_client -connect "127.0.0.1:$PF_PORT" -servername qv-core.qv.svc -CAfile "$S/ca-business.crt" -verify_return_error 2>/dev/null | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2

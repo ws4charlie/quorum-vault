@@ -3,10 +3,12 @@
 # real API server (server-side dry run) and must be refused WITH the policy's own message, so a refusal from RBAC or a typo does not pass; each control is admitted.
 # Production-only rules (digest, signature by Kyverno, development switches, the ConfigMap writer list) need production mode, which needs Kyverno: not here (README "Not done").
 . "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"; set +e
-rc=0; bad() { echo "FAIL: $*"; rc=1; }
+# a failure is a file, not a variable: the deny/admit checks run on the right-hand side of pipes, in subshells, where a variable set by bad() is lost
+FAILF="$(mktemp)"; rm -f "$FAILF"; bad() { echo "FAIL: $*"; : > "$FAILF"; }
 VAP=qv-ptest-vap      # labelled for the policies only, NOT for Pod Security: otherwise Pod Security refuses a privileged pod first and the policy's own message is never seen
-trap 'k delete namespace "$VAP" --wait=false >/dev/null 2>&1' EXIT
+trap 'k delete namespace "$VAP" --wait=false >/dev/null 2>&1; rm -f "$FAILF"' EXIT
 k get namespace "$NS_PTEST" >/dev/null 2>&1 || { echo "FAIL: $NS_PTEST does not exist (ci/kind/policy.sh)"; exit 1; }
+k delete namespace "$VAP" --ignore-not-found --wait=true --timeout=120s >/dev/null 2>&1  # one still terminating from an earlier run refuses every create
 k create namespace "$VAP" --dry-run=client -o yaml | k apply -f - >/dev/null
 k label namespace "$VAP" quorumvault.io/policy=enforced --overwrite >/dev/null
 IMG=qv-image/qv-core:local
@@ -44,6 +46,12 @@ Y
 admit() { local what="$1" out; out="$(k apply --dry-run=server -f - 2>&1)" || bad "$what: refused: $out"; }
 deny() { local want="$1" what="$2" out; out="$(k apply --dry-run=server -f - 2>&1)" && { bad "$what: ADMITTED"; return; }
   grep -qF -- "$want" <<< "$out" && echo "refused: $what" || bad "$what: refused for another reason: $out"; }
+
+# negative control: the helpers must be able to fail. A manifest that IS admitted, given to deny (through a pipe, as the real checks are), must register a failure, and a refused one given to admit too.
+NC="$FAILF"; FAILF="$(mktemp)"; rm -f "$FAILF"
+good_pod "$NS_PTEST" nc | deny "no such message" "negative control (admitted pod passed to deny)" >/dev/null
+[ -e "$FAILF" ] || { FAILF="$NC"; bad "negative control: deny did not fail on an admitted manifest"; }
+rm -f "$FAILF"; FAILF="$NC"
 
 # the API server learns the new namespace label a moment later: wait until a pod that must be refused is refused
 for i in $(seq 30); do good_pod "$VAP" probe | sed 's|^spec:|spec:\n  hostNetwork: true|' | k apply --dry-run=server -f - >/dev/null 2>&1 || break; sleep 1; done
@@ -95,14 +103,23 @@ Y
 
 # exec, attach, port-forward and debug into a pod: refused for an identity outside the break-glass group (here: an administrator by group, so RBAC allows it and only the policy says no),
 # not refused for a member. The pod is a real one (the image is not a shell; the verdict is the admission's, a later "container not found" is the kubelet's).
+k -n "$NS_PTEST" delete pod victim --grace-period=0 --force --wait=true >/dev/null 2>&1 # a leftover from an earlier run
 good_pod "$NS_PTEST" victim | sed "s|image: .*|image: qv-image/pause:local|" | k apply -f - >/dev/null
 kn "$NS_PTEST" wait --for=condition=Ready pod/victim --timeout=90s >/dev/null || bad "the victim pod is not running"
 GROUP=qv:break-glass; ADMIN=(--as=lane-tester --as-group=system:masters); MEMBER=("${ADMIN[@]}" "--as-group=$GROUP")
 MSG="for the break-glass group only"
+# refused: the policy's message. reached: evidence the call got past admission to the pod (the pause image has no `true`, so a real exec ends in the runtime's own "not found").
 out="$(k "${ADMIN[@]}" -n "$NS_PTEST" exec victim -- true 2>&1)";            grep -qF "$MSG" <<< "$out" && echo "refused: exec" || bad "exec by a non-member: $out"
-out="$(k "${MEMBER[@]}" -n "$NS_PTEST" exec victim -- true 2>&1)";           grep -qF "$MSG" <<< "$out" && bad "exec by a member refused by the policy: $out" || echo "admitted: exec by a member (later: ${out:0:70})"
-out="$(timeout 20 kubectl --context "$CTX" "${ADMIN[@]}" -n "$NS_PTEST" port-forward victim 18080:8080 2>&1)"; grep -qF "$MSG" <<< "$out" && echo "refused: port-forward" || bad "port-forward by a non-member: $out"
-out="$(timeout 20 kubectl --context "$CTX" "${MEMBER[@]}" -n "$NS_PTEST" port-forward victim 18080:8080 2>&1)"; grep -qF "$MSG" <<< "$out" && bad "port-forward by a member refused by the policy: $out" || echo "admitted: port-forward by a member"
+out="$(k "${MEMBER[@]}" -n "$NS_PTEST" exec victim -- true 2>&1)"
+if grep -qE 'executable file not found|exec: "true"|OCI runtime exec' <<< "$out"; then echo "admitted: exec by a member (the runtime answered)"; else bad "exec by a member did not reach the pod: $out"; fi
+# port-forward: run in the background on a free local port (no GNU timeout on macOS); the verdict is the policy's message or the ready line
+pfwd() { local f; f="$(mktemp)"; kubectl --context "$CTX" "$@" -n "$NS_PTEST" port-forward victim :8080 > "$f" 2>&1 & local pid=$!
+  for _ in $(seq 40); do grep -qE "Forwarding from|$MSG|rror" "$f" && break; sleep 0.5; done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; cat "$f"; rm -f "$f"; }
+out="$(pfwd "${ADMIN[@]}")"; grep -qF "$MSG" <<< "$out" && echo "refused: port-forward" || bad "port-forward by a non-member: $out"
+out="$(pfwd "${MEMBER[@]}")"; grep -qF "Forwarding from" <<< "$out" && ! grep -qF "$MSG" <<< "$out" && echo "admitted: port-forward by a member (forwarding)" || bad "port-forward by a member did not forward: $out"
 out="$(k "${ADMIN[@]}" -n "$NS_PTEST" debug victim --image=qv-image/pause:local --profile=restricted --attach=false -- true 2>&1)";  grep -qF "$MSG" <<< "$out" && echo "refused: debug (ephemeral container)" || bad "debug by a non-member: $out"
-k -n "$NS_PTEST" delete pod victim --wait=false >/dev/null 2>&1
-exit $rc
+out="$(k "${MEMBER[@]}" -n "$NS_PTEST" debug victim --image=qv-image/pause:local --profile=restricted --attach=false -- true 2>&1)"
+if grep -qF "$MSG" <<< "$out"; then bad "debug by a member refused by the policy: $out"; elif [ "$(kn "$NS_PTEST" get pod victim -o json | jq '.spec.ephemeralContainers // [] | length')" -ge 1 ]; then echo "admitted: debug by a member (ephemeral container added)"; else bad "debug by a member added no ephemeral container: $out"; fi
+k -n "$NS_PTEST" delete pod victim --grace-period=0 --force --wait=true >/dev/null 2>&1
+if [ -e "$FAILF" ]; then echo "admission: FAILED"; exit 1; fi; echo "admission: checks ok"; exit 0
