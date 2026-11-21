@@ -1,0 +1,11 @@
+# The tool that makes an EIF: nitro-cli, pinned. It needs Linux and a Docker socket; it needs NO enclave-capable host and no AWS account:
+# `nitro-cli build-enclave` "can build enclave image files using the Nitro CLI on any Linux environment, including outside of AWS"
+# (https://docs.aws.amazon.com/enclaves/latest/user/cmd-nitro-build-enclave.html, read 2026-11-20; verified: it ran in this container on a laptop VM).
+# PCR1 is the hash of the kernel and boot blobs that ship in these packages (the -devel one holds the blobs), so the package version is part of the measurement: pinned, and the build fails
+# (instead of quietly measuring another kernel) when the repository no longer has it. eif-build.sh records the blobs' hashes next to the PCRs.
+# The architecture of the builder is the architecture of the EIF: build for the instance type that will run it (x86_64 or arm64).
+ARG AL2023=amazonlinux:2023@sha256:9cf762f5099b606bcd851391317af7cd75b11363c4816ebcb5e91292dd5736a7
+FROM ${AL2023}
+ARG NITRO_CLI_VERSION=1.5.0
+RUN dnf install -y "aws-nitro-enclaves-cli-${NITRO_CLI_VERSION}" "aws-nitro-enclaves-cli-devel-${NITRO_CLI_VERSION}" && dnf clean all \
+ && nitro-cli --version | grep -q "${NITRO_CLI_VERSION}"
