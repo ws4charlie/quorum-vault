@@ -7,9 +7,9 @@ CREATE TABLE sweep_holds (
     asset       text    NOT NULL,
     amount      numeric(78,0) NOT NULL,           -- unswept credited funds, in the asset's base units
     value       numeric(78,0) NOT NULL,           -- the same in the rule's common unit (amount x price)
-    fee         numeric(78,0),                    -- the fee estimate of the sweep, same unit; NULL when the amount was under min_sweep and no estimate was asked
-    threshold   numeric(78,0) NOT NULL,           -- max(min_sweep, k x fee)
-    by_fee      boolean NOT NULL,                 -- true when the value reached min_sweep, so only the fee keeps it (it clears when the fee falls); false when it is under min_sweep (it clears only when more arrives)
+    fee         numeric(78,0),                    -- the fee estimate of the sweep, same unit; NULL when none was asked (under min_sweep) or the chain gave none (fee_cap)
+    threshold   numeric(78,0),                    -- max(min_sweep, k x fee); NULL for fee_cap
+    cause       text NOT NULL CHECK (cause IN ('fee', 'min_sweep', 'fee_cap')),  -- fee: reached min_sweep, the fee alone holds it; min_sweep: under the floor; fee_cap: the chain offers no sweep of it now (Bitcoin: the fee rate is over the cap, or the outputs cost more than they carry)
     since       timestamptz NOT NULL DEFAULT now(),  -- the first pass that held it, kept while it stays held
     updated_at  timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (chain, address, asset)

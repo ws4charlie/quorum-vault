@@ -186,7 +186,7 @@ func TestSmallDepositHeldAtHighFeeThenSwept(t *testing.T) {
 		}
 		return held != nil
 	})
-	if held["by_fee"] != true || held["fee"] == nil || held["threshold"] == nil || held["value"] != "50000000000000000" {
+	if held["cause"] != custody.CauseFee || held["fee"] == nil || held["threshold"] == nil || held["value"] != "50000000000000000" {
 		t.Fatalf("held state lacks the value, the fee or the line: %v", held)
 	}
 	fee, _ := new(big.Int).SetString(held["fee"].(string), 10)

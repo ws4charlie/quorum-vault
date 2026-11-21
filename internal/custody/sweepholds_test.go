@@ -68,7 +68,7 @@ func TestHeldBelowThresholdClearsWhenTheFeeFalls(t *testing.T) {
 		t.Fatalf("swept at a fee that makes it a loss: %v", got)
 	}
 	d := unsweptOf(t, s, "0xADDR")
-	if d == nil || d.Reason != ReasonBelowThreshold || d.Value != "1500" || d.Fee != "100" || d.Threshold != "2000" || d.ByFee == nil || !*d.ByFee || d.Since == nil {
+	if d == nil || d.Reason != ReasonBelowThreshold || d.Value != "1500" || d.Fee != "100" || d.Threshold != "2000" || d.Cause != CauseFee || d.Since == nil {
 		t.Fatalf("held state: %+v", d)
 	}
 	// The planner looks again at every pass: the fee rises, the record follows.
@@ -115,7 +115,7 @@ func TestHeldUnderMinSweepAndPrune(t *testing.T) {
 	credit(t, s, "d1", "0xDUST", "ETH", 10)
 	planOnce(t, s)
 	d := unsweptOf(t, s, "0xDUST")
-	if d == nil || d.Reason != ReasonBelowThreshold || d.ByFee == nil || *d.ByFee || d.Fee != "" || d.Threshold != "1000" {
+	if d == nil || d.Reason != ReasonBelowThreshold || d.Cause != CauseMinSweep || d.Fee != "" || d.Threshold != "1000" {
 		t.Fatalf("dust: %+v", d)
 	}
 	var buf bytes.Buffer
@@ -194,5 +194,99 @@ func TestUnsweptReasonsAreDistinct(t *testing.T) {
 	}
 	if counts[ReasonParked] != 1 || counts[ReasonSweepPending] != 1 {
 		t.Fatalf("groups: %+v", rep.Groups)
+	}
+}
+
+// btcLike is a chain that says what a sweep could take, and leaves some addresses out (Bitcoin: the fee rate is over a cap).
+type btcLike struct {
+	*feeChain
+	cands []chain.SweepCandidate
+}
+
+func (b *btcLike) SweepCandidates(ctx context.Context) ([]chain.SweepCandidate, error) {
+	return b.cands, nil
+}
+
+// Whatever the planner did last, every address with credited, unswept funds is in the operator's list exactly once: held, excluded by the chain (the
+// Bitcoin candidates), in a sweep (a Solana batch lists its addresses in sweep_items), failed, parked, or not yet looked at.
+func TestEveryCreditedAddressIsListedOnceWithOneReason(t *testing.T) {
+	ctx := context.Background()
+	s, fc := newHoldSvc(t, 100)
+	b := &btcLike{feeChain: fc}
+	s.Chain = b
+	addrs := map[string]int64{"0xHELD": 1500, "0xBIG": 5000, "0xCAPPED": 5000, "0xBATCH1": 5000, "0xBATCH2": 5000, "0xPARK": 5000, "0xNEW": 5000}
+	i := 0
+	for a, v := range addrs {
+		i++
+		credit(t, s, "d"+a, a, "ETH", v)
+	}
+	// the chain offers everything but the capped address, and 0xNEW only from the second pass on
+	offer := func(withNew bool) {
+		b.cands = nil
+		for a, v := range addrs {
+			if a == "0xCAPPED" || (a == "0xNEW" && !withNew) || a == "0xBATCH1" || a == "0xBATCH2" {
+				continue
+			}
+			b.cands = append(b.cands, chain.SweepCandidate{Address: a, Asset: "ETH", Amount: big.NewInt(v)})
+		}
+	}
+	check := func(when string) {
+		t.Helper()
+		rep, err := s.UnsweptDeposits(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]int{}
+		for _, it := range rep.Items {
+			seen[it.Address]++
+			if it.Reason == "" {
+				t.Fatalf("%s: %s has no reason", when, it.Address)
+			}
+		}
+		for a := range addrs {
+			if seen[a] != 1 {
+				t.Fatalf("%s: %s listed %d times: %+v", when, a, seen[a], rep.Items)
+			}
+		}
+	}
+	offer(false)
+	check("before any pass")
+	planOnce(t, s)
+	check("after the first pass")
+	if d := unsweptOf(t, s, "0xCAPPED"); d.Reason != ReasonBelowThreshold || d.Cause != CauseFeeCap || d.Value != "5000" {
+		t.Fatalf("excluded by the chain: %+v", d)
+	}
+	// a Solana batch: two addresses in one sweep, the second only in sweep_items; the batch fails
+	if _, err := s.Pool.Exec(ctx, `INSERT INTO sweeps (id, chain, asset, from_address, to_partition_id, amount, status, failure_reason) VALUES ('sw-batch',$1,'ETH','0xBATCH1',$2,10000,'failed','refused')`,
+		testChain, s.Cfg.SinkPartition("ETH")); err != nil {
+		t.Fatal(err)
+	}
+	for n, a := range []string{"0xBATCH1", "0xBATCH2"} {
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO sweep_items (sweep_id, address, amount, close_account, ord) VALUES ('sw-batch',$1,5000,false,$2)`, a, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check("a failed batch")
+	if d := unsweptOf(t, s, "0xBATCH2"); d.Reason != ReasonSweepFailed || d.SweepID != "sw-batch" {
+		t.Fatalf("second address of a failed batch: %+v", d)
+	}
+	offer(true)
+	planOnce(t, s)
+	check("after the second pass")
+	if _, err := s.Pool.Exec(ctx, `UPDATE sweeps SET failure_reason='parked: needs a person' WHERE from_address='0xBIG' AND status<>'failed'`); err != nil {
+		t.Fatal(err)
+	}
+	check("with a parked sweep")
+	// the fee falls: nothing falls out of the list on the way
+	fc.sweepFee = big.NewInt(1)
+	planOnce(t, s)
+	check("after the fee fell")
+	// the capped address is in the metrics too, under its cause
+	var m SweepHoldMetrics
+	m.Use(s.Pool)
+	var buf bytes.Buffer
+	m.Write(&buf)
+	if !strings.Contains(buf.String(), `cause="fee_cap"} 1`) {
+		t.Fatalf("metrics:\n%s", buf.String())
 	}
 }

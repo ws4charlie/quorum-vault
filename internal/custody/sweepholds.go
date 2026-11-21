@@ -23,22 +23,32 @@ const (
 	ReasonSweepPending   = "sweep_pending"         // a sweep is planned, signing or broadcast
 	ReasonSweepFailed    = "sweep_failed"          // the last sweep failed; the planner tries again after its backoff
 	ReasonParked         = "parked"                // a sweep needs a person
+	ReasonAwaitingPlan   = "awaiting_plan"         // worth sweeping, no sweep yet: credited since the last planner pass, or waiting for room (open-sweep limit, nonce accounts)
 )
 
-// holdSweep records that the address was left alone at this pass. fee is nil when the funds were under min_sweep and no estimate was asked.
-func (s *Service) holdSweep(ctx context.Context, addr, asset string, amount, value, fee, threshold *big.Int) error {
-	var fs *string
-	if fee != nil {
-		v := fee.String()
-		fs = &v
+// The causes of a hold.
+const (
+	CauseFee      = "fee"       // the value reached min_sweep; the fee alone holds it, and it clears when the fee falls
+	CauseMinSweep = "min_sweep" // under the floor; it clears only when more arrives
+	CauseFeeCap   = "fee_cap"   // the chain offers no sweep of it now (Bitcoin: the fee rate is over a cap, or its outputs cost more to spend than they carry); it clears when the fee falls
+)
+
+// holdSweep records that the address was left alone at this pass. fee is nil when no estimate was asked or given, threshold nil for the fee_cap cause.
+func (s *Service) holdSweep(ctx context.Context, addr, asset string, amount, value, fee, threshold *big.Int, cause string) error {
+	str := func(v *big.Int) *string {
+		if v == nil {
+			return nil
+		}
+		x := v.String()
+		return &x
 	}
-	_, err := s.Pool.Exec(ctx, `INSERT INTO sweep_holds (chain, address, asset, amount, value, fee, threshold, by_fee)
+	_, err := s.Pool.Exec(ctx, `INSERT INTO sweep_holds (chain, address, asset, amount, value, fee, threshold, cause)
 		VALUES ($1,$2,$3,$4::numeric,$5::numeric,$6::numeric,$7::numeric,$8)
 		ON CONFLICT (chain, address, asset) DO UPDATE SET amount=EXCLUDED.amount, value=EXCLUDED.value, fee=EXCLUDED.fee, threshold=EXCLUDED.threshold,
-			by_fee=EXCLUDED.by_fee, updated_at=now()
-			WHERE (sweep_holds.amount, sweep_holds.value, sweep_holds.fee, sweep_holds.threshold, sweep_holds.by_fee) IS DISTINCT FROM (EXCLUDED.amount, EXCLUDED.value, EXCLUDED.fee, EXCLUDED.threshold, EXCLUDED.by_fee)
+			cause=EXCLUDED.cause, updated_at=now()
+			WHERE (sweep_holds.amount, sweep_holds.value, sweep_holds.fee, sweep_holds.threshold, sweep_holds.cause) IS DISTINCT FROM (EXCLUDED.amount, EXCLUDED.value, EXCLUDED.fee, EXCLUDED.threshold, EXCLUDED.cause)
 				OR sweep_holds.updated_at < now() - interval '1 minute'`,
-		s.Cfg.Chain, addr, asset, amount.String(), value.String(), fs, threshold.String(), fee != nil)
+		s.Cfg.Chain, addr, asset, amount.String(), value.String(), str(fee), str(threshold), cause)
 	return err
 }
 
@@ -46,6 +56,36 @@ func (s *Service) holdSweep(ctx context.Context, addr, asset string, amount, val
 func (s *Service) releaseHold(ctx context.Context, addr, asset string) error {
 	_, err := s.Pool.Exec(ctx, `DELETE FROM sweep_holds WHERE chain=$1 AND address=$2 AND asset=$3`, s.Cfg.Chain, addr, asset)
 	return err
+}
+
+// holdExcluded records the addresses that hold credited funds but that the chain did not offer as sweep candidates and that have no sweep open.
+func (s *Service) holdExcluded(ctx context.Context, ledger, offered map[[2]string]*big.Int) error {
+	busy := map[[2]string]bool{}
+	rows, err := s.Pool.Query(ctx, `SELECT from_address, asset FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed')`, s.Cfg.Chain)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var a, as string
+		if err := rows.Scan(&a, &as); err != nil {
+			rows.Close()
+			return err
+		}
+		busy[[2]string{a, as}] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for k, v := range ledger {
+		if v.Sign() <= 0 || busy[k] || offered[k] != nil {
+			continue
+		}
+		if err := s.holdSweep(ctx, k[0], k[1], v, s.valueWei(k[1], v), nil, nil, CauseFeeCap); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pruneHolds removes the records of addresses that no longer have unswept funds (swept, or emptied).
@@ -71,8 +111,8 @@ type UnsweptDeposit struct {
 	Value     string     `json:"value,omitempty"`
 	Fee       string     `json:"fee,omitempty"`
 	Threshold string     `json:"threshold,omitempty"`
-	ByFee     *bool      `json:"by_fee,omitempty"` // true: the fee alone holds it; false: it is under min_sweep
-	Since     *time.Time `json:"since,omitempty"`  // below the threshold: held since this pass
+	Cause     string     `json:"cause,omitempty"` // fee, min_sweep or fee_cap (CauseFee ...)
+	Since     *time.Time `json:"since,omitempty"` // below the threshold: held since this pass
 	SweepID   string     `json:"sweep_id,omitempty"`
 	Detail    string     `json:"detail,omitempty"` // sweep status or failure reason
 }
@@ -94,8 +134,8 @@ type UnsweptReport struct {
 
 const unsweptListLimit = 200
 
-// UnsweptDeposits says, for every deposit address that still holds credited funds and that the sweeper has looked at, which of the four reasons applies.
-// An address not yet looked at (credited since the last pass) is not listed: it is neither waiting nor stuck, only new.
+// UnsweptDeposits says, for every deposit address that still holds credited funds and that the sweeper has looked at, which reason applies.
+// Every address with credited, unswept funds is listed with exactly one reason: one nothing else explains is awaiting_plan (new, or waiting for room).
 func (s *Service) UnsweptDeposits(ctx context.Context) (UnsweptReport, error) {
 	rep := UnsweptReport{Groups: []UnsweptGroup{}, Items: []UnsweptDeposit{}}
 	un, err := s.unswept(ctx)
@@ -136,8 +176,11 @@ func (s *Service) UnsweptDeposits(ctx context.Context) (UnsweptReport, error) {
 		at         time.Time
 	}
 	last := map[key]failed{}
-	frows, err := s.Pool.Query(ctx, `SELECT DISTINCT ON (from_address, asset) from_address, asset, id, status, COALESCE(failure_reason,''), updated_at FROM sweeps WHERE chain=$1
-		ORDER BY from_address, asset, created_at DESC`, s.Cfg.Chain)
+	// A Solana batch keeps only its first address in sweeps.from_address; the others are in sweep_items.
+	frows, err := s.Pool.Query(ctx, `SELECT DISTINCT ON (addr, asset) addr, asset, id, status, reason, updated_at FROM (
+			SELECT from_address AS addr, asset, id, status, COALESCE(failure_reason,'') AS reason, updated_at, created_at FROM sweeps WHERE chain=$1
+			UNION ALL SELECT i.address, w.asset, w.id, w.status, COALESCE(w.failure_reason,''), w.updated_at, w.created_at FROM sweep_items i JOIN sweeps w ON w.id=i.sweep_id WHERE w.chain=$1
+		) x ORDER BY addr, asset, created_at DESC`, s.Cfg.Chain)
 	if err != nil {
 		return rep, err
 	}
@@ -158,19 +201,18 @@ func (s *Service) UnsweptDeposits(ctx context.Context) (UnsweptReport, error) {
 	}
 	holds := map[key]UnsweptDeposit{}
 	var heldAt = map[key]time.Time{}
-	hrows, err := s.Pool.Query(ctx, `SELECT address, asset, value::text, COALESCE(fee::text,''), threshold::text, by_fee, since, updated_at FROM sweep_holds WHERE chain=$1`, s.Cfg.Chain)
+	hrows, err := s.Pool.Query(ctx, `SELECT address, asset, value::text, COALESCE(fee::text,''), COALESCE(threshold::text,''), cause, since, updated_at FROM sweep_holds WHERE chain=$1`, s.Cfg.Chain)
 	if err != nil {
 		return rep, err
 	}
 	for hrows.Next() {
 		var d UnsweptDeposit
-		var by bool
 		var since, upd time.Time
-		if err := hrows.Scan(&d.Address, &d.Asset, &d.Value, &d.Fee, &d.Threshold, &by, &since, &upd); err != nil {
+		if err := hrows.Scan(&d.Address, &d.Asset, &d.Value, &d.Fee, &d.Threshold, &d.Cause, &since, &upd); err != nil {
 			hrows.Close()
 			return rep, err
 		}
-		d.Reason, d.ByFee, d.Since = ReasonBelowThreshold, &by, &since
+		d.Reason, d.Since = ReasonBelowThreshold, &since
 		holds[key{d.Address, d.Asset}], heldAt[key{d.Address, d.Asset}] = d, upd
 	}
 	hrows.Close()
@@ -189,6 +231,10 @@ func (s *Service) UnsweptDeposits(ctx context.Context) (UnsweptReport, error) {
 			items[k] = &h
 		case wasFailed:
 			items[k] = &UnsweptDeposit{Address: k[0], Asset: k[1], Reason: ReasonSweepFailed, Amount: v.String(), SweepID: f.id, Detail: f.reason}
+		default:
+			// Nothing above applies: the address is worth sweeping (or not yet looked at) and no sweep exists. It is listed all the same: credited funds
+			// never fall out of this report, whatever the planner did last.
+			items[k] = &UnsweptDeposit{Address: k[0], Asset: k[1], Reason: ReasonAwaitingPlan, Amount: v.String()}
 		}
 	}
 	keys := make([]key, 0, len(items))
@@ -250,7 +296,7 @@ func (m *SweepHoldMetrics) Write(w io.Writer) {
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		rows, err := pool.Query(ctx, `SELECT chain, asset, CASE WHEN by_fee THEN 'fee' ELSE 'min_sweep' END, count(*), COALESCE(sum(amount),0)::text,
+		rows, err := pool.Query(ctx, `SELECT chain, asset, cause, count(*), COALESCE(sum(amount),0)::text,
 			COALESCE(max(extract(epoch FROM now() - since)),0)::bigint FROM sweep_holds GROUP BY 1,2,3 ORDER BY 1,2,3`)
 		if err != nil {
 			fmt.Fprint(w, "# HELP qv_sweep_held_metrics_error 1 when the held-deposit metrics could not be read from the database.\n# TYPE qv_sweep_held_metrics_error gauge\nqv_sweep_held_metrics_error 1\n")

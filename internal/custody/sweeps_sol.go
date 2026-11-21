@@ -113,7 +113,7 @@ func (s *Service) planSweepsSOL(ctx context.Context, log *slog.Logger) ([]Sweep,
 		amt := un[k]
 		value := s.valueWei(asset, amt)
 		if value.Cmp(c.MinSweepWei) < 0 {
-			if err := s.holdSweep(ctx, addr, asset, amt, value, nil, c.MinSweepWei); err != nil {
+			if err := s.holdSweep(ctx, addr, asset, amt, value, nil, c.MinSweepWei, CauseMinSweep); err != nil {
 				return nil, err
 			}
 			continue
@@ -133,7 +133,7 @@ func (s *Service) planSweepsSOL(ctx context.Context, log *slog.Logger) ([]Sweep,
 			need = c.MinSweepWei
 		}
 		if value.Cmp(need) < 0 {
-			if err := s.holdSweep(ctx, addr, asset, amt, value, fee, need); err != nil {
+			if err := s.holdSweep(ctx, addr, asset, amt, value, fee, need, CauseFee); err != nil {
 				return nil, err
 			}
 			continue
