@@ -58,6 +58,8 @@ coordinator (B cannot reach A, C reaches nobody), it learns it at its next conta
 `FROZEN`, the one that hears it freezes too, and A's reconciliation carries the flag, so after A restarts or reconnects all three
 are frozen. Check `Health` on all three parties (`frozen`) before and after.
 
+**A verdict that did not arrive.** When a signing session breaks after signing messages were exchanged (not before: an ordinary outage starts nothing), the coordinator asks its peer once, within 2 s, whether the keyset is frozen there. If it is, the coordinator freezes too and answers `FROZEN` (not retryable), not `TRANSPORT`. If the peer cannot be asked, the coordinator stays unfrozen, answers `TRANSPORT` and logs `the peer's freeze state is unknown`: cutting the network never freezes a keyset. What stays open: the freeze notices are best effort, so if the verdict **and** the notice to the third member are both lost and the peer cannot be asked, the coordinator and the third member can still sign together until one of them next meets a frozen member. After any `TRANSPORT` failure of a 2-of-3 signing that follows a `keyset frozen` alert on another party, check `Health` on all three.
+
 Log lines: `ALERT keyset frozen after a cryptographic failure` (`scheme: ecdsa-2of3`, `op`, `job_id`, `session_peer`),
 `ALERT keyset frozen on notice from another member`, `ALERT keyset frozen: another member holds it frozen`.
 

@@ -65,6 +65,7 @@ func startLink(t *testing.T, targetAddr, targetPin, clientPin string, proxyCert 
 	t.Cleanup(func() { conn.Close() })
 	p := &tamperProxy{client: pb.NewPeerClient(conn)}
 	p.n.Store(-1)
+	p.refuseFrom.Store(-1)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
