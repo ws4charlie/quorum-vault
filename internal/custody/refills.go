@@ -253,6 +253,12 @@ func (s *Service) ExportRefill(ctx context.Context, id string) (coldsign.Request
 	if r.Status != RefillRequested {
 		return coldsign.RequestFile{}, fmt.Errorf("%w: refill %s is %s; only a request that has not been signed can be exported again", ErrInvalid, id, r.Status)
 	}
+	if r.Kind == coldsign.KindColdMove && r.Request != nil {
+		// An open cold-to-cold move keeps the request it was exported with: custodians may have signed it already (a ceremony takes hours and people), and
+		// a rebuilt request has another hash and, on a changed fee, another amount at the same nonce, which the offline record refuses. RebuildColdMove is
+		// the explicit, audited way to start again.
+		return r.Request.File(), nil
+	}
 	nonce, tip, maxFee, err := rc.ColdTxParams(ctx, common.HexToAddress(r.ColdAddress))
 	if err != nil {
 		return coldsign.RequestFile{}, err
@@ -764,6 +770,10 @@ func (s *Service) ExportBTCRefill(ctx context.Context, id string) (coldsign.BTCR
 		if cur.Kind == coldsign.KindColdMove && cur.Status == RefillRequested {
 			// A cold-to-cold move: every available output of the retiring cold address into one output at the new one. It has no change, so it is never
 			// fee-bumped: a move that does not confirm waits, and a new request is built only if it was never signed.
+			if cur.BTC != nil { // see ExportRefill: the same request, the same hash, until it is imported or rebuilt on purpose
+				out = cur.BTC.File()
+				return nil
+			}
 			cm, ok := s.Chain.(chain.ColdMover)
 			if !ok {
 				return fmt.Errorf("%w: this chain cell cannot move a cold address", ErrInvalid)

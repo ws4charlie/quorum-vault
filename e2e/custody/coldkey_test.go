@@ -31,6 +31,24 @@ func (s *system) coldMoveStep(kit, newKit *coldKit, name string, wantAsset strin
 		s.t.Fatalf("%s: second ask: %d %v", name, code2, out2)
 	}
 	rf := s.exportRefill(id)
+	// A second export of an open move is the same request, the same hash: a stray re-export cannot strand a ceremony. A rebuild needs a reason and the
+	// offline confirmation.
+	if again := s.exportRefill(id); again.RequestHash != rf.RequestHash {
+		s.t.Fatalf("%s: a second export replaced the request (%s, then %s)", name, rf.RequestHash, again.RequestHash)
+	}
+	if code, out := s.call("POST", "/v2/refills/"+id+"/rebuild", map[string]string{"X-Actor": "ops"}, map[string]any{"reason": "test"}); code != 400 {
+		s.t.Fatalf("%s: a rebuild without the offline confirmation answered %d %v", name, code, out)
+	}
+	if name == "mv-usdt" { // the explicit, audited way to start again: a new revision with a new hash
+		if code, out := s.call("POST", "/v2/refills/"+id+"/rebuild", map[string]string{"X-Actor": "ops"}, map[string]any{"reason": "test: fees moved", "offline_record_cleared": true}); code != 200 {
+			s.t.Fatalf("%s: rebuild: %d %v", name, code, out)
+		}
+		next := s.exportRefill(id)
+		if next.RequestHash == rf.RequestHash || next.Request.Revision != rf.Request.Revision+1 {
+			s.t.Fatalf("%s: the rebuilt request is %+v after %+v", name, next.Request, rf.Request)
+		}
+		rf = next
+	}
 	if rf.Request.Kind != coldsign.KindColdMove || rf.Request.To != newKit.addr.Hex() || rf.Request.From != kit.addr.Hex() {
 		s.t.Fatalf("%s: request %+v", name, rf.Request)
 	}

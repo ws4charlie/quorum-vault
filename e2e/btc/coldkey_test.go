@@ -92,6 +92,12 @@ func (s *system) coldMoveRound(old, nw *coldKit, name string) coldsign.BTCReques
 	req := s.exportRefill(id, name)
 	var rf coldsign.BTCRequestFile
 	b, _ := os.ReadFile(req)
+	if b2, _ := os.ReadFile(s.exportRefill(id, name+"-again")); string(b2) != string(b) {
+		s.t.Fatalf("%s: a second export replaced the request", name)
+	}
+	if code, out := s.call("POST", "/v2/refills/"+id+"/rebuild", map[string]any{"reason": "test"}); code != 400 {
+		s.t.Fatalf("%s: a rebuild without the offline confirmation answered %d %v", name, code, out)
+	}
 	if err := json.Unmarshal(b, &rf); err != nil {
 		s.t.Fatal(err)
 	}

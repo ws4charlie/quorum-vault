@@ -215,8 +215,12 @@ func (r SOLRequest) Message() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if amount.Sign() == 0 || !amount.IsUint64() {
+	closeOnly := r.Kind == KindSOLColdMove && r.Mint != "" && r.CloseSource && amount.Sign() == 0 // an empty token account closed for its rent
+	if (amount.Sign() == 0 && !closeOnly) || !amount.IsUint64() {
 		return nil, errors.New("amount is zero or above 2^64-1")
+	}
+	if closeOnly && r.CreateDestAccount {
+		return nil, errors.New("closing an empty token account opens no account")
 	}
 	if r.ComputeUnitLimit == 0 {
 		return nil, errors.New("compute unit limit is zero")
@@ -249,7 +253,9 @@ func (r SOLRequest) Message() ([]byte, error) {
 		if r.Decimals < 0 || r.Decimals > 18 {
 			return nil, errors.New("decimals out of range")
 		}
-		ixs = append(ixs, solmsg.CheckedTransferIx(src, mint, dst, from, amount.Uint64(), uint8(r.Decimals)))
+		if !closeOnly {
+			ixs = append(ixs, solmsg.CheckedTransferIx(src, mint, dst, from, amount.Uint64(), uint8(r.Decimals)))
+		}
 		if r.CloseSource { // the old token account goes away and its rent returns to the old cold address, which sends it on with the SOL (the chain refuses it unless it is empty)
 			ixs = append(ixs, solmsg.CloseAccountIx(src, from, from))
 		}
@@ -534,7 +540,8 @@ func (c *SOLConfig) Check(rf SOLRequestFile) (SOLRequest, []byte, error) {
 		}
 		max, _ = parseAmt("cold_move max_amount", mv)
 	}
-	if amount.Sign() == 0 || amount.Cmp(max) > 0 {
+	closeOnly := r.Kind == KindSOLColdMove && r.Mint != "" && r.CloseSource && amount.Sign() == 0
+	if (amount.Sign() == 0 && !closeOnly) || amount.Cmp(max) > 0 {
 		return r, nil, refuse("amount %s is zero or above the per-ceremony cap %s", amount, max)
 	}
 	coldKey, _ := solmsg.ParseAddress(cold)

@@ -212,3 +212,34 @@ func (s *Service) requestBTCColdMove(ctx context.Context) (Refill, bool, error) 
 	})
 	return out, found, err
 }
+
+// RebuildColdMove discards the exported request of an open cold-to-cold move, so that the next export builds a new one (new fees, other outputs). It is refused
+// once a signed file was imported (that file is the move), and it needs the operator to say why and to confirm the offline step: the offline signer remembers
+// what it signed at a nonce (EVM), for an outpoint (Bitcoin) or for a nonce value (Solana) and refuses a different request there, so before a rebuilt request
+// can be signed the custodians must remove that record on the offline machine, or know that nothing was signed (docs/runbooks/cold-key-replacement.md,
+// "A request that must be rebuilt"). If a signed file of the old request exists it must be imported, or destroyed: a signed file whose hash was replaced
+// cannot be imported.
+func (s *Service) RebuildColdMove(ctx context.Context, id, actor, reason string, offlineRecordCleared bool) error {
+	if !ValidID(actor) || strings.TrimSpace(reason) == "" {
+		return fmt.Errorf("%w: an actor and a reason are required", ErrInvalid)
+	}
+	if !offlineRecordCleared {
+		return fmt.Errorf("%w: confirm that the offline record of the old request was cleared, or that nothing was signed for it", ErrInvalid)
+	}
+	return InTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		r, err := scanRefill(tx.QueryRow(ctx, `SELECT `+refillCols+` FROM refills WHERE id=$1 FOR UPDATE`, id))
+		if isNoRows(err) {
+			return fmt.Errorf("%w: refill %s", ErrNotFound, id)
+		}
+		if err != nil {
+			return err
+		}
+		if r.Kind != coldsign.KindColdMove || r.Status != RefillRequested {
+			return fmt.Errorf("%w: %s is a %s in status %s: only a cold-to-cold move that has not been imported can be rebuilt", ErrInvalid, id, r.Kind, r.Status)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE refills SET request=NULL, request_hash=NULL, updated_at=now() WHERE id=$1`, id); err != nil {
+			return err
+		}
+		return auditEvent(ctx, tx, id, "cold_move.rebuilt", map[string]any{"by": actor, "reason": reason, "previous_request_hash": r.RequestHash, "revision": r.Revision})
+	})
+}

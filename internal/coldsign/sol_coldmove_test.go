@@ -188,3 +188,29 @@ func TestSOLColdMoveConfigIsChecked(t *testing.T) {
 		}
 	}
 }
+
+// An empty token account is closed for its rent with no transfer: amount 0 is allowed only for that (a token, close_source, no new account).
+func TestSOLColdMoveClosesAnEmptyTokenAccount(t *testing.T) {
+	e, nc := solMoveEnv(t)
+	r := e.move(nc, "TKN", "0", 0)
+	r.CloseSource = true
+	s, _, err := e.cfg.Sign(context.Background(), r.File(), e.approvals(r, "alice", "bob"), e.signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifySOLSignedMatches(r, r.HashHex(), s); err != nil {
+		t.Fatal(err)
+	}
+	for name, mut := range map[string]func(q *SOLRequest){
+		"zero without close_source": func(q *SOLRequest) { q.CloseSource = false },
+		"zero SOL":                  func(q *SOLRequest) { q.Asset, q.Mint, q.Decimals, q.CloseSource = "SOL", "", 9, false },
+		"opens a new account":       func(q *SOLRequest) { q.CreateDestAccount = true },
+	} {
+		q := e.move(nc, "TKN", "0", 1)
+		q.CloseSource = true
+		mut(&q)
+		if err := e.signReq(q, "alice", "bob"); err == nil {
+			t.Errorf("%s: signed", name)
+		}
+	}
+}

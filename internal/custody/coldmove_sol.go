@@ -70,15 +70,25 @@ func (s *Service) ExportColdMoveSOL(ctx context.Context, pool string) (rf coldsi
 		if err != nil {
 			return zero, false, err
 		}
-		if bal.Sign() == 0 {
+		mint, ok := sc.MintOf(sym)
+		if !ok {
+			return zero, false, fmt.Errorf("%w: %s is no configured token", ErrInvalid, sym)
+		}
+		missing, err := sc.TokenAccountMissing(ctx, old, mint)
+		if err != nil {
+			return zero, false, err
+		}
+		if bal.Sign() == 0 && missing {
 			continue
 		}
 		if len(nonces) == 0 {
 			return zero, false, fmt.Errorf("%w: the old cold address has no nonce account left to sign a move on", ErrInvalid)
 		}
-		mint, ok := sc.MintOf(sym)
-		if !ok {
-			return zero, false, fmt.Errorf("%w: %s is no configured token", ErrInvalid, sym)
+		if bal.Sign() == 0 { // an empty token account still holds its rent: it is closed (no transfer), the rent returning to the old address like the others
+			r := base
+			r.Kind, r.ID, r.Asset, r.Mint, r.Decimals, r.Amount = coldsign.KindSOLColdMove, "mvs-"+nonces[0].Value[:10], sym, mint, s.Cfg.Assets[sym].Decimals, "0"
+			r.NonceAccount, r.NonceValue, r.ComputeUnitLimit, r.CloseSource = nonces[0].Account, nonces[0].Value, limit+10_000, true
+			return r.File(), false, nil
 		}
 		r := base
 		r.Kind, r.ID, r.Asset, r.Mint, r.Decimals, r.Amount = coldsign.KindSOLColdMove, "mvs-"+nonces[0].Value[:10], sym, mint, s.Cfg.Assets[sym].Decimals, bal.String()
@@ -108,7 +118,9 @@ func (s *Service) ExportColdMoveSOL(ctx context.Context, pool string) (rf coldsi
 	}
 	r := base
 	r.Kind, r.ID, r.NonceValue, r.ComputeUnitLimit = coldsign.KindSOLColdMoveClose, "mvc-"+bh[:10], bh, 10_000+5_000*uint32(min(len(nonces), 8))
-	if sol.Cmp(big.NewInt(solMoveFee)) > 0 { // what is left goes with the rent, less this step's own fee
+	// Only the LAST batch sends the SOL that is left: an earlier one keeps it, because the next batch has to pay its fee from the old address and the
+	// account may not be left below the rent minimum before then (the reserve of the SOL step covers the fees of up to 8 batches).
+	if len(nonces) <= 8 && sol.Cmp(big.NewInt(solMoveFee)) > 0 {
 		r.Asset, r.Amount = "", new(big.Int).Sub(sol, big.NewInt(solMoveFee)).String()
 	}
 	for _, n := range nonces[:min(len(nonces), 8)] {

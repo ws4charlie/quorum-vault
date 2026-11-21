@@ -45,6 +45,7 @@ var routeRules = map[string]auth.Rule{
 	"POST /v2/cold/spends":                      {Roles: operators, StepUp: true},
 	"POST /v2/cold/actions":                     {Roles: adminsOnly, StepUp: true, HumanOnly: true},
 	"POST /v2/cold/moves":                       {Roles: adminsOnly, StepUp: true, HumanOnly: true},
+	"POST /v2/refills/{id}/rebuild":             {Roles: adminsOnly, StepUp: true, HumanOnly: true},
 	"POST /v2/cold-move/export":                 {Roles: adminsOnly},
 	"POST /v2/cold-move/submit":                 {Roles: adminsOnly, StepUp: true, HumanOnly: true},
 	"POST /v2/refills/{id}/close":               {Roles: operators, StepUp: true},
