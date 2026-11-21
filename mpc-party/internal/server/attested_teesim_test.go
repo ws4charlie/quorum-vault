@@ -33,7 +33,8 @@ type attRig struct {
 	*teetest.Rig
 	t     *testing.T
 	env   *testenv.Env
-	certs map[string]*server.Config // role -> a config that names the party's certificate files
+	certs map[string]*server.Config                   // role -> a config that names the party's certificate files
+	kms   func(role, pcr0 string) server.SealerConfig // when set, the parties are released by (a fake) KMS instead of the broker (attested_kms_teesim_test.go)
 }
 
 func newAttRig(t *testing.T) *attRig { return newAttRigOn(t, testenv.NewEnv(t)) }
@@ -53,6 +54,9 @@ func newAttRigOn(t *testing.T, env *testenv.Env) *attRig {
 func (r *attRig) sealerConfig(role, pcr0 string) server.SealerConfig {
 	if pcr0 == "" {
 		pcr0 = r.Parties[role].PCR0Hex()
+	}
+	if r.kms != nil {
+		return r.kms(role, pcr0)
 	}
 	c := r.certs[role]
 	return server.SealerConfig{Type: server.AttestedSealerType, BrokerURL: r.URL, BrokerPins: []string{r.Pin},

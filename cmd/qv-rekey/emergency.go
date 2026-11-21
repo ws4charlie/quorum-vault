@@ -149,6 +149,7 @@ func (em *emergency) logf(step, format string, a ...any) {
 // watch follows the drain in the core until it is drained, or shows no change for stallAfter.
 func (em *emergency) watch(ctx context.Context, p *Plan, poll, stallAfter time.Duration) error {
 	var last string
+	sawDrained := false
 	lastChange := em.env.Now()
 	for {
 		c, err := em.env.Core.Keysets(ctx, p.Shard)
@@ -167,12 +168,26 @@ func (em *emergency) watch(ctx context.Context, p *Plan, poll, stallAfter time.D
 			em.logf("drain", "%s", cur)
 			last, lastChange = cur, em.env.Now()
 		}
+		if d != nil && d.State == "drained" && poll > 0 && !sawDrained {
+			// Drained once is not enough: a sweep that was broadcast before the mark may confirm after the planner looked, and put new funds on the old
+			// address. The core reads the balance again after every transaction is final; one more poll shows whether it found more.
+			sawDrained = true
+			em.logf("drain", "empty at this look; checking once more for what arrives late (a sweep paid to the old address before the mark)")
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(poll):
+			}
+			continue
+		}
+		sawDrained = d != nil && d.State == "drained"
 		if d != nil && d.State == "drained" {
 			em.logf("drained", "generation %d holds nothing above dust; it stays compromised and in the watch list. Next: verify (runbook), then the afterwards steps", p.From)
 			return nil
 		}
 		if stallAfter > 0 && em.env.Now().Sub(lastChange) >= stallAfter {
-			em.logf("STALLED", "no change for %s (%s). ALERT: read the reason, fix it (gas at the old address, a lagging zone database, the cap: `qv-rekey caps`), then run this command again", stallAfter, cur)
+			em.logf("STALLED", "no change for %s (%s). ALERT: read the reason, fix it (gas at the old address, a lagging zone database, the cap: `qv-rekey caps`; "+
+				"for work in flight, the transaction named above: docs/runbooks/stolen-hot-key.md, \"Work in flight\"), then run this command again", stallAfter, cur)
 			return fmt.Errorf("%w: %s", ErrStalled, cur)
 		}
 		if poll <= 0 {

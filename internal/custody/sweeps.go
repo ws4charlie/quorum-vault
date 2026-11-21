@@ -134,6 +134,20 @@ func (s *Service) PlanSweeps(ctx context.Context, log *slog.Logger) ([]Sweep, er
 	// takes row locks on the same few ledger accounts (dep, sweep, hot, fee) and
 	// a nonce on the one sweep destination, so more than a handful in flight only
 	// queues. The rest wait for a later pass.
+	// A destination that is a compromised generation's address is refused by the zone (forwarders may only pay an active one), and every refused sweep
+	// would leave a nonce hole at the old address. Planning waits for the new destination (the cold ceremony and the config edit); nothing is lost.
+	if d, ok := s.Chain.(interface {
+		SweepDestinationAddress(context.Context) (string, error)
+	}); ok && s.evmFamily() {
+		if addr, err := d.SweepDestinationAddress(ctx); err == nil {
+			if bad, err := addressCompromised(ctx, s.Pool, addr); err != nil {
+				return nil, err
+			} else if bad {
+				log.Info("the sweep destination is a compromised generation's address; sweeping waits for the new destination", "destination", addr)
+				return nil, ErrSweepFrozen
+			}
+		}
+	}
 	const maxPerPass, maxOpen = 25, 12
 	var open int
 	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed')`, s.Cfg.Chain).Scan(&open); err != nil {
