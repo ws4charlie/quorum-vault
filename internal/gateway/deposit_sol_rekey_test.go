@@ -27,7 +27,7 @@ func TestSolDepositGenerationStates(t *testing.T) {
 	e1.Chain = "sol-t"
 	v.gens[id] = map[int]*KeysetEntry{1: e1, 2: solEntry(2, partition.StateCandidate)}
 	d := &Decider{}
-		ok := func(gens ...uint32) error { return d.solDepositRules(v, cc, TxInfo{DepositGens: gens}) }
+	ok := func(gens ...uint32) error { return d.solDepositRules(v, cc, TxInfo{DepositGens: gens}) }
 	if err := ok(); err != nil {
 		t.Fatal("generation 1 alone:", err)
 	}

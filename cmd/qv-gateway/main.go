@@ -141,10 +141,14 @@ func run(log *slog.Logger) error {
 	if *metricsFile != "" {
 		// the certificate metrics go to a sibling file of the same textfile directory, whether or not a route is configured
 		tlsFile := strings.TrimSuffix(*metricsFile, ".prom") + "-tls.prom"
+		drainFile := strings.TrimSuffix(*metricsFile, ".prom") + "-drain.prom" // qv_drain_refusals_total
 		go func() {
 			for {
 				if err := pki.WriteMetricsFile(tlsFile, tsrc, lsrc); err != nil {
 					log.Error("cannot write the certificate metrics file", "error", err.Error())
+				}
+				if err := writeDrainMetrics(drainFile, guard, cfg); err != nil {
+					log.Error("cannot write the drain metrics file", "error", err.Error())
 				}
 				select {
 				case <-ctx.Done():
@@ -255,6 +259,17 @@ func sameDatabase(a, b string) (bool, error) {
 func writeMetrics(ctx context.Context, path string, r *mpcsigner.Router, m *mpcsigner.Monitor) error {
 	var b bytes.Buffer
 	r.WriteMetrics(ctx, &b, m)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b.Bytes(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// writeDrainMetrics replaces the drain-refusal metrics file atomically.
+func writeDrainMetrics(path string, g *gateway.Guard, cfg *gateway.Config) error {
+	var b bytes.Buffer
+	g.WriteDrainMetrics(&b, cfg, gateway.ModeGateway)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b.Bytes(), 0o644); err != nil {
 		return err

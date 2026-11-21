@@ -1,0 +1,30 @@
+# Emergency mode (K8, reports/K8-r1.md): a key generation marked compromised, and the drain of its funds. Inputs: the core's /metrics (internal/custody/emergency_metrics.go).
+#   qv_keyset_compromised{shard,generation}                1 for each generation marked compromised. A gauge with a series only while something is compromised: when nothing is,
+#                                                          there is no series and nothing fires. The first scrape that shows a mark carries the 1, so no first-event form is needed.
+#   qv_emergency_drain_stalled_seconds{shard,generation}   seconds since a compromised generation last made progress (the mark, or its last confirmed drain move); 0 when drained.
+#   qv_emergency_metrics_error                             1 when the database could not be read: a broken scrape must never look like "nothing is compromised".
+groups:
+  - name: qv-emergency
+    rules:
+      # The mark never goes away, so this stays on until the generation is retired by hand. Page at once: the stolen-key runbook starts here.
+      - alert: QVKeysetCompromised
+        expr: max(qv_keyset_compromised) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "A key generation is marked compromised: emergency mode is on"
+          description: "Follow docs/runbooks/stolen-hot-key.md: the drain moves the funds to a new generation under the emergency caps."
+      - alert: QVEmergencyDrainStalled
+        expr: max by (shard, generation) (qv_emergency_drain_stalled_seconds) > 600
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "The emergency drain of shard {{ $labels.shard }} generation {{ $labels.generation }} has made no progress for over 10 minutes"
+          description: "Funds are still on a compromised key. Check the drain requests, the emergency caps and the signers (docs/runbooks/stolen-hot-key.md)."
+      # With this at 1 the two alerts above are blind. It pages for that reason.
+      - alert: QVEmergencyMetricsError
+        expr: qv_emergency_metrics_error == 1
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "The core cannot read the emergency state from the database"
+          description: "QVKeysetCompromised and QVEmergencyDrainStalled cannot fire while this is on. Check the core's database connection."

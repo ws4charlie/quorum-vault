@@ -940,6 +940,7 @@ func (d *Decider) noteDrainRefusal(job signjob.Job, reason string) {
 		return
 	}
 	n := d.guard.drainRefused.Add(1)
+	d.noteDrainMetric(i.Chain, reason)
 	slog.Error("ALERT drain refused: the zone refused a drain; refusals do not count against the drain rate or cap, so a repeating one is a stuck planner or an attack by the business zone",
 		"intent", i.ID, "mode", d.mode.actor(), "source", i.From, "asset", i.Asset, "refused_total", n, "reason", reason)
 }

@@ -2,20 +2,20 @@
 
 [中文](zh/limits.md)
 
-Here's what QuorumVault can't do yet, so you don't have to find out the hard way.
+This page lists what QuorumVault cannot do yet, so you don't have to find out the hard way.
 
 **Not run for real**
 - **Local chains only.** Tests run against a local EVM node, Bitcoin regtest and a local Solana validator. Nothing has met a real fee market, a deep reorganisation or a congested network.
 - **No testnet or mainnet use.** Do not point it at real funds or real keys.
-- **No load test.** Numbers were measured on a laptop, not on target hardware ([measurements](measurements)).
+- **No load test.** Numbers were measured on a laptop, not on the target hardware ([measurements](measurements)).
 - **No real cluster has run the charts.** The four-cluster shape is a design, checked by tests ([Deployment](deployment.md)).
 - **The first image release has not been made.** Images are built and checked, not published.
 - **Restore is drilled on one machine,** not across sites.
 
 **Simulated parts**
-- **CloudHSM support is untested on hardware.** The party's sealer has a profile for AWS CloudHSM, proven against its documentation and a test double. Nobody has run it on a real cluster; the first run follows [a checklist](runbooks/cloudhsm-sealer.md).
+- **CloudHSM support is untested on hardware.** The party's sealing module has a profile for AWS CloudHSM, proven against its documentation and a test double. Nobody has run it on a real cluster; the first run follows [a checklist](runbooks/cloudhsm-sealer.md).
 - **SoftHSM, not hardware.** The tokens are software with no tamper resistance. The structure is what a real HSM would need, but it is not one.
-- **M-of-N is simulated.** The cold signer checks operator signatures in software; a hardware HSM would enforce it itself.
+- **M-of-N is simulated.** The cold signing machine checks the cold signers' signatures in software; a hardware HSM would enforce the rule itself.
 - **The enclave is simulated.** A stand-in produces the proof, so nobody has shown that real hardware measures what the stand-in measures ([Enclaves](enclaves.md)).
 - **Revoking a program does not stop it at once.** A running party keeps its key in memory until it restarts, and nothing makes it ask again. To cut one off now, the operator stops it as well ([Enclaves](enclaves.md)).
 - **Nothing has run the enclave charts on a real cluster.** The broker chart and the party's enclave mode are checked by tests and, later, a local cluster with the simulated enclave. There is no production attester yet, so the chart refuses an enclave party outside development and test.
@@ -23,26 +23,26 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 - **All parties run on one machine, run by one team.** The cryptographic separation is real. The operational separation is not.
 
 **Approvals and logins**
-- **Logins and approvals were tested with software parts.** The test users and the development identity provider are test data, and tests approve with software keys. No real hardware key has been tried, in the browser or in the terminal tool. The approval page has run only in a headless browser.
-- **What you see is what you sign is only partly solved.** A security key signs a hash and has no screen. The approval page recomputes the hash and catches a lying core, but a replaced page can still show one payee and ask for a signature on another job. The terminal tool is the better choice for a large payment, since it prints every field on a separate machine, but no key has a display, so the person still trusts that machine ([runbook](runbooks/webauthn-approver.md)). Closing the gap needs a device that shows the job itself, which is not built.
+- **Logins and approvals were tested with software parts.** The test users and the development identity provider are test data, and tests approve with software keys. No real hardware key has been tried, in the browser or in the command-line tool. The approval page has run only in a headless browser.
+- **"What you see is what you sign" is only partly solved.** A security key signs a hash and has no screen. The approval page recomputes the hash and catches a lying core, but a replaced page can still show one payee and ask for a signature on another job. The command-line tool is the better choice for a large payment, since it prints every field on a separate machine, but no key has a display, so the person still trusts that machine ([runbook](runbooks/webauthn-approver.md)). Closing the gap needs a device that shows the job itself, which is not built.
 - **One key per approver name.** A person who wants a second key needs a second name.
 - **The approval end-to-end test runs with the HSM signer only.** The MPC mode does not run it.
 - **The core keeps its own copy of the approver keys for Bitcoin fee-cap changes.** A newly enrolled approver cannot sign a fee-cap change until the core's settings list them, and a revoked one must be removed there by hand ([runbook](runbooks/approvers.md)).
-- **The operators are a short list in the zone's settings.** They are the root of trust for approver changes, so changing the list means editing settings and restarting. Changes that no longer meet a raised rule are ignored.
+- **The zone operators are a short list in the zone's settings.** They are the root of trust for approver changes, so changing the list means editing the settings and restarting. Changes that no longer meet a raised rule are ignored.
 
 **Signing and parties**
-- **The administrator keys are software keys, and changing the list is a restart.** A party's admin calls (key setup, refresh, unfreeze) need several administrators to sign one request, which names everything the call does. Each administrator keeps a key on their own machine; a hardware token is not supported yet. Adding or removing an administrator means a settings change and a restart on every party. The old single-signature format works only while a party's settings still allow it.
-- **Some rollbacks cannot be detected.** If both parties are restored to the same older generation, nothing notices. A party restored to older state of the same generation may sign a repeated job again. The broker cannot destroy the keys of old generations ([Enclaves](enclaves.md)).
+- **The party administrator keys are software keys, and changing the list is a restart.** A party's admin calls (key setup, refresh, unfreeze) need several administrators to sign one request, which names everything the call does. Each administrator keeps a key on their own machine; a hardware token is not supported yet. Adding or removing an administrator means a settings change and a restart on every party. The old single-signature format works only while a party's settings still allow it.
+- **Some rollbacks cannot be detected.** If both parties are restored to the same older generation, nothing notices. A party restored to an older state of the same generation may sign a repeated job again. The broker cannot destroy the keys of old generations ([Enclaves](enclaves.md)).
 - **Cosigners B and C share one certificate name.** Their keys differ, but the name on the list is the same.
 - **A new key is not test-signed before it takes over.** The first real signature after activation is the first proof that it works ([Key replacement](key-replacement.md)).
 - **cb-mpc has had no external review here.** That is why a key freezes on any cryptographic failure.
 - **Two-party keys need both parties.** Bitcoin and Solana deposit sweeps pause if A or B is down.
 - **Replacing a Solana hot wallet pauses its withdrawals briefly.** The new key cannot create its nonce accounts before it is active and funded, so new withdrawals wait between the switch and an operator creating them. Tokens of a kind the config does not list, and token accounts that are not the standard one, are reported and never moved ([Key replacement](key-replacement.md)).
 - **A Solana emergency drain moves tokens in the order of the asset list, not by value,** and has run on a local validator only; the SOL goes first among the rest, and the new nonce pool is created by an operator afterwards ([stolen hot key](runbooks/stolen-hot-key.md)).
-- **An emergency cannot save what a thief moves first.** The old key stays valid on chain until its funds are moved; only the signing zone refuses it. The cold ceremony that points deposits at the new key takes hours and sweeps wait meanwhile; the emergency drill has run on local chains only ([stolen hot key](runbooks/stolen-hot-key.md)).
+- **An emergency cannot save what a thief moves first.** The old key stays valid on chain until its funds are moved; only the signing zone refuses it. The key ceremony that points deposits at the new key takes hours and sweeps wait meanwhile; the emergency drill has run on local chains only ([stolen hot key](runbooks/stolen-hot-key.md)).
 
 **Chains**
-- **Bitcoin has one hot shard per pool,** so no rebalance. Taproot addresses are not supported, because the signing library cannot derive them ([spike note](spikes/btc-taproot.md)).
+- **Bitcoin has one hot shard per pool,** so there is no rebalance. Taproot addresses are not supported, because the signing library cannot derive them ([spike note](spikes/btc-taproot.md)).
 - **Batched Bitcoin payments are visible.** The chain shows that the recipients were paid together.
 - **Solana is narrower.** Only the classic token program is credited, a very large customer base would need a different scan, and a cold ceremony that signs on a recent blockhash must finish within its short life.
 - **One refill per cold address at a time** on EVM and Bitcoin (on Solana, one per asset), and hot funding on Solana is booked by an operator call, not found by the scan.

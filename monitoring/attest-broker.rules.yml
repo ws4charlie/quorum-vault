@@ -23,12 +23,13 @@ groups:
         annotations:
           summary: "The attestation broker refused a new allowlist file and keeps the old one"
           description: "The file is unsigned, signed by too few operators, malformed, or its sequence is not higher. The broker log has the reason. Runbook: docs/runbooks/tee-broker.md"
-      # PENDING metric: the broker publishes no certificate expiry yet (monitoring/pending-metrics.txt: qv_attest_broker_cert_seconds_to_expiry, a gauge of its server certificate in
-      # /metrics). That certificate is pinned by the parties and renewed by hand, so it gets a month of warning, like the other pinned certificates (tls-cert.rules.yml).
+      # qv_attest_broker_cert_seconds_to_expiry{kind} (gauge, the broker's /metrics): kind="leaf" is its serving certificate, kind="trust_root" the soonest end of the vendor
+      # roots in trust_roots. The broker has no client CA: callers are pinned keys. The serving certificate is pinned by the parties and renewed by hand, so it gets a month
+      # of warning, like the other pinned certificates (tls-cert.rules.yml); the vendor root is replaced only with a new broker release.
       - alert: QVAttestBrokerCertExpiringSoon
-        expr: min(qv_attest_broker_cert_seconds_to_expiry) < 30 * 86400
+        expr: min by (kind) (qv_attest_broker_cert_seconds_to_expiry) < 30 * 86400
         for: 5m
         labels: {severity: ticket}
         annotations:
-          summary: "The attestation broker's certificate expires in {{ $value | humanizeDuration }}"
-          description: "The parties pin it: issue the new one, add its pin on the parties' side, restart the broker, remove the old pin. Runbook: docs/runbooks/certificates.md"
+          summary: "The attestation broker's {{ $labels.kind }} certificate expires in {{ $value | humanizeDuration }}"
+          description: "leaf: the parties pin it; issue the new one, add its pin on the parties' side, restart the broker, remove the old pin (docs/runbooks/certificates.md). trust_root: the vendor root of the evidence ends; the broker needs the new root file (docs/runbooks/tee-broker.md)."
