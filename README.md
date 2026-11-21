@@ -85,4 +85,4 @@ QuorumVault ships as container images, one per binary, public on `ghcr.io`. A re
 | Replacing an EVM hot key | End-to-end tests, planned and emergency, with a real gateway, cosigners and parties. Bitcoin and Solana deposit keys are tested the same way. A Solana hot wallet cannot be replaced yet |
 | Enclave start-up | Simulated only: the broker and sealed shares are tested with a stand-in for the enclave. **No real enclave yet** |
 | Kubernetes shape | Charts and images are built and checked by tests. **No real cluster has run them yet** ([Deployment](docs/deployment.md)) |
-| Real networks, real load | **Not yet.** No testnet or mainnet use, and no load test. See [Limits](docs/limits.md) |
+| Real networks, real load | A local load test exists ([results](docs/measurements/load-local.md)): one laptop, local chains, software HSM. **No testnet or mainnet use, and no cloud or real-network load run yet.** See [Limits](docs/limits.md) |

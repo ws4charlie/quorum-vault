@@ -366,3 +366,39 @@ kind-smoke:
 	ci/kind/smoke/run.sh
 kind-down:
 	ci/kind/down.sh
+
+# ---- The local load test (loadtest/README.md, docs/measurements/load-local.md). Not a CI gate: a real run takes minutes and its numbers depend on the machine.
+# Needs what test-e2e-evm needs (`make setup infra-up softhsm mpc-build`). The stack is the e2e stack of this checkout's lane; the generator drives the core's API.
+#   make load-local SCENARIO=loadtest/scenarios/evm-mixed.json
+#   make load-local SCENARIO=... WORKERS=2 CORES=2 SHARDS=4 DELAY_MS=20 RATE_SCALE=2 OUT=data/load/mine
+# Results (result.json, ops.jsonl, stack.json, report.html) go to OUT (default data/load/<time>). `make load-dash-up` first for the live dashboard.
+.PHONY: load-local load-smoke load-dash-up load-dash-down load-report
+SCENARIO ?= loadtest/scenarios/smoke.json
+load-local:
+	QV_LOAD_SCENARIO=$(abspath $(SCENARIO)) $(if $(OUT),QV_LOAD_OUT=$(abspath $(OUT))) $(if $(OUT),,QV_LOAD_OUT=$(abspath data/load)/$(shell date +%Y%m%d-%H%M%S)) $(if $(SHARDS),QV_LOAD_SHARDS=$(SHARDS)) $(if $(WORKERS),QV_LOAD_WORKERS=$(WORKERS)) \
+	  $(if $(CORES),QV_LOAD_CORES=$(CORES)) $(if $(DELAY_MS),QV_LOAD_LINK_DELAY_MS=$(DELAY_MS)) $(if $(RATE_SCALE),QV_LOAD_RATE_SCALE=$(RATE_SCALE)) \
+	  $(if $(SEED),QV_LOAD_SEED=$(SEED)) $(if $(LABEL),QV_LOAD_LABEL='$(LABEL)') $(if $(wildcard data/load/targets),QV_LOAD_TARGETS_DIR=$(abspath data/load/targets)) \
+	  $(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 90m -v -run 'TestLoadLocal$$' ./e2e/custody/
+
+# The smoke scenario: a handful of operations, correctness only.
+load-smoke:
+	$(MAKE) load-local SCENARIO=loadtest/scenarios/smoke.json
+
+# The page of a finished run again, from its result.json: make load-report OUT=data/load/<run>
+load-report:
+	go run ./loadtest/cmd/qv-load report -in $(OUT)
+
+# Prometheus and Grafana for a live run (deploy/load/compose.yml): http://127.0.0.1:$(QV_LOAD_GRAFANA_PORT) with the dashboard "QuorumVault load run" already there.
+load-dash-up:
+	deploy/load/dash.sh up
+load-dash-down:
+	deploy/load/dash.sh down
+
+# The same generator against the kind lane's pods (loadtest/kind/run.sh; `make kind-up` first). It has its own default scenario: SCENARIO defaults to the smoke
+# scenario of load-local, so only a SCENARIO given on the command line (or in the environment) replaces the kind one.
+#   make load-kind                                  (loadtest/scenarios/evm-kind.json)
+#   make load-kind SCENARIO=loadtest/scenarios/smoke.json OUT=data/load/kind-smoke
+.PHONY: load-kind
+KIND_SCENARIO := loadtest/scenarios/evm-kind.json
+load-kind:
+	loadtest/kind/run.sh $(if $(filter command line environment,$(origin SCENARIO)),$(SCENARIO),$(KIND_SCENARIO)) $(OUT)

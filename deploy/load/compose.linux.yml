@@ -1,0 +1,27 @@
+# Linux override of compose.yml (deploy/load/dash.sh adds it on Linux). The generator's and the sampler's metrics servers listen on 127.0.0.1 only, and on Linux a
+# container on the bridge network cannot reach the host's loopback (host.docker.internal is the bridge address there). So Prometheus and Grafana run on the host's
+# network and bind to 127.0.0.1 themselves: they reach the loopback listeners and nothing becomes reachable from outside. The load test writes 127.0.0.1 targets on Linux.
+# Needs Docker Compose 2.24 or later (!reset, !override). NOT TESTED: written on macOS, where Docker Desktop's VM makes the base file work; checked there only with `docker compose config`.
+services:
+  prometheus:
+    network_mode: host
+    extra_hosts: !reset []
+    ports: !reset []
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d", "--web.listen-address=127.0.0.1:${QV_LOAD_PROM_PORT:-19190}"]
+  grafana:
+    network_mode: host
+    ports: !reset []
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "${QV_LOAD_GRAFANA_PORT:-13000}"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_USERS_DEFAULT_THEME: light
+    # the datasource file is written by dash.sh into QV_LOAD_DS_DIR with this lane's Prometheus port
+    volumes: !override
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ${QV_LOAD_DS_DIR}:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro

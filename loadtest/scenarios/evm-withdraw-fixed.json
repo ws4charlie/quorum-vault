@@ -1,0 +1,13 @@
+{
+  "name": "evm-withdraw-fixed",
+  "note": "Auto-approved withdrawals at one fixed rate, held for 60 s: the same load run against different shapes of the stack (1, 2 and 4 workers and cores, a delay between the parties).",
+  "seed": 15,
+  "mode": "open",
+  "setup": {"withdraw_customers": 80, "fund_each_eth": 60, "deposit_customers": 0},
+  "ramp_s": 5, "hold_s": 60, "drain_s": 120, "settle_s": 600, "max_inflight": 400,
+  "background_reconcile_s": 10,
+  "streams": [
+    {"op": "withdraw", "tier": "auto", "rate": 8, "amount_eth": [0.001, 0.05]}
+  ],
+  "objectives": {"withdraw_p95_ms": 5000, "approved_to_broadcast_p95_ms": 3000, "error_rate": 0.001, "achieved_of_offered": 0.99}
+}

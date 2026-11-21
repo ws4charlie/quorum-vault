@@ -1,0 +1,749 @@
+{
+ "uid": "qv-load-run",
+ "title": "QuorumVault load run",
+ "tags": [
+  "quorumvault",
+  "load"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "2s",
+ "time": {
+  "from": "now-10m",
+  "to": "now"
+ },
+ "editable": false,
+ "panels": [
+  {
+   "id": 1,
+   "type": "stat",
+   "title": "Rate scale (the step now running)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "max(qvload_rate_scale)",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Operations in flight",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "sum(qvload_ops_inflight)",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Failed operations (total)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "sum(qvload_ops_failed_total) or vector(0)",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Largest lateness of a scheduled arrival",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 6,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "max(qvload_max_lateness_seconds)",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Phase",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 18,
+    "y": 0,
+    "w": 6,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "count by (phase)(qvload_phase_info)",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "Offered and completed operations per second",
+   "description": "Open loop: the offered rate does not wait for the system. Where ended well falls below offered, the system has stopped keeping up.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "sum by (op)(rate(qvload_ops_offered_total[10s]))",
+     "legendFormat": "{{op}} offered",
+     "refId": "A"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "sum by (op)(rate(qvload_ops_completed_total[10s]))",
+     "legendFormat": "{{op}} ended well",
+     "refId": "B"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "sum by (op,kind)(rate(qvload_ops_failed_total[10s]))",
+     "legendFormat": "{{op}} failed {{kind}}",
+     "refId": "C"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "timeseries",
+   "title": "Operations in flight",
+   "description": "A queue that keeps growing is the first sign of the limit.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "qvload_ops_inflight",
+     "legendFormat": "{{op}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "Latency to the final state, p50 and p95",
+   "description": "Withdrawals: request to confirmed. Deposits: sent to swept.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 12,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le, op) (rate(qvload_stage_seconds_bucket{stage=\"total\"}[20s])))",
+     "legendFormat": "{{op}} p50",
+     "refId": "A"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, op) (rate(qvload_stage_seconds_bucket{stage=\"total\"}[20s])))",
+     "legendFormat": "{{op}} p95",
+     "refId": "B"
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "type": "timeseries",
+   "title": "Withdrawal stages, p95 since the request",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 12,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, op) (rate(qvload_stage_seconds_bucket{stage=\"approved\"}[20s])))",
+     "legendFormat": "{{op}} approved",
+     "refId": "A"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, op) (rate(qvload_stage_seconds_bucket{stage=\"signing\"}[20s])))",
+     "legendFormat": "{{op}} signing",
+     "refId": "B"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, op) (rate(qvload_stage_seconds_bucket{stage=\"broadcast\"}[20s])))",
+     "legendFormat": "{{op}} broadcast",
+     "refId": "C"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, op) (rate(qvload_stage_seconds_bucket{stage=\"confirmed\"}[20s])))",
+     "legendFormat": "{{op}} confirmed",
+     "refId": "D"
+    }
+   ]
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "Deposit stages, p95 since the payment was sent",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, op) (rate(qvload_stage_seconds_bucket{stage=\"credited\"}[20s])))",
+     "legendFormat": "{{op}} credited",
+     "refId": "A"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, op) (rate(qvload_stage_seconds_bucket{stage=\"swept\"}[20s])))",
+     "legendFormat": "{{op}} swept",
+     "refId": "B"
+    }
+   ]
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "API requests, p95 by route",
+   "description": "What the client sees from each call, including the polls that follow a withdrawal.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "histogram_quantile(0.95, sum by (le, request)(rate(qvload_request_seconds_bucket[20s])))",
+     "legendFormat": "{{request}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 12,
+   "type": "timeseries",
+   "title": "CPU per process (percent of one core)",
+   "description": "Services are host processes; docker-* are the Postgres, Temporal, Redpanda and anvil containers.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 28,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "qvstack_cpu{name!=\"\"}",
+     "legendFormat": "{{name}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 13,
+   "type": "timeseries",
+   "title": "Queues and open work",
+   "description": "Withdrawals by status, sign jobs waiting or being signed, unpublished outbox rows, open sweeps.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 28,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "qvstack_queue",
+     "legendFormat": "{{name}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 14,
+   "type": "timeseries",
+   "title": "Postgres: connections, active, waiting on locks",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 36,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "qvstack_db",
+     "legendFormat": "{{name}}",
+     "refId": "A"
+    }
+   ]
+  },
+  {
+   "id": 15,
+   "type": "timeseries",
+   "title": "Resident memory per process (MB)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "qvload-prom"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 36,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "decmbytes",
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 8,
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "qvload-prom"
+     },
+     "expr": "qvstack_rss",
+     "legendFormat": "{{name}}",
+     "refId": "A"
+    }
+   ]
+  }
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": []
+ },
+ "description": "Live view of make load-local: the generator's own metrics (qvload_*) and the stack's sampler (qvstack_*)."
+}

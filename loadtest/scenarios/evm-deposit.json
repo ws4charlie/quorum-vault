@@ -1,0 +1,41 @@
+{
+  "name": "evm-deposit",
+  "note": "Only deposits at many addresses: scan, credit, sweep. Rates rise in steps.",
+  "seed": 13,
+  "mode": "open",
+  "setup": {
+    "withdraw_customers": 0,
+    "fund_each_eth": 0,
+    "deposit_customers": 1500
+  },
+  "ramp_s": 5,
+  "step_s": 30,
+  "steps": [
+    1,
+    2,
+    4,
+    6,
+    8,
+    12
+  ],
+  "drain_s": 180,
+  "background_reconcile_s": 10,
+  "streams": [
+    {
+      "op": "deposit",
+      "rate": 1,
+      "amount_eth": [
+        0.05,
+        2
+      ]
+    }
+  ],
+  "objectives": {
+    "deposit_credit_p95_ms": 5000,
+    "sweep_p95_ms": 60000,
+    "error_rate": 0.001,
+    "achieved_of_offered": 0.99
+  },
+  "max_inflight": 250,
+  "settle_s": 900
+}
