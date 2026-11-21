@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -37,10 +39,36 @@ type Guard struct {
 	drainMetrics drainCounts
 }
 
-// OpenGuard applies the schema to pool and returns the guard. The schema's statements are idempotent but take table locks even when they change nothing, so
-// opening a guard that a running gateway or cosigner is deciding on (an operator's tool, a test) can meet a decision's transaction in a deadlock: the database
-// ends one of the two. The schema is applied again then, a few times; a decision that lost is retried by its job.
+// storeVersion identifies the schema this binary needs: the hash of store.sql. The guard database records the version it was last brought to (guard_schema),
+// and OpenGuard applies the schema only when that record is missing or different.
+var storeVersion = func() string { h := sha256.Sum256([]byte(storeSQL)); return hex.EncodeToString(h[:8]) }()
+
+// schemaCurrent reports whether the database is already at this binary's schema, with plain reads that take no table lock (to_regclass and a select take
+// at most an ACCESS SHARE lock on one small table). Any error counts as "not current": the schema is then applied, as before the marker existed (a role that
+// may not read the marker, a marker table that does not exist yet).
+func schemaCurrent(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) bool {
+	var reg *string
+	if err := q.QueryRow(ctx, `SELECT to_regclass('guard_schema')::text`).Scan(&reg); err != nil || reg == nil {
+		return false
+	}
+	var v string
+	if err := q.QueryRow(ctx, `SELECT version FROM guard_schema WHERE id=1`).Scan(&v); err != nil {
+		return false
+	}
+	return v == storeVersion
+}
+
+// OpenGuard returns the guard of pool, applying the schema first only when the database is behind it. The schema's statements are idempotent but take table
+// locks even when they change nothing, so an operator's tool (qv-rekey, qv-keysets, qv-approvers, qv-route, qv-fee-caps) that ran them at every start could
+// block or deadlock the gateway's and the cosigners' decisions at the very moment it is used (a key ceremony, an emergency). The services apply the schema at
+// their own start, as before; a tool finds it current and runs no DDL. When it is behind, the apply runs under an advisory lock, so two openers never race,
+// and is tried again a few times if it still meets a decision in a deadlock.
 func OpenGuard(ctx context.Context, pool *pgxpool.Pool) (*Guard, error) {
+	if schemaCurrent(ctx, pool) {
+		return &Guard{pool: pool}, nil
+	}
 	var err error
 	for try := 0; try < 6; try++ {
 		if err = applyStoreSchema(ctx, pool); err == nil {
@@ -69,11 +97,24 @@ func applyStoreSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('qv-guard-schema'))`); err != nil {
 		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
+	if schemaCurrent(ctx, pool) { // another opener finished while this one waited for the lock (read outside the transaction: a refused read must not abort it)
+		return nil
+	}
 	if _, err := tx.Exec(ctx, storeSQL); err != nil {
 		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("gateway: apply store schema: %w", err)
+	}
+	// The marker is written after the schema, best effort and in its own transaction: a role that may create tables but not write the marker (it belongs to
+	// another role) must still open the guard, as it always did; the next open then applies the schema again.
+	if tx, err := pool.Begin(ctx); err == nil {
+		defer tx.Rollback(context.Background())
+		if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS guard_schema (id int PRIMARY KEY CHECK (id = 1), version text NOT NULL)`); err == nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO guard_schema (id, version) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version`, storeVersion); err == nil {
+				_ = tx.Commit(ctx)
+			}
+		}
 	}
 	return nil
 }
