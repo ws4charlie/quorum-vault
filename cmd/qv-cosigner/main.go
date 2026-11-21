@@ -167,6 +167,7 @@ func run(log *slog.Logger) error {
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 			certs.ServeHTTP(w, r)
 			cosigner.WriteSocketMetrics(w, sockTLS, time.Now()) // the party-to-cosigner channel certificate (pinned, loaded once)
+			guard.WriteDrainMetrics(w, cfg, gateway.ModeCosigner)
 		})
 		msrv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() {

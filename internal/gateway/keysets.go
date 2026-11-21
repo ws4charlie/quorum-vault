@@ -193,7 +193,11 @@ func (c KeysetChange) shape() error {
 		if c.Address == "" || c.Successor != 0 || len(c.Caps) != 0 {
 			return errors.New("register-candidate carries the address (and its key reference and public key), and no successor or caps")
 		}
-		if err := c.checkKey(); err != nil {
+		if common.IsHexAddress(c.Address) {
+			if err := c.checkKey(); err != nil {
+				return err
+			}
+		} else if err := c.checkEdKey(); err != nil {
 			return err
 		}
 	case KeysetActivate, KeysetRetire:
@@ -236,6 +240,28 @@ func (c KeysetChange) checkKey() error {
 	}
 	if !common.IsHexAddress(c.Address) || crypto.PubkeyToAddress(*pub) != common.HexToAddress(c.Address) {
 		return fmt.Errorf("the public key is the key of %s, not of %s", crypto.PubkeyToAddress(*pub).Hex(), c.Address)
+	}
+	return nil
+}
+
+// checkEdKey is checkKey for a Solana hot shard: the address is base58 of 32 bytes, and the public key (32 bytes of hex) is those same bytes.
+func (c KeysetChange) checkEdKey() error {
+	raw, err := sol.ParseAddress(c.Address)
+	if err != nil || raw == ([32]byte{}) {
+		return fmt.Errorf("%q is neither an EVM address nor a Solana address: %v", c.Address, err)
+	}
+	if c.KeyRef == "" && c.PublicKey == "" {
+		return nil
+	}
+	if c.KeyRef == "" || c.PublicKey == "" {
+		return errors.New("a candidate's key reference and public key come together")
+	}
+	pub, err := hex.DecodeString(c.PublicKey)
+	if err != nil || len(pub) != 32 {
+		return errors.New("public_key of a Solana hot shard is the 32-byte Ed25519 key in hex")
+	}
+	if !bytes.Equal(pub, raw[:]) {
+		return fmt.Errorf("the public key is the key of %s, not of %s", sol.Address([32]byte(pub)), c.Address)
 	}
 	return nil
 }
@@ -313,6 +339,23 @@ func (c *Config) StaticKeysets() *KeysetView {
 		// The deposit key tree of a Bitcoin or Solana chain: generation 1 is the key the config pins.
 		if id, ok := cc.depositTreeID(name); ok {
 			v.gens[id] = map[int]*KeysetEntry{1: {Shard: id, Chain: name, Generation: 1, State: partition.StateActive}}
+		}
+		if cc.Family == FamilySOL {
+			// A Solana hot shard is a shard of the registry like an EVM one: generation 1 is the address the config pins, in the canonical base58 form.
+			for p, a := range cc.SOL.HotShards {
+				k, err := partition.Parse(p)
+				if err != nil || k.Tier != partition.TierHot {
+					continue
+				}
+				raw, err := sol.ParseAddress(a)
+				if err != nil {
+					continue // the verifier refused it at load
+				}
+				if _, ok := v.gens[k.ShardID()]; !ok {
+					v.gens[k.ShardID()] = map[int]*KeysetEntry{1: {Shard: k.ShardID(), Chain: name, Generation: 1, Address: sol.Address(raw), State: partition.StateActive}}
+				}
+			}
+			continue
 		}
 		if cc.Family != FamilyEVM {
 			continue
@@ -554,6 +597,31 @@ func (v *KeysetView) apply(cfg *Config, c KeysetChange, fresh bool) error {
 				return fmt.Errorf("that key is the one the config pins as generation 1")
 			}
 			gens[c.Generation] = &KeysetEntry{Shard: shard, Chain: cc.Name, Generation: c.Generation, State: partition.StateCandidate, KeyRef: c.KeyRef, PublicKey: c.PublicKey}
+			break
+		}
+		if cc.Family == FamilySOL {
+			raw, err := sol.ParseAddress(c.Address)
+			if err != nil || raw == ([32]byte{}) {
+				return fmt.Errorf("%q is not a Solana address", c.Address)
+			}
+			addr := sol.Address(raw)
+			top := 0
+			for g := range gens {
+				top = max(top, g)
+			}
+			switch {
+			case c.Generation != top+1:
+				return fmt.Errorf("the next generation of %s is %d, not %d", c.Shard, top+1, c.Generation)
+			case next.addressUsed(cc.Name, addr):
+				return fmt.Errorf("address %s is already a generation of a shard of %s", addr, cc.Name)
+			}
+			for pool, cold := range cc.SOL.ColdAddresses {
+				if c, err := sol.ParseAddress(cold); err == nil && c == raw {
+					return fmt.Errorf("address %s is the cold address of pool %q", addr, pool)
+				}
+			}
+			gens[c.Generation] = &KeysetEntry{Shard: shard, Chain: cc.Name, Generation: c.Generation, Address: addr, State: partition.StateCandidate,
+				KeyRef: c.KeyRef, PublicKey: c.PublicKey}
 			break
 		}
 		if !common.IsHexAddress(c.Address) || common.HexToAddress(c.Address) == (common.Address{}) {
@@ -814,7 +882,7 @@ func (d *Decider) keysetRules(ctx context.Context, gt *GuardTx, kv *KeysetView, 
 	case FamilyBTC:
 		return d.btcGenRules(ctx, gt, kv, cc, i, info, amount, known, now)
 	case FamilySOL:
-		return d.solGenRules(kv, cc, i, info)
+		return d.solGenRules(ctx, gt, kv, cc, i, info, amount, known, now)
 	}
 	if kv == nil {
 		if i.Kind == signjob.KindDrain {
@@ -872,6 +940,7 @@ func (d *Decider) noteDrainRefusal(job signjob.Job, reason string) {
 		return
 	}
 	n := d.guard.drainRefused.Add(1)
+	d.noteDrainMetric(i.Chain, reason)
 	slog.Error("ALERT drain refused: the zone refused a drain; refusals do not count against the drain rate or cap, so a repeating one is a stuck planner or an attack by the business zone",
 		"intent", i.ID, "mode", d.mode.actor(), "source", i.From, "asset", i.Asset, "refused_total", n, "reason", reason)
 }
@@ -881,6 +950,10 @@ func (g *Guard) DrainRefusals() int64 { return g.drainRefused.Load() }
 
 // drainRule judges a drain by this zone's own view: nothing the intent says about states is believed.
 func (d *Decider) drainRule(ctx context.Context, gt *GuardTx, kv *KeysetView, cc *ChainConfig, shard partition.ShardID, i signjob.Intent, info TxInfo, amount *big.Int, known bool, now time.Time) error {
+	canon := func(a string) (string, error) { return (&EVMCodec{}).Canonical(a) }
+	if cc.Family == FamilySOL {
+		canon = func(a string) (string, error) { raw, err := sol.ParseAddress(a); return sol.Address(raw), err }
+	}
 	if d.cfg.Operators == nil {
 		return reject(ReasonKeyset, "this zone's config has no operators section: keyset states, and so drains, are off")
 	}
@@ -919,7 +992,7 @@ func (d *Decider) drainRule(ctx context.Context, gt *GuardTx, kv *KeysetView, cc
 	default:
 		return reject(ReasonKeyset, "successor generation %d of %s is %s: a drain pays an active generation", succ.Generation, shard, succ.State)
 	}
-	dest, err := (&EVMCodec{}).Canonical(i.To)
+	dest, err := canon(i.To)
 	if err != nil || dest != succ.Address {
 		return reject(ReasonKeyset, "drain destination %s is not the successor %s (generation %d of %s)", i.To, succ.Address, succ.Generation, shard)
 	}

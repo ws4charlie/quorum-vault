@@ -374,7 +374,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       CGO_ENABLED: "1"
       CC: clang-20

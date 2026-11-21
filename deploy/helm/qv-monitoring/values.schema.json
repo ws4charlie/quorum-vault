@@ -15,7 +15,7 @@
         "businessNamespace": { "type": "string", "minLength": 1 },
         "clusterLabel": { "type": "string", "minLength": 1 },
         "interval": { "type": "string" },
-        "components": { "type": "array", "items": { "enum": ["core", "relay", "archiver"] } }
+        "components": { "type": "array", "items": { "enum": ["core", "worker", "relay", "archiver"] } }
       }
     },
     "alertmanager": {

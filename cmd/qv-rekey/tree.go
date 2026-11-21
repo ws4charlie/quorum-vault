@@ -4,10 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"time"
 
@@ -99,37 +97,19 @@ func (k *treeKeys) New(ctx context.Context, p *Plan) (string, string, error) {
 		return id, ident, err
 	}
 	if k.adminAuth == "" {
-		return "", "", fmt.Errorf("-admin-auth is required: an operator's file from `qv-keysets party-auth -op dkg -keyset %s` (valid for a few minutes, make it right before)", id)
-	}
-	raw, err := os.ReadFile(k.adminAuth)
-	if err != nil {
-		return "", "", err
-	}
-	var f struct {
-		Op        string `json:"op"`
-		Keyset    string `json:"keyset"`
-		Unix      int64  `json:"unix_seconds"`
-		PublicKey string `json:"public_key"`
-		Signature string `json:"signature"`
-	}
-	if err := json.Unmarshal(raw, &f); err != nil {
-		return "", "", err
-	}
-	if f.Op != "dkg" || f.Keyset != id {
-		return "", "", fmt.Errorf("%s is for %s of keyset %q, this step needs dkg of %q", k.adminAuth, f.Op, f.Keyset, id)
-	}
-	pub, err1 := hex.DecodeString(f.PublicKey)
-	sig, err2 := hex.DecodeString(f.Signature)
-	if err1 != nil || err2 != nil {
-		return "", "", errors.New("the admin-auth file is not hex")
+		return "", "", fmt.Errorf("-admin-auth is required: a request file the admins signed: `qv-party-admin request -op dkg -keyset %s ...`, then `qv-party-admin sign` by each admin (valid for the time it was made for)", id)
 	}
 	c := pb.Curve_CURVE_SECP256K1
 	if curve == "ed25519" {
 		c = pb.Curve_CURVE_ED25519
 	}
+	auth, err := readDKGAuth(k.adminAuth, id, pb.Scheme_SCHEME_UNSPECIFIED, c)
+	if err != nil {
+		return "", "", err
+	}
 	x, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
-	if _, err := cl.DKG(x, &pb.DKGRequest{KeysetId: id, Curve: c, Admin: &pb.AdminAuth{UnixSeconds: f.Unix, PublicKey: pub, Signature: sig}}); err != nil {
+	if _, err := cl.DKG(x, &pb.DKGRequest{KeysetId: id, Curve: c, Admin: auth}); err != nil {
 		if st, e2 := keyset(ctx, cl, id); e2 != nil || st == nil { // the DKG may have finished although the answer was lost
 			return "", "", fmt.Errorf("DKG %s: %w", id, err)
 		}

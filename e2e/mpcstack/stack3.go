@@ -2,8 +2,6 @@ package mpcstack
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -11,7 +9,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +17,6 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
-	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
 
@@ -36,9 +32,7 @@ type Stack3 struct {
 	CertA, CertB, CertC, CertGW Cert
 	CertCosB, CertCosC          Cert // what the cosigners present on their sockets (the party pins it; the cosigner pins its party)
 	certPAB, certPAC, certPBC   Cert
-	adminPub                    ed25519.PublicKey
-	admin                       ed25519.PrivateKey
-	adminSkew                   atomic.Int64
+	Admins                      AdminSet // the three admin keys; the parties are configured with them and admin_threshold 2
 
 	CallerA, CallerB, CallerC string
 	PeerB, PeerC              string
@@ -65,7 +59,7 @@ func Start3(t testing.TB, dir string, bin Binaries, o Opts) *Stack3 {
 	s := &Stack3{t: t, Dir: dir, Bin: bin, cfg: map[string]string{}, client: map[string]pb.MpcPartyClient{}}
 	s.CertA, s.CertB, s.CertC, s.CertGW = NewCert(t, "party-a"), NewCert(t, "party-b"), NewCert(t, "party-c"), NewCert(t, "gateway")
 	s.CertCosB, s.CertCosC = NewCert(t, "cosigner-b"), NewCert(t, "cosigner-c")
-	s.adminPub, s.admin, _ = ed25519.GenerateKey(rand.Reader)
+	s.Admins = newAdminSet()
 	if o.TEE != nil { // simulated enclave: brokers, allowlist and the enrolment of the sealed TLS keys come first; they set the parties' pins
 		s.tee = &TEE{s: s, o: *o.TEE}
 		s.tee.setup()
@@ -164,7 +158,7 @@ func (s *Stack3) writeParty(role string, o Opts, extra map[string]any) string {
 	}
 	cfg := map[string]any{
 		"role": role, "cert_file": crt, "key_file": key, "caller_pins": []string{s.CertGW.Pin},
-		"data_dir": filepath.Join(s.Dir, "data-"+role), "admin_keys": []string{hex.EncodeToString(s.adminPub)},
+		"data_dir": filepath.Join(s.Dir, "data-"+role), "admin_keys": s.Admins.PublicHex(), "admin_threshold": AdminThreshold,
 		"sealer": SealerConfig(role), "limits": lim,
 	}
 	if s.tee != nil { // simulated enclave: the TLS key is sealed in the data directory, the sealer is the attested one
@@ -272,13 +266,6 @@ func (s *Stack3) ready(all bool) bool {
 	return true
 }
 
-// AdminSeedHex is the operator's admin key (the seed, hex) for a key file: `qv-keysets party-auth` makes the authorisation of a DKG from it.
-func (s *Stack3) AdminSeedHex() string { return hex.EncodeToString(s.admin.Seed()) }
-
-func (s *Stack3) AdminAuth(op, keyset string) *pb.AdminAuth {
-	return admin.Sign(s.admin, op, keyset, time.Now().Add(time.Duration(s.adminSkew.Add(1))*time.Second))
-}
-
 // DKG is kept so the callers of the two-party stack read the same: every shard has its own keyset, made by Derive.
 func (s *Stack3) DKG() {}
 
@@ -288,7 +275,7 @@ func (s *Stack3) Derive(i int) Shard {
 	id := fmt.Sprintf("hot-%d", i)
 	x, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	r, err := s.client["A"].DKG(x, &pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: s.AdminAuth("dkg", id)})
+	r, err := s.client["A"].DKG(x, s.Admins.DKG(&pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3}))
 	if err != nil {
 		s.t.Fatalf("DKG %s: %v\nA: %s\nB: %s\nC: %s", id, err, tail(s.A.Output()), tail(s.B.Output()), tail(s.C.Output()))
 	}
@@ -304,7 +291,7 @@ func (s *Stack3) Derive(i int) Shard {
 func (s *Stack3) RefreshKeyset(id string) error {
 	x, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	_, err := s.client["A"].Refresh(x, &pb.RefreshRequest{KeysetId: id, Admin: s.AdminAuth("refresh", id)})
+	_, err := s.client["A"].Refresh(x, s.Admins.Refresh(&pb.RefreshRequest{KeysetId: id}))
 	return err
 }
 
@@ -322,7 +309,7 @@ func (s *Stack3) Refresh() error {
 func (s *Stack3) UnfreezeKeyset(id string) error {
 	x, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	_, err := s.client["A"].Unfreeze(x, &pb.UnfreezeRequest{KeysetId: id, Admin: s.AdminAuth("unfreeze", id)})
+	_, err := s.client["A"].Unfreeze(x, s.Admins.Unfreeze(&pb.UnfreezeRequest{KeysetId: id}))
 	return err
 }
 
@@ -456,7 +443,7 @@ func (s *Stack3) DKGEd25519(id string) []byte {
 	s.t.Helper()
 	x, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	r, err := s.client["A"].DKG(x, &pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ED25519_2OF3, Admin: s.AdminAuth("dkg", id)})
+	r, err := s.client["A"].DKG(x, s.Admins.DKG(&pb.DKGRequest{KeysetId: id, Scheme: pb.Scheme_SCHEME_ED25519_2OF3}))
 	if err != nil {
 		s.t.Fatalf("DKG %s: %v\nA: %s\nB: %s\nC: %s", id, err, tail(s.A.Output()), tail(s.B.Output()), tail(s.C.Output()))
 	}
@@ -469,7 +456,7 @@ func (s *Stack3) DKGHDEd25519(id string) {
 	s.t.Helper()
 	x, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if _, err := s.client["A"].DKG(x, &pb.DKGRequest{KeysetId: id, Curve: pb.Curve_CURVE_ED25519, Admin: s.AdminAuth("dkg", id)}); err != nil {
+	if _, err := s.client["A"].DKG(x, s.Admins.DKG(&pb.DKGRequest{KeysetId: id, Curve: pb.Curve_CURVE_ED25519})); err != nil {
 		s.t.Fatalf("HD DKG %s: %v", id, err)
 	}
 }

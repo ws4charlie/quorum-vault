@@ -420,8 +420,8 @@ func (c *attCluster) up() {
 	var b, a *server.Server
 	b, c.sealB = mk(c.cfgB, "B", c.logB, nil)
 	a, c.sealA = mk(c.cfgA, "A", c.logA, c.fi)
-	cl, conn := testenv.Dial(t, c.callerA, c.r.env.CertCaller, c.r.env.CertA.Pin)
-	bc, _ := testenv.Dial(t, c.callerB, c.r.env.CertCaller, c.r.env.CertB.Pin)
+	cl, conn := c.r.env.DialAs(t, c.callerA, c.r.env.CertCaller, c.r.env.CertA.Pin)
+	bc, _ := c.r.env.DialAs(t, c.callerB, c.r.env.CertCaller, c.r.env.CertB.Pin)
 	c.p = &pair{Env: c.r.env, A: a, B: b, Client: cl, BCall: bc, ConnA: conn}
 }
 

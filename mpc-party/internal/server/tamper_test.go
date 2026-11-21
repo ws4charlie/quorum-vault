@@ -5,7 +5,6 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -178,7 +177,7 @@ func TestTamperingProxyYieldsCryptographicNoSignature(t *testing.T) {
 					keyset = "ks-s"
 				}
 				// A forged or wrong-key unfreeze is refused; the real one works and signing resumes.
-				_, uerr := p2.Client.Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: keyset, Admin: server.SignAdmin(p2.Env.CertCallerKey(), "unfreeze", keyset, time.Now())})
+				_, uerr := p2.Client.Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: keyset, Admin: p2.Env.AdminBy(p2.Env.AdminKeys[0], p2.Env.CertCallerKey())})
 				wantKind(t, uerr, codes.PermissionDenied, pb.ErrorKind_ERROR_KIND_REFUSED)
 				_, uerr = p2.Client.Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: keyset, Admin: p2.Env.Admin("unfreeze", keyset)})
 				mustOK(t, uerr)

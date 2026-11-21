@@ -604,8 +604,23 @@ func (e *Env) Activate(ctx context.Context) error {
 		e.printf("%s", treeNoticeText(p))
 		return nil
 	}
+	if len(p.PublicKey) == 64 { // an Ed25519 key: a Solana hot shard
+		e.printf("%s", solNoticeText(p))
+		return nil
+	}
 	e.printf("%s", ceremonyText(p))
 	return e.factoryCheck(ctx, p)
+}
+
+// solNoticeText is what follows the activation of a Solana hot shard's new generation. There is no ceremony: the deposit sweeps and the withdrawals follow the
+// active generation by themselves; what the operator does is give the new key its nonce pool, once the drain has funded it.
+func solNoticeText(p *Plan) string {
+	return fmt.Sprintf(`generation %d (%s) is active: withdrawals and sweeps are built from it, once it has a nonce pool and SOL.
+the drain of generation %d starts by itself (the worker's drain planner): it moves the tokens, then the SOL the new key needs to create its pool, and waits.
+next, an operator creates the new generation's pool (one approval): qv-sol-nonces -config CUSTODY.json -dsn $DATABASE_URL -shard N -approver NAME -approver-key FILE
+(no -generation: the active one). The drain then empties the old pool and the last lamports; status shows each wait and its reason.
+withdrawals wait without a free nonce until the pool exists. Then: status until generation %d is drained, then retire.
+`, p.To, p.Address, p.From, p.From)
 }
 
 func ceremonyText(p *Plan) string {

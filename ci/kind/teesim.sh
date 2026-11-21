@@ -97,7 +97,7 @@ log "tee-sim: brokers (nothing allowed yet)"
 install_brokers
 
 # ---- party values
-ADMIN_PUB="$(go run ./ci/kind/tools/kindctl adminkey -seed "$S/admin.seed")"
+ADMIN_KEYS="$(go run ./ci/kind/tools/kindctl adminkey -seed "$S/admin.seed" | sed 's/.*/"&"/' | paste -sd, -)"  # three admin keys, two must sign (adminThreshold)
 GW="$(kn "$NS_SIGN" get secret qv-signing-gateway-party-tls -o jsonpath='{.data.tls\.crt}' | base64 -d | spki_pin)"
 GWSEL="{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: $NS_SIGN } }, podSelector: { matchLabels: { app.kubernetes.io/component: gateway } } }"
 attested_values() { # role: what every phase needs
@@ -145,7 +145,8 @@ run_values() { # role
   local r="$1"
   attested_values "$r"
   cat <<Y
-adminKeys: ["$ADMIN_PUB"]
+adminKeys: [$ADMIN_KEYS]
+adminThreshold: 2
 callerPins: ["$GW"]
 Y
   case "$r" in

@@ -18,6 +18,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	wire "github.com/ws4charlie/quorum-vault/mpc-party/api/cosigner"
+	"google.golang.org/protobuf/proto"
 	"math/big"
 	"net"
 	"net/url"
@@ -239,9 +240,8 @@ type stack struct {
 	certC              cert
 	certGW             cert // the gateway's client certificate (pinned by the parties' caller ports)
 	certProx           cert
-	certCosB, certCosC cert // what the cosigners present on their sockets (the party pins it; the cosigner pins its party)
-	adminPub           ed25519.PublicKey
-	admin              ed25519.PrivateKey
+	certCosB, certCosC cert                 // what the cosigners present on their sockets (the party pins it; the cosigner pins its party)
+	adminKeys          []ed25519.PrivateKey // three admin keys; the parties need two (admin_threshold 2)
 
 	callerA, callerB, callerC string
 	peerB, peerC              string
@@ -282,14 +282,32 @@ type stackOpts struct {
 	noCosign bool
 }
 
-func (s *stack) adminAuth(op, keyset string, at time.Time) *pb.AdminAuth {
-	return admin.Sign(s.admin, op, keyset, at)
+// adminAuth is a v2 authorization of (op, body) signed by two of the three admin keys, valid from issued to expires.
+func (s *stack) adminAuth(op string, body proto.Message, issued, expires time.Time) *pb.AdminAuth {
+	return s.adminAuthBy(op, body, issued, expires, s.adminKeys[0], s.adminKeys[1])
 }
 
-var adminSkew int
+func (s *stack) adminAuthBy(op string, body proto.Message, issued, expires time.Time, keys ...ed25519.PrivateKey) *pb.AdminAuth {
+	a, err := admin.Authorize(op, body, "", issued, expires, keys...)
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
 
-// adminNow returns an admin signature timestamp that has not been used: signatures are deterministic per second.
-func adminNow() time.Time { adminSkew++; return time.Now().Add(time.Duration(adminSkew) * time.Second) }
+// freshAuth is adminAuth valid from now for ten minutes.
+func (s *stack) freshAuth(op string, body proto.Message) *pb.AdminAuth {
+	now := time.Now()
+	return s.adminAuth(op, body, now, now.Add(10*time.Minute))
+}
+
+func (s *stack) adminHex() []string {
+	var l []string
+	for _, k := range s.adminKeys {
+		l = append(l, hex.EncodeToString(k.Public().(ed25519.PublicKey)))
+	}
+	return l
+}
 
 func newStack(t *testing.T, o stackOpts) *stack {
 	t.Helper()
@@ -299,7 +317,10 @@ func newStack(t *testing.T, o stackOpts) *stack {
 	s := &stack{t: t, dir: t.TempDir(), chainID: o.chainID, keysetID: "hot"}
 	s.certA, s.certB, s.certC, s.certGW, s.certProx = newCert(t, "party-a"), newCert(t, "party-b"), newCert(t, "party-c"), newCert(t, "gateway"), newCert(t, "proxy")
 	s.certCosB, s.certCosC = newCert(t, "cosigner-b"), newCert(t, "cosigner-c")
-	s.adminPub, s.admin, _ = ed25519.GenerateKey(rand.Reader)
+	for range 3 {
+		_, k, _ := ed25519.GenerateKey(rand.Reader)
+		s.adminKeys = append(s.adminKeys, k)
+	}
 	s.callerA, s.callerB, s.callerC, s.peerB, s.peerC = freeAddr(t), freeAddr(t), freeAddr(t), freeAddr(t), freeAddr(t)
 	s.peerForA = s.peerB
 	s.sock = filepath.Join(os.TempDir(), fmt.Sprintf("qvcs-%d.sock", time.Now().UnixNano()%1e9))
@@ -323,7 +344,7 @@ func (s *stack) writeParty(t *testing.T, role, seal, peerPin string) string {
 	crt, key := own.write(t, s.dir)
 	cfg := map[string]any{
 		"role": role, "cert_file": crt, "key_file": key, "caller_pins": []string{s.certGW.pin},
-		"data_dir": filepath.Join(s.dir, "data-"+role), "admin_keys": []string{hex.EncodeToString(s.adminPub)},
+		"data_dir": filepath.Join(s.dir, "data-"+role), "admin_keys": s.adminHex(), "admin_threshold": 2,
 		"sealer": mpcstack.SealerConfig(role),
 		"limits": map[string]any{"recv_timeout_ms": 3000, "session_timeout_ms": 20000, "sessions_per_sec_key": 100000, "max_peer_sessions": 32},
 	}
@@ -391,7 +412,7 @@ func (s *stack) provision(t *testing.T, noCosigner bool) {
 	t.Helper()
 	x := ctx(t, 60*time.Second)
 	// The hot key is a 2-of-3 keyset on A, B and C: the keyset is the key (Sign names it as key_id).
-	d, err := s.client.DKG(x, &pb.DKGRequest{KeysetId: s.keysetID, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: s.adminAuth("dkg", s.keysetID, adminNow())})
+	d, err := s.client.DKG(x, &pb.DKGRequest{KeysetId: s.keysetID, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3, Admin: s.freshAuth("dkg", &pb.DKGRequest{KeysetId: s.keysetID, Scheme: pb.Scheme_SCHEME_ECDSA_2OF3})})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,10 +572,6 @@ func bigInt(v int64) *big.Int { return big.NewInt(v) }
 func newAdminKey() (ed25519.PublicKey, ed25519.PrivateKey) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	return pub, priv
-}
-
-func signWith(priv ed25519.PrivateKey, op, keyset string, at time.Time) *pb.AdminAuth {
-	return admin.Sign(priv, op, keyset, at)
 }
 
 func signerPub(s *stack) (*ecdsa.PublicKey, error) { return crypto.UnmarshalPubkey(s.pub65) }

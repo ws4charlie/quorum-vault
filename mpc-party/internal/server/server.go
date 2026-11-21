@@ -152,6 +152,10 @@ func New(o Options) (srv *Server, err error) {
 		return nil, err
 	}
 	adm.persistOn(st, c.DataDir)
+	adm.log = lg
+	if adm.allowV1 && c.AdminThreshold > 0 {
+		lg.Warn("the v1 admin authorization is still accepted (admin_allow_v1): it covers no request field beyond the keyset and needs no quorum; switch it off after the roll-over", "admin_threshold", c.AdminThreshold)
+	}
 	var fz *fileFreeze
 	if fs, ok := st.(*FileStore); ok {
 		fz, err = newFileFreezeOn(fs)

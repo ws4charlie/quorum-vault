@@ -93,6 +93,8 @@ type Options struct {
 	// Generations builds the signer of a generation of an EVM hot shard other than the first (gensigners.go). Nil: the zone signs from the configured
 	// key of each partition only.
 	Generations GenerationSigner
+	// MessageGenerations builds the signer of a generation of a Solana hot shard other than the first. Nil: the 2-of-3 Ed25519 builder (MPCEdGenerationSigner).
+	MessageGenerations MessageGenerationSigner
 }
 
 // Gateway claims sign jobs and signs the ones it independently approves.
@@ -107,6 +109,7 @@ type Gateway struct {
 	gens    *genSigners // later generations of a key: Options.Generations and the built-in deposit-tree builder
 	edMu    sync.Mutex
 	edGens  map[string]signer.MessageDeriver // later generations of a Solana deposit tree, by partition and keyset
+	msgGens map[string]signer.MessageSigner  // later generations of a Solana hot shard, by partition, keyset and key (guarded by edMu)
 
 	inflight sync.WaitGroup // signer calls still running, abandoned ones included
 
@@ -143,6 +146,9 @@ func New(cfg *Config, codecs map[string]ChainCodec, signers map[string]signer.Si
 	dec := NewDecider(cfg, codecs, guard, ModeGateway, opt.Now)
 	g := &Gateway{cfg: cfg, codecs: codecs, signers: signers, guard: guard, dec: dec, jobs: jobs, opt: opt}
 	// A later generation of a deposit tree is reached through the partition's own party A connection, so the zone can build it from the record alone.
+	if g.opt.MessageGenerations == nil {
+		g.opt.MessageGenerations = MPCEdGenerationSigner()
+	}
 	g.gens = &genSigners{build: ComposeGenerationSigners(opt.Generations, MPCDepositGenerationSigner())}
 	return g, nil
 }
@@ -413,6 +419,9 @@ func (g *Gateway) evaluateMessage(ctx context.Context, job signjob.Job, mc Messa
 	var s signer.MessageSigner
 	if !deposit {
 		s = g.opt.MessageSigners[job.PartitionID]
+		if s, err = g.hotMessageSigner(ctx, job, s); err != nil {
+			return nil, false, err
+		}
 	} else if d := g.opt.DepositSigners[job.PartitionID]; d != nil {
 		if gen > 1 {
 			if d, err = g.edDepositDeriver(ctx, job, d, gen); err != nil {
