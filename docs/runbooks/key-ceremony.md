@@ -118,6 +118,8 @@ The change stays on the parties that took it; the others keep the old set. `stat
 2. Sign it with the set the party that is behind still has, and with the new set; send it. The parties that already have the change answer `already had it` (no signature is looked at, nothing changes); the one behind applies it.
 3. A party more than one version behind needs the earlier requests first, in order (each still needs the signatures of the set it replaces: keep every request file on the change ticket).
 
+A change must also fit in one request: it needs the current threshold of signatures from the current set **and** the new threshold from the new set, a key in both counting for both, and one request carries at most 32 signatures. A set with a threshold above 16 can therefore be replaced in one step only by a set that keeps enough of its keys (17 of 17 replaced by 17 other keys needs 34); `admin-set request` and every party refuse a change that cannot fit, and a party whose threshold is above 16 logs a warning at start. Change such a set in two steps, or lower the threshold first.
+
 Only one change is in flight: `admin-set request` refuses while the parties disagree.
 
 ### Break-glass: the current admin set has lost its quorum
@@ -146,6 +148,8 @@ Each party's shares sit on its volume sealed under one AES key that never leaves
 3. Set `"wrap_key_label": "qv-share-wrap-2"` in the `sealer` section of the party's configuration (chart: the party's config value for the sealer; **list for the lead**: the chart has no value for it yet) and start the party. Wait until `status` shows every keyset resolved and sign once through each pair that includes this party.
 4. `mpc-party reseal -config party.json -destroy-label qv-share-wrap -confirm-restarted` removes the old key from the token. It refuses while the configuration still seals under it, while any share is sealed under it, while a reseal is unfinished, and without `-confirm-restarted`. Destroying the key is for good: do it after the step-3 checks, and after you have decided that you do not need a restart under the old key as a rollback.
 5. New generations (every refresh) are sealed under the new key from the restart on.
+
+**A resumed re-seal never overwrites a newer file.** Before the marker is written the command records the hash of every live file a staged file will replace; a resumed run moves a staged file only over a live file that still has that hash. A party that started between the runs, discarded an undecided refresh candidate and wrote a newer share at the same generation number keeps it: the staged copy is dropped and reported (`NOT moved`), and a new run moves what is left. `migrate-seal` shares the same move code and the same hole existed there (the staged `state.json` of an old run could replace a newer one); it now refuses, before moving anything, when a live file changed after its marker was written, and tells you to restore the snapshot and run it again.
 
 A backup (`mpc-party backup`) does not depend on the wrap key: it is encrypted to the recovery key. Restoring a party into a token that has only the new key works as before.
 

@@ -32,6 +32,12 @@ import (
 )
 
 func recordsCmd(group string, args []string, out, errw io.Writer) error {
+	if group == "records" {
+		if len(args) > 0 && args[0] == "export" {
+			return recordsExportCmd(args[1:], out)
+		}
+		return errors.New("usage: qv-party-admin records export -party … -cert … -key … -out FILE")
+	}
 	if len(args) == 0 {
 		return fmt.Errorf("usage: qv-party-admin %s request|send%s (see the file header of cmd/qv-party-admin/records.go)", group, map[string]string{"recovery-key": "|status|registry"}[group])
 	}
@@ -202,6 +208,7 @@ func adminSetRequestCmd(args []string, out, errw io.Writer) error {
 			return errors.New("-finish makes the request for the change party A already has: do not give -add, -remove or -threshold")
 		}
 		var prev []byte
+		var behind *pb.AdminSetStatus
 		for _, v := range answered(vs) {
 			s := v.health.AdminSet
 			if s == nil || s.Version == a.Version {
@@ -213,7 +220,7 @@ func adminSetRequestCmd(args []string, out, errw io.Writer) error {
 			if prev != nil && !bytes.Equal(prev, s.SetHash) {
 				return errors.New("the parties that are behind do not hold the same set: look at `status` and finish them one by one")
 			}
-			prev = s.SetHash
+			prev, behind = s.SetHash, s
 		}
 		if prev == nil {
 			return errors.New("no party that answered is behind party A: nothing to finish")
@@ -224,7 +231,7 @@ func adminSetRequestCmd(args []string, out, errw io.Writer) error {
 		copy(keys, a.Keys)
 		// version = A's, predecessor = the behind parties' set
 		body := admin.AdminSetBody(a.Version, keys, int(a.Threshold), h)
-		r, err = requestFromBody(body, dom, *validFor)
+		r, err = requestFromBody(body, behind.Keys, int(behind.Threshold), dom, *validFor)
 		if err != nil {
 			return err
 		}
@@ -240,7 +247,7 @@ func adminSetRequestCmd(args []string, out, errw io.Writer) error {
 		}
 		var h [32]byte
 		copy(h[:], a.SetHash)
-		r, err = admin.NewSetRequest(dom, a.Version, h, keys, thr, time.Now(), *validFor)
+		r, err = admin.NewSetRequest(dom, a.Version, h, a.Keys, int(a.Threshold), keys, thr, time.Now(), *validFor)
 		if err != nil {
 			return err
 		}
@@ -262,14 +269,14 @@ func requiredFrom(vs []view, finish bool, a *pb.AdminSetStatus) int {
 	return int(a.Threshold)
 }
 
-func requestFromBody(body *pb.AdminSetRequest, domain string, validFor time.Duration) (admin.Request, error) {
+func requestFromBody(body *pb.AdminSetRequest, curKeys [][]byte, curThr int, domain string, validFor time.Duration) (admin.Request, error) {
 	if err := admin.CheckAdminSet(body.SetKeys, int(body.SetThreshold)); err != nil {
 		return admin.Request{}, err
 	}
 	var h [32]byte
 	copy(h[:], body.SetPrevHash)
 	// NewSetRequest makes version curVersion+1
-	return admin.NewSetRequest(domain, body.SetVersion-1, h, body.SetKeys, int(body.SetThreshold), time.Now(), validFor)
+	return admin.NewSetRequest(domain, body.SetVersion-1, h, curKeys, curThr, body.SetKeys, int(body.SetThreshold), time.Now(), validFor)
 }
 
 // newSet is the current set with the keys added and removed and the threshold changed, checked.
@@ -342,6 +349,7 @@ func recoveryRequestCmd(args []string, out, errw io.Writer) error {
 	var c common
 	c.flags(fs)
 	pub := fs.String("current-public", "", "the recovery PUBLIC key file backups must be made under from now on")
+	finish := fs.Bool("finish", false, "make the request that brings the parties that are one version behind to the registry party A holds (a new request for the same change: the first one may have expired, or a party restarted since)")
 	var retire stringList
 	fs.Var(&retire, "retire", "a recovery key fingerprint (64 hex) to retire (repeat; default: the key that is current now, when it is another one)")
 	domain := fs.String("domain", "", "the parties' admin_domain (default: what party A reports)")
@@ -350,16 +358,18 @@ func recoveryRequestCmd(args []string, out, errw io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *pub == "" {
-		return errors.New("-current-public is required")
+	if *pub == "" && !*finish {
+		return errors.New("-current-public is required (or -finish)")
 	}
-	raw, err := os.ReadFile(*pub)
-	if err != nil {
-		return err
-	}
-	fpr, err := admin.RecoveryFingerprint(raw)
-	if err != nil {
-		return fmt.Errorf("%s: %w", *pub, err)
+	var fpr string
+	if *pub != "" {
+		raw, err := os.ReadFile(*pub)
+		if err != nil {
+			return err
+		}
+		if fpr, err = admin.RecoveryFingerprint(raw); err != nil {
+			return fmt.Errorf("%s: %w", *pub, err)
+		}
 	}
 	if err := c.check(); err != nil {
 		return err
@@ -381,9 +391,54 @@ func recoveryRequestCmd(args []string, out, errw io.Writer) error {
 		}
 	}
 	reg := vs[0].health.RecoveryKey
+	if *finish {
+		if *pub != "" {
+			return errors.New("-finish makes the request for the change party A already has: do not give -current-public")
+		}
+		var behind *pb.RecoveryKeyStatus
+		for _, v := range answered(vs) {
+			rk := v.health.RecoveryKey
+			if rk.Version == reg.Version && bytes.Equal(rk.Hash, reg.Hash) {
+				continue
+			}
+			if rk.Version+1 != reg.Version {
+				return fmt.Errorf("party %s is at registry version %d and party A at %d: it is more than one change behind; send it the earlier requests in order", v.name, rk.Version, reg.Version)
+			}
+			if behind != nil && !bytes.Equal(behind.Hash, rk.Hash) {
+				return errors.New("the parties that are behind do not hold the same registry: finish them one by one")
+			}
+			behind = rk
+		}
+		if behind == nil {
+			return errors.New("no party that answered is behind party A: nothing to finish")
+		}
+		have := map[string]bool{}
+		for _, f := range behind.Retired {
+			have[f] = true
+		}
+		var retire []string
+		for _, f := range reg.Retired {
+			if !have[f] {
+				retire = append(retire, f)
+			}
+		}
+		dom := *domain
+		if dom == "" {
+			dom = a.Domain
+		}
+		var h [32]byte
+		copy(h[:], behind.Hash)
+		r, err := admin.NewRecoveryRequest(dom, behind.Version, h, reg.Current, retire, time.Now(), *validFor)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(errw, "request (finish): recovery-key registry version %d: current key %s, retire %s\n%s\nvalid until %s: sign it (qv-party-admin sign), then recovery-key send; the parties that already have the change answer \"already had it\"\n",
+			reg.Version, orNone([]string{reg.Current}), orNone(retire), describe(r), time.Unix(r.ExpiresUnix, 0).Format("2006-01-02 15:04:05 MST"))
+		return writeRequest(r, *outFile, out)
+	}
 	for _, v := range answered(vs) {
 		if v.health.RecoveryKey.Version != reg.Version || !bytes.Equal(v.health.RecoveryKey.Hash, reg.Hash) {
-			return fmt.Errorf("party %s and party A hold different recovery-key registries (versions %d and %d): send the last change again before a new one", v.name, v.health.RecoveryKey.Version, reg.Version)
+			return fmt.Errorf("party %s and party A hold different recovery-key registries (versions %d and %d): finish the last change first (`recovery-key request -finish`)", v.name, v.health.RecoveryKey.Version, reg.Version)
 		}
 	}
 	ret := []string(retire)
@@ -658,8 +713,19 @@ func recoveryStatusCmd(args []string, out io.Writer) error {
 	if cur == "" || !regOK {
 		problems = append(problems, "no current recovery key is registered on every party")
 	}
-	if len(problems) == 0 && pending == 0 && len(rows) > 0 {
-		fmt.Fprintln(out, "\nCOMPLETE: every keyset has a verified, current backup under the current recovery key on every party")
+	// Completion is a statement about the whole deployment: party A must answer, every party A dials must be named and answer, and the parties must agree
+	// on every keyset (generation, scheme, public key, presence). A check of fewer parties is a local check and says so.
+	exp, global := expectedParties(vs)
+	if global {
+		problems = append(problems, compare(vs, *keyset, false)...)
+	}
+	if !global {
+		fmt.Fprintf(out, "\nLOCAL CHECK ONLY: %s. This is not the completion check: it cannot see the other parties' backups or whether the keysets agree. Run `recovery-key status` with every party (-party A=… -party B=… -party C=…) from a pod that can reach all of them\n", whyLocal(vs, exp))
+		if pending == 0 && len(problems) == 0 {
+			return nil
+		}
+	} else if len(problems) == 0 && pending == 0 && len(rows) > 0 {
+		fmt.Fprintf(out, "\nCOMPLETE: all %d parties (%s) answered, agree on every keyset and the registry, and every keyset has a verified backup of its current generation under the current recovery key on every party that holds it. This says nothing about copies of older backups or of the old key kept elsewhere: they are destroyed by the custodians, and that is not visible here\n", len(exp), strings.Join(exp, ", "))
 		return nil
 	}
 	var ids []string
@@ -669,22 +735,55 @@ func recoveryStatusCmd(args []string, out io.Writer) error {
 	sort.Strings(ids)
 	fmt.Fprintln(out, "\nnext:")
 	for _, id := range ids {
-		stale := false
-		for _, r := range rows {
-			if r.keyset == id && (r.state == "stale" || r.state == "retired") {
-				stale = true
-			}
-		}
-		if stale {
-			fmt.Fprintf(out, "  keyset %s: if its shares may have been exposed with the old recovery key, REFRESH it first (qv-party-admin request -op refresh -keyset %s, sign, send): old backups then stop working; then on each of %s: mpc-party backup export -config PARTY.json -keyset %s -recovery-public NEW.public -out FILE\n", id, id, strings.Join(todo[id], ", "), id)
-		} else {
-			fmt.Fprintf(out, "  keyset %s: on each of %s: mpc-party backup export -config PARTY.json -keyset %s -recovery-public NEW.public -out FILE\n", id, strings.Join(todo[id], ", "), id)
-		}
+		fmt.Fprintf(out, "  keyset %s: on each of %s: mpc-party backup export -config PARTY.json -keyset %s -recovery-public NEW.public -out FILE (a backup of an older generation, or under a retired key, does not count; a refresh first is for a deliberate decision, see the runbook)\n", id, strings.Join(todo[id], ", "), id)
 	}
 	for _, p := range problems {
 		fmt.Fprintf(out, "  %s\n", p)
 	}
 	return errors.New("the replacement of the recovery key is not complete")
+}
+
+// expectedParties are the parties party A reports itself and its links to (A, B and, with 2-of-3 keysets, C). global is false when A did not answer or a
+// party it dials was not named or did not answer: nothing then says "every party".
+func expectedParties(vs []view) (names []string, global bool) {
+	var a *view
+	for i := range vs {
+		if vs[i].name == "A" && vs[i].err == nil {
+			a = &vs[i]
+		}
+	}
+	if a == nil {
+		return nil, false
+	}
+	names = []string{"A"}
+	for _, p := range a.health.Peers {
+		names = append(names, p.Name)
+	}
+	got := map[string]bool{}
+	for _, v := range vs {
+		if v.err == nil {
+			got[v.name] = true
+		}
+	}
+	for _, n := range names {
+		if !got[n] {
+			return names, false
+		}
+	}
+	return names, true
+}
+
+func whyLocal(vs []view, exp []string) string {
+	var checked []string
+	for _, v := range vs {
+		if v.err == nil {
+			checked = append(checked, v.name)
+		}
+	}
+	if exp == nil {
+		return fmt.Sprintf("party A was not among the parties that answered (checked: %s)", strings.Join(checked, ", "))
+	}
+	return fmt.Sprintf("checked %s, but party A dials %s", strings.Join(checked, ", "), strings.Join(exp, ", "))
 }
 
 // recoveryRegistryCmd writes the registry the parties agree on, for the offline machine that restores backups (`mpc-party backup restore -registry`).
@@ -729,5 +828,74 @@ func recoveryRegistryCmd(args []string, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(out, "registry version %d written to %s (current %s, %d retired)\n", rk.Version, *outFile, rk.Current, len(rk.Retired))
+	return nil
+}
+
+// recordsExportCmd writes the admin set and the recovery-key registry the surviving parties hold, for `mpc-party backup restore -records`. Name only the
+// surviving parties: it needs at least two, every one of them must answer, and they must all hold the same versions and hashes. Anything else is refused:
+// the file decides what a restored party believes about who its admins are.
+func recordsExportCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("records export", flag.ContinueOnError)
+	var c common
+	c.flags(fs)
+	outFile := fs.String("out", "", "write the records here (public data)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := c.check(); err != nil {
+		return err
+	}
+	if *outFile == "" {
+		return errors.New("-out is required")
+	}
+	if len(c.parties) < 2 {
+		return errors.New("name at least two surviving parties (-party): one party's word is not enough for what a restored party will believe about its admins")
+	}
+	cs, err := c.dial()
+	if err != nil {
+		return err
+	}
+	defer closeAll(cs)
+	vs := healthOf(context.Background(), cs)
+	for _, v := range vs {
+		if v.err != nil {
+			return fmt.Errorf("party %s did not answer: name only parties that are up, and at least two", v.name)
+		}
+		if v.health.AdminSet == nil || v.health.RecoveryKey == nil {
+			return fmt.Errorf("party %s reports no admin set or no registry (an older version, or its records cannot be read)", v.name)
+		}
+	}
+	if p := recordProblems(vs); len(p) > 0 {
+		return disagree(p)
+	}
+	a, rk := vs[0].health.AdminSet, vs[0].health.RecoveryKey
+	f := struct {
+		V        int `json:"v"`
+		AdminSet struct {
+			Version   uint64   `json:"version"`
+			Keys      []string `json:"keys"`
+			Threshold int      `json:"threshold"`
+			Hash      string   `json:"hash"`
+		} `json:"admin_set"`
+		Registry struct {
+			Version uint64   `json:"version"`
+			Current string   `json:"current"`
+			Retired []string `json:"retired"`
+		} `json:"recovery_key_registry"`
+	}{V: 1}
+	f.AdminSet.Version, f.AdminSet.Threshold, f.AdminSet.Hash = a.Version, int(a.Threshold), hex.EncodeToString(a.SetHash)
+	for _, k := range a.Keys {
+		f.AdminSet.Keys = append(f.AdminSet.Keys, hex.EncodeToString(k))
+	}
+	sort.Strings(f.AdminSet.Keys)
+	f.Registry.Version, f.Registry.Current, f.Registry.Retired = rk.Version, rk.Current, rk.Retired
+	if f.Registry.Retired == nil {
+		f.Registry.Retired = []string{}
+	}
+	b, _ := json.MarshalIndent(f, "", "  ")
+	if err := os.WriteFile(*outFile, append(b, '\n'), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "records written to %s: admin set version %d, recovery-key registry version %d, agreed by %d parties\n", *outFile, a.Version, rk.Version, len(vs))
 	return nil
 }

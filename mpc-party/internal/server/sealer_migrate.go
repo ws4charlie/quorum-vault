@@ -73,7 +73,7 @@ func MigrateSeal(ctx context.Context, from, to *Config, opt MigrateOptions) (Mig
 
 	if _, err := os.Stat(filepath.Join(stg, committedMarker)); err == nil {
 		rep.Resumed = true
-		return rep, finishMoves(stg, from.DataDir, stage)
+		return rep, finishMoves(stg, from.DataDir, stage, nil)
 	}
 
 	oldSealer, err := NewSealerForRole(from.Role, from.Sealer)
@@ -275,13 +275,16 @@ func MigrateSeal(ctx context.Context, from, to *Config, opt MigrateOptions) (Mig
 	if err := stage("verified"); err != nil {
 		return rep, err
 	}
+	if err := writeManifest(stg, dir); err != nil {
+		return rep, err
+	}
 	if err := writeAtomic(filepath.Join(stg, committedMarker), []byte("verified\n")); err != nil {
 		return rep, err
 	}
 	if err := stage("committed"); err != nil {
 		return rep, err
 	}
-	return rep, finishMoves(stg, dir, stage)
+	return rep, finishMoves(stg, dir, stage, nil)
 }
 
 func verifyLocal(ctx context.Context, ns *FileStore, stg string, rep MigrateReport) error {
@@ -319,15 +322,63 @@ func verifyLocal(ctx context.Context, ns *FileStore, stg string, rep MigrateRepo
 	return nil
 }
 
+// manifestFile records, before the commit marker is written, the hash of the live file each staged file will replace ("" when there is none). A resumed
+// run moves a staged file only over a live file that still has that hash: between the runs a party may have started, discarded an undecided candidate,
+// refreshed again and written a NEWER file at the same name, and the staged copy must never replace it.
+const manifestFile = "MANIFEST.json"
+
+func fileHash(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(b)
+	return fmt.Sprintf("%x", h[:]), nil
+}
+
+// writeManifest hashes the live counterpart of every staged file.
+func writeManifest(stg, dir string) error {
+	m := map[string]string{}
+	err := filepath.WalkDir(stg, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(stg, p)
+		if rel == committedMarker || rel == manifestFile || strings.HasPrefix(filepath.Base(rel), ".tmp-") {
+			return nil
+		}
+		h, err := fileHash(filepath.Join(dir, rel))
+		m[rel] = h
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	raw, _ := json.Marshal(m)
+	return writeAtomic(filepath.Join(stg, manifestFile), raw)
+}
+
 // finishMoves renames every staged file over the data directory (local.key.json last) and removes the staging directory. Safe to repeat.
-func finishMoves(stg, dir string, stage func(string) error) error {
+// A staged file whose live counterpart changed since staging (manifest) is not moved: changed(rel) decides (nil: that is an error).
+func finishMoves(stg, dir string, stage func(string) error, changed func(rel string) error) error {
+	manifest := map[string]string{}
+	haveManifest := false
+	if raw, err := os.ReadFile(filepath.Join(stg, manifestFile)); err == nil {
+		if json.Unmarshal(raw, &manifest) != nil {
+			return errors.New("the staging manifest is damaged: restore the snapshot taken before the command and run it again")
+		}
+		haveManifest = true
+	}
 	var rels []string
 	err := filepath.WalkDir(stg, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
 		rel, _ := filepath.Rel(stg, p)
-		if rel != committedMarker && !strings.HasPrefix(filepath.Base(rel), ".tmp-") {
+		if rel != committedMarker && rel != manifestFile && !strings.HasPrefix(filepath.Base(rel), ".tmp-") {
 			rels = append(rels, rel)
 		}
 		return nil
@@ -336,8 +387,37 @@ func finishMoves(stg, dir string, stage func(string) error) error {
 		return err
 	}
 	sort.SliceStable(rels, func(i, j int) bool { return rank(rels[i]) < rank(rels[j]) })
+	if haveManifest && changed == nil { // all or nothing: look at every live file before the first move
+		for _, rel := range rels {
+			live, err := fileHash(filepath.Join(dir, rel))
+			if err != nil {
+				return err
+			}
+			if live != manifest[rel] {
+				return fmt.Errorf("%s changed after the commit marker was written (a party ran on this directory between the runs): nothing was overwritten. Restore the snapshot taken before the command, remove %s and run it again", rel, stg)
+			}
+		}
+	}
 	for i, rel := range rels {
 		dst := filepath.Join(dir, rel)
+		if haveManifest {
+			live, err := fileHash(dst)
+			if err != nil {
+				return err
+			}
+			if live != manifest[rel] {
+				if changed == nil {
+					return fmt.Errorf("%s changed after the commit marker was written (a party ran on this directory between the runs): nothing was overwritten. Restore the snapshot taken before the command, remove %s and run it again", rel, stg)
+				}
+				if err := changed(rel); err != nil {
+					return err
+				}
+				if err := os.Remove(filepath.Join(stg, rel)); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return err
 		}

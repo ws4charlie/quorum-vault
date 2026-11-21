@@ -277,3 +277,92 @@ func TestWrapKeyLabelInConfig(t *testing.T) {
 		t.Errorf("attested with a label: %v", err)
 	}
 }
+
+// The interleaving that lost a share: the re-seal is committed but not moved, the party starts, discards an undecided candidate and writes a NEWER share at
+// the same generation number, and the resumed re-seal must not put the staged (old) copy over it.
+func TestResealResumeNeverOverwritesANewerFile(t *testing.T) {
+	for _, pc := range profileCases {
+		t.Run(pc.name, func(t *testing.T) {
+			r := newResealRig(t, pc)
+			stop := errors.New("crash")
+			if _, err := r.reseal(newWrapLabel, ResealOptions{Stage: func(n string) error {
+				if n == "committed" {
+					return stop
+				}
+				return nil
+			}}); !errors.Is(err, stop) {
+				t.Fatal(err)
+			}
+			// the party ran: k1/g2 is replaced by a newer share of the same generation number (sealed under the old key, as a party that did not
+			// know about the re-seal would), k2/g1 was a discarded candidate and is gone
+			old := r.sealer("")
+			newer := []byte("the newer share written after the restart")
+			sealed, _ := old.Seal(aadTKeyset("A", "k1", 2), newer)
+			raw, _ := json.Marshal(keysetFile{V: 3, Scheme: 1, Role: "A", Gen: 2, Sealed: sealed})
+			p2 := filepath.Join(r.cfg.DataDir, "keysets", "k1", "g2.json")
+			if err := os.WriteFile(p2, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(r.cfg.DataDir, "keysets", "k2", "g1.json")); err != nil {
+				t.Fatal(err)
+			}
+			rep, err := r.reseal(newWrapLabel, ResealOptions{})
+			if err != nil || !rep.Resumed || len(rep.Skipped) != 2 {
+				t.Fatalf("resume: %+v %v", rep, err)
+			}
+			got, _ := os.ReadFile(p2)
+			if !bytes.Equal(got, raw) {
+				t.Fatal("the newer share was overwritten by the staged copy")
+			}
+			if _, err := os.Stat(filepath.Join(r.cfg.DataDir, "keysets", "k2", "g1.json")); err == nil {
+				t.Fatal("a discarded candidate was brought back")
+			}
+			if _, err := os.Stat(filepath.Join(r.cfg.DataDir, resealStagingDir)); err == nil {
+				t.Error("the staging directory was left behind")
+			}
+			// the files that did not change were moved; a new run moves the skipped one that is still there
+			delete(r.shares, filepath.Join("k2", "g1.json"))
+			r.shares[filepath.Join("k1", "g2.json")] = newer
+			if by := r.openAll(""); by[newWrapLabel] != 2 || by[pkcs11WrapKeyLabel] != 1 {
+				t.Fatalf("after the resume: %v", by)
+			}
+			if rep, err := r.reseal(newWrapLabel, ResealOptions{}); err != nil || rep.Moved != 1 {
+				t.Fatalf("a second run: %+v %v", rep, err)
+			}
+			if by := r.openAll(newWrapLabel); by[newWrapLabel] != 3 || len(by) != 1 {
+				t.Fatalf("at the end: %v", by)
+			}
+		})
+	}
+}
+
+// migrate-seal shares finishMoves, so it has the same protection: a staged file is not moved over a live file that changed after the marker was written.
+func TestFinishMovesRefusesAChangedLiveFile(t *testing.T) {
+	dir, stg := t.TempDir(), filepath.Join(t.TempDir(), ".migrate-v2")
+	write := func(p, c string) {
+		os.MkdirAll(filepath.Dir(p), 0o700)
+		if err := os.WriteFile(p, []byte(c), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(dir, "keysets", "k", "state.json"), "old state")
+	write(filepath.Join(dir, "keysets", "k", "g1.json"), "old share")
+	write(filepath.Join(stg, "keysets", "k", "state.json"), "staged state")
+	write(filepath.Join(stg, "keysets", "k", "g1.json"), "staged share")
+	if err := writeManifest(stg, dir); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(stg, committedMarker), "verified")
+	// a party ran: state.json moved on
+	write(filepath.Join(dir, "keysets", "k", "state.json"), "newer state")
+	err := finishMoves(stg, dir, func(string) error { return nil }, nil)
+	if err == nil || !strings.Contains(err.Error(), "changed after the commit marker") {
+		t.Fatalf("finishMoves over a changed file: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "keysets", "k", "state.json")); string(b) != "newer state" {
+		t.Fatalf("the newer state was overwritten: %s", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "keysets", "k", "g1.json")); string(b) != "old share" {
+		t.Fatalf("a file was moved before the changed one was found: %s", b)
+	}
+}

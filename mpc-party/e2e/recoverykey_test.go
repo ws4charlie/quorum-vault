@@ -222,7 +222,7 @@ func TestRecoveryKeyReplacementWithSigningInFlight(t *testing.T) {
 	}
 	// a restore from a NEW backup works
 	loseC()
-	mustCLI(t, "restore", "-config", cl.paths["C"], "-recovery-private", newPriv, "-file", newBackups["C"], "-registry", regFile)
+	mustCLI(t, "restore", "-no-records", "-config", cl.paths["C"], "-recovery-private", newPriv, "-file", newBackups["C"], "-registry", regFile)
 	cl.start(t, "C")
 	cl.waitReady(t)
 	cl.waitConverged3(t, "k1", true)
@@ -230,15 +230,16 @@ func TestRecoveryKeyReplacementWithSigningInFlight(t *testing.T) {
 
 	// a restore from an OLD backup is refused when the registry is given, and nothing is written
 	loseC()
-	out, err := cli(t, binProd, "restore", "-config", cl.paths["C"], "-recovery-private", oldPriv, "-file", oldBackups["C"], "-registry", regFile)
+	out, err := cli(t, binProd, "restore", "-no-records", "-config", cl.paths["C"], "-recovery-private", oldPriv, "-file", oldBackups["C"], "-registry", regFile)
 	if err == nil || !strings.Contains(out, "RETIRED") {
 		t.Fatalf("restore of a backup under the retired key: %v\n%s", err, out)
 	}
 	if ents, _ := os.ReadDir(filepath.Join(cl.cfgs["C"].DataDir, "keysets")); len(ents) > 0 {
 		t.Fatalf("a refused restore left a keyset behind: %v", ents)
 	}
-	// without the registry the tool cannot tell, says so, and the party still does not take the share: it is of a generation the keyset has left
-	out, err = cli(t, binProd, "restore", "-config", cl.paths["C"], "-recovery-private", oldPriv, "-file", oldBackups["C"])
+	// without the registry the tool cannot tell, says so, and the PARTY still does not take the share: it is of a generation the keyset has left. This shows
+	// what the running group does; it does not show that old backups are harmless to someone who holds them together with the old key (they are not)
+	out, err = cli(t, binProd, "restore", "-no-records", "-config", cl.paths["C"], "-recovery-private", oldPriv, "-file", oldBackups["C"])
 	if err != nil || !strings.Contains(out, "WARNING") {
 		t.Fatalf("restore without a registry: %v\n%s", err, out)
 	}
@@ -252,7 +253,7 @@ func TestRecoveryKeyReplacementWithSigningInFlight(t *testing.T) {
 	cl.signUntil(t, "A", "k1", "ab-while-c-is-stale", 77, pub)
 	cl.stop("C")
 	must(t, os.RemoveAll(cl.cfgs["C"].DataDir))
-	mustCLI(t, "restore", "-config", cl.paths["C"], "-recovery-private", newPriv, "-file", newBackups["C"], "-registry", regFile)
+	mustCLI(t, "restore", "-no-records", "-config", cl.paths["C"], "-recovery-private", newPriv, "-file", newBackups["C"], "-registry", regFile)
 	cl.start(t, "C")
 	cl.waitReady(t)
 	cl.waitConverged3(t, "k1", true)

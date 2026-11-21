@@ -70,6 +70,9 @@ func resealMain(args []string) {
 		} else {
 			fmt.Printf("resealed: %d generation files in the data directory, %d moved to wrap key %q (before: %v); every one was opened again with the new key before it replaced the old file\n", rep.Generations, rep.Moved, *newLabel, rep.Before)
 		}
+		if len(rep.Skipped) > 0 {
+			fmt.Printf("NOT moved: %v changed after staging (the party ran between the runs); they were left as they are. Run the command again to move what is still under another key\n", rep.Skipped)
+		}
 		fmt.Printf("next: set \"wrap_key_label\": %q in the sealer section of %s, restart the party, wait until every keyset is resolved, then: mpc-party reseal -config %s -destroy-label <old label> -confirm-restarted\n", *newLabel, *cfgPath, *cfgPath)
 	default:
 		if !*confirmed {

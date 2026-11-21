@@ -74,9 +74,13 @@ func NewRequest(op, keyset, domain string, scheme pb.Scheme, curve pb.Curve, now
 		IssuedUnix: now.Unix(), ExpiresUnix: now.Add(validFor).Unix(), Nonce: hex.EncodeToString(nonce[:])}, nil
 }
 
-// NewSetRequest makes an unsigned request for a change of the admin set: the party's current version and set hash say which step it is.
-func NewSetRequest(domain string, curVersion uint64, curHash [32]byte, keys [][]byte, threshold int, now time.Time, validFor time.Duration) (Request, error) {
+// NewSetRequest makes an unsigned request for a change of the admin set: the party's current version, set hash, keys and threshold say which step it is
+// (it refuses a change no request could carry, CheckSetStep).
+func NewSetRequest(domain string, curVersion uint64, curHash [32]byte, curKeys [][]byte, curThreshold int, keys [][]byte, threshold int, now time.Time, validFor time.Duration) (Request, error) {
 	if err := CheckAdminSet(keys, threshold); err != nil {
+		return Request{}, err
+	}
+	if err := CheckSetStep(curKeys, curThreshold, keys, threshold); err != nil {
 		return Request{}, err
 	}
 	return newRequestBody(OpAdminSet, domain, AdminSetBody(curVersion+1, keys, threshold, curHash), now, validFor)

@@ -6,7 +6,7 @@
 {{- if not $j.partyPin }}{{ fail "operator.job.partyPin is required: the pin (SHA-256 of the public key) of this party's certificate" }}{{ end -}}
 {{- if not (regexMatch "^[0-9a-f]{64}$" $j.partyPin) }}{{ fail "operator.job.partyPin must be 64 lowercase hex characters" }}{{ end -}}
 {{- if not $j.callerCertSecret }}{{ fail "operator.job.callerCertSecret is required: a Secret (tls.crt, tls.key) with the caller certificate this party pins, made for the ceremony" }}{{ end -}}
-{{- /* admin-set and recovery-key SEND a change of the admin set / the recovery-key registry (qv-party-admin admin-set send, recovery-key send); recovery-status is `qv-party-admin recovery-key status` */ -}}
+{{- /* admin-set and recovery-key SEND a change of the admin set / the recovery-key registry (qv-party-admin admin-set send, recovery-key send); recovery-status is `qv-party-admin recovery-key status` against THIS party only: it prints LOCAL CHECK ONLY, never COMPLETE (the completion check needs every party) */ -}}
 {{- $record := has $j.command (list "admin-set" "recovery-key") -}}
 {{- $signed := not (has $j.command (list "status" "recovery-status")) -}}
 {{- $keyed := has $j.command (list "dkg" "refresh" "unfreeze" "status" "recovery-status") -}}

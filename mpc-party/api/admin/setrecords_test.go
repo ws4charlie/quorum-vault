@@ -55,7 +55,7 @@ func TestSetRequestNeedsBothQuorums(t *testing.T) {
 	cur, nxt := newKeys(3), newKeys(2)
 	now := time.Now()
 	pol := Policy{Keys: pubs(cur), Threshold: 2, MaxValidity: time.Hour, Skew: time.Minute}
-	r, err := NewSetRequest("", 4, SetHash(pubs(cur), 2), pubs(nxt), 2, now, time.Hour)
+	r, err := NewSetRequest("", 4, SetHash(pubs(cur), 2), pubs(cur), 2, pubs(nxt), 2, now, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestSetRequestNeedsBothQuorums(t *testing.T) {
 	}
 	// a key that is in both sets counts for both
 	both := []ed25519.PrivateKey{cur[0], cur[1]}
-	r2, _ := NewSetRequest("", 4, SetHash(pubs(cur), 2), pubs(both), 2, now, time.Hour)
+	r2, _ := NewSetRequest("", 4, SetHash(pubs(cur), 2), pubs(cur), 2, pubs(both), 2, now, time.Hour)
 	if err := sign(r2, both...).Check(pol, now); err != nil {
 		t.Errorf("two keys that stay in the set sign for both quorums: %v", err)
 	}
@@ -141,4 +141,27 @@ func TestRecoveryRequest(t *testing.T) {
 		t.Error(err)
 	}
 	var _ = pb.Op_OP_RECOVERY_KEY
+}
+
+// 17 of 17 replaced by 17 other keys needs 34 signatures and one request carries 32: the request is refused when it is made (and by the party).
+func TestSetStepNeverNeedsMoreThanARequestCarries(t *testing.T) {
+	cur, other := pubs(newKeys(17)), pubs(newKeys(17))
+	if n := MinSetSigners(cur, 17, other, 17); n != 34 {
+		t.Fatalf("disjoint 17 and 17: %d", n)
+	}
+	if err := CheckSetStep(cur, 17, other, 17); err == nil || !strings.Contains(err.Error(), "at most 32") {
+		t.Fatalf("34 signatures: %v", err)
+	}
+	if _, err := NewSetRequest("", 0, [32]byte{}, cur, 17, other, 17, time.Now(), time.Hour); err == nil {
+		t.Error("the tool built a request that can never pass")
+	}
+	// keeping keys makes it possible: 17 shared keys need 17 signatures
+	if err := CheckSetStep(cur, 17, append(append([][]byte{}, cur...), other...), 17); err != nil {
+		t.Error(err)
+	}
+	// 16 of 16 replaced entirely needs exactly 32
+	c16, o16 := pubs(newKeys(16)), pubs(newKeys(16))
+	if err := CheckSetStep(c16, 16, o16, 16); err != nil {
+		t.Errorf("32 is allowed: %v", err)
+	}
 }

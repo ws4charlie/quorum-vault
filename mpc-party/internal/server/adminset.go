@@ -198,6 +198,9 @@ func (v *adminVerifier) applySet(b *pb.AdminSetRequest, a *pb.AdminAuth) (pb.Rec
 	case newHash == cur.hash:
 		return 0, cur, fmt.Errorf("%w: the new admin set equals the current one: nothing to change", errAdmin)
 	}
+	if err := admin.CheckSetStep(cur.rawKeys(), cur.threshold, newKeys, thr); err != nil {
+		return 0, cur, fmt.Errorf("%w: %v", errAdmin, err)
+	}
 	if a.GetV2() == nil {
 		return 0, cur, fmt.Errorf("%w: a change of the admin set needs a v2 authorization (the old v1 format signs no request body)", errAdmin)
 	}

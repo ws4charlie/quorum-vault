@@ -331,3 +331,22 @@ func TestRecoveryRegistryRules(t *testing.T) {
 	}
 	_ = hex.EncodeToString
 }
+
+// A change no request could carry is refused by the party too (17 of 17 replaced by 17 other keys needs 34 signatures).
+func TestAdminSetRefusesAChangeThatCannotBeSigned(t *testing.T) {
+	r := newV2Rig(t, 17, func(c *Config) {
+		c.AdminKeys = nil
+		for _, k := range genKeys(17) {
+			c.AdminKeys = append(c.AdminKeys, hex.EncodeToString(k.Public().(ed25519.PublicKey)))
+		}
+	})
+	v, err := newAdminVerifier(r.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := genKeys(17)
+	sn, _ := v.snap()
+	body := admin.AdminSetBody(1, rawPubs(other), 17, sn.hash)
+	_, _, err = v.applySet(body, &pb.AdminAuth{V2: &pb.AdminAuthV2{Nonce: make([]byte, 16)}})
+	wantRefused(t, "34 signatures", err, "at most 32")
+}

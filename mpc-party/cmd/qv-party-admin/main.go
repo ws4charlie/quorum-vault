@@ -69,7 +69,7 @@ func run(args []string, out, errw io.Writer) int {
 		err = sendCmd(args[0], args[1:], out, errw)
 	case "status":
 		err = statusCmd(args[1:], out)
-	case "admin-set", "recovery-key":
+	case "admin-set", "recovery-key", "records":
 		err = recordsCmd(args[0], args[1:], out, errw)
 	default:
 		err = fmt.Errorf("unknown command %q", args[0])

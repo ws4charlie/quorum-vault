@@ -7,6 +7,12 @@ import pathlib, re, sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LINK = re.compile(r'(?<!\\)\]\(([^)\s]+)\)|<(?:a|img)[^>]*?(?:href|src)="([^"]+)"')
 bad = []
+for f in sorted(ROOT.glob("README*.md")) + sorted((ROOT / "docs").rglob("*.md")):  # invalid UTF-8 or a replacement character (a damaged character)
+    try:
+        if "\ufffd" in f.read_bytes().decode("utf-8"):
+            bad.append(f"{f.relative_to(ROOT)}: contains a replacement character (a damaged character)")
+    except UnicodeDecodeError:
+        bad.append(f"{f.relative_to(ROOT)}: not valid UTF-8")
 files = sorted(ROOT.glob("README*.md")) + sorted((ROOT / "docs").rglob("*.md"))
 for f in files:
     text = re.sub(r"```.*?```", "", f.read_text(encoding="utf-8"), flags=re.S)

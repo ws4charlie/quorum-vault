@@ -25,6 +25,11 @@ import (
 // away). After the marker it only finishes the moves. Envelopes name their key, so a directory in between (some files moved, some not) opens in full:
 // the party may even start in that state.
 //
+// A resumed run never overwrites a file that changed after staging: the hash of every live file is recorded before the marker, and a staged file is
+// moved only over a live file that still has it. Between the runs a party may have started, discarded an undecided refresh candidate and written a newer
+// share at the same generation number; the staged copy of the discarded one is dropped (reported in Skipped) and the newer file stays, still under
+// whatever key it names. Run the command again to move what was skipped.
+//
 // After it: set sealer.wrap_key_label to the new label in the party's configuration and restart; when every keyset is resolved, remove the old key from
 // the token with DestroyWrapKey (it refuses while anything is still sealed under it).
 type ResealOptions struct {
@@ -38,6 +43,7 @@ type ResealReport struct {
 	Moved       int            // of them, the ones that were under another key
 	Before      map[string]int // wrap key label -> generation files that were sealed under it before the run
 	Resumed     bool           // the marker existed: only the moves were run
+	Skipped     []string       // staged files NOT moved because the live file changed since staging (a party ran in between): run the command again
 }
 
 const resealStagingDir = ".reseal-wrap"
@@ -74,7 +80,8 @@ func resealWrapKey(ctx context.Context, cfg *Config, newLabel string, mk func(la
 	stg := filepath.Join(cfg.DataDir, resealStagingDir)
 	if _, err := os.Stat(filepath.Join(stg, committedMarker)); err == nil {
 		rep.Resumed = true
-		return rep, finishMoves(stg, cfg.DataDir, stage)
+		err := finishMoves(stg, cfg.DataDir, stage, func(rel string) error { rep.Skipped = append(rep.Skipped, rel); return nil })
+		return rep, err
 	}
 	sealer, err := mk(newLabel) // makes the key when the token has none under this label
 	if err != nil {
@@ -188,13 +195,17 @@ func resealWrapKey(ctx context.Context, cfg *Config, newLabel string, mk func(la
 	if err := stage("verified"); err != nil {
 		return rep, err
 	}
+	if err := writeManifest(stg, dir); err != nil {
+		return rep, err
+	}
 	if err := writeAtomic(filepath.Join(stg, committedMarker), []byte("verified "+newLabel+"\n")); err != nil {
 		return rep, err
 	}
 	if err := stage("committed"); err != nil {
 		return rep, err
 	}
-	return rep, finishMoves(stg, dir, stage)
+	err = finishMoves(stg, dir, stage, func(rel string) error { rep.Skipped = append(rep.Skipped, rel); return nil })
+	return rep, err
 }
 
 func shareAAD(role, id string, gen uint64, kf keysetFile) ([]byte, error) {

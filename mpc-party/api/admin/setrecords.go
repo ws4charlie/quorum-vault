@@ -128,6 +128,34 @@ func CheckRecoveryRecord(current string, retire []string) error {
 	return nil
 }
 
+// MinSetSigners is the fewest distinct keys that can sign a change from the current set (threshold curThr) to a new one (newThr): the change needs
+// curThr signatures from the current keys AND newThr from the new keys, and a key in both counts for both, so the least is curThr + newThr minus the
+// overlap that can be used (at most the keys the sets share, and at most either threshold).
+func MinSetSigners(curKeys [][]byte, curThr int, newKeys [][]byte, newThr int) int {
+	in := map[string]bool{}
+	for _, k := range curKeys {
+		in[string(k)] = true
+	}
+	shared := 0
+	for _, k := range newKeys {
+		if in[string(k)] {
+			shared++
+		}
+	}
+	return curThr + newThr - min(shared, curThr, newThr)
+}
+
+// CheckSetStep refuses a change that no request could ever carry: one authorization holds at most MaxSignatures signatures (Verify2), and a change needs
+// MinSetSigners of them. A set with a threshold above half the limit can therefore be replaced in one step only by a set that shares enough keys with it
+// (17 of 17 cannot be replaced by 17 other keys: 34 signatures); the answer is to change it in two steps through a set that keeps enough keys, or to lower
+// the threshold first.
+func CheckSetStep(curKeys [][]byte, curThr int, newKeys [][]byte, newThr int) error {
+	if n := MinSetSigners(curKeys, curThr, newKeys, newThr); n > MaxSignatures {
+		return fmt.Errorf("this change needs at least %d distinct signatures (%d from the current set, %d from the new one, %d keys shared), and one request carries at most %d: keep more of the current keys in the new set, or change the set in two steps", n, curThr, newThr, min(len(curKeys), len(newKeys)), MaxSignatures)
+	}
+	return nil
+}
+
 // CheckSetSignatures is the policy part of a check of an admin-set request: the signers must be keys of the current set or of the new set (an
 // unknown key spoils the whole authorization), at least the current threshold of them from the current set AND at least the new threshold from the
 // new set (a key in both counts for both). The second condition keeps a typo in the new keys from locking the admins out: the new set has to

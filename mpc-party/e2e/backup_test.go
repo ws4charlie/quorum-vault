@@ -126,14 +126,14 @@ func TestBackupRestoreCLI(t *testing.T) {
 			// A is destroyed (data directory gone) and restored from its generation-4 backup
 			cl.a.kill()
 			must(t, os.RemoveAll(cl.dataDir("A")))
-			mustCLI(t, "restore", "-config", cl.cfgA, "-recovery-private", priv, "-file", a4)
+			mustCLI(t, "restore", "-no-records", "-config", cl.cfgA, "-recovery-private", priv, "-file", a4)
 			cl.restartA(t)
 			cl.waitConverged(t, "k", true)
 			cl.signOK(t, "k", curve, "after-restore-A")
 			// B is destroyed and restored
 			cl.b.kill()
 			must(t, os.RemoveAll(cl.dataDir("B")))
-			mustCLI(t, "restore", "-config", cl.cfgB, "-recovery-private", priv, "-file", b4)
+			mustCLI(t, "restore", "-no-records", "-config", cl.cfgB, "-recovery-private", priv, "-file", b4)
 			cl.restartB(t)
 			cl.waitConverged(t, "k", true)
 			cl.signOK(t, "k", curve, "after-restore-B")
@@ -148,7 +148,7 @@ func TestBackupRestoreCLI(t *testing.T) {
 			_, _ = a5, b5
 			cl.b.kill()
 			must(t, os.RemoveAll(cl.dataDir("B")))
-			mustCLI(t, "restore", "-config", cl.cfgB, "-recovery-private", priv, "-file", b3) // generation 3 vs A at 5
+			mustCLI(t, "restore", "-no-records", "-config", cl.cfgB, "-recovery-private", priv, "-file", b3) // generation 3 vs A at 5
 			cl.restartB(t)
 			waitLogText(t, cl.a.stderr, "party B is on generation 3 but party A is on 5", 30*time.Second)
 			if s := status(func() *pb.HealthResponse { h, _ := cl.health(t); return h }(), "k"); s == nil || s.Resolved {
@@ -159,7 +159,7 @@ func TestBackupRestoreCLI(t *testing.T) {
 			}
 			cl.b.kill()
 			must(t, os.RemoveAll(cl.dataDir("B")))
-			mustCLI(t, "restore", "-config", cl.cfgB, "-recovery-private", priv, "-file", b5)
+			mustCLI(t, "restore", "-no-records", "-config", cl.cfgB, "-recovery-private", priv, "-file", b5)
 			cl.restartB(t)
 			cl.waitConverged(t, "k", true)
 			cl.signOK(t, "k", curve, "after-stale-fixed")
@@ -178,9 +178,9 @@ func TestBackupRestoreCLI(t *testing.T) {
 			otherPriv, otherPub := filepath.Join(dir, "other.private"), filepath.Join(dir, "other.public")
 			mustCLI(t, "gen-recovery-key", "-private", otherPriv, "-public", otherPub)
 			bad("verify with another recovery key", "recovery key", "verify", "-file", a5, "-recovery-public", otherPub)
-			bad("restore with another recovery key", "not the recovery key", "restore", "-config", cl.cfgA, "-recovery-private", otherPriv, "-file", a5)
-			bad("restore into a directory that already has the keyset", "already has keyset", "restore", "-config", cl.cfgA, "-recovery-private", priv, "-file", a5)
-			bad("restore A's backup with B's config", "wrong slot", "restore", "-config", cl.cfgB, "-recovery-private", priv, "-file", a5)
+			bad("restore with another recovery key", "not the recovery key", "restore", "-no-records", "-config", cl.cfgA, "-recovery-private", otherPriv, "-file", a5)
+			bad("restore into a directory that already has the keyset", "already has keyset", "restore", "-no-records", "-config", cl.cfgA, "-recovery-private", priv, "-file", a5)
+			bad("restore A's backup with B's config", "wrong slot", "restore", "-no-records", "-config", cl.cfgB, "-recovery-private", priv, "-file", a5)
 			raw, _ := os.ReadFile(a5)
 			tam := filepath.Join(dir, "tampered.bk")
 			raw[len(raw)/2] ^= 1
