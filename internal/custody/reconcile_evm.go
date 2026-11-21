@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ws4charlie/quorum-vault/internal/coldsign"
 	"math/big"
 	"strings"
 
@@ -563,12 +564,18 @@ func (s *Service) evmPending(ctx context.Context, q booksQ, rr ReceiptReader, h 
 			continue
 		}
 		if !found || rc.Block > h {
-			if r.Status == RefillBroadcast {
+			if r.Status == RefillBroadcast && r.Kind != coldsign.KindColdMove {
 				a.move(coldAcct(r.PartitionID), refillAcct(c.Chain, r.Asset), r.Amount) // booked at broadcast, not on the chain yet: take it out
 			}
 			continue
 		}
 		a.mined++
+		if r.Kind == coldsign.KindColdMove { // no amount is booked for a cold-to-cold move, only the fee
+			if err := s.adjRefillFee(a, r, rc.Fee); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if r.Status == RefillSigned {
 			a.move(refillAcct(c.Chain, r.Asset), coldAcct(r.PartitionID), r.Amount)
 		}
@@ -596,7 +603,7 @@ func (s *Service) adjRefillFee(a *evmAdj, r Refill, fee *big.Int) error {
 		return err
 	}
 	to := opFundAcct(c.Chain, c.Native)
-	if cold, cerr := c.EVM.ColdAddress(nativePart, c.Native); cerr == nil && strings.EqualFold(cold.Hex(), r.ColdAddress) {
+	if s.isColdSigner(nativePart, r.ColdAddress) {
 		to = coldAcct(nativePart)
 	}
 	a.move(feeAcct(c.Chain, c.Native), to, fee)
@@ -750,6 +757,16 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 			bal, no, err := balance(k.addr, k.asset)
 			if err != nil {
 				return nil, 0, false, err
+			}
+			// A cold key being replaced: its balance is the cold tier's money too, until it is empty and removed from cold.retiring.
+			if old := s.retiringFor(k.addr, k.asset); old != "" && !no {
+				ob, ono, err := balance(old, k.asset)
+				if err != nil {
+					return nil, 0, false, err
+				}
+				if !ono {
+					bal = new(big.Int).Add(bal, ob)
+				}
 			}
 			if no {
 				unsupported = true

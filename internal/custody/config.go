@@ -55,6 +55,9 @@ type ReconcileFile struct {
 type ColdFile struct {
 	// Addresses: "<pool>/native" or "<pool>/token" -> the cold address (the same keys as the signing zone's cold_addresses).
 	Addresses map[string]string `json:"addresses"`
+	// Retiring: a cold key being replaced (docs/runbooks/cold-key-replacement.md). Same keys as Addresses, the OLD cold address. It stays in the books and
+	// in Reconcile (its balance counts with the new address's) until it is empty and the entry is removed; hot-to-cold moves and refills use Addresses only.
+	Retiring map[string]string `json:"retiring"`
 	// Limits per asset, applied to every hot shard: Low raises an ALERT (the refill is a later task), High triggers a move, and
 	// the move brings the shard down to Target (default: halfway between Low and High). Base units.
 	Limits map[string]LimitFile `json:"limits"`
@@ -219,8 +222,10 @@ type Config struct {
 	StartHeight  uint64
 
 	// Cold: limits per hot partition ID; empty when hot-to-cold is not configured.
-	ActivityTimeout  time.Duration // 0 = the workflows' production activity timeouts
-	ColdLimits       map[string]HotLimits
+	ActivityTimeout time.Duration // 0 = the workflows' production activity timeouts
+	ColdLimits      map[string]HotLimits
+	// ColdRetiring is ColdFile.Retiring in the form of the family's addresses (an evm address in hex, a canonical bitcoin address, a base58 Solana address).
+	ColdRetiring     map[string]string
 	ColdPlanInterval time.Duration
 	DrainWindow      time.Duration // the not_after of a drain intent, from now
 	DrainRetryAfter  time.Duration // how long a generation is left alone after the zone refused a drain move
@@ -939,6 +944,9 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 			c.EVM.ColdAddresses[k] = common.HexToAddress(a)
 		}
 	}
+	if err := c.buildRetiring(cf); err != nil {
+		return err
+	}
 	parse := func(where string, lf LimitFile) (HotLimits, error) {
 		var l HotLimits
 		var err error
@@ -1069,3 +1077,53 @@ func (c *Config) buildRebalance(rf RebalanceFile) error {
 
 // BatchingOf returns the batching settings of a hot partition (the zero value, off, when it has none).
 func (c *Config) BatchingOf(partitionID string) Batching { return c.Batch[partitionID] }
+
+// buildRetiring reads cold.retiring: each key must be a configured cold address key, and its old address a valid address of the family that is neither
+// the new cold address nor a hot shard.
+func (c *Config) buildRetiring(cf ColdFile) error {
+	c.ColdRetiring = map[string]string{}
+	for k, old := range cf.Retiring {
+		cur, ok := cf.Addresses[k]
+		if !ok {
+			return fmt.Errorf("custody: config: cold.retiring has key %q, which is not in cold.addresses", k)
+		}
+		var canon, curCanon string
+		switch c.Family {
+		case FamilySOL:
+			raw, err := sol.ParseAddress(old)
+			if err != nil {
+				return fmt.Errorf("custody: config: retiring cold address of %q: %w", k, err)
+			}
+			canon, curCanon = sol.Address(raw), cur
+			for _, h := range c.SOLHot {
+				if h == canon {
+					return fmt.Errorf("custody: config: the retiring cold address of %q is a hot shard", k)
+				}
+			}
+		case FamilyBTC:
+			var err error
+			if canon, err = btc.CanonicalAddress(c.BTC.Network, old); err != nil {
+				return fmt.Errorf("custody: config: retiring cold address of %q: %w", k, err)
+			}
+			if curCanon, err = btc.CanonicalAddress(c.BTC.Network, cur); err != nil {
+				return err
+			}
+		default:
+			if !common.IsHexAddress(old) {
+				return fmt.Errorf("custody: config: retiring cold address of %q is not an address", k)
+			}
+			canon, curCanon = common.HexToAddress(old).Hex(), common.HexToAddress(cur).Hex()
+		}
+		if strings.EqualFold(canon, curCanon) {
+			return fmt.Errorf("custody: config: the retiring cold address of %q is the new one", k)
+		}
+		c.ColdRetiring[k] = canon
+	}
+	if c.Family == FamilyBTC && len(c.ColdRetiring) > 0 {
+		c.BTC.ColdRetiring = c.ColdRetiring
+		if err := c.BTC.Validate(); err != nil {
+			return fmt.Errorf("custody: config: %w", err)
+		}
+	}
+	return nil
+}

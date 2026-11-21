@@ -269,6 +269,7 @@ func (s *Service) EnqueueReplacement(ctx context.Context, o Owner, t Track, n in
 func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 	t := CancelTrack(o)
 	id := t.FirstJob()
+	handed := false
 	err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		var have bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sign_jobs WHERE id=$1)`, id).Scan(&have); err != nil {
@@ -276,6 +277,22 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 		}
 		if have {
 			return nil
+		}
+		// EVM, a compromised generation: its cancel would be refused like everything but its drain. Without a signature there is nothing to cancel:
+		// the nonce becomes a hole that the next drain move fills (drain_inflight.go).
+		if s.evmFamily() {
+			if ok, err := s.handOverUnsigned(ctx, tx, o); err != nil {
+				return err
+			} else if ok {
+				handed = true
+				return nil
+			}
+			if ok, err := s.handedOverBefore(ctx, tx, o); err != nil {
+				return err
+			} else if ok {
+				handed = true
+				return nil
+			}
 		}
 		// A chain whose attempts can be released (Bitcoin) needs a cancel only when a signature may exist. If none can, the caller releases
 		// the reservation instead (ReleaseIfUnsigned), which is what "nothing to free" means there.
@@ -307,7 +324,7 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 		}
 		return EnqueueUnsigned(ctx, tx, id, o.PartitionID, u, ib, nil)
 	})
-	if errors.Is(err, chain.ErrNotSupported) {
+	if errors.Is(err, chain.ErrNotSupported) || (err == nil && handed) {
 		return "", nil
 	}
 	return id, err
@@ -441,7 +458,12 @@ func sortedKeys[V any](m map[string]V) []string {
 // jobStates reads the jobs of every attempt of an owner (its track), locking them: the IDs of the pending ones, and whether a signature may exist, which
 // is when any job is being signed, is done or failed (the gateway keeps its reservation for a failed one).
 func jobStates(ctx context.Context, tx pgx.Tx, o Owner) (pending []string, mayExist bool, err error) {
-	rows, err := tx.Query(ctx, `SELECT id, status FROM sign_jobs WHERE starts_with(id, $1) FOR UPDATE`, string(OwnerTrack(o))+":")
+	return trackJobStates(ctx, tx, OwnerTrack(o))
+}
+
+// trackJobStates is jobStates for any track (the owner's own, or its cancel track).
+func trackJobStates(ctx context.Context, tx pgx.Tx, t Track) (pending []string, mayExist bool, err error) {
+	rows, err := tx.Query(ctx, `SELECT id, status FROM sign_jobs WHERE starts_with(id, $1) FOR UPDATE`, string(t)+":")
 	if err != nil {
 		return nil, false, err
 	}

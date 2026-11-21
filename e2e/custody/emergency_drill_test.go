@@ -1,6 +1,7 @@
 package custody_test
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math/big"
 	"os"
@@ -10,6 +11,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/ws4charlie/quorum-vault/internal/custody"
+	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
 // The emergency drill (docs/runbooks/stolen-hot-key.md, "Drill"): a hot key may be stolen, with a withdrawal in flight and deposits arriving.
@@ -81,6 +85,12 @@ func TestEmergencyDrillStolenHotKey(t *testing.T) {
 	s.mustRefuse("em-thief-wd", "withdrawal", gen1, randAddr(), 1000, 951, "compromised")
 	// (a "drain" to an outside address is tried after the activation: before it the zone only waits, the successor not being active yet)
 
+	// Work in flight at the mark that the zone refused: a sweep and a withdrawal, each with a nonce at the old address and a refused job, no signature.
+	// This is what a sweep built a moment before the mark leaves behind (the zone refuses it, and refuses its cancel too). It made the drain wait for
+	// ever for "transactions still in flight"; now the nonces are holes that the drain's own transfers fill.
+	s.strandNonce("sweep", "sw-em-stranded", gen1)
+	s.strandNonce("withdrawal", "wd-em-stranded", gen1)
+
 	// Run 3 with everything: activate, then the drain is watched to its end. (A kill of this run costs nothing: run it again.)
 	t4 := time.Now()
 	out, err = emergency("-changes", cand, "-changes", comp, "-changes", act)
@@ -92,6 +102,18 @@ func TestEmergencyDrillStolenHotKey(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("the run's output lacks the step %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "STALLED") || strings.Contains(out, "still in flight") && !strings.Contains(out, "drained") {
+		t.Errorf("the drain waited for work the zone had refused:\n%s", out)
+	}
+	var open int
+	s.pool.QueryRow(s.ctx, `SELECT count(*) FROM evm_nonce_allocations WHERE lower(address)=lower($1) AND owner_kind NOT IN ('hole','drain') AND status IN ('allocated','broadcast')`, gen1.Hex()).Scan(&open)
+	if open != 0 {
+		t.Errorf("%d transactions of the old address are still open after the drain", open)
+	}
+	// The filler of a hole below a live transaction is a one-wei drain to the successor: the zone must sign it (a high nonce, so it can never mine).
+	if status, reason := s.hostile("em-filler-1wei", "drain", gen1, gen2, 1, 100000); status != "done" {
+		t.Fatalf("the zone refused a one-wei drain to the successor: %s %s", status, reason)
 	}
 	s.mustRefuse("em-thief-drain", "drain", gen1, randAddr(), 1000, 952, "successor")
 	// The run again changes nothing.
@@ -114,8 +136,19 @@ func TestEmergencyDrillStolenHotKey(t *testing.T) {
 	s.waitIdle(120 * time.Second)
 
 	// The withdrawal in flight settled, from one key or the other; one made now goes out from the new key.
-	s.waitWd(inflight.ID, "confirmed", 180*time.Second)
-	if from := s.senderOfWithdrawal(inflight.ID); from != gen1 && from != gen2 {
+	// It ends one of two ways: paid (from one key or the other), or, when the zone's decision came after the mark, refused and voided with the zone's
+	// reason, its hold released (the reconciliation below checks the books). It never waits for ever.
+	var iw wd
+	s.waitFor(180*time.Second, "the in-flight withdrawal to end", func() bool {
+		iw = s.getWd(inflight.ID)
+		return iw.Status == "confirmed" || iw.Status == "failed"
+	})
+	if iw.Status == "failed" {
+		if !strings.Contains(iw.Reason, "compromised") {
+			t.Fatalf("the in-flight withdrawal failed for another reason: %s", iw.Reason)
+		}
+		t.Logf("the in-flight withdrawal was refused by the zone after the mark and voided: %s", iw.Reason)
+	} else if from := s.senderOfWithdrawal(inflight.ID); from != gen1 && from != gen2 {
 		t.Fatalf("the in-flight withdrawal came from %s", from)
 	}
 	w := s.withdrawETH("em-after", 1e15)
@@ -145,4 +178,39 @@ func mustReadFile(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// strandNonce leaves what a refused transaction leaves at the old address once the zone refuses its cancel as well: the next nonce of the address, allocated
+// to the owner, and one rejected sign job. No signature exists, so the nonce is free for anyone who can still sign: only a drain.
+func (s *system) strandNonce(kind, id string, from common.Address) {
+	s.t.Helper()
+	o := custody.Owner{Kind: kind, ID: id, PartitionID: s.shardPart("ETH", 0)}
+	tx, err := s.pool.Begin(s.ctx)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	defer tx.Rollback(s.ctx)
+	var next int64
+	if err := tx.QueryRow(s.ctx, `SELECT next_nonce FROM evm_nonces WHERE chain=$1 AND lower(address)=lower($2) FOR UPDATE`, s.chainName, from.Hex()).Scan(&next); err != nil {
+		s.t.Fatal(err)
+	}
+	if _, err := tx.Exec(s.ctx, `INSERT INTO evm_nonce_allocations (chain, address, nonce, owner_kind, owner_id, status) VALUES ($1,$2,$3,$4,$5,'allocated')`,
+		s.chainName, from.Hex(), next, kind, id); err != nil {
+		s.t.Fatal(err)
+	}
+	if _, err := tx.Exec(s.ctx, `UPDATE evm_nonces SET next_nonce=$3 WHERE chain=$1 AND lower(address)=lower($2)`, s.chainName, from.Hex(), next+1); err != nil {
+		s.t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(kind + id))
+	job := signjob.Job{ID: custody.OwnerTrack(o).FirstJob(), PartitionID: o.PartitionID, KeyRef: "m/0", Chain: s.chainName,
+		Intent: mustJSONb(signjob.Intent{Kind: kind, ID: id, PartitionID: o.PartitionID, Chain: s.chainName}), Digest: digest[:], Payload: []byte(`{}`)}
+	if err := signjob.Enqueue(s.ctx, tx, job); err != nil {
+		s.t.Fatal(err)
+	}
+	if _, err := tx.Exec(s.ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='keyset_state: generation 1 is compromised: it signs nothing' WHERE id=$1`, job.ID); err != nil {
+		s.t.Fatal(err)
+	}
+	if err := tx.Commit(s.ctx); err != nil {
+		s.t.Fatal(err)
+	}
 }
