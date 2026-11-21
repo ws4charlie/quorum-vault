@@ -105,7 +105,7 @@ func newCluster3S(t *testing.T, sc pb.Scheme, tweak func(role string, c *server.
 	callers := map[string]string{"A": cl.addrs.CallerA, "B": cl.addrs.CallerB, "C": cl.addrs.CallerC}
 	pins := map[string]string{"A": env.CertA.Pin, "B": env.CertB.Pin, "C": env.CertC.Pin}
 	for role, addr := range callers {
-		c, _ := testenv.Dial(t, addr, env.CertCaller, pins[role])
+		c, _ := env.DialAs(t, addr, env.CertCaller, pins[role])
 		cl.client[role] = c
 	}
 	cl.waitReady(t)

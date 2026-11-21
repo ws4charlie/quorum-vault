@@ -129,7 +129,7 @@ func TestSwFlowsHotKeyReplacementDrivenByTheTool(t *testing.T) {
 	dir := filepath.Join(s.dir, "rekey")
 	s.rekeyMust(dir, "open", "-shard", s.hotShardID(), "-mode", "mpc", "-reason", "e2e")
 	keyset := strings.Trim(slugSol.ReplaceAllString(strings.ToLower(s.hotShardID()), "-"), "-") + "-g2"
-	s.rekeyMust(dir, "dkg", "-admin-auth", s.partyAuthFor(keyset))
+	s.rekeyMust(dir, "dkg", "-admin-auth", s.partyAuthHotFor(keyset))
 	var plan struct {
 		KeyRef    string `json:"key_ref"`
 		PublicKey string `json:"public_key"`
@@ -266,7 +266,7 @@ func TestSwFlowsHotKeyReplacementWithAnEmptyTokenAccount(t *testing.T) {
 	dir := filepath.Join(s.dir, "rekey")
 	s.rekeyMust(dir, "open", "-shard", s.hotShardID(), "-mode", "mpc", "-reason", "e2e")
 	keyset := strings.Trim(slugSol.ReplaceAllString(strings.ToLower(s.hotShardID()), "-"), "-") + "-g2"
-	s.rekeyMust(dir, "dkg", "-admin-auth", s.partyAuthFor(keyset))
+	s.rekeyMust(dir, "dkg", "-admin-auth", s.partyAuthHotFor(keyset))
 	var plan struct {
 		KeyRef, PublicKey, Address string
 	}
@@ -323,7 +323,7 @@ func TestSwFlowsHotKeyCompromisedDrainsWithoutWaitingForThePool(t *testing.T) {
 	dir := filepath.Join(s.dir, "rekey")
 	s.rekeyMust(dir, "open", "-shard", s.hotShardID(), "-mode", "mpc", "-reason", "the hot key may be stolen (e2e)")
 	keyset := strings.Trim(slugSol.ReplaceAllString(strings.ToLower(s.hotShardID()), "-"), "-") + "-g2"
-	s.rekeyMust(dir, "dkg", "-admin-auth", s.partyAuthFor(keyset))
+	s.rekeyMust(dir, "dkg", "-admin-auth", s.partyAuthHotFor(keyset))
 	b, err := os.ReadFile(filepath.Join(dir, "plan.json"))
 	if err != nil {
 		t.Fatal(err)

@@ -45,8 +45,8 @@ who obtained both shares (or one share plus a backup of the other plus the recov
 
 ## Unfreeze
 
-An operator signs `(unfreeze, keyset id, timestamp)` with an Ed25519 admin key (`api/admin`); both parties verify it against
-their own `admin_keys`, within `admin_max_age_seconds`, once. Call `Unfreeze` on party A; A asks B, B verifies the signature
+`admin_threshold` admins sign one request for `unfreeze` of the keyset (`qv-party-admin request` and `sign`, [key-ceremony.md](key-ceremony.md)); every
+member verifies the signatures against its own `admin_keys` and the request against its own view, within the request's validity, once. Call `Unfreeze` on party A; A asks B, B verifies the signatures
 itself. Both log `AUDIT keyset unfrozen` with the admin key. Run a signing self-test through a non-production key first if in
 doubt, then watch the next signs.
 
@@ -70,5 +70,5 @@ Which pair signs does not matter for the remedy: the choices are the same as abo
 share possibly exposed, treat it as a compromised member: restore that member on a clean host from a backup and **refresh**; the old
 share becomes useless, the public key (and so the address) is unchanged.
 
-**Unfreeze** needs the operator signature accepted by **all three** members, each verifying it against its own `admin_keys`; if one
+**Unfreeze** needs the admins' request (M signatures) accepted by **all three** members, each verifying it against its own `admin_keys`; if one
 member is down or refuses, nothing is lifted anywhere. Call `Unfreeze` on party A. Each member logs `AUDIT keyset unfrozen`.

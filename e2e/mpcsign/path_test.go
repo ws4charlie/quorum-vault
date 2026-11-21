@@ -317,10 +317,10 @@ func TestTamperingFreezesKeysetAndOperatorUnfreezes(t *testing.T) {
 	}
 	// 4. a signature by a stranger cannot unfreeze; the operator's can
 	_, strangerKey := newAdminKey()
-	if _, err := s.client.Unfreeze(x, &pb.UnfreezeRequest{KeysetId: s.keysetID, Admin: signWith(strangerKey, "unfreeze", s.keysetID, adminNow())}); grpcstatus.Code(err) != codes.PermissionDenied {
+	if _, err := s.client.Unfreeze(x, &pb.UnfreezeRequest{KeysetId: s.keysetID, Admin: s.adminAuthBy("unfreeze", &pb.UnfreezeRequest{KeysetId: s.keysetID}, time.Now(), time.Now().Add(10*time.Minute), strangerKey, strangerKey)}); grpcstatus.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unfreeze by a stranger: %v", err)
 	}
-	if _, err := s.client.Unfreeze(x, &pb.UnfreezeRequest{KeysetId: s.keysetID, Admin: s.adminAuth("unfreeze", s.keysetID, adminNow())}); err != nil {
+	if _, err := s.client.Unfreeze(x, &pb.UnfreezeRequest{KeysetId: s.keysetID, Admin: s.freshAuth("unfreeze", &pb.UnfreezeRequest{KeysetId: s.keysetID})}); err != nil {
 		t.Fatalf("operator unfreeze: %v", err)
 	}
 	waitLog(t, s.a.out, "AUDIT keyset unfrozen", 5*time.Second)

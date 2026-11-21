@@ -174,6 +174,7 @@ func (s *Server) WriteMetrics(w io.Writer) {
 	if s.gate != nil {
 		s.gate.writeMetrics(w)
 	}
+	s.admin.writeMetrics(w)
 	fmt.Fprintf(w, "# HELP qv_mpc_party_info The party's role and version.\n# TYPE qv_mpc_party_info gauge\nqv_mpc_party_info{party=%q,version=%q} 1\n", s.cfg.Role, Version)
 }
 

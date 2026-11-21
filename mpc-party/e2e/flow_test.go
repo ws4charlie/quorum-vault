@@ -71,7 +71,7 @@ func TestTwoProcessFlow(t *testing.T) {
 		}
 	}
 	// B refuses callers on its caller port except Health.
-	bc, _ := testenv.Dial(t, cl.callerB, cl.env.CertCaller, cl.env.CertB.Pin)
+	bc, _ := cl.env.DialAs(t, cl.callerB, cl.env.CertCaller, cl.env.CertB.Pin)
 	if _, err := bc.Sign(x, &pb.SignRequest{KeyId: d.KeyId, JobId: "x", Digest: dgst(1)}); grpcstatus.Code(err) != codes.Unimplemented {
 		t.Fatalf("B served Sign: %v", err)
 	}
