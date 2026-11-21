@@ -86,6 +86,14 @@ func tail(s string) string {
 	return s
 }
 
+// exitedRole reports whether the party of that role has exited.
+func (cl *cluster) exitedRole(role string) bool {
+	if role == "B" {
+		return cl.b.exited()
+	}
+	return cl.a.exited()
+}
+
 func (cl *cluster) deadParty(t *testing.T, role string) *proc {
 	p := cl.a
 	if role == "B" {
@@ -94,6 +102,7 @@ func (cl *cluster) deadParty(t *testing.T, role string) *proc {
 	select {
 	case <-p.done:
 	case <-time.After(15 * time.Second):
+		t.Logf("---- party A stderr ----\n%s\n---- party B stderr ----\n%s", cl.a.stderr.String(), cl.b.stderr.String())
 		t.Fatalf("party %s did not die at the failpoint", role)
 	}
 	return p
@@ -192,7 +201,17 @@ func crashMatrixDKG(t *testing.T, mk func(t *testing.T) *cluster) {
 				cl.restartB(t, env)
 			}
 			cl.waitReady(t)
-			_, derr := cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: pb.Curve_CURVE_SECP256K1, Admin: cl.env.Admin("dkg", "k")})
+			// A party with the attested sealer is "reachable" before it holds its data keys; a DKG it refuses for that reason ("sealer not ready")
+			// ran nothing and left nothing, so ask again while the answer is UNAVAILABLE and the party has not died. Without this the failpoint
+			// is never reached on a loaded machine and the test fails with "did not die".
+			var derr error
+			for until := time.Now().Add(30 * time.Second); ; {
+				_, derr = cl.client.DKG(x, &pb.DKGRequest{KeysetId: "k", Curve: pb.Curve_CURVE_SECP256K1, Admin: cl.env.Admin("dkg", "k")})
+				if k, ok := kindOf(derr); derr == nil || !ok || k != pb.ErrorKind_ERROR_KIND_UNAVAILABLE || cl.exitedRole(st.role) || time.Now().After(until) {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
 			cl.deadParty(t, st.role)
 			t.Logf("died at %s (%s); DKG returned: %v", st.name, st.what, derr)
 			if st.role == "A" {

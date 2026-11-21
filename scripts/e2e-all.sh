@@ -288,9 +288,12 @@ run_group() { # run_group <lane> <group>
     export COMPOSE_PROJECT_NAME="$PROJ-l$n" QV_PG_PORT=$(pg_port "$n") QV_ANVIL_PORT=$(anvil_port "$n") QV_BTC_PORT=$(btc_port "$n") QV_SOL_PORT=$(sol_port "$n")
     case "$(field "$g" 2)" in *k*) export QV_E2E_KEYCLOAK_URL="https://127.0.0.1:$KC_PORT" ;; esac
     [ "$scale" -gt 1 ] && export QV_E2E_TIMEOUT_SCALE="${QV_E2E_TIMEOUT_SCALE:-$scale}"
+    # scripts/e2e-repeat.sh: the same command N times, with -run replaced (the services stay up between the runs)
+    [ -n "${QV_E2E_REPEAT:-}" ] && exec "$ROOT/scripts/e2e-repeat.sh" engine "$QV_E2E_REPEAT" "${QV_E2E_RUN:-.}" "$OUT/repeat-$g" -- bash -c "$cmd"
     exec bash -c "$cmd"
   ) >"$OUT/$g.log" 2>&1 </dev/null
   rc=$?
+  [ -n "${QV_E2E_REPEAT:-}" ] && tail -n 1 "$OUT/$g.log"
   printf '%s\t%s\t%s\t%s\n' "$g" "$rc" "$((SECONDS - t1))" "$n" >>"$OUT/results.tsv"
   if [ "$rc" = 0 ]; then
     printf '  PASS   %-22s %4ds  lane %s  %s\n' "$g" "$((SECONDS - t1))" "$n" "$OUT/$g.log"

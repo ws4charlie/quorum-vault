@@ -57,6 +57,19 @@ func Start3(t testing.TB, dir string, bin Binaries, o Opts) *Stack3 {
 		t.Fatal(err)
 	}
 	s := &Stack3{t: t, Dir: dir, Bin: bin, cfg: map[string]string{}, client: map[string]pb.MpcPartyClient{}}
+	// registered first, so it runs after the parties were stopped: a failed test shows the end of every party's log (the directory is gone afterwards)
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, n := range []string{"A", "B", "C"} {
+			b, _ := os.ReadFile(filepath.Join(dir, "party-"+n+".log"))
+			if len(b) > 12000 {
+				b = b[len(b)-12000:]
+			}
+			t.Logf("---- party-%s.log (end) ----\n%s", n, b)
+		}
+	})
 	s.CertA, s.CertB, s.CertC, s.CertGW = NewCert(t, "party-a"), NewCert(t, "party-b"), NewCert(t, "party-c"), NewCert(t, "gateway")
 	s.CertCosB, s.CertCosC = NewCert(t, "cosigner-b"), NewCert(t, "cosigner-c")
 	s.Admins = newAdminSet()
