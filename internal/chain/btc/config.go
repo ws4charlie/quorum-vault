@@ -59,7 +59,10 @@ type Config struct {
 	// SweepUrgentValue, in satoshis, is the amount from which a sweep goes regardless of that ceiling, up to MaxFeeRate (0: no such exception).
 	SweepMaxFeeRate uint64
 	// ColdAddresses is where hot-to-cold moves pay, "<pool>/native" -> address; it must match the signing zone's pin. Checked against the network.
-	ColdAddresses    map[string]string
+	ColdAddresses map[string]string
+	// ColdRetiring is the cold address a key replacement is moving away from, same keys as ColdAddresses (docs/runbooks/cold-key-replacement.md). The cell keeps
+	// recording its outputs as cold outputs, so a refill-shaped cold-to-cold move can spend them; hot-to-cold moves and refills use ColdAddresses only.
+	ColdRetiring     map[string]string
 	SweepUrgentValue uint64
 	// SweepK and MinSweep are the sweep rule (value >= max(MinSweep, SweepK x fee)); the adapter needs them to refuse a fee bump that would break it.
 	// SweepK 0 and MinSweep 0 mean no rule.
@@ -226,6 +229,22 @@ func (c Config) validated() (*validatedConfig, error) {
 		}
 		if hotSet[d.Canonical] {
 			return nil, fmt.Errorf("btc: config: cold address for %q is a hot shard address", k)
+		}
+	}
+	for k, a := range c.ColdRetiring {
+		cur, ok := c.ColdAddresses[k]
+		if !ok {
+			return nil, fmt.Errorf("btc: config: retiring cold address key %q has no cold address", k)
+		}
+		d, err := DecodeAddress(a, params)
+		if err != nil {
+			return nil, fmt.Errorf("btc: config: retiring cold address for %q: %w", k, err)
+		}
+		if c, err := DecodeAddress(cur, params); err == nil && c.Canonical == d.Canonical {
+			return nil, fmt.Errorf("btc: config: the retiring cold address for %q is the new one", k)
+		}
+		if hotSet[d.Canonical] {
+			return nil, fmt.Errorf("btc: config: retiring cold address for %q is a hot shard address", k)
 		}
 	}
 	if c.MaxInputs < 1 || c.SpendConfirmations < 1 {

@@ -228,6 +228,9 @@ func (s *Service) reconcileBTC(ctx context.Context, rep *Report) error {
 	for _, a := range c.BTC.ColdAddresses {
 		colds = append(colds, a)
 	}
+	for _, a := range c.ColdRetiring { // a cold key being replaced is read with the new one
+		colds = append(colds, a)
+	}
 	rows, err := s.Pool.Query(ctx, `SELECT d.address FROM deposit_addresses d WHERE d.chain=$1 AND `+partition.WatchedSQL+` ORDER BY d.address`, c.Chain)
 	if err != nil {
 		return err
@@ -398,12 +401,18 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 	}
 	rrows.Close()
 	sums := map[string]*big.Int{}
+	retiring := map[string]string{} // the cold address -> the old one it replaces
 	var keys []string
 	for i := 0; i < c.shardCount(); i++ {
 		p := c.PartitionKey(btc.Native, i).String()
 		ca, err := c.ColdAddressOf(p, btc.Native)
 		if err != nil {
 			continue
+		}
+		if k, kerr := partition.Parse(p); kerr == nil {
+			if old, ok := c.ColdRetiring[k.Pool+"/native"]; ok {
+				retiring[ca] = old
+			}
 		}
 		posted, err := s.posted(ctx, coldAcct(p))
 		if err != nil {
@@ -420,12 +429,19 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		want := new(big.Int).Sub(sums[k], spent(k))
-		out = append(out, Check{Name: "cold", Asset: btc.Native, Subject: k, Ledger: want.String(), Chain: bal(k).String(), OK: want.Cmp(bal(k)) == 0,
-			Detail: note(fmt.Sprintf("read at chain height %d", v.Height), spent(k))})
+		// A cold key being replaced counts with the new one: the books have one cold account per pool, whatever address holds the money.
+		onChain, spentK, addrs := new(big.Int).Set(bal(k)), new(big.Int).Set(spent(k)), []string{canon(k)}
+		if old := retiring[k]; old != "" {
+			onChain.Add(onChain, bal(old))
+			spentK.Add(spentK, spent(old))
+			addrs = append(addrs, canon(old))
+		}
+		want := new(big.Int).Sub(sums[k], spentK)
+		out = append(out, Check{Name: "cold", Asset: btc.Native, Subject: k, Ledger: want.String(), Chain: onChain.String(), OK: want.Cmp(onChain) == 0,
+			Detail: note(fmt.Sprintf("read at chain height %d", v.Height), spentK)})
 		var rows string
-		if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(SUM(value),0)::text FROM btc_utxos WHERE chain=$1 AND cold AND address=$2 AND status IN ('available','reserved')`,
-			c.Chain, canon(k)).Scan(&rows); err != nil {
+		if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(SUM(value),0)::text FROM btc_utxos WHERE chain=$1 AND cold AND address=ANY($2) AND status IN ('available','reserved')`,
+			c.Chain, addrs).Scan(&rows); err != nil {
 			return nil, err
 		}
 		out = append(out, Check{Name: "cold_outputs", Asset: btc.Native, Subject: k, Ledger: sums[k].String(), Chain: rows, OK: sums[k].Cmp(parseBig(rows)) == 0,
