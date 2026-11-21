@@ -250,6 +250,12 @@ func TestAdminSetEndsV1(t *testing.T) {
 	if _, err := r.v.check("refresh", "k", admin.RefreshBody("k"), a); err == nil || !strings.Contains(err.Error(), "v1") {
 		t.Errorf("a v1 authorization by a new key: %v", err)
 	}
+	// a party that restarts reads its state before it looks at the format: its first call after the restart cannot be a v1 file either
+	r.restart(t)
+	a = admin.Sign(r.keys[0], "refresh", "k", time.Now())
+	if _, err := r.v.check("refresh", "k", admin.RefreshBody("k"), a); err == nil || !strings.Contains(err.Error(), "no longer accepts the v1") {
+		t.Errorf("the first call after a restart, in the v1 format: %v", err)
+	}
 }
 
 func TestRecoveryRegistryRules(t *testing.T) {

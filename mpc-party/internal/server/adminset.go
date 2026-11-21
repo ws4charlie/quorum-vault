@@ -92,6 +92,9 @@ func (v *adminVerifier) snapLocked() setSnap {
 func (v *adminVerifier) v1Allowed() bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.ensure() != nil { // the state is read first: a party that has one must not take a v1 file as its first call after a restart
+		return false
+	}
 	return v.allowV1 && v.cur == nil
 }
 

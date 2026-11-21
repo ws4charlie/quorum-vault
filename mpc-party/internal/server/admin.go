@@ -245,6 +245,9 @@ func (v *adminVerifier) check(op, keysetID string, body proto.Message, a *pb.Adm
 	case a == nil:
 		return "", fmt.Errorf("%w: missing", errAdmin)
 	}
+	if _, err := v.snap(); err != nil { // an unreadable admin set refuses with its own reason, not with a misleading one about v1
+		return "", fmt.Errorf("%w: %v", errAdmin, err)
+	}
 	if !v.v1Allowed() {
 		return "", fmt.Errorf("%w: this party no longer accepts the v1 authorization format (it does not cover the request body or a quorum): sign a v2 request with qv-party-admin", errAdmin)
 	}
