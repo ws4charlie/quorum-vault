@@ -56,7 +56,7 @@ func TestProductionPartyHasNoMockAndRefusesTheAttestedSealerWithoutAttester(t *t
 	if err == nil {
 		t.Fatal("a production party started with the attested sealer and no attester")
 	}
-	if !strings.Contains(stderr.String(), "contains no attester") {
+	if !strings.Contains(stderr.String(), "attester \"mock\" is not available in this build") {
 		t.Fatalf("unclear refusal: %s", stderr.String())
 	}
 }
