@@ -128,7 +128,7 @@ func newClusterOn(t *testing.T, env *testenv.Env, tweak func(role string, c *ser
 	cl.cfgA, cl.cfgB = env.WriteConfig(t, ca, "a.json"), env.WriteConfig(t, cb, "b.json")
 	cl.b = start(t, binDev, cl.cfgB)
 	cl.a = start(t, binDev, cl.cfgA)
-	c, _ := testenv.Dial(t, cl.callerA, env.CertCaller, env.CertA.Pin)
+	c, _ := env.DialAs(t, cl.callerA, env.CertCaller, env.CertA.Pin)
 	cl.client = c
 	cl.waitReady(t)
 	return cl

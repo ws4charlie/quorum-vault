@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 )
 
@@ -251,7 +252,7 @@ func (t *transportErr) Unwrap() error { return t.error }
 var _ = grpc.WaitForReady
 
 // unfreeze asks B to lift the freeze (B verifies the operator signature itself), then lifts ours.
-func (s *Server) unfreezeSession(ctx context.Context, keysetID string, admin *pb.AdminAuth) error {
+func (s *Server) unfreezeSession(ctx context.Context, req *pb.UnfreezeRequest) error {
 	if s.peerClient == nil {
 		return invalid("unfreeze", "this party has no peer connection")
 	}
@@ -269,7 +270,7 @@ func (s *Server) unfreezeSession(ctx context.Context, keysetID string, admin *pb
 	tr := newSessTransport(sid, stream, s.cfg.Limits.MaxFrameBytes, &s.stats)
 	go tr.pump()
 	defer stream.CloseSend()
-	b, _ := proto.Marshal(&pb.Open{Op: pb.Op_OP_UNFREEZE, KeysetId: keysetID, Admin: admin})
+	b, _ := proto.Marshal(admin.OpenOf(req))
 	if err := stream.Send(&pb.Frame{SessionId: sid, Kind: pb.FrameKind_FRAME_KIND_OPEN, Payload: b}); err != nil {
 		return fromWrapper("unfreeze", &transportErr{err})
 	}

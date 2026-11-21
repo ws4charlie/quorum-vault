@@ -31,7 +31,7 @@ This page lists what QuorumVault cannot do yet, so you don't have to find out th
 - **The zone operators are a short list in the zone's settings.** They are the root of trust for approver changes, so changing the list means editing the settings and restarting. Changes that no longer meet a raised rule are ignored.
 
 **Signing and parties**
-- **One party administrator key is enough for a party's admin calls.** Calls such as key setup, refresh and unfreeze are signed by one key in the party's list, and the signature covers the operation, the key and the time, not the setup parameters.
+- **The party administrator keys are software keys, and changing the list is a restart.** A party's admin calls (key setup, refresh, unfreeze) need several administrators to sign one request, which names everything the call does. Each administrator keeps a key on their own machine; a hardware token is not supported yet. Adding or removing an administrator means a settings change and a restart on every party. The old single-signature format works only while a party's settings still allow it.
 - **Some rollbacks cannot be detected.** If both parties are restored to the same older generation, nothing notices. A party restored to an older state of the same generation may sign a repeated job again. The broker cannot destroy the keys of old generations ([Enclaves](enclaves.md)).
 - **Cosigners B and C share one certificate name.** Their keys differ, but the name on the list is the same.
 - **A new key is not test-signed before it takes over.** The first real signature after activation is the first proof that it works ([Key replacement](key-replacement.md)).

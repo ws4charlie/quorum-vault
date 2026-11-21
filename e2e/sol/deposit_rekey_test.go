@@ -75,15 +75,14 @@ func (s *wdSys) treeChange(ops map[string]ed25519.PrivateKey, name string, seq i
 }
 
 func (s *wdSys) partyAuthFor(keyset string) string {
-	key := filepath.Join(s.dir, "party-admin.key")
-	if err := os.WriteFile(key, []byte(s.m3.AdminSeedHex()), 0o600); err != nil {
-		s.t.Fatal(err)
-	}
-	f := filepath.Join(s.dir, "party-auth.json")
-	if out, err := exec.Command(filepath.Join(binDir, "qv-keysets"), "party-auth", "-key", key, "-op", "dkg", "-keyset", keyset, "-out", f).CombinedOutput(); err != nil {
-		s.t.Fatalf("party-auth: %v\n%s", err, out)
-	}
-	return f
+	s.t.Helper()
+	return s.m3.Admins.DKGRequestFile(s.t, s.dir, keyset, pb.Scheme_SCHEME_UNSPECIFIED, pb.Curve_CURVE_ED25519)
+}
+
+// partyAuthHotFor is the same for a hot shard's 2-of-3 Ed25519 keyset (the scheme is part of what the admins sign; the curve is the scheme's).
+func (s *wdSys) partyAuthHotFor(keyset string) string {
+	s.t.Helper()
+	return s.m3.Admins.DKGRequestFile(s.t, s.dir, keyset, pb.Scheme_SCHEME_ED25519_2OF3, pb.Curve_CURVE_UNSPECIFIED)
 }
 
 func (s *wdSys) keyRefs() []string {

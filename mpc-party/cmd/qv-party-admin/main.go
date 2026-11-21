@@ -1,23 +1,33 @@
 // Command qv-party-admin is the operator's tool for the MPC parties' signed admin calls: DKG, refresh and unfreeze, and a read-only status.
-// Signing and sending are two steps on two machines, and the parties verify the signature themselves:
+// An admin call needs the signatures of M of the party's N admin keys (admin_threshold) over ONE request that names everything the call does.
+// Creating, signing and sending are separate steps, usually on different machines; the parties verify the signatures themselves:
 //
-//	qv-party-admin sign     -key OPERATOR.key -op dkg|refresh|unfreeze -keyset ID [-out F]     on the operator's own machine; holds the only signing key
-//	qv-party-admin dkg      -auth F [-keyset ID] -party A=ADDR@PIN -party B=ADDR@PIN [-party C=...] -cert F -key F [-scheme hd|ecdsa-2of3|ed25519-2of3] [-curve secp256k1|ed25519]
-//	qv-party-admin refresh  -auth F  (the same -party, -cert and -key flags)
+//	qv-party-admin request  -op dkg|refresh|unfreeze -keyset ID [-scheme hd|ecdsa-2of3|ed25519-2of3] [-curve secp256k1|ed25519] [-domain NAME] [-valid-for 1h] [-out F]
+//	qv-party-admin sign     -key ADMIN.key -in F [-out F]       each admin, on their own machine: adds a signature, changes nothing else in the file
+//	qv-party-admin verify   -in F (-config PARTY.json ... | -admin-key HEX ... -threshold M) [-domain NAME]   anyone: what the file says, who signed, whether a party would take it
+//	qv-party-admin pubkey   -key ADMIN.key                      prints the public key (hex) to put in the parties' admin_keys
+//	qv-party-admin dkg      -auth F -party A=ADDR@PIN -party B=ADDR@PIN [-party C=...] -cert F -key F (-config PARTY.json ... | -admin-key HEX ... -threshold M)
+//	qv-party-admin refresh  -auth F  (the same)
 //	qv-party-admin unfreeze -auth F  (the same)
 //	qv-party-admin status   (the same -party, -cert and -key flags; no -auth) [-keyset ID]
 //
-// The three sending commands run inside the parties' network with a caller certificate; they hold no signing key. The file is valid for the
-// parties' own window (admin_max_age_seconds, 300 s by default) and is accepted once per party. Party A (the first -party, or the one
-// named A) takes the call and tells the others. A server pin is the SHA-256 of the party's certificate public key (SPKI), 64 hex chars.
-// Before and after every call the tool asks every named party for its keysets and refuses to go on, or to call the outcome good, when they disagree.
+// The file carries the request (keyset and, for a DKG, scheme and curve), the deployment domain, the time it was issued and expires and a nonce;
+// every admin signs the same bytes, in any order, and a party rebuilds what was signed from the call it receives, so a changed field, keyset or
+// operation fails the signatures. `send` (dkg, refresh, unfreeze) refuses, before it contacts any party, a file with too few signatures, an unknown
+// key, a wrong domain or an expired one. The sending commands run inside the parties' network with a caller certificate and hold no signing key.
+// A file is accepted once per party. Party A (the first -party, or the one named A) takes the call and tells the others. A server pin is the
+// SHA-256 of the party's certificate public key (SPKI), 64 hex chars. Before and after every call the tool asks every named party for its keysets and
+// refuses to go on, or to call the outcome good, when they disagree. `sign -op ... -keyset ...` without -in still writes the old v1 file (one
+// signature, nothing but operation, keyset and time covered), only for parties that still accept v1 during the roll-over.
 // See docs/runbooks/key-ceremony.md.
 package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,13 +49,19 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errw, "usage: qv-party-admin sign|dkg|refresh|unfreeze|status (see the file header and docs/runbooks/key-ceremony.md)")
+		fmt.Fprintln(errw, "usage: qv-party-admin request|sign|verify|pubkey|dkg|refresh|unfreeze|status (see the file header and docs/runbooks/key-ceremony.md)")
 		return 2
 	}
 	var err error
 	switch args[0] {
+	case "request":
+		err = requestCmd(args[1:], out, errw)
 	case "sign":
 		err = signCmd(args[1:], out, errw)
+	case "verify":
+		err = verifyCmd(args[1:], out)
+	case "pubkey":
+		err = pubkeyCmd(args[1:], out)
 	case "dkg", "refresh", "unfreeze":
 		err = sendCmd(args[0], args[1:], out, errw)
 	case "status":
@@ -60,38 +76,261 @@ func run(args []string, out, errw io.Writer) int {
 	return 0
 }
 
-// ---- sign ----
+// ---- request, sign, verify ----
 
-func signCmd(args []string, out, errw io.Writer) error {
-	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
+func requestCmd(args []string, out, errw io.Writer) error {
+	fs := flag.NewFlagSet("request", flag.ContinueOnError)
 	fs.SetOutput(errw)
-	keyFile := fs.String("key", "", "file with the operator's Ed25519 private key, hex (32-byte seed or 64-byte key)")
 	op := fs.String("op", "", "dkg, refresh or unfreeze")
 	keyset := fs.String("keyset", "", "the keyset ID")
-	maxAge := fs.Duration("window", admin.DefaultMaxAge, "the parties' admin_max_age_seconds, only to print when the file expires")
+	scheme := fs.String("scheme", "hd", "dkg: hd (two-party HD keyset), ecdsa-2of3 or ed25519-2of3")
+	curve := fs.String("curve", "secp256k1", "dkg, scheme hd: secp256k1 or ed25519")
+	domain := fs.String("domain", "", "the parties' admin_domain (the deployment name); empty when they have none")
+	validFor := fs.Duration("valid-for", admin.DefaultValidity, "how long the request stays valid for signing and sending (the parties' admin_max_validity_seconds is the upper limit)")
 	outFile := fs.String("out", "", "write the file here (default stdout)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *keyFile == "" || *op == "" || *keyset == "" {
-		return errors.New("-key, -op and -keyset are required")
+	if *op == "" || *keyset == "" {
+		return errors.New("-op and -keyset are required")
+	}
+	d := dkgRequest{}
+	if *op == admin.OpDKG {
+		var err error
+		if d, err = dkgFlags(*scheme, *curve); err != nil {
+			return err
+		}
+	}
+	now := time.Now()
+	r, err := admin.NewRequest(*op, *keyset, *domain, d.scheme, d.curve, now, *validFor)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(errw, "request: %s of keyset %s\n%s\nvalid until %s: it needs the signatures of the party's admin_threshold admin keys (qv-party-admin sign), then send\n",
+		r.Op, r.Keyset, describe(r), time.Unix(r.ExpiresUnix, 0).Format("2006-01-02 15:04:05 MST"))
+	if *outFile == "" {
+		_, err = out.Write(r.JSON())
+		return err
+	}
+	return os.WriteFile(*outFile, r.JSON(), 0o600)
+}
+
+// describe says in words what the signatures cover, so a signer reads what they sign.
+func describe(r admin.Request) string {
+	s := fmt.Sprintf("  covers: operation %q, keyset %q, domain %q, issued %s, nonce %s\n  request body: %s", r.Op, r.Keyset, r.Domain,
+		time.Unix(r.IssuedUnix, 0).Format("15:04:05"), r.Nonce, r.Body)
+	return s
+}
+
+func signCmd(args []string, out, errw io.Writer) error {
+	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
+	fs.SetOutput(errw)
+	keyFile := fs.String("key", "", "file with the admin's Ed25519 private key, hex (32-byte seed or 64-byte key)")
+	in := fs.String("in", "", "the request file (from `request`, maybe already signed by others) to add this admin's signature to")
+	outFile := fs.String("out", "", "write the file here (default: back into -in, or stdout for the old v1 form)")
+	op := fs.String("op", "", "OLD v1 form only (no -in): dkg, refresh or unfreeze")
+	keyset := fs.String("keyset", "", "OLD v1 form only (no -in): the keyset ID")
+	maxAge := fs.Duration("window", admin.DefaultMaxAge, "OLD v1 form only: the parties' admin_max_age_seconds, only to print when the file expires")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *keyFile == "" {
+		return errors.New("-key is required")
 	}
 	priv, err := admin.ReadKeyFile(*keyFile)
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	f, err := admin.NewFile(priv, *op, *keyset, now)
+	if *in == "" {
+		return signV1(priv, *op, *keyset, *maxAge, *outFile, out, errw)
+	}
+	raw, err := os.ReadFile(*in)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(errw, "authorisation: %s of keyset %s by operator key %s\nvalid until about %s (%s window, once per party): send it now\n",
-		f.Op, f.Keyset, f.PublicKey, now.Add(*maxAge).Format("15:04:05 MST"), *maxAge)
-	if *outFile == "" {
+	r, err := admin.ParseRequest(raw)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *in, err)
+	}
+	if time.Now().After(time.Unix(r.ExpiresUnix, 0)) {
+		return fmt.Errorf("%s expired at %s: create a new request", *in, time.Unix(r.ExpiresUnix, 0).Format(time.RFC3339))
+	}
+	fmt.Fprintf(errw, "signing: %s\n%s\n", r.Op, describe(r))
+	if err := r.Sign(priv); err != nil {
+		return err
+	}
+	fmt.Fprintf(errw, "signatures now: %d (%s)\n", len(r.Signatures), signerList(r))
+	dest := *outFile
+	if dest == "" {
+		dest = *in
+	}
+	return os.WriteFile(dest, r.JSON(), 0o600)
+}
+
+func signerList(r admin.Request) string {
+	var l []string
+	for _, s := range r.Signatures {
+		l = append(l, s.PublicKey[:8]+"...")
+	}
+	return strings.Join(l, ", ")
+}
+
+func signV1(priv ed25519.PrivateKey, op, keyset string, maxAge time.Duration, outFile string, out, errw io.Writer) error {
+	if op == "" || keyset == "" {
+		return errors.New("-in FILE (a request from `request`) is required; the old v1 form needs -op and -keyset")
+	}
+	now := time.Now()
+	f, err := admin.NewFile(priv, op, keyset, now)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(errw, "OLD v1 authorisation (one signature, covers only operation, keyset and time; refused by parties with admin_threshold set): %s of keyset %s by operator key %s\nvalid until about %s (%s window, once per party): send it now\n",
+		f.Op, f.Keyset, f.PublicKey, now.Add(maxAge).Format("15:04:05 MST"), maxAge)
+	if outFile == "" {
 		_, err = out.Write(f.JSON())
 		return err
 	}
-	return os.WriteFile(*outFile, f.JSON(), 0o600)
+	return os.WriteFile(outFile, f.JSON(), 0o600)
+}
+
+func pubkeyCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("pubkey", flag.ContinueOnError)
+	keyFile := fs.String("key", "", "file with the admin's Ed25519 private key, hex")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *keyFile == "" {
+		return errors.New("-key is required")
+	}
+	priv, err := admin.ReadKeyFile(*keyFile)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, hex.EncodeToString(priv.Public().(ed25519.PublicKey)))
+	return nil
+}
+
+// policyFlags are the ways to say what a party needs: its config files, or its admin keys and threshold.
+type policyFlags struct {
+	configs     stringList
+	keys        stringList
+	threshold   int
+	domain      string
+	maxValidity time.Duration
+	skew        time.Duration
+}
+
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ",") }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
+
+func (p *policyFlags) flags(fs *flag.FlagSet) {
+	fs.Var(&p.configs, "config", "a party's config file (repeat for each party): its admin_keys, admin_threshold, admin_domain and limits decide")
+	fs.Var(&p.keys, "admin-key", "an admin public key the parties are configured with, 64 hex (repeat for each); with -threshold, instead of -config")
+	fs.IntVar(&p.threshold, "threshold", 0, "the parties' admin_threshold; with -admin-key, instead of -config")
+	fs.StringVar(&p.domain, "domain", "", "with -admin-key: the parties' admin_domain")
+	fs.DurationVar(&p.maxValidity, "max-validity", time.Hour, "with -admin-key: the parties' admin_max_validity_seconds")
+	fs.DurationVar(&p.skew, "window", admin.DefaultMaxAge, "the parties' admin_max_age_seconds (the clock skew they tolerate)")
+}
+
+// policies gives one policy per party config, or the single one from the flags. It refuses to guess: without either there is nothing to check against.
+func (p *policyFlags) policies() ([]admin.Policy, error) {
+	switch {
+	case len(p.configs) > 0 && (len(p.keys) > 0 || p.threshold > 0):
+		return nil, errors.New("give either -config files or -admin-key with -threshold, not both")
+	case len(p.configs) > 0:
+		var l []admin.Policy
+		for _, f := range p.configs {
+			raw, err := os.ReadFile(f)
+			if err != nil {
+				return nil, err
+			}
+			var c struct {
+				Keys      []string `json:"admin_keys"`
+				Threshold int      `json:"admin_threshold"`
+				MaxAge    int      `json:"admin_max_age_seconds"`
+				MaxValid  int      `json:"admin_max_validity_seconds"`
+				Domain    string   `json:"admin_domain"`
+			}
+			if err := json.Unmarshal(raw, &c); err != nil {
+				return nil, fmt.Errorf("%s: %w", f, err)
+			}
+			pol, err := mkPolicy(c.Keys, c.Threshold, c.Domain, time.Duration(c.MaxValid)*time.Second, time.Duration(c.MaxAge)*time.Second)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", f, err)
+			}
+			l = append(l, pol)
+		}
+		return l, nil
+	case len(p.keys) > 0 && p.threshold > 0:
+		pol, err := mkPolicy(p.keys, p.threshold, p.domain, p.maxValidity, p.skew)
+		return []admin.Policy{pol}, err
+	}
+	return nil, errors.New("say what the parties need: -config PARTY.json (each party), or -admin-key HEX (each) with -threshold M")
+}
+
+func mkPolicy(keys []string, threshold int, domain string, maxValidity, skew time.Duration) (admin.Policy, error) {
+	p := admin.Policy{Threshold: max(threshold, 1), Domain: domain, MaxValidity: maxValidity, Skew: skew}
+	if p.MaxValidity <= 0 {
+		p.MaxValidity = time.Hour
+	}
+	if p.Skew <= 0 {
+		p.Skew = admin.DefaultMaxAge
+	}
+	for _, k := range keys {
+		b, err := hex.DecodeString(k)
+		if err != nil || len(b) != ed25519.PublicKeySize {
+			return p, fmt.Errorf("admin key %q is not 32 bytes of hex", k)
+		}
+		p.Keys = append(p.Keys, b)
+	}
+	if len(p.Keys) == 0 {
+		return p, errors.New("no admin keys")
+	}
+	if p.Threshold > len(p.Keys) {
+		return p, fmt.Errorf("admin_threshold %d is more than the %d admin keys", p.Threshold, len(p.Keys))
+	}
+	if p.Threshold > admin.MaxSignatures {
+		return p, fmt.Errorf("admin_threshold %d is more than the %d signatures one authorization may carry: no request could reach it", p.Threshold, admin.MaxSignatures)
+	}
+	return p, nil
+}
+
+func verifyCmd(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	in := fs.String("in", "", "the request file")
+	var pf policyFlags
+	pf.flags(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *in == "" {
+		return errors.New("-in is required")
+	}
+	raw, err := os.ReadFile(*in)
+	if err != nil {
+		return err
+	}
+	if admin.FileVersion(raw) == 1 {
+		return errors.New("this is an old v1 file: it covers only operation, keyset and time and has one signature; it cannot be checked against a quorum")
+	}
+	r, err := admin.ParseRequest(raw)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "%s\n  signatures that verify: %d (%s)\n", describe(r), len(r.Signatures), signerList(r))
+	pols, err := pf.policies()
+	if err != nil {
+		return err
+	}
+	for i, p := range pols {
+		if err := r.Check(p, time.Now()); err != nil {
+			return fmt.Errorf("a party %d of %d would refuse this file: %w", i+1, len(pols), err)
+		}
+	}
+	fmt.Fprintf(out, "OK: every configuration checked (%d) would take it (a party also refuses a file it has already used)\n", len(pols))
+	return nil
 }
 
 // ---- parties ----
@@ -415,41 +654,97 @@ func sendCmd(op string, args []string, out, errw io.Writer) error {
 	fs.SetOutput(errw)
 	var c common
 	c.flags(fs)
+	var pf policyFlags
+	pf.flags(fs)
 	expectKeyset := fs.String("keyset", "", "the keyset this call is meant for: refused, before any call, when the authorisation file names another (a Job names it so a wrong file cannot act on another keyset)")
-	authFile := fs.String("auth", "", "the authorisation file `qv-party-admin sign` wrote for this operation (valid for the parties' window, once per party)")
-	maxAge := fs.Duration("window", admin.DefaultMaxAge, "the parties' admin_max_age_seconds: a file older than this is refused here without a call")
-	scheme := fs.String("scheme", "hd", "dkg: hd (two-party HD keyset), ecdsa-2of3 or ed25519-2of3")
-	curve := fs.String("curve", "secp256k1", "dkg, scheme hd: secp256k1 or ed25519")
+	authFile := fs.String("auth", "", "the authorisation file: a request from `qv-party-admin request`, signed by the admin_threshold admins with `sign` (or an old v1 file during the roll-over)")
+	scheme := fs.String("scheme", "hd", "dkg: hd (two-party HD keyset), ecdsa-2of3 or ed25519-2of3; must match the request file, which decides")
+	curve := fs.String("curve", "secp256k1", "dkg, scheme hd: secp256k1 or ed25519; must match the request file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *authFile == "" {
-		return errors.New("-auth is required: an operator's file from `qv-party-admin sign` on their own machine; this command holds no signing key")
+		return errors.New("-auth is required: a request file signed by the admins (`qv-party-admin request`, then `sign` by each); this command holds no signing key")
 	}
 	if err := c.check(); err != nil {
 		return err
 	}
-	f, err := admin.ReadFile(*authFile)
+	raw, err := os.ReadFile(*authFile)
 	if err != nil {
 		return err
 	}
-	if f.Op != op {
-		return fmt.Errorf("%s is an authorisation for %s of keyset %s, not for %s", *authFile, f.Op, f.Keyset, op)
-	}
-	if *expectKeyset != "" && *expectKeyset != f.Keyset {
-		return fmt.Errorf("%s is an authorisation for keyset %s, but this call is for keyset %s: nothing was sent", *authFile, f.Keyset, *expectKeyset)
-	}
-	now := time.Now()
-	if age := f.Age(now); age > *maxAge || age < -*maxAge {
-		return fmt.Errorf("%s was signed %s ago, outside the %s the parties accept: have the operator sign a new one and send it at once", *authFile, age.Round(time.Second), *maxAge)
-	}
-	auth, _ := f.Auth()
-	req := dkgRequest{}
-	if op == admin.OpDKG {
-		if req, err = dkgFlags(*scheme, *curve); err != nil {
+	var (
+		fkeyset string
+		auth    *pb.AdminAuth
+		req     dkgRequest
+		now     = time.Now()
+	)
+	switch admin.FileVersion(raw) {
+	case 2:
+		r, err := admin.ParseRequest(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", *authFile, err)
+		}
+		if r.Op != op {
+			return fmt.Errorf("%s is an authorisation for %s of keyset %s, not for %s", *authFile, r.Op, r.Keyset, op)
+		}
+		if *expectKeyset != "" && *expectKeyset != r.Keyset {
+			return fmt.Errorf("%s is an authorisation for keyset %s, but this call is for keyset %s: nothing was sent", *authFile, r.Keyset, *expectKeyset)
+		}
+		pols, err := pf.policies()
+		if err != nil {
 			return err
 		}
+		for i, p := range pols { // too few signatures, an unknown key, another domain, a stale file: refused here, before any party is contacted
+			if err := r.Check(p, now); err != nil {
+				return fmt.Errorf("%s would be refused by the parties (configuration %d of %d): %w: nothing was sent", *authFile, i+1, len(pols), err)
+			}
+		}
+		if auth, err = r.Auth(); err != nil {
+			return err
+		}
+		fkeyset = r.Keyset
+		if op == admin.OpDKG {
+			sch, cur, _ := r.DKGParams()
+			req = dkgRequest{sch, cur}
+			set := map[string]bool{}
+			fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+			if set["scheme"] || set["curve"] {
+				want, err := dkgFlags(*scheme, *curve)
+				if err != nil {
+					return err
+				}
+				if admin.DKGBody("k", want.scheme, want.curve).Curve != admin.DKGBody("k", sch, cur).Curve || want.scheme != sch {
+					return fmt.Errorf("-scheme/-curve differ from the request in %s (%s, %s): the file decides; make a new request to change them", *authFile, schemeName(sch), cur)
+				}
+			}
+		}
+	case 1:
+		f, err := admin.ReadFile(*authFile)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(errw, "WARNING: an old v1 file (one signature; it covers only operation, keyset and time): parties with admin_threshold set refuse it")
+		if f.Op != op {
+			return fmt.Errorf("%s is an authorisation for %s of keyset %s, not for %s", *authFile, f.Op, f.Keyset, op)
+		}
+		if *expectKeyset != "" && *expectKeyset != f.Keyset {
+			return fmt.Errorf("%s is an authorisation for keyset %s, but this call is for keyset %s: nothing was sent", *authFile, f.Keyset, *expectKeyset)
+		}
+		if age := f.Age(now); age > pf.skew || age < -pf.skew {
+			return fmt.Errorf("%s was signed %s ago, outside the %s the parties accept: have the operator sign a new one and send it at once", *authFile, age.Round(time.Second), pf.skew)
+		}
+		auth, _ = f.Auth()
+		fkeyset = f.Keyset
+		if op == admin.OpDKG {
+			if req, err = dkgFlags(*scheme, *curve); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("%s is not an authorisation file", *authFile)
 	}
+	f := struct{ Keyset string }{fkeyset}
 	cs, err := c.dial()
 	if err != nil {
 		return err

@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/ws4charlie/quorum-vault/mpc-party/api/admin"
 )
 
 // Config is the JSON config file. Unknown fields are an error; a missing or invalid file stops the process.
@@ -49,7 +51,21 @@ type Config struct {
 	// AdminKeys are the operators' Ed25519 public keys (64 hex chars). DKG, Refresh and Unfreeze need a signature by one of
 	// them, checked by BOTH parties against their own list, so a compromised party A cannot start them.
 	AdminKeys          []string `json:"admin_keys"`
-	AdminMaxAgeSeconds int      `json:"admin_max_age_seconds"` // accepted clock skew / age of an admin signature; default 300
+	AdminMaxAgeSeconds int      `json:"admin_max_age_seconds"` // accepted clock skew (v2) / age of an admin signature (v1); default 300
+
+	// AdminThreshold is how many DISTINCT admin_keys must sign one authorization (v2). 0 (unset) means one, and keeps the old v1 format accepted
+	// until it is switched off; set (1 or more), v1 is refused unless AdminAllowV1 says true. Every party that takes part verifies it, so the
+	// strictest party decides. Changing the keys or the threshold is a config change and a restart.
+	AdminThreshold int `json:"admin_threshold"`
+	// AdminAllowV1: accept the v1 single-signature authorization. Unset: yes while AdminThreshold is unset, no once it is set. Each acceptance is
+	// logged (AUDIT) and counted (qv_mpc_party_admin_auth_accepted_total{version="v1"}). Only for the roll-over.
+	AdminAllowV1 *bool `json:"admin_allow_v1"`
+	// AdminMaxValiditySeconds is the longest an authorization may be valid (expires minus issued); default 3600. A request to co-sign travels
+	// between admins, so it needs more than the v1 window; a stolen file stops working at its expiry.
+	AdminMaxValiditySeconds int `json:"admin_max_validity_seconds"`
+	// AdminDomain names the deployment ("prod", "staging"): signed into every authorization, so one made for another deployment that shares
+	// admin keys is useless here. "" when the deployment has no name; every party of one deployment must use the same.
+	AdminDomain string `json:"admin_domain"`
 
 	Sealer     SealerConfig     `json:"sealer"`
 	Authorizer AuthorizerConfig `json:"authorizer"`
@@ -219,6 +235,14 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // Validate checks the config and fills defaults.
+// adminV1Allowed: the v1 authorization is accepted when the config says so, else while no threshold is set.
+func (c *Config) adminV1Allowed() bool {
+	if c.AdminAllowV1 != nil {
+		return *c.AdminAllowV1
+	}
+	return c.AdminThreshold == 0
+}
+
 func (c *Config) Validate() error {
 	var errs []error
 	req := func(name, v string) {
@@ -305,6 +329,22 @@ func (c *Config) Validate() error {
 	}
 	if c.AdminMaxAgeSeconds <= 0 {
 		c.AdminMaxAgeSeconds = 300
+	}
+	if c.AdminMaxValiditySeconds <= 0 {
+		c.AdminMaxValiditySeconds = int(DefaultAdminMaxValidity / time.Second)
+	}
+	seenKey := map[string]bool{}
+	for _, k := range c.AdminKeys {
+		if k = strings.ToLower(k); seenKey[k] {
+			errs = append(errs, fmt.Errorf("admin_keys: %q is listed twice (a key counts once)", k))
+		}
+		seenKey[k] = true
+	}
+	if c.AdminThreshold < 0 || c.AdminThreshold > len(seenKey) {
+		errs = append(errs, fmt.Errorf("admin_threshold: %d is not between 0 (unset) and the %d distinct admin_keys", c.AdminThreshold, len(seenKey)))
+	}
+	if c.AdminThreshold > admin.MaxSignatures { // Verify2 refuses more signatures than this, so no request could ever reach such a threshold
+		errs = append(errs, fmt.Errorf("admin_threshold: %d is more than the %d signatures one authorization may carry (more admin_keys than that are fine; the threshold must stay within it)", c.AdminThreshold, admin.MaxSignatures))
 	}
 	req("sealer.type", c.Sealer.Type)
 	if c.Sealer.Type == AttestedSealerType {

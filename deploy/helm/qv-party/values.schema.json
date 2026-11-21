@@ -227,6 +227,22 @@
       "type": "integer",
       "minimum": 1
     },
+    "adminThreshold": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 32
+    },
+    "adminAllowV1": {
+      "type": ["boolean", "null"]
+    },
+    "adminMaxValiditySeconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "adminDomain": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{0,64}$"
+    },
     "limits": {
       "type": "object",
       "additionalProperties": false,

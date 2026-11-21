@@ -150,7 +150,7 @@ func startTrio(t *testing.T, o trioOpts) *trio {
 	callers := map[string]string{"A": tr.Addrs.CallerA, "B": tr.Addrs.CallerB, "C": tr.Addrs.CallerC}
 	pins := map[string]string{"A": env.CertA.Pin, "B": env.CertB.Pin, "C": env.CertC.Pin}
 	for role, addr := range callers {
-		c, _ := testenv.Dial(t, addr, env.CertCaller, pins[role])
+		c, _ := env.DialAs(t, addr, env.CertCaller, pins[role])
 		tr.Client[role] = c
 	}
 	tr.waitReady(t)
@@ -300,7 +300,7 @@ func TestTrioTamperFreezesAllThree(t *testing.T) {
 						wantKind(t, ferr, codes.FailedPrecondition, pb.ErrorKind_ERROR_KIND_FROZEN)
 					}
 					// a forged unfreeze is refused and changes nothing; the real one lifts it on all three
-					_, uerr := tr.Client["A"].Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: "k", Admin: server.SignAdmin(tr.Env.CertCallerKey(), "unfreeze", "k", time.Now())})
+					_, uerr := tr.Client["A"].Unfreeze(ctx30(t), &pb.UnfreezeRequest{KeysetId: "k", Admin: tr.Env.AdminBy(tr.Env.AdminKeys[0], tr.Env.CertCallerKey())})
 					wantKind(t, uerr, codes.PermissionDenied, pb.ErrorKind_ERROR_KIND_REFUSED)
 					for _, role := range []string{"A", "B", "C"} {
 						if !tr.frozen(t, role, "k") {
