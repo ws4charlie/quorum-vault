@@ -134,8 +134,8 @@ func TestSOLColdMoveCloseStepRefusals(t *testing.T) {
 	}{
 		{"rent to another address", func(q *SOLRequest) { q.To = randAddr() }, "may only go to the pinned new cold address"},
 		{"rent to the hot shard", func(q *SOLRequest) { q.To = e.hot }, "may only go to the pinned new cold address"},
-		{"with an amount", func(q *SOLRequest) { q.Amount = "5" }, "closes nonce accounts and nothing else"},
-		{"with a mint", func(q *SOLRequest) { q.Mint = e.mint }, "closes nonce accounts and nothing else"},
+		{"with an amount above the cap", func(q *SOLRequest) { q.Asset, q.Amount = "", "5000000000001" }, "above the cold_move cap"},
+		{"with a mint", func(q *SOLRequest) { q.Mint = e.mint }, "no asset, mint or setup field"},
 		{"an account outside the pool", func(q *SOLRequest) { q.NonceIndexes = []int{1, 9} }, "outside the pool"},
 		{"a balance that is no nonce account's", func(q *SOLRequest) { q.Lamports = []uint64{rent * 1000, 1} }, "not a nonce account's"},
 		{"a repeated account", func(q *SOLRequest) { q.NonceIndexes = []int{1, 1} }, "repeated"},

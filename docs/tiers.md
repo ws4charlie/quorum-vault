@@ -21,6 +21,9 @@ The cold address is written into the signing zone's own config, which the busine
 ## A hot wallet can change its key
 A hot wallet can get a new key without a new set of books: new payments leave from the new key, the old key moves everything it holds to the new one, and only then is it retired ([Key replacement](key-replacement.md)).
 
+## A cold key can change too
+A cold key is replaced by a ceremony of its own: the old key, signed by M of N custodians, moves everything to a new address that is written into the offline machine's own config, never taken from the request. New hot-to-cold moves go to the new address from the switch, and the old address stays in the books' checks until it is empty ([runbook](runbooks/cold-key-replacement.md)).
+
 ## Cold to hot needs people
 A refill makes coins more exposed, so it goes through a ceremony.
 1. The core opens a refill request. One stays open per cold address; on Solana one per asset.

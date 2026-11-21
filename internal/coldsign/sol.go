@@ -59,8 +59,8 @@ type SOLRequest struct {
 	ComputeUnitPrice uint64 `json:"compute_unit_price"` // micro-lamports per unit; 0 for none
 	// CreateDestAccount makes the cold address open the hot shard's associated token account first (rent from the cold address); for a token only.
 	CreateDestAccount bool `json:"create_dest_account,omitempty"`
-	// CloseSource (a cold-move of a token): after the transfer the old cold address closes its token account, the rent going to the new cold address. The
-	// chain refuses it unless the account is then empty, so it is only asked for when the whole balance moves.
+	// CloseSource (a cold-move of a token): after the transfer the old cold address closes its token account. The
+	// chain refuses it unless the account is then empty, so it is only asked for when the whole balance moves. The rent returns to the old cold address.
 	CloseSource bool `json:"close_source,omitempty"`
 
 	// Setup only: the pool nonce accounts of the cold address to create (indexes), the rent each holds, and the mints whose associated token account of the
@@ -250,8 +250,8 @@ func (r SOLRequest) Message() ([]byte, error) {
 			return nil, errors.New("decimals out of range")
 		}
 		ixs = append(ixs, solmsg.CheckedTransferIx(src, mint, dst, from, amount.Uint64(), uint8(r.Decimals)))
-		if r.CloseSource { // the old token account goes away and its rent to the new cold address (the chain refuses it unless it is empty)
-			ixs = append(ixs, solmsg.CloseAccountIx(src, to, from))
+		if r.CloseSource { // the old token account goes away and its rent returns to the old cold address, which sends it on with the SOL (the chain refuses it unless it is empty)
+			ixs = append(ixs, solmsg.CloseAccountIx(src, from, from))
 		}
 	}
 	return solmsg.Compile(from, value, ixs...), nil
@@ -270,6 +270,9 @@ func (r SOLRequest) Summary(decimals int) string {
 	fmt.Fprintf(&b, "  chain     %s, pool %s\n", r.Chain, r.Pool)
 	if r.Kind == KindSOLColdMoveClose {
 		fmt.Fprintf(&b, "  action    COLD-TO-COLD MOVE, LAST STEP: closes nonce accounts %v of the old cold address (%v lamports); the rent goes to the NEW cold address %s\n", r.NonceIndexes, r.Lamports, r.To)
+		if r.Amount != "" && r.Amount != "0" {
+			fmt.Fprintf(&b, "  also      sends the SOL that is left, %s lamports, to the NEW cold address (the old address ends at zero)\n", r.Amount)
+		}
 		fmt.Fprintf(&b, "  from      %s (the old cold address)\n  blockhash %s\n", r.From, r.NonceValue)
 		return b.String()
 	}
@@ -288,7 +291,7 @@ func (r SOLRequest) Summary(decimals int) string {
 		fmt.Fprintf(&b, "  action    COLD-TO-COLD MOVE: the old cold key sends funds to the NEW cold address (a key replacement)\n")
 		fmt.Fprintf(&b, "  to        %s (the new cold address)\n", r.To)
 		if r.CloseSource {
-			fmt.Fprintf(&b, "  also      closes the old token account afterwards; its rent goes to the new cold address\n")
+			fmt.Fprintf(&b, "  also      closes the old token account afterwards; its rent returns to the old cold address\n")
 		}
 	} else {
 		fmt.Fprintf(&b, "  to        %s (a hot shard)\n", r.To)
@@ -938,6 +941,13 @@ func (r SOLRequest) coldMoveCloseMessage(from [32]byte) ([]byte, error) {
 		seen[i] = true
 		ixs = append(ixs, solmsg.WithdrawNonceIx(solmsg.NonceAddress(from, i), to, from, r.Lamports[k]))
 	}
+	if r.Amount != "" && r.Amount != "0" { // the SOL the old address still holds, so that it ends at zero (an account may not be left below the rent minimum)
+		amt, err := parseAmt("amount", r.Amount)
+		if err != nil || !amt.IsUint64() {
+			return nil, errors.New("amount is not a lamport count")
+		}
+		ixs = append(ixs, solmsg.TransferIx(from, to, amt.Uint64()))
+	}
 	return solmsg.Compile(from, bh, ixs...), nil
 }
 
@@ -950,8 +960,27 @@ func (c *SOLConfig) checkColdMoveClose(r SOLRequest, cold string) (SOLRequest, [
 	if r.To != c.ColdMove.NewCold {
 		return r, nil, refuse("a cold-to-cold move may only go to the pinned new cold address %s, the request says %s", c.ColdMove.NewCold, r.To)
 	}
-	if r.Amount != "" && r.Amount != "0" || r.Asset != "" || r.Mint != "" || r.NonceAccount != "" || r.CreateDestAccount || r.CloseSource || len(r.Mints) != 0 || r.NonceRent != 0 {
-		return r, nil, refuse("the last step of a cold-to-cold move closes nonce accounts and nothing else: it has no amount, asset, mint or setup field")
+	if r.Asset != "" || r.Mint != "" || r.NonceAccount != "" || r.CreateDestAccount || r.CloseSource || len(r.Mints) != 0 || r.NonceRent != 0 {
+		return r, nil, refuse("the last step of a cold-to-cold move closes nonce accounts and sends the SOL that is left: it has no asset, mint or setup field")
+	}
+	if r.Amount != "" && r.Amount != "0" {
+		amt, err := parseAmt("amount", r.Amount)
+		if err != nil {
+			return r, nil, refuse("%v", err)
+		}
+		nativeCap := ""
+		for name, p := range c.Assets {
+			if p.Mint == "" {
+				nativeCap = c.ColdMove.MaxAmount[name]
+			}
+		}
+		if nativeCap == "" {
+			return r, nil, refuse("this config has no cold_move max_amount for SOL: it does not send SOL")
+		}
+		max, _ := parseAmt("cold_move max_amount", nativeCap)
+		if amt.Cmp(max) > 0 {
+			return r, nil, refuse("amount %s is above the cold_move cap %s", amt, max)
+		}
 	}
 	if c.NonceRent == 0 {
 		return r, nil, refuse("this config has no nonce_rent: it signs no close of nonce accounts")

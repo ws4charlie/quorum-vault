@@ -226,8 +226,9 @@ test-e2e-sol-sweep-faults:
 # Solana cold tier (P8-7): moves to cold and rebalance between the shards of a pool, the refill ceremony (the cold key is an Ed25519 key in the qv-cold SoftHSM
 # token, qv-cold a separate process, only files crossing) with its attacks, a refill that cannot mine and is closed by an operator; and the crash tests at every
 # boundary of a refill, a move to cold and a rebalance. Needs `make sol-up infra-up softhsm mpc-build`.
+E2E_SOL_COLD := TestColdMovesAndRebalance|TestColdRefillCeremony|TestColdRefillParked|TestColdRefillRequestExpires|TestColdRefillIsSentAgainUntilItLands|TestColdRefillsOfTwoAssetsRunInParallel|TestColdKeyReplacementSOL
 test-e2e-sol-cold:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestColdMovesAndRebalance|TestColdRefillCeremony|TestColdRefillParked|TestColdRefillRequestExpires|TestColdRefillIsSentAgainUntilItLands|TestColdRefillsOfTwoAssetsRunInParallel' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_SOL_COLD)' ./e2e/sol/...
 
 test-e2e-sol-cold-crash:
 	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestColdRefillCrash' ./e2e/sol/...
