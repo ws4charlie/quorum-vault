@@ -30,7 +30,15 @@ sign the emergency record, and how fast the old address is emptied afterwards. E
 | **Solana deposit keys** | like Bitcoin deposit keys | none |
 | Cold key, admin keys | not this page: "If the cold key is in doubt" below, and the key-ceremony pages | |
 
-Solana: a transaction of the stolen key that the zone refused before signing is released by the core at once and does not hold the drain; one that may be signed keeps its nonce and the drain waits for it, as on EVM.
+### Work in flight at the mark (Solana)
+
+A transaction of the stolen key that the zone refused before any signature is released by the core at once (its nonce account is given back unused: a sweep fails and is planned again, a withdrawal is voided and its hold released) and does not hold the drain. A refusal by a cosigner after the gateway reserved is released too: the stolen key cannot cancel, and its drain takes the account's lamports whatever claims it (tested: the zone signs the drain's withdrawal of a claimed nonce account).
+
+**What can still hold the drain:** a transaction that may be signed (one of its sign jobs is done or failed, so a signature may exist). A message signed on a durable nonce can land at any time until the nonce advances or the nonce account is withdrawn. The core keeps its nonce account allocated; the stolen key cannot sign the cancel, so the owner is parked (`failure_reason` starts with `parked: the gateway refused to cancel the nonce`, with an ALERT in the worker log) and the drain shows `waiting: N transactions built from the old address are still in flight; the drain starts when they are final`. That text does not name the owner: find it with `SELECT owner_kind, owner_id, address, status FROM sol_nonce_allocations WHERE hot_address='<old address>' AND status IN ('allocated','broadcast')`.
+
+Two ways out, and what exists today:
+1. **The payment should happen:** the signed message is broadcast and confirms, the allocation closes and the drain goes on. There is **no operator command** to broadcast a parked owner's signed message; it is backlog.
+2. **The payment is abandoned:** once the drain withdraws the nonce account the message can never land, and the owner should then be voided with its hold released. There is **no operator command** to declare a parked owner abandoned (which would release the allocation so the drain may take the account); it is backlog. Until one exists this needs a reviewed change in the database by the core's operators.
 
 ## Decide: who and on what evidence (two minutes)
 
