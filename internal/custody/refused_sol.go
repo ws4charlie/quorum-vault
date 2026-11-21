@@ -34,13 +34,18 @@ var solSettleWait = 30 * time.Second
 // solSettleStep is how often the wait looks again.
 const solSettleStep = 200 * time.Millisecond
 
-// settleSolJobs waits until no job of the owner's own track is being signed, or until solSettleWait has passed or ctx ends (the caller then decides as before:
-// a job still being signed means a signature may exist).
+// settleSolJobs waits until no job of the owner's own track is being signed, until solSettleWait has passed, or until half of what is left of the caller's
+// deadline has passed (the activity that calls this has a time limit of its own: the wait must end and let the decision below run inside it, or the activity
+// is cut off, retried, and waits again for ever). The caller then decides as before: a job still being signed means a signature may exist, so the cancel is built.
 func (s *Service) settleSolJobs(ctx context.Context, o Owner) error {
 	if s.Cfg.Family != FamilySOL {
 		return nil
 	}
-	deadline := time.Now().Add(solSettleWait)
+	wait := solSettleWait
+	if dl, ok := ctx.Deadline(); ok {
+		wait = min(wait, time.Until(dl)/2)
+	}
+	deadline := time.Now().Add(wait)
 	for {
 		var n int
 		if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM sign_jobs WHERE starts_with(id, $1) AND status=$2`, string(OwnerTrack(o))+":", signjob.StatusSigning).Scan(&n); err != nil {
@@ -97,8 +102,10 @@ const (
 // solRefusedLeftAlone reports whether the address is left alone because its last solRefusedBound sweeps were all refused by the zone, and the last one is
 // younger than solRefusedProbe. It gives the ALERT once per address and process.
 func (s *Service) solRefusedLeftAlone(ctx context.Context, addr, asset string) (bool, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT status, COALESCE(failure_reason, ''), EXTRACT(EPOCH FROM (now() - updated_at)) FROM sweeps
-		WHERE chain=$1 AND from_address=$2 AND asset=$3 ORDER BY created_at DESC LIMIT $4`, s.Cfg.Chain, addr, asset, solRefusedBound)
+	// A batched sweep names only its first address in sweeps.from_address; every address is in sweep_items.
+	rows, err := s.Pool.Query(ctx, `SELECT w.status, COALESCE(w.failure_reason, ''), EXTRACT(EPOCH FROM (now() - w.updated_at)) FROM sweeps w
+		WHERE w.chain=$1 AND w.asset=$3 AND (w.from_address=$2 OR EXISTS (SELECT 1 FROM sweep_items i WHERE i.sweep_id=w.id AND i.address=$2))
+		ORDER BY w.created_at DESC LIMIT $4`, s.Cfg.Chain, addr, asset, solRefusedBound)
 	if err != nil {
 		return false, err
 	}

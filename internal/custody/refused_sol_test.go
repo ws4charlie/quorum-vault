@@ -222,3 +222,48 @@ func TestSolClaimedRefusalOfACompromisedGenerationIsReleased(t *testing.T) {
 		}
 	}
 }
+
+// The wait for a sibling that is being signed ends before the deadline of the activity that runs it: a deposit signer that is down leaves a job in "signing",
+// and the cancel (then the existing refusal and alert path) must still be reached inside the activity's time, not cut off and retried for ever.
+func TestSolRefusalWaitEndsBeforeTheActivityDeadline(t *testing.T) {
+	s, cc, mk := solRefusalWorld(t)
+	o := mk("w", "rejected:tx_mismatch", "signing")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	id, err := s.EnqueueCancel(ctx, o)
+	if err != nil || id == "" || cc.built != 1 {
+		t.Fatalf("no cancel after the wait: id=%q built=%d err=%v", id, cc.built, err)
+	}
+	if took := time.Since(start); took > 2500*time.Millisecond {
+		t.Fatalf("the wait took %s of a 3s deadline", took)
+	}
+}
+
+// A refused sweep of an address that is not the first of its batch counts toward the bound (sweeps.from_address holds only the first address).
+func TestSolRefusedBoundCountsEveryAddressOfABatch(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newSvc(t)
+	s.Cfg.Family = FamilySOL
+	for i := 0; i < solRefusedBound; i++ {
+		id := fmt.Sprintf("sw-b%d", i)
+		if _, err := s.Pool.Exec(ctx, `INSERT INTO sweeps (id, chain, asset, from_address, to_partition_id, amount, status, failure_reason, created_at, updated_at)
+			VALUES ($1,$2,'SOL','first',$3,2,'failed','gateway refused: tx_mismatch', now() - ($4 || ' hours')::interval, now() - interval '1 hour')`,
+			id, s.Cfg.Chain, s.Cfg.PartitionKey("ETH", 0).String(), fmt.Sprint(10-i)); err != nil {
+			t.Fatal(err)
+		}
+		for k, a := range []string{"first", "second"} {
+			if _, err := s.Pool.Exec(ctx, `INSERT INTO sweep_items (sweep_id, address, amount, close_account, ord) VALUES ($1,$2,1,false,$3)`, id, a, k); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, a := range []string{"first", "second"} {
+		if left, err := s.solRefusedLeftAlone(ctx, a, "SOL"); err != nil || !left {
+			t.Fatalf("%s: left alone=%v err=%v", a, left, err)
+		}
+	}
+	if left, _ := s.solRefusedLeftAlone(ctx, "third", "SOL"); left {
+		t.Fatal("an address that was in no refused sweep is left alone")
+	}
+}
