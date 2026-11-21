@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/big"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
@@ -31,6 +32,9 @@ type Report struct {
 	Chain      string `json:"chain"`
 	Height     uint64 `json:"height"`      // the pinned safe block height
 	ScanCursor uint64 `json:"scan_cursor"` // next height Scan will read
+	// ScanLag is how many blocks of the chain up to Height the scan has not read (0: caught up). A lag inside reconcile.max_scan_lag_blocks is a status, not
+	// a difference: the deposits in those blocks are accounted for in the comparison.
+	ScanLag uint64 `json:"scan_lag_blocks"`
 	// ChainHeight is the tip a chain-read balance was taken at (Bitcoin reads the node's UTXO set at its tip); 0 if the chain is read at Height.
 	ChainHeight uint64 `json:"chain_height,omitempty"`
 	// SkippedChainChecks counts chain comparisons that could not be made (a block or a change in the books kept arriving during the read, or the
@@ -73,7 +77,8 @@ func (s *Service) posted(ctx context.Context, acct string) (*big.Int, error) {
 //   - for every cold address, minus the cold accounts of the partitions that use it equals its on-chain balance;
 //   - every clearing account holds exactly what the broadcast bookings of the transactions not mined yet say;
 //   - ledger.CheckInvariants passes;
-//   - the scan has caught up to the pinned height (otherwise deposits the chain has but the books do not yet would show as differences).
+//   - the scan has not fallen behind the pinned height by more than reconcile.max_scan_lag_blocks, and its cursor is not stuck; inside the bound the
+//     deposits of the blocks it has not read are accounted for (reconcile_lag.go).
 //
 // What a transaction of ours changed on the chain and the books have not booked yet (or the books booked and the chain has not yet), is
 // explained from the cell's own records instead of skipping the check: reconcileEVM and reconcileBTC. A comparison that cannot be made is
@@ -106,8 +111,9 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 		return rep, err
 	}
 	rep.ScanCursor = cur
-	rep.add(Check{Name: "scan_caught_up", Ledger: fmt.Sprint(cur), Chain: fmt.Sprint(h + 1), OK: cur > h,
-		Detail: "the scan cursor must be past the pinned height"})
+	chk, lag := s.scanCheck(cur, h)
+	rep.ScanLag = lag
+	rep.add(chk)
 
 	if err := s.reconcileBTC(ctx, &rep); err != nil {
 		return rep, err
@@ -256,11 +262,19 @@ func (s *Service) reconcileBTC(ctx context.Context, rep *Report) error {
 		if err != nil {
 			return err
 		}
+		// A scan that is behind, within its bound: what the blocks it has not read hold is read now, the way the next scan will read it.
+		var pend *pendingScan
+		if cur0, err := s.Cursor(ctx); err != nil {
+			return err
+		} else if lag := scanLag(cur0, h0); lag > 0 && lag <= s.Cfg.ReconcileMaxScanLag {
+			p := s.readPendingScan(ctx, cur0)
+			pend = &p
+		}
 		view, err := cv.ChainView(ctx, all)
 		if err != nil {
 			return err
 		}
-		checks, err := s.btcChecks(ctx, view, hots, colds, deps)
+		checks, err := s.btcChecks(ctx, view, hots, colds, deps, pend)
 		if err != nil {
 			return err
 		}
@@ -300,7 +314,7 @@ func (s *Service) skipChainChecks(rep *Report, why string) {
 	}
 }
 
-func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds, deps []string) ([]Check, error) {
+func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds, deps []string, pend *pendingScan) ([]Check, error) {
 	c := s.Cfg
 	canon := func(a string) string {
 		if n, ok := s.Chain.(chain.AddressNormalizer); ok {
@@ -321,6 +335,56 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 			return b
 		}
 		return new(big.Int)
+	}
+	// What the scan has not read yet (it is behind, within its bound): outputs the chain holds and the books will book when the scan reaches them. An
+	// unexplained output the view lists as a difference is dropped when the pending read has it; its amount goes to the ledger side of the check it belongs
+	// to. A difference nothing in the pending read explains stays and alerts.
+	pendDep, pendHot, pendCold := new(big.Int), map[string]*big.Int{}, map[string]*big.Int{}
+	diffs := v.Diffs
+	var pendNote string
+	if pend != nil {
+		if pend.err != nil {
+			pendNote = fmt.Sprintf("the scan is behind and the blocks it has not read could not be read: %v", pend.err)
+		} else {
+			explained := map[string]bool{}
+			for _, d := range pend.deposits {
+				explained[canon(d.Address)+"|"+strings.TrimPrefix(d.DedupKey, c.Chain+":")] = true
+			}
+			for _, f := range pend.funding {
+				explained[canon(f.Address)+"|"+fmt.Sprintf("%s:%d", f.TxHash, f.Vout)] = true
+			}
+			diffs = nil
+			for _, d := range v.Diffs {
+				if explained[canon(d.Address)+"|"+d.Output] {
+					continue
+				}
+				diffs = append(diffs, d)
+			}
+			depSet := map[string]bool{}
+			for _, a := range deps {
+				depSet[canon(a)] = true
+			}
+			for _, d := range pend.deposits {
+				if depSet[canon(d.Address)] {
+					pendDep.Add(pendDep, d.Amount)
+				}
+			}
+			for _, f := range pend.funding {
+				if f.Cold {
+					addTo(pendCold, canon(f.Address), f.Amount)
+				} else {
+					addTo(pendHot, f.PartitionID, f.Amount)
+				}
+			}
+			pendNote = "the scan is behind; outputs in the blocks it has not read are accounted for on the ledger side"
+		}
+	}
+	zero := new(big.Int)
+	orZero := func(x *big.Int) *big.Int {
+		if x == nil {
+			return zero
+		}
+		return x
 	}
 	var out []Check
 	note := func(base string, inflight *big.Int) string {
@@ -374,6 +438,7 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 			balAll.Add(balAll, bal(ad))
 		}
 		want := new(big.Int).Sub(booked, spentAll)
+		want.Add(want, orZero(pendHot[p]))
 		out = append(out, Check{Name: "hot", Asset: btc.Native, Subject: h.Address, Ledger: want.String(), Chain: balAll.String(), OK: want.Cmp(balAll) == 0,
 			Detail: note(fmt.Sprintf("read at chain height %d", v.Height), spentAll)})
 		var rows string
@@ -437,6 +502,10 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 			addrs = append(addrs, canon(old))
 		}
 		want := new(big.Int).Sub(sums[k], spentK)
+		want.Add(want, orZero(pendCold[canon(k)]))
+		if old := retiring[k]; old != "" {
+			want.Add(want, orZero(pendCold[canon(old)]))
+		}
 		out = append(out, Check{Name: "cold", Asset: btc.Native, Subject: k, Ledger: want.String(), Chain: onChain.String(), OK: want.Cmp(onChain) == 0,
 			Detail: note(fmt.Sprintf("read at chain height %d", v.Height), spentK)})
 		var rows string
@@ -464,8 +533,9 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 		spentDeposit.Add(spentDeposit, spent(a))
 	}
 	want := new(big.Int).Sub(booked, spentDeposit)
+	want.Add(want, pendDep)
 	out = append(out, Check{Name: "deposit_addresses", Asset: btc.Native, Ledger: want.String(), Chain: onDeposit.String(), OK: want.Cmp(onDeposit) == 0,
-		Detail: note(fmt.Sprintf("suspense deposits stay on their address, so they are part of what the chain holds; read at chain height %d", v.Height), spentDeposit)})
+		Detail: joinNotes(note(fmt.Sprintf("suspense deposits stay on their address, so they are part of what the chain holds; read at chain height %d", v.Height), spentDeposit), pendNote)})
 	var rows string
 	if err := s.Pool.QueryRow(ctx, `SELECT COALESCE(SUM(value),0)::text FROM btc_utxos WHERE chain=$1 AND deposit AND status IN ('available','reserved')`, c.Chain).Scan(&rows); err != nil {
 		return nil, err
@@ -474,11 +544,11 @@ func (s *Service) btcChecks(ctx context.Context, v chain.ChainView, hots, colds,
 	out = append(out, Check{Name: "deposit_outputs", Asset: btc.Native, Ledger: wantRows.String(), Chain: rows, OK: wantRows.Cmp(parseBig(rows)) == 0,
 		Detail: "the deposit outputs in the table against the ledger, without suspense"})
 
-	if len(v.Diffs) == 0 {
+	if len(diffs) == 0 {
 		out = append(out, Check{Name: "outputs_on_chain", Asset: btc.Native, OK: true, Ledger: "table", Chain: fmt.Sprintf("chain at %d", v.Height),
 			Detail: fmt.Sprintf("%d outputs explained as not settled yet", v.Unsettled)})
 	}
-	for _, d := range v.Diffs {
+	for _, d := range diffs {
 		out = append(out, Check{Name: "outputs_on_chain", Asset: btc.Native, Subject: d.Address, Ledger: "table", Chain: fmt.Sprintf("chain at %d", v.Height), Detail: d.Output + ": " + d.Detail})
 	}
 	return out, nil

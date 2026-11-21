@@ -47,6 +47,7 @@ type Service struct {
 	sweepAlerted sync.Map // address -> true: the ALERT for a refused sweep of a later key generation was given (per process)
 
 	reconSkipSince  atomic.Int64 // Unix time the chain comparisons of Reconcile began to be skipped (0: they are not)
+	scanSeen        scanWatch    // where the scan cursor was last seen and since when (Reconcile: a cursor that does not move while the chain does is a stuck scan)
 	mismatchAlerted atomic.Bool  // the "destination changed on chain" ALERT was given and the mismatch has not cleared since
 
 	// planHook, set by tests only, is called inside a cold planner pass at the named stage ("balance read": the hot balance is read, the open refills are not yet).

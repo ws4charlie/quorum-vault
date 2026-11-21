@@ -90,7 +90,7 @@ func (s *Service) reconcileEVM(ctx context.Context, rep *Report) error {
 		}
 		final = r2
 	}
-	rep.Height, rep.ScanCursor, rep.InFlight = final.h, final.cur, final.open
+	rep.Height, rep.ScanCursor, rep.InFlight, rep.ScanLag = final.h, final.cur, final.open, final.lag
 	for _, ck := range final.checks {
 		rep.add(ck)
 	}
@@ -106,6 +106,7 @@ type evmRead struct {
 	checks      []Check
 	open        int
 	h, cur      uint64
+	lag         uint64 // blocks the scan is behind the pinned height
 	unsupported bool
 }
 
@@ -150,7 +151,7 @@ func (s *Service) evmOnce(ctx context.Context, rr ReceiptReader) (evmRead, error
 	if out.cur, err = s.cursorTx(ctx, tx); err != nil {
 		return out, err
 	}
-	out.checks, out.open, out.unsupported, err = s.evmChecks(ctx, tx, rr, out.h, out.cur)
+	out.checks, out.open, out.unsupported, out.lag, err = s.evmChecks(ctx, tx, rr, out.h, out.cur)
 	return out, err
 }
 
@@ -611,13 +612,19 @@ func (s *Service) adjRefillFee(a *evmAdj, r Refill, fee *big.Int) error {
 }
 
 // evmChecks makes every chain comparison of an EVM cell at height h. unsupported is true when the reader cannot read balances.
-func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, cur uint64) (checks []Check, open int, unsupported bool, err error) {
+func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, cur uint64) (checks []Check, open int, unsupported bool, lag uint64, err error) {
 	c := s.Cfg
-	checks = append(checks, Check{Name: "scan_caught_up", Ledger: fmt.Sprint(cur), Chain: fmt.Sprint(h + 1), OK: cur > h,
-		Detail: "the scan cursor must be past the pinned height"})
+	scanChk, lag := s.scanCheck(cur, h)
+	checks = append(checks, scanChk)
+	// The scan is behind the pinned height, within its bound: the chain holds deposits the books do not yet. They are read the way the next scan will
+	// read them, and put on the books' side of the deposit check, so that the comparison is as at the height the scan has reached.
+	var pend pendingScan
+	if lag > 0 && scanChk.OK {
+		pend = s.readPendingScan(ctx, cur)
+	}
 	adj, err := s.evmPending(ctx, q, rr, h)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, false, lag, err
 	}
 	// The books' open items, as before: what the report shows as in flight.
 	if err := q.QueryRow(ctx, `SELECT (SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
@@ -626,7 +633,7 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 		+ (SELECT count(*) FROM rebalance_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM drain_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM refills WHERE chain=$1 AND status IN ('signed','broadcast'))`, c.Chain).Scan(&open); err != nil {
-		return nil, 0, false, err
+		return nil, 0, false, lag, err
 	}
 	note := func(_ string, d *big.Int) string {
 		if d == nil || d.Sign() == 0 {
@@ -658,17 +665,17 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 			p := c.PartitionKey(sym, i).String()
 			posted, d, err := adjusted(hotAcct(p))
 			if err != nil {
-				return nil, 0, false, err
+				return nil, 0, false, lag, err
 			}
 			wl, err := s.WatchList(ctx, q, i)
 			if err != nil {
-				return nil, 0, false, err
+				return nil, 0, false, lag, err
 			}
 			bal, subject, detail, no := new(big.Int), "", "", false
 			for _, k := range wl {
 				b, skip, err := balance(k.Address, sym)
 				if err != nil {
-					return nil, 0, false, err
+					return nil, 0, false, lag, err
 				}
 				if skip {
 					no = true
@@ -700,7 +707,7 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 	for i := range c.HotShards {
 		ks, err := shardKeysets(ctx, q, c.shardIDOf(i))
 		if err != nil {
-			return nil, 0, false, err
+			return nil, 0, false, lag, err
 		}
 		for _, k := range ks {
 			if k.State != partition.StateRetired {
@@ -709,7 +716,7 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 			for _, sym := range c.AssetList {
 				b, skip, err := balance(k.Address, sym)
 				if err != nil {
-					return nil, 0, false, err
+					return nil, 0, false, lag, err
 				}
 				if skip {
 					continue
@@ -742,7 +749,7 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 				}
 				posted, d, err := adjusted(coldAcct(p))
 				if err != nil {
-					return nil, 0, false, err
+					return nil, 0, false, lag, err
 				}
 				k := coldKey{ca.Hex(), sym}
 				if sums[k] == nil {
@@ -756,13 +763,13 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 		for _, k := range keys {
 			bal, no, err := balance(k.addr, k.asset)
 			if err != nil {
-				return nil, 0, false, err
+				return nil, 0, false, lag, err
 			}
 			// A cold key being replaced: its balance is the cold tier's money too, until it is empty and removed from cold.retiring.
 			if old := s.retiringFor(k.addr, k.asset); old != "" && !no {
 				ob, ono, err := balance(old, k.asset)
 				if err != nil {
-					return nil, 0, false, err
+					return nil, 0, false, lag, err
 				}
 				if !ono {
 					bal = new(big.Int).Add(bal, ob)
@@ -781,14 +788,14 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 	// Deposit addresses.
 	rows, err := q.Query(ctx, `SELECT address FROM deposit_addresses WHERE chain=$1 ORDER BY address`, c.Chain)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, false, lag, err
 	}
 	var addrs []string
 	for rows.Next() {
 		var a string
 		if err := rows.Scan(&a); err != nil {
 			rows.Close()
-			return nil, 0, false, err
+			return nil, 0, false, lag, err
 		}
 		addrs = append(addrs, a)
 	}
@@ -799,7 +806,7 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 		for _, a := range addrs {
 			b, skip, err := balance(a, sym)
 			if err != nil {
-				return nil, 0, false, err
+				return nil, 0, false, lag, err
 			}
 			if skip {
 				no = true
@@ -814,11 +821,24 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 		}
 		posted, d, err := adjusted(depAcct(c.Chain, sym))
 		if err != nil {
-			return nil, 0, false, err
+			return nil, 0, false, lag, err
 		}
 		want := new(big.Int).Neg(posted)
-		checks = append(checks, Check{Name: "deposit_addresses", Asset: sym, Ledger: want.String(), Chain: sum.String(), OK: want.Cmp(sum) == 0,
-			Detail: note("", new(big.Int).Neg(d))})
+		detail := note("", new(big.Int).Neg(d))
+		if lag > 0 && scanChk.OK {
+			switch {
+			case pend.err != nil:
+				detail = strings.TrimSpace(detail + fmt.Sprintf(" The scan is behind by %d blocks and the deposits in them could not be read: %v.", lag, pend.err))
+			case pend.covered < h:
+				detail = strings.TrimSpace(detail + fmt.Sprintf(" The scan is behind by %d blocks and the read of them stops at height %d, below the pinned height.", lag, pend.covered))
+			default:
+				if u := pend.sumDeposits(h)[sym]; u != nil && u.Sign() != 0 {
+					want.Add(want, u)
+					detail = strings.TrimSpace(detail + fmt.Sprintf(" %s of deposits in the %d blocks the scan has not read yet are on the chain and added to the ledger side.", u, lag))
+				}
+			}
+		}
+		checks = append(checks, Check{Name: "deposit_addresses", Asset: sym, Ledger: want.String(), Chain: sum.String(), OK: want.Cmp(sum) == 0, Detail: detail})
 	}
 
 	// Clearing residuals: zero, once the broadcast bookings of the items not mined yet are out and the mined ones are settled.
@@ -826,11 +846,11 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 		for _, id := range []string{sweepAcct(c.Chain, sym), wdAcct(c.Chain, sym), toColdAcct(c.Chain, sym), rebalAcct(c.Chain, sym), refillAcct(c.Chain, sym)} {
 			posted, _, err := adjusted(id)
 			if err != nil {
-				return nil, 0, false, err
+				return nil, 0, false, lag, err
 			}
 			checks = append(checks, Check{Name: "clearing_residual", Asset: sym, Subject: id, Ledger: posted.String(), Chain: "0", OK: posted.Sign() == 0,
 				Detail: "after taking out the broadcast bookings of the transactions not mined yet and settling the ones that are"})
 		}
 	}
-	return checks, open, unsupported, nil
+	return checks, open, unsupported, lag, nil
 }
