@@ -16,6 +16,16 @@ groups:
         annotations:
           summary: "A qv-worker cannot be scraped ({{ $labels.instance }})"
           description: "No deposits are scanned, no sweeps or withdrawals move while no worker runs for the chain's task queue. Check the pod (kubectl describe, logs) and the database and Temporal it needs."
+      # no worker is scraped at all: a pod that is gone (deleted, never scheduled, its Service or ServiceMonitor removed) has no "up" series, so "up == 0" above never matches it.
+      # The same absent() form as monitoring/mpc-routing.rules.yml. Limit: it needs at least one worker series to ever have existed in this Prometheus; "fewer workers than the
+      # chain needs" is not detected (the expected count is a deployment fact, not a metric: a follow-up would add a qv-business replica-count rule on kube-state-metrics).
+      - alert: QVWorkerAbsent
+        expr: absent(up{job="qv-worker"})
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "No qv-worker is scraped at all"
+          description: "There is no 'up' series for job qv-worker: the pods are gone or not scheduled, or the scrape target was removed. Nothing is scanned, swept or paid out meanwhile. Check the Deployment, the worker Service and the ServiceMonitor."
       # running but not polling: not ready for 10 minutes without a stop in progress (a stopping worker is not ready on purpose)
       - alert: QVWorkerNotReady
         expr: (qv_worker_ready == 0) unless (qv_worker_stopping == 1)

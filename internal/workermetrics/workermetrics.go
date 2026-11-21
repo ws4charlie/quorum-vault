@@ -11,6 +11,8 @@
 package workermetrics
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
@@ -49,6 +51,7 @@ type Registry struct {
 	mu       sync.Mutex
 	fam      map[string]*family
 	ready    atomic.Bool
+	readyFn  func(context.Context) error // when set, qv_worker_ready is its answer at each scrape
 	stopping atomic.Bool
 	stopTO   time.Duration
 	started  time.Time
@@ -61,8 +64,24 @@ func New(stopTimeout time.Duration) *Registry {
 	return &Registry{fam: map[string]*family{}, stopTO: stopTimeout, started: time.Now()}
 }
 
-// SetReady records whether the worker is polling (the readiness probe's answer).
+// SetReady records whether the worker is polling. Used only when no SetReadyFunc is given.
 func (r *Registry) SetReady(v bool) { r.ready.Store(v) }
+
+// SetReadyFunc makes qv_worker_ready the live answer of fn (the same function /readyz runs: health.Probe.Ready), asked at each scrape: 1 when it returns nil.
+// A database, Temporal or certificate failure after start then shows here as it does on /readyz. Call it before the listener starts.
+func (r *Registry) SetReadyFunc(fn func(context.Context) error) { r.readyFn = fn }
+
+// readyTimeout bounds the readiness check a scrape runs, so a hung dependency cannot hold the scrape past a scraper's own timeout (10 s by default).
+const readyTimeout = 8 * time.Second
+
+func (r *Registry) isReady() bool {
+	if r.readyFn == nil {
+		return r.ready.Load()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), readyTimeout)
+	defer cancel()
+	return r.readyFn(ctx) == nil
+}
 
 // SetStopping records that SIGTERM arrived: the worker polls no more and waits for its running activities.
 func (r *Registry) SetStopping() { r.stopping.Store(true) }
@@ -201,12 +220,21 @@ func b2f(b bool) float64 {
 	return 0
 }
 
-// Write writes the worker's own state and every SDK metric seen so far.
+// Write writes the worker's own state and every SDK metric seen so far. The text is rendered into a buffer under the registry lock and written to w after the lock is
+// released: a slow or stalled reader of w cannot hold the lock that every SDK metric update needs. The readiness check runs before, outside the lock.
 func (r *Registry) Write(w io.Writer) {
-	fmt.Fprintf(w, "# TYPE qv_worker_ready gauge\nqv_worker_ready %g\n", b2f(r.ready.Load()))
-	fmt.Fprintf(w, "# TYPE qv_worker_stopping gauge\nqv_worker_stopping %g\n", b2f(r.stopping.Load()))
-	fmt.Fprintf(w, "# TYPE qv_worker_stop_timeout_seconds gauge\nqv_worker_stop_timeout_seconds %g\n", r.stopTO.Seconds())
-	fmt.Fprintf(w, "# TYPE qv_worker_start_time_seconds gauge\nqv_worker_start_time_seconds %d\n", r.started.Unix())
+	ready := r.isReady()
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "# TYPE qv_worker_ready gauge\nqv_worker_ready %g\n", b2f(ready))
+	fmt.Fprintf(&buf, "# TYPE qv_worker_stopping gauge\nqv_worker_stopping %g\n", b2f(r.stopping.Load()))
+	fmt.Fprintf(&buf, "# TYPE qv_worker_stop_timeout_seconds gauge\nqv_worker_stop_timeout_seconds %g\n", r.stopTO.Seconds())
+	fmt.Fprintf(&buf, "# TYPE qv_worker_start_time_seconds gauge\nqv_worker_start_time_seconds %d\n", r.started.Unix())
+	r.render(&buf)
+	w.Write(buf.Bytes())
+}
+
+// render writes every SDK metric to buf under the registry lock; buf is memory, so the lock is never held across I/O.
+func (r *Registry) render(w *bytes.Buffer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	names := make([]string, 0, len(r.fam))

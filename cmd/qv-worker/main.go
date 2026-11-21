@@ -92,13 +92,14 @@ func run(log *slog.Logger) error {
 	}
 	// The SDK reports its metrics to reg; the listener publishes them with the worker's state and the certificate expiry.
 	reg := workermetrics.New(*stopTimeout)
+	reg.SetReadyFunc(probe.Ready) // qv_worker_ready is what /readyz answers now: the same checks, not a flag set once at start
 	if *metricsListen != "" {
 		if err := pki.CheckMetricsAddr(*metricsListen, pki.ZoneBusiness); err != nil {
 			return fmt.Errorf("-metrics-listen: %w", err)
 		}
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", reg.Handler(tsrc))
-		msrv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		msrv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 15 * time.Second}
 		go func() {
 			if err := msrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("metrics server stopped", "error", err.Error())
@@ -159,12 +160,10 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("qv-worker started", "chain", cfg.Chain, "failpoint", workflow.Armed())
 	probe.SetReady(true)
-	reg.SetReady(true)
 	// SIGTERM: not ready at once (the probe, see health.Serve), then the worker stops polling and waits up to -stop-timeout for the activities
 	// and workflow tasks it is running; waits (sign, nonce, refill) hand their state back early. The process then exits 0. A second signal
 	// ends it at once (exit 1); so does the bound, because the SDK cancels the activities' context then and Stop returns.
 	<-ctx.Done()
-	reg.SetReady(false)
 	reg.SetStopping()
 	log.Info("qv-worker stopping: not ready, no new tasks", "stop_timeout", stopTimeout.String())
 	again := make(chan os.Signal, 1)

@@ -23,7 +23,9 @@ var drainReasons = []string{ReasonIntent, ReasonExpired, ReasonTx, ReasonApprova
 // drainChainOther collects a chain name that the config does not have (the intent names a chain the zone does not know).
 const drainChainOther = "other"
 
-func drainReasonClass(code string) string {
+// drainReasonClass maps a rejection to its class. The refusal text is "<code>: <detail>" (IsRejection); a bare code is accepted too. The detail is never a label.
+func drainReasonClass(reason string) string {
+	code, _, _ := strings.Cut(reason, ":")
 	if strings.HasPrefix(code, "replay_") {
 		return "replay"
 	}

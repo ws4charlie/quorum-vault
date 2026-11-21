@@ -47,3 +47,38 @@ tests:
         values: '4+0x60'
     alert_rule_test:
       - {eval_time: 30m, alertname: QVDrainRefused, exp_alerts: []}
+  # the first sample Prometheus ever sees is already above 0 (the refusal came before the first scrape of the series): it pages, and stops once the series is older than the window
+  - interval: 1m
+    input_series:
+      - series: 'qv_drain_refusals_total{mode="gateway",chain="eth",reason="policy_drain_cap"}'
+        values: '3+0x40'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: QVDrainRefused
+        exp_alerts:
+          - exp_labels: {severity: page, mode: gateway, chain: eth}
+            exp_annotations:
+              summary: "The signing zone refused a drain on eth (gateway)"
+              description: "The ALERT line 'drain refused' in the gateway log has the intent, the source and the reason (the reason label says the class). Repeated refusals: a stuck planner, or the business zone probing. Runbook: docs/runbooks/key-replacement.md"
+      - eval_time: 14m
+        alertname: QVDrainRefused
+        exp_alerts:
+          - exp_labels: {severity: page, mode: gateway, chain: eth}
+            exp_annotations:
+              summary: "The signing zone refused a drain on eth (gateway)"
+              description: "The ALERT line 'drain refused' in the gateway log has the intent, the source and the reason (the reason label says the class). Repeated refusals: a stuck planner, or the business zone probing. Runbook: docs/runbooks/key-replacement.md"
+      - {eval_time: 30m, alertname: QVDrainRefused, exp_alerts: []}
+  # a series that was scraped at 0 for a while and then jumps (the usual case) still pages through the increase() branch
+  - interval: 1m
+    input_series:
+      - series: 'qv_drain_refusals_total{mode="cosigner",chain="eth",reason="keyset_state"}'
+        values: '0x20 2+0x20'
+    alert_rule_test:
+      - {eval_time: 19m, alertname: QVDrainRefused, exp_alerts: []}
+      - eval_time: 21m
+        alertname: QVDrainRefused
+        exp_alerts:
+          - exp_labels: {severity: page, mode: cosigner, chain: eth}
+            exp_annotations:
+              summary: "The signing zone refused a drain on eth (cosigner)"
+              description: "The ALERT line 'drain refused' in the cosigner log has the intent, the source and the reason (the reason label says the class). Repeated refusals: a stuck planner, or the business zone probing. Runbook: docs/runbooks/key-replacement.md"

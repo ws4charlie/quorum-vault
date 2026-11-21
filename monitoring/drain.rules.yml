@@ -3,12 +3,15 @@
 #
 #   qv_drain_refusals_total{mode="gateway"|"cosigner", chain, reason}   counter since process start (internal/gateway/drainmetrics.go).
 # The gateway writes it to its textfile (<mpc-metrics-file>-drain.prom), the cosigner serves it on its metrics port. Every label combination (the config's chains,
-# a fixed set of reason classes) is published at 0 from the first scrape, so a first refusal is an increase and a bare increase() sees it.
+# a fixed set of reason classes) is published at 0 from process start, but that does not guarantee Prometheus scrapes the 0: a refusal can come before the first scrape of a new
+# series (a new pod, a first textfile write after a refusal), and then the first sample is already above 0 and increase() has nothing to subtract. So the rule uses the first-event
+# form of monitoring/attest-broker.rules.yml (reports/D10-r1.md): increase() for a series that existed a window ago, the value itself for one that did not.
+# Limit: a scrape gap of over 5 minutes makes a series look new once and re-reports its old total for one window.
 groups:
   - name: qv-drain
     rules:
       - alert: QVDrainRefused
-        expr: sum by (mode, chain) (increase(qv_drain_refusals_total[15m])) > 0
+        expr: sum by (mode, chain) ((increase(qv_drain_refusals_total[15m]) unless (qv_drain_refusals_total unless qv_drain_refusals_total offset 15m)) or (qv_drain_refusals_total unless qv_drain_refusals_total offset 15m)) > 0
         labels: {severity: page}
         annotations:
           summary: "The signing zone refused a drain on {{ $labels.chain }} ({{ $labels.mode }})"

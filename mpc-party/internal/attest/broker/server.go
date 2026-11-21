@@ -43,8 +43,10 @@ type Server struct {
 
 	list     atomic.Pointer[attest.SignedAllowlist]
 	loadedAt atomic.Int64 // unix seconds when the list in force was loaded
-	reloadMu sync.Mutex
-	lastHash [32]byte
+	// NotAfter (unix seconds, 0 = not loaded) of the material in use: the serving certificate the listener loaded, the soonest vendor root the verifier was built from (certmetrics.go).
+	leafEnd, rootEnd atomic.Int64
+	reloadMu         sync.Mutex
+	lastHash         [32]byte
 
 	cmu      sync.Mutex
 	counters map[string]int
@@ -85,7 +87,12 @@ func Open(cfg Config, opt Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newServer(cfg, set, ops, v, hsm, opt)
+	s, err := newServer(cfg, set, ops, v, hsm, opt)
+	if err != nil {
+		return nil, err
+	}
+	s.rootEnd.Store(soonestNotAfter(roots))
+	return s, nil
 }
 
 // newServer is Open after the I/O of roots and token; the allowlist and the audit log are loaded here.
@@ -307,6 +314,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.leafEnd.Store(leafNotAfter(tc))
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), TLSConfig: tc, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
 	errc := make(chan error, 2)
 	go func() { errc <- srv.ListenAndServeTLS("", "") }()

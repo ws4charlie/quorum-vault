@@ -19,10 +19,10 @@ func TestDrainMetricsZeroThenCount(t *testing.T) {
 	if strings.Contains(out, "} 1") || !strings.Contains(out, `qv_drain_refusals_total{mode="cosigner",chain="eth",reason="policy_drain_cap"} 0`) {
 		t.Fatalf("not zero-initialised:\n%s", out)
 	}
+	d.noteDrainMetric("eth", ReasonDrainCap+": the drain cap of 5 ETH is spent") // the text IsRejection returns: code, colon, detail
 	d.noteDrainMetric("eth", ReasonDrainCap)
-	d.noteDrainMetric("eth", ReasonDrainCap)
-	d.noteDrainMetric("eth", ReasonNonceTaken)           // a replay_* code is the class "replay"
-	d.noteDrainMetric("0xdeadbeef-no-such-chain", "zzz") // neither label can grow without bound
+	d.noteDrainMetric("eth", ReasonNonceTaken+": nonce 3 is taken") // a replay_* code is the class "replay"
+	d.noteDrainMetric("0xdeadbeef-no-such-chain", "zzz")            // neither label can grow without bound
 	b.Reset()
 	d.guard.WriteDrainMetrics(&b, cfg, ModeCosigner)
 	out = b.String()

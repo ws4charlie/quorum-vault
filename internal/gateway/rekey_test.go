@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
@@ -315,6 +316,11 @@ func TestDrainCosignerCountsWhatItAuthorised(t *testing.T) {
 	if why, ok := IsRejection(err); !ok || !strings.HasPrefix(why, ReasonDrainRate+":") {
 		t.Fatalf("third drain at the cosigner: %v", err)
 	}
+	var m bytes.Buffer // the cosigner side counts the same refusal under its own mode
+	cos.guard.WriteDrainMetrics(&m, r.cfg, ModeCosigner)
+	if want := `qv_drain_refusals_total{mode="cosigner",chain="` + testChain + `",reason="policy_drain_rate"} 1`; !strings.Contains(m.String(), want) {
+		t.Errorf("missing %s in:\n%s", want, m.String())
+	}
 }
 
 // What the business zone could do before and after: a repeating drain that the signer (or a cosigner) always refuses. Before, every attempt was
@@ -332,6 +338,18 @@ func TestDrainRefusalStormUsesNothingAndIsCounted(t *testing.T) {
 	}
 	if got := r.guard.DrainRefusals() - before; got != 40 {
 		t.Fatalf("%d refusals counted, want 40", got)
+	}
+	// qv_drain_refusals_total, through the real caller: the reason is the rejection's code, not "other"
+	var m bytes.Buffer
+	r.guard.WriteDrainMetrics(&m, r.cfg, ModeGateway)
+	for _, want := range []string{
+		`qv_drain_refusals_total{mode="gateway",chain="` + testChain + `",reason="keyset_state"} 20`,
+		`qv_drain_refusals_total{mode="gateway",chain="` + testChain + `",reason="policy_drain_cap"} 20`,
+		`qv_drain_refusals_total{mode="gateway",chain="` + testChain + `",reason="other"} 0`,
+	} {
+		if !strings.Contains(m.String(), want) {
+			t.Errorf("missing %s in:\n%s", want, m.String())
+		}
 	}
 	// None of it was signed, so the whole allowance is still there.
 	r.mustSign(r.drain("ok0", addrG2, 5000, 0, "ETH"))

@@ -98,3 +98,30 @@ tests:
         values: '3x45'
     alert_rule_test:
       - {eval_time: 30m, alertname: QVWorkerWorkflowFailed, exp_alerts: []}
+  # the pod is gone: its "up" series ends (no up == 0 ever appears), and absent() pages after 5 minutes; a worker that is still scraped does not
+  - interval: 1m
+    input_series:
+      - series: 'up{job="qv-worker",instance="w1"}'
+        values: '1x5 stale _x19'
+      - series: 'up{job="qv-worker",instance="w2"}'
+        values: '1x25'
+      - series: 'up{job="qv-other",instance="x"}'
+        values: '1x25'
+    alert_rule_test:
+      - {eval_time: 10m, alertname: QVWorkerAbsent, exp_alerts: []} # w2 is still there
+      - {eval_time: 12m, alertname: QVWorkerDown, exp_alerts: []}   # and no "up == 0" series exists for the vanished pod
+  - interval: 1m
+    input_series:
+      - series: 'up{job="qv-worker",instance="w1"}'
+        values: '1x5 stale _x19'
+      - series: 'up{job="qv-other",instance="x"}'
+        values: '1x25'
+    alert_rule_test:
+      - {eval_time: 9m, alertname: QVWorkerAbsent, exp_alerts: []} # absent for under 5 minutes
+      - eval_time: 12m
+        alertname: QVWorkerAbsent
+        exp_alerts:
+          - exp_labels: {severity: page, job: qv-worker}
+            exp_annotations:
+              summary: "No qv-worker is scraped at all"
+              description: "There is no 'up' series for job qv-worker: the pods are gone or not scheduled, or the scrape target was removed. Nothing is scanned, swept or paid out meanwhile. Check the Deployment, the worker Service and the ServiceMonitor."
