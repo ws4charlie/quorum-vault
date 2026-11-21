@@ -12,6 +12,7 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/base58"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/partition"
@@ -43,30 +44,69 @@ var (
 	_ chain.AddressNormalizer = (*Adapter)(nil)
 )
 
-// ensurePool registers the pool accounts of every hot shard (their addresses follow from the shard). Whether an account exists on the chain
-// is checked when it is taken.
+// ensurePool registers the pool accounts of every hot shard, of every generation the registry knows (their addresses follow from the shard). Whether an
+// account exists on the chain is checked when it is taken.
 func (a *Adapter) ensurePool(ctx context.Context) error {
 	seen := map[[32]byte]bool{}
 	for _, h := range a.cfg.hot {
-		if seen[h] {
-			continue
-		}
 		seen[h] = true
-		for i := 0; i < a.cfg.NoncePool; i++ {
-			if _, err := a.pool.Exec(ctx, `INSERT INTO sol_nonce_accounts (chain, address, hot_address, idx) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
-				a.cfg.Chain, Address(NonceAddress(h, i)), Address(h), i); err != nil {
-				return fmt.Errorf("sol: register nonce pool: %w", err)
-			}
+	}
+	var shards []string
+	for p := range a.cfg.hot {
+		k, _ := partition.Parse(p)
+		shards = append(shards, string(k.ShardID()))
+	}
+	rows, err := a.pool.Query(ctx, `SELECT address FROM keysets WHERE shard_id = ANY($1)`, shards)
+	if err != nil {
+		return fmt.Errorf("sol: read the keyset registry: %w", err)
+	}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			rows.Close()
+			return err
+		}
+		if raw, err := ParseAddress(s); err == nil {
+			seen[raw] = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for h := range seen {
+		if err := a.ensurePoolFor(ctx, a.pool, h); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// HotAddress is the address of the hot shard that serves a partition.
-func (a *Adapter) HotAddress(partitionID string) (string, error) {
-	h, ok := a.cfg.hot[partitionID]
+// execer is a pool or a transaction.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// ensurePoolFor registers the pool accounts of one hot key.
+func (a *Adapter) ensurePoolFor(ctx context.Context, q any, h [32]byte) error {
+	ex, ok := q.(execer)
 	if !ok {
-		return "", fmt.Errorf("sol: partition %q has no hot shard", partitionID)
+		return errors.New("sol: no way to write the nonce pool")
+	}
+	for i := 0; i < a.cfg.NoncePool; i++ {
+		if _, err := ex.Exec(ctx, `INSERT INTO sol_nonce_accounts (chain, address, hot_address, idx) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+			a.cfg.Chain, Address(NonceAddress(h, i)), Address(h), i); err != nil {
+			return fmt.Errorf("sol: register nonce pool: %w", err)
+		}
+	}
+	return nil
+}
+
+// HotAddress is the address of the hot shard that serves a partition: its active generation (the configured address while the registry knows no other).
+func (a *Adapter) HotAddress(partitionID string) (string, error) {
+	h, err := a.activeHot(context.Background(), a.pool, partitionID)
+	if err != nil {
+		return "", err
 	}
 	return Address(h), nil
 }
@@ -176,9 +216,12 @@ func (a *Adapter) BuildWithdrawal(ctx context.Context, tx pgx.Tx, w chain.Withdr
 	if w.Amount == nil || w.Amount.Sign() <= 0 || !w.Amount.IsUint64() {
 		return chain.UnsignedTx{}, errors.New("sol: withdrawal amount must be between 1 and 2^64-1")
 	}
-	hot, ok := a.cfg.hot[w.PartitionID]
-	if !ok {
-		return chain.UnsignedTx{}, fmt.Errorf("sol: partition %q has no hot shard", w.PartitionID)
+	hot, err := a.activeHot(ctx, tx, w.PartitionID)
+	if err != nil {
+		return chain.UnsignedTx{}, err
+	}
+	if err := a.ensurePoolFor(ctx, tx, hot); err != nil {
+		return chain.UnsignedTx{}, err
 	}
 	if w.ID == "" {
 		return chain.UnsignedTx{}, errors.New("sol: empty owner id")
@@ -369,7 +412,7 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	if price > a.cfg.MaxMicroLamports {
 		return chain.UnsignedTx{}, fmt.Errorf("%w: price %d would exceed the maximum %d", chain.ErrCannotBump, price, a.cfg.MaxMicroLamports)
 	}
-	part := a.partitionOfHot(r.hot, ownerKind, ownerID)
+	part := a.partitionOfHot(ctx, tx, r.hot)
 	u, err := a.unsignedFromStored(part, r.payload, Compile(m.Keys[0], m.Blockhash, withPrice(m, price)...))
 	if err != nil {
 		return chain.UnsignedTx{}, err
@@ -377,12 +420,17 @@ func (a *Adapter) BuildReplacement(ctx context.Context, tx pgx.Tx, ownerKind, ow
 	return u, a.storeBuilt(ctx, tx, r, u, price)
 }
 
-// partitionOfHot names a partition of the shard whose address is hot, for the job's key reference; the intent (what approvers signed) names the
+// partitionOfHot names a partition of the shard whose key (of any generation) is hot, for the job's key reference; the intent (what approvers signed) names the
 // owner's own partition, and the workflow passes that on, so the zone only needs one that belongs to the same shard.
-func (a *Adapter) partitionOfHot(hot, _, _ string) string {
+func (a *Adapter) partitionOfHot(ctx context.Context, q chain.Querier, hot string) string {
+	var shard string
+	if err := q.QueryRow(ctx, `SELECT shard_id FROM keysets WHERE address=$1 LIMIT 1`, hot).Scan(&shard); err != nil {
+		shard = ""
+	}
 	best := ""
 	for p, h := range a.cfg.hot {
-		if Address(h) == hot && (best == "" || p < best) {
+		k, _ := partition.Parse(p)
+		if (Address(h) == hot || (shard != "" && string(k.ShardID()) == shard)) && (best == "" || p < best) {
 			best = p
 		}
 	}
@@ -416,7 +464,7 @@ func (a *Adapter) BuildCancel(ctx context.Context, tx pgx.Tx, ownerKind, ownerID
 	if price > 0 {
 		ixs = append(ixs, SetPriceIx(price))
 	}
-	u, err := a.unsigned(a.partitionOfHot(r.hot, ownerKind, ownerID), Compile(m.Keys[0], m.Blockhash, ixs...))
+	u, err := a.unsigned(a.partitionOfHot(ctx, tx, r.hot), Compile(m.Keys[0], m.Blockhash, ixs...))
 	if err != nil {
 		return chain.UnsignedTx{}, err
 	}

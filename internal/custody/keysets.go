@@ -186,6 +186,9 @@ var ErrSuccessorUnfunded = fmt.Errorf("%w: successor key not funded yet", chain.
 // sends (and, for a token, native for the gas), because the shard's one ledger account says the shard has the money but the money may still be at the
 // old address. It changes nothing for a shard with one generation or one that is fully drained.
 func (s *Service) checkActiveFunded(ctx context.Context, q kq, partitionID, asset string, amount *big.Int) error {
+	if s.Cfg.Family == FamilySOL {
+		return s.checkActiveFundedSOL(ctx, q, partitionID, asset, amount)
+	}
 	if s.Cfg.Family != FamilyEVM && s.Cfg.Family != "" {
 		return nil
 	}
@@ -213,6 +216,41 @@ func (s *Service) checkActiveFunded(ctx context.Context, q kq, partitionID, asse
 		if bal[sym].Cmp(n) < 0 {
 			return fmt.Errorf("%w: generation %d of %s (%s) holds %s %s, the transfer needs %s; the old generation is draining into it, so the work waits", ErrSuccessorUnfunded,
 				act.Generation, k.ShardID(), act.Address, bal[sym], sym, n)
+		}
+	}
+	return nil
+}
+
+// checkActiveFundedSOL is checkActiveFunded for a Solana shard: while the old generation drains into the active one, the active address must hold the asset (and the
+// SOL a token transfer needs for its fee and for the account it may open) before a withdrawal is built from it. The chain's own refusal of an unfunded transfer
+// would be a failed transaction and a refund: waiting costs nothing.
+func (s *Service) checkActiveFundedSOL(ctx context.Context, q kq, partitionID, asset string, amount *big.Int) error {
+	k, err := partition.Parse(partitionID)
+	if err != nil {
+		return err
+	}
+	leaving, err := shardLeaving(ctx, q, k.ShardID())
+	if err != nil || !leaving {
+		return err
+	}
+	act, err := partition.Active(ctx, q, k.ShardID())
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrSuccessorUnfunded, err)
+	}
+	need := map[string]*big.Int{asset: new(big.Int).Set(amount)}
+	if asset != s.Cfg.Native {
+		need[s.Cfg.Native] = new(big.Int).Set(s.Cfg.NativeReserve())
+	} else {
+		need[asset].Add(need[asset], s.Cfg.NativeReserve())
+	}
+	for sym, n := range need {
+		bal, err := s.Reader.Balance(ctx, act.Address, sym, 0)
+		if err != nil {
+			return fmt.Errorf("%w: cannot read %s: %v", ErrSuccessorUnfunded, act.Address, err)
+		}
+		if bal.Cmp(n) < 0 {
+			return fmt.Errorf("%w: generation %d of %s (%s) holds %s %s, the transfer needs %s; the old generation is draining into it, so the work waits", ErrSuccessorUnfunded,
+				act.Generation, k.ShardID(), act.Address, bal, sym, n)
 		}
 	}
 	return nil

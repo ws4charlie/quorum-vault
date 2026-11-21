@@ -71,7 +71,12 @@ func raw32(a string) [32]byte { r, _ := sol.ParseAddress(a); return r }
 
 func newSOLHarness(t *testing.T, tweak func(*ChainFile)) *solH {
 	t.Helper()
-	h := newHarness(t)
+	return newSOLHarnessOn(t, newHarness(t), tweak, nil)
+}
+
+// newSOLHarnessOn builds the Solana rig on an existing harness (the keyset tests bring one with operators), with extra gateway options.
+func newSOLHarnessOn(t *testing.T, h *harness, tweak func(*ChainFile), opts func(*Options)) *solH {
+	t.Helper()
 	ctx := context.Background()
 	s := &solH{harness: h, hot: &softMsg{k: soltest.NewKey()}, acct: soltest.NewNode(), depIdx: 4}
 	s.dep = &softDeposit{node: s.acct}
@@ -106,10 +111,13 @@ func newSOLHarness(t *testing.T, tweak func(*ChainFile)) *solH {
 			t.Fatal(err)
 		}
 	}
-	gw, err := New(h.cfg, nil, map[string]signer.Signer{testPartition: h.signer, testColdPartition: h.signer}, h.guard, h.biz,
-		Options{WorkerID: "sol-w", Lease: time.Minute, Now: h.clock,
-			MessageSigners: map[string]signer.MessageSigner{solPartSOL: s.hot, solPartTKN: s.hot},
-			DepositSigners: map[string]signer.MessageDeriver{solPartSOL: s.dep, solPartTKN: s.dep}})
+	o := Options{WorkerID: "sol-w", Lease: time.Minute, Now: h.clock,
+		MessageSigners: map[string]signer.MessageSigner{solPartSOL: s.hot, solPartTKN: s.hot},
+		DepositSigners: map[string]signer.MessageDeriver{solPartSOL: s.dep, solPartTKN: s.dep}}
+	if opts != nil {
+		opts(&o)
+	}
+	gw, err := New(h.cfg, nil, map[string]signer.Signer{testPartition: h.signer, testColdPartition: h.signer}, h.guard, h.biz, o)
 	if err != nil {
 		t.Fatal(err)
 	}

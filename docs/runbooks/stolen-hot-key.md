@@ -26,7 +26,7 @@ sign the emergency record, and how fast the old address is emptied afterwards. E
 | **EVM deposit keys** | none exist: forwarders pay the factory destination | the same ceremony; the guardian `freeze()` stops sweeping at once |
 | **Bitcoin hot shard** | replaced with the deposit tree (it is a child of the same account key): `-compromised` on the tree, then the drain consolidates the hot outputs into the successor's shard | DKG of the new 2-party tree; customer notice |
 | **Bitcoin deposit keys** | new addresses come from the new generation at once; old addresses stay watched, swept to the new hot shard | none; the sweep of each old address needs the 2 parties |
-| **Solana hot shard** | **not replaceable yet** (K4 in flight): stop the key's signing path (below) and move funds with cold | everything |
+| **Solana hot shard** | `qv-rekey emergency` (K4 on K8): the record stops ordinary signing, allows only the drain to the successor (tokens, the SOL, the old pool's accounts), lifts the hourly rate; the drain does not wait for the new pool and moves the SOL before the pool's accounts; core stops paying from it | the new pool afterwards (`qv-sol-nonces -generation N`), the cold ceremony for deposits, the zone config edit; tokens are not ordered by value (backlog); the Solana emergency has been run on a local validator only |
 | **Solana deposit keys** | like Bitcoin deposit keys | none |
 | Cold key, admin keys | not this page: "If the cold key is in doubt" below, and the key-ceremony pages | |
 

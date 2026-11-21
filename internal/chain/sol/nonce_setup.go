@@ -31,9 +31,14 @@ func (r *RPC) LatestBlockhash(ctx context.Context, c string) ([32]byte, error) {
 // MissingNonces lists the pool accounts of the shard of partitionID that do not exist yet. An account that exists but is not a nonce account of
 // this shard is an error: something else sits at an address the pool needs.
 func (a *Adapter) MissingNonces(ctx context.Context, partitionID string) ([]int, error) {
-	hot, ok := a.cfg.hot[partitionID]
-	if !ok {
-		return nil, fmt.Errorf("sol: partition %q has no hot shard", partitionID)
+	return a.MissingNoncesGen(ctx, partitionID, 0)
+}
+
+// MissingNoncesGen is MissingNonces for generation gen of the shard (0: the active one). A candidate's pool is created before it is activated.
+func (a *Adapter) MissingNoncesGen(ctx context.Context, partitionID string, gen int) ([]int, error) {
+	hot, _, err := a.HotKeyOfGeneration(ctx, partitionID, gen)
+	if err != nil {
+		return nil, err
 	}
 	var missing []int
 	retired, err := a.retiredNonces(ctx)
@@ -61,8 +66,19 @@ func (a *Adapter) MissingNonces(ctx context.Context, partitionID string) ([]int,
 // BuildNonceSetup builds the creation of every missing pool account of the partition's shard (in one message). It returns the unsigned
 // transaction and the total rent the intent must name; nothing when no account is missing.
 func (a *Adapter) BuildNonceSetup(ctx context.Context, partitionID string) (u chain.UnsignedTx, amount *big.Int, count int, err error) {
-	hot := a.cfg.hot[partitionID]
-	missing, err := a.MissingNonces(ctx, partitionID)
+	return a.BuildNonceSetupGen(ctx, partitionID, 0)
+}
+
+// BuildNonceSetupGen is BuildNonceSetup for generation gen of the shard (0: the active one); the message is paid and signed by that generation's key.
+func (a *Adapter) BuildNonceSetupGen(ctx context.Context, partitionID string, gen int) (u chain.UnsignedTx, amount *big.Int, count int, err error) {
+	hot, _, err := a.HotKeyOfGeneration(ctx, partitionID, gen)
+	if err != nil {
+		return chain.UnsignedTx{}, nil, 0, err
+	}
+	if err := a.ensurePoolFor(ctx, a.pool, hot); err != nil {
+		return chain.UnsignedTx{}, nil, 0, err
+	}
+	missing, err := a.MissingNoncesGen(ctx, partitionID, gen)
 	if err != nil || len(missing) == 0 {
 		return chain.UnsignedTx{}, new(big.Int), 0, err
 	}
@@ -76,7 +92,7 @@ func (a *Adapter) BuildNonceSetup(ctx context.Context, partitionID string) (u ch
 	if err != nil {
 		return chain.UnsignedTx{}, nil, 0, err
 	}
-	ixs := []Ix{SetLimitIx(20_000 + uint32(len(missing))*5_000)}
+	ixs := []Ix{SetLimitIx(nonceSetupUnits(len(missing)))}
 	if a.cfg.ComputeUnitPrice > 0 {
 		ixs = append(ixs, SetPriceIx(a.cfg.ComputeUnitPrice))
 	}
@@ -124,4 +140,14 @@ func (a *Adapter) SubmitNonceSetup(ctx context.Context, s chain.SignedTx, wait t
 		case <-time.After(400 * time.Millisecond):
 		}
 	}
+}
+
+// nonceSetupUnits is the compute unit limit of the creation of n pool accounts.
+func nonceSetupUnits(n int) uint32 { return 20_000 + uint32(n)*5_000 }
+
+// NonceSetupFee is the most the creation of n pool accounts costs in fees: the base fee of its one signature and the priority fee the configured price
+// makes of its compute unit limit (rounded up). The rent of the accounts is not in it.
+func (a *Adapter) NonceSetupFee(n int) uint64 {
+	prio := (uint64(nonceSetupUnits(n))*a.cfg.ComputeUnitPrice + 999_999) / 1_000_000
+	return 5000 + prio
 }

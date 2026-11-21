@@ -1,6 +1,6 @@
-# Key replacement: replacing an EVM hot shard's key, and the deposit keys of Bitcoin and Solana
+# Key replacement: replacing an EVM or Solana hot shard's key, and the deposit keys of Bitcoin and Solana
 
-This page is the procedure for **EVM hot shards**, run with `qv-rekey`, in the planned and in the emergency order. Bitcoin and Solana (and the deposit key trees) are not covered yet. The sections after the procedure explain what the zone checks, the business side, and the drain.
+This page is the procedure for **EVM hot shards**, run with `qv-rekey`, in the planned and in the emergency order. **Solana hot shards** follow the same steps with the differences in [their section](#solana-hot-shards-k4), and the deposit key trees of Bitcoin and Solana have [theirs](#deposit-keys-of-bitcoin-and-solana-k6). The sections after the procedure explain what the zone checks, the business side, and the drain.
 
 ## The procedure with `qv-rekey`
 
@@ -65,7 +65,7 @@ All changes use `qv-keysets sign` (each operator, on their own machine; `-join` 
 **Compromise:** `-action mark-compromised`. It may name `-successor` and `-cap` in the same record (once). A compromised key signs only a drain to that successor.
 
 ## What the zone checks and what it cannot
-The zone signs a drain only from a `draining` or `compromised` generation to exactly the successor's address, as a plain transfer (native: no data; token: `transfer(successor, amount)`), within the signed cap and `drains_per_hour` of the chain config (default 10; 0 turns drains off; **not applied to a compromised source**), and at most `max_drains_per_source` drains signed from one address in all (default 40, every state): the cap counts value, each drain also costs gas, so this count bounds the gas a storm of tiny drains could burn. It **cannot** check that the amount is everything: it has no chain access. A smaller drain is harmless; the rest stays on the old key until drained again.  A cap is raised with a signed `set-drain-caps` record (`qv-keysets sign -action set-drain-caps -generation G -cap ASSET=BASE_UNITS`): a draining or compromised generation, the new total per named asset.
+The zone signs a drain only from a `draining` or `compromised` generation to exactly the successor's address, as a plain transfer (native: no data; token: `transfer(successor, amount)`), within the signed cap and `drains_per_hour` of the chain config (default 10; 0 turns drains off; **not applied to a compromised source**), and at most `max_drains_per_source` drains signed from one address in all (default 40, every state; on Solana 40 plus the pool size and the number of tokens, see [Solana](#solana-hot-shards-k4)): the cap counts value, each drain also costs gas, so this count bounds the gas a storm of tiny drains could burn. It **cannot** check that the amount is everything: it has no chain access. A smaller drain is harmless; the rest stays on the old key until drained again.  A cap is raised with a signed `set-drain-caps` record (`qv-keysets sign -action set-drain-caps -generation G -cap ASSET=BASE_UNITS`): a draining or compromised generation, the new total per named asset.
 
 ## Deposit keys of Bitcoin and Solana (K6)
 The deposit key tree of such a chain is the registry entry `entity/chain/deposit-tree/0` in both sides (the zone's signed log, the core's `keysets` table). Generation 1 is the key the configs pin; every later generation exists because two operators signed it. Its identity is the account xpub (Bitcoin) or the Solana node `<public key hex>:<chain code hex>`; its key reference is the ID of a **second 2-party HD keyset on parties A and B** (curve secp256k1 or ed25519). Each `deposit_addresses` row carries its `generation`; "get my deposit address" returns the active generation's address and lists the older watched ones in `older_addresses`; a sweep's sign job names the key as `g<N>/<path>` from generation 2 (generation 1 is unchanged).
@@ -115,6 +115,47 @@ Run every zone step first (the tool applies the signed file to the gateway's and
 
 Generation 1 never changes: the core refuses to start when the configured key differs from the registered one.
 
+## Solana hot shards (K4)
+A Solana hot shard is replaced with the same tool, the same signed records and the same states as an EVM one (`-shard entity/chain/pool/N`, for example `qv-us/sol-main/omnibus/0`). The record carries the **new address in base58**, the **key reference** (the ID of a 2-of-3 Ed25519 keyset on parties A, B and C) and the **32-byte public key in hex**, which must be the address's bytes. `qv-rekey dkg` makes that keyset (`-admin-auth` as for EVM; the shard's signer entry in the zone config is `ed25519-2of3`). What differs is everything the old key owns on Solana.
+
+**The order, and why**
+```
+qv-rekey open | dkg | candidate | drain-start -cap SOL=N -cap TOKEN=N … | activate     # as for EVM; caps in base units (lamports, token units)
+(automatic)   the drain planner moves every configured token, then SOL for the new key's nonce pool, then waits
+qv-sol-nonces -config CUSTODY.json -dsn $DATABASE_URL -shard N -approver NAME -approver-key FILE      # the new key's pool, one approval (the active generation)
+(automatic)   the old nonce accounts, then the last lamports: the old address ends at zero
+qv-rekey status | retire
+```
+1. **The new key needs a pool of its own** (durable-nonce accounts, authority the new key) before it can pay a withdrawal or a sweep. Creating it needs SOL at the new address, and the books must see where that SOL came from, so it comes from the drain: the first moves are the tokens, then just enough SOL for the pool. A candidate signs nothing, so the pool is created **after** `activate`. Between `activate` and the pool, new withdrawals wait ("no free nonce account", or "successor key not funded yet"); a customer's request is not lost. Keep that window short: run `qv-sol-nonces` as soon as `status` says the drain waits for the pool.
+2. **The old pool is emptied after the new one exists.** Each old nonce account is withdrawn into the new address (rent recovered; the books lower the shard's cost by it), one account a move, only when no withdrawal or sweep holds it and the node no longer shows the value its last owner signed.
+3. **The last move** sends all SOL but the fee of that transaction (5000 lamports), so the old address holds exactly zero.
+
+**What the drain moves, in order** (each is one transaction on a recent blockhash, paid and signed by the old key alone; one open move per generation):
+| Step | What | Zone's shape |
+|---|---|---|
+| tokens | for each configured token with an account: transfer all of it to the new address's associated account (created, paid by the old key, if missing) and **close the old token account, its rent paid to the new address**; an empty account is only closed | `drain` of the token: transferChecked, optional closeAccount |
+| fund | SOL for the new key's pool (rent of each account, fees), once | `drain` of SOL: one system transfer |
+| nonce accounts | one old pool account at a time, whole balance to the new address | `drain` of SOL: one WithdrawNonceAccount |
+| last SOL | everything left but the fee | `drain` of SOL: one system transfer |
+
+**In-flight work.** A withdrawal or sweep built before the switch keeps the old key and the old pool's nonce: a stuck one is still replaced (fee raise) and cancelled with the old key, because the zone lets a draining key finish exactly the work it signed. The drain starts only when no allocation of the old key is open, so a withdrawal lands once or is cancelled by advancing its nonce, never twice and never stuck. New withdrawals are built from the active key only.
+
+**Dust and what the books do not know.** Less than the fee of the last transaction (5000 lamports) cannot be moved and is written off at `retire`. Tokens of a mint the config does not list, and token accounts that are not the associated one, are **reported** (an `ALERT`, and the drain's reason on `status`) and never moved or burned: `drained` is reached with them still there; decide by hand (a recovery with the old key before the shares are destroyed) before `retire`.
+
+**What the zone checks** (each tested): the fee payer is a generation of the partition's shard and each generation owns its own pool (a nonce of another key's pool is refused); a **candidate** signs nothing; an **active** key signs what a hot shard signs, including the creation of its pool; a **draining** key signs only a `drain` to its successor (the successor active, to the named address, within the signed per-asset cap and `drains_per_hour`), the closing of its own nonce accounts to itself (`nonce-close`, as before), the cancel and replacement of work it signed; a **compromised** key signs **only** the `drain` to its successor, no cancel, no nonce close, no replacement (the rule of EVM); a **retired** key signs nothing. A rebalance pays only an active generation of another shard. Each cosigner judges from its own log.
+
+**Compromised key (emergency).** `drain-start -compromised -cap …`, or `qv-rekey emergency`, as for EVM: the old key signs only its drain to the new one, in every shape of it (a token transfer with its close, the close of an empty token account, a withdrawal of an old pool account to the successor, the SOL), no cancel, no `nonce-close`, no replacement, and the hourly drain limit is not applied (tested in the gateway and in the e2e). The drain differs from the planned one in two ways, because a thief races it: it does **not** wait for the new key's pool (the operator creates the pool afterwards, `qv-sol-nonces -generation N`, from the SOL the drain brought), and the SOL goes before the old pool's accounts (all but the fee of every transaction still to come). Tokens still go first, in the order of the asset list: the Solana planner does not order them by value (backlog). Freeze the old keyset on the parties first (mpc-keyset-freeze.md). The old key is never retired.
+
+**How many drains one key may sign.** `max_drains_per_source` (K8) bounds the drains signed from one address in all, to bound the gas. Every step of a Solana drain is one drain: a token (transfer and close, or only the close of an empty account), a pool account, the SOL, and a retry after a failed one. So the default on Solana is 40 + the pool size + the number of configured tokens + 1 (up to 40 + 64 + tokens + 1), not 40; a value in the config is taken as it is, so set it to at least pool + tokens + retries. Each step costs one base fee (5000 lamports), so the gas the bound allows stays small. Worst case by count: the e2e (pool 3, one token) 5 steps; a wallet with 20 tokens and a pool of 16 needs 37, and one with 30 tokens and a pool of 32 needs 63, which the 40 of other chains would have refused halfway.
+
+**Sweeps and Reconcile.** Sweeps of deposit addresses pay the active generation's address after `activate` (the zone refuses a sweep that pays a draining one). Reconcile adds up every generation that is not retired as one shard, explains a drain transaction that is final and not booked yet from its own record, and books each move's cost (fee, less rent that came back) when it settles. Nothing is booked for the amount: it stays in the shard.
+
+**Crash safety.** Every step is derived from the chain at finalized commitment and from the registry, never from memory: kill `qv-rekey` or the worker between any two steps and run it again. A drain move and its sign job are written in one transaction; the signature is recorded before the send and the send repeats while the blockhash is valid; a move whose blockhash expired unconfirmed ends as failed (nothing moved) and the planner builds the next one from the chain.
+
+**Signer mode.** The Solana hot shard is an MPC keyset on the three parties today (there is no HSM mode for Solana), so only the MPC path of `qv-rekey` applies. `qv-keysets sign`'s help text speaks of secp256k1 keys: for Solana `-address` is the base58 address and `-public-key` the 32-byte key in hex.
+
+**Kubernetes.** `qv-rekey` runs as for EVM: a Job (or `kubectl exec`) in the signing cluster with the guard databases, the zone config, party A's caller port and the gateway's client certificate mounted, `-core` reaching the business zone's admin API outward (or run those calls from a business-zone host). `qv-keysets sign` stays on operators' machines. `qv-sol-nonces` runs where the business database and the signing zone's job queue are reachable: a Job in the business cluster with the custody config and the approver key mounted as secrets (one approval, then discard). The drain is the worker's existing drain planner loop, so nothing new runs, no new port opens and no chart value changes; the gateway and every cosigner must run this release first (an older zone ignores the new records with an ALERT and refuses the key references).
+
 ## Differing databases and rolling updates
 The gateway and each cosigner judge by their own verified log. A drain whose state does not hold in one of them yet (source not draining, successor not active) is **not refused**: it waits with an `ALERT keyset registry: a drain waits…` until its `not_after`. Run `apply` again to finish; `show` warns when sequence numbers differ.
 
@@ -162,7 +203,7 @@ Once the old generation is `draining` (or `compromised`) in the core and the suc
 - **Kubernetes.** The planner is one more loop of the worker (`drain-planner:<chain>`); nothing new runs and no new network path is needed. State is in the business database (`drain_moves`, `keyset_drains`); a second worker replica or a restart is safe (one open move per generation is a unique index, the move ID is the workflow ID). A worker older than this release does not run the loop; the migration is additive.
 
 ## What is not covered yet
-- Solana hot shards (K4). A cosigner-side self-test of a candidate (a bounded transaction before activation) is not built: `dkg` checks the parties agree on the key (MPC) or test-signs in the token (HSM), and the first withdrawal after `activate` is the first real signature.
+- A cosigner-side self-test of a candidate (a bounded transaction before activation) is not built: `dkg` checks the parties agree on the key (MPC) or test-signs in the token (HSM), and the first withdrawal after `activate` is the first real signature.
 - Destroying the old key's shares and backups after the window: do it by the parties' own procedures (docs/runbooks/mpc-backup-restore.md); the tool never destroys anything.
 
 The MPC parties' admin calls (the `dkg` step's signature, refresh, unfreeze) step by step: [key-ceremony.md](key-ceremony.md).
