@@ -76,6 +76,7 @@ A frozen keyset refuses signing and refresh. **Do not unfreeze until [mpc-keyset
 | `domain "…": the parties are configured for "…"` | `-domain` of the request is not the parties' `admin_domain` | make a new request with the right domain |
 | `this authorization was already used` | the party accepted this file before | check `status`; make a new request only if the operation did not happen |
 | `before this party's start` | the party restarted after the file was made | make a new request |
+| `party B: …` or `party C: …` in front of a refusal | that member refused the file; party A passes the member's own answer on, with its name, within a second or two (it used to show as a 10 s timeout when C refused) | read the reason after the name and fix that party, not the link; a refusal is never "try again": make a new request |
 | `no longer accepts the v1 authorization format` | an old v1 file reached a party with `admin_threshold` set | use `request` and `sign -in`; see the roll-over below |
 | `THE PARTIES DISAGREE` | generation, frozen flag, public key or presence differs, or a party did not answer | stop; use [mpc-failures.md](mpc-failures.md); a half-done refresh or DKG is reconciled by the parties on restart, then check again |
 | `-auth is required` | `send` runs without a file | get the file from the admins; the Job holds no key and cannot make one |

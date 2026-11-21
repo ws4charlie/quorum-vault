@@ -129,11 +129,7 @@ func (s *Server) coordinate(ctx context.Context, name string, open *pb.Open, rat
 	err = tr.waitAck(ackCtx)
 	c3()
 	if err != nil {
-		var f *Fail
-		if errors.As(err, &f) { // refused / limit / failed by the peer before any protocol message
-			return nil, f
-		}
-		return nil, fromWrapper(name, &transportErr{err})
+		return nil, ackFail(name, "B", err) // refused / limit / failed by the peer before any protocol message: named, with its kind
 	}
 
 	res, err = s.execOp(ctx, open, tr)

@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -25,6 +26,8 @@ type tamperProxy struct {
 	n      atomic.Int32
 	count  [2]atomic.Int32
 	hit    atomic.Bool
+	// slowBA delays every frame from B to A by this much (nanoseconds): a slow return path, as a loaded machine has.
+	slowBA atomic.Int64
 }
 
 func (p *tamperProxy) set(dir, n int) {
@@ -52,35 +55,47 @@ func (p *tamperProxy) Session(in pb.Peer_SessionServer) error {
 	if err != nil {
 		return err
 	}
-	done := make(chan struct{}, 2)
+	toB, toA := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(toB)
 		for {
 			f, err := in.Recv()
 			if err != nil {
 				out.CloseSend()
-				break
+				return
 			}
 			p.mutate(0, f)
 			if out.Send(f) != nil {
-				break
+				return
 			}
 		}
-		done <- struct{}{}
 	}()
 	go func() {
+		defer close(toA)
 		for {
 			f, err := out.Recv()
 			if err != nil {
-				break
+				return
 			}
 			p.mutate(1, f)
+			if d := p.slowBA.Load(); d > 0 {
+				time.Sleep(time.Duration(d))
+			}
 			if in.Send(f) != nil {
-				break
+				return
 			}
 		}
-		done <- struct{}{}
 	}()
-	<-done
+	// The session ends when B's side has ended and everything B sent (its FIN) was handed to A. A's side ending first
+	// (B already finished, so A's next frame found no stream) must not cut B's last frames off: a real link delivers them.
+	select {
+	case <-toA:
+	case <-toB:
+		select {
+		case <-toA:
+		case <-time.After(5 * time.Second):
+		}
+	}
 	return nil
 }
 

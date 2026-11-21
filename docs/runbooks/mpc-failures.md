@@ -17,7 +17,7 @@ Every party counts each failed peer session once, in `qv_mpc_party_session_failu
 |---|---|
 | `TRANSPORT`, `UNAVAILABLE` | The peer or the link did not answer, a timeout, or the peer's own dependency (its cosigner, its database) is down. Nothing was signed |
 | `CRYPTOGRAPHIC` | A check on the peer's data failed (proof, parsing, final signature). The keyset is frozen on every party that holds it |
-| `REFUSED` | A cosigner (or the party's own check) said no. Policy at work; nothing ran |
+| `REFUSED` | A cosigner (or the party's own check, or a member's check of an admin file) said no. Policy at work; nothing ran. The message names the party (`party C: admin authorization: …`) and is never a timeout: a key ceremony that times out did not hear a refusal |
 | `LIMIT`, `INTERNAL`, `FROZEN` | A limit was hit, a bug or a bad request, or the keyset is already frozen |
 
 **The peer is a suspect, not proof.** cb-mpc aborts without blame: a failed message tells where it came in, not who made it bad. The cause can equally be the reporting party, the link, or the third party. Nothing in the signing zone reads these counters: no freeze, route change or refusal depends on them. Humans act on the alerts.
