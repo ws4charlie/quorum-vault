@@ -25,6 +25,7 @@ type btcClaimChain struct {
 	reserved []btc.ReservedOwner
 	plan     btc.DrainPlan
 	held     []string
+	open     bool // Reservation reports an open reservation (a cancel can be built)
 }
 
 func (f *btcClaimChain) PlanDrain(context.Context, string, string) (btc.DrainPlan, error) {
@@ -259,5 +260,36 @@ func TestBTCDrainRefusedForAClaimedCoinHoldsIt(t *testing.T) {
 }
 
 func (f *btcClaimChain) Reservation(context.Context, chain.Querier, string, string) (chain.Reservation, error) {
-	return chain.Reservation{}, nil
+	return chain.Reservation{Open: f.open, Account: "bcrt1hot"}, nil
+}
+
+func (f *btcClaimChain) BuildCancel(context.Context, pgx.Tx, string, string) (chain.UnsignedTx, error) {
+	return chain.UnsignedTx{Chain: "BTC", Digest: []byte{9, 9}, Payload: []byte(`{}`), KeyRef: chain.KeyRef{Path: "k"}}, nil
+}
+
+// An expired cancel of a held coin is renewed once; a repeat of the request (an activity retry after a lost reply) follows the latest attempt whatever state it
+// is in, signing or done included, and never answers with the expired one.
+func TestBTCCancelRenewalIsFollowedOnRepeat(t *testing.T) {
+	ctx := context.Background()
+	s, fc := btcClaimWorld(t, "compromised")
+	fc.open = true
+	o := Owner{Kind: "withdrawal", ID: "w1", PartitionID: s.Cfg.PartitionKey(s.Cfg.Native, 0).String()}
+	ownerJob(t, s, o, "rejected", "signer_refused: authorizer on B refused: keyset_state: generation 1 of x is compromised: it signs nothing")
+	cancelJob(t, s, o.Kind, o.ID, "rejected")
+	first := CancelTrack(o).FirstJob()
+	if _, err := s.Pool.Exec(ctx, `UPDATE sign_jobs SET reject_reason='intent_expired: intent expired at 1, now 2' WHERE id=$1`, first); err != nil {
+		t.Fatal(err)
+	}
+	renewed, err := s.EnqueueCancel(ctx, o)
+	if err != nil || renewed == first || renewed == "" {
+		t.Fatalf("no renewal: %q %v", renewed, err)
+	}
+	for _, st := range []string{"pending", "signing", "done"} {
+		if _, err := s.Pool.Exec(ctx, `UPDATE sign_jobs SET status=$2 WHERE id=$1`, renewed, st); err != nil {
+			t.Fatal(err)
+		}
+		if again, err := s.EnqueueCancel(ctx, o); err != nil || again != renewed {
+			t.Fatalf("renewal %s: a repeat returned %q (%v), want %q", st, again, err, renewed)
+		}
+	}
 }

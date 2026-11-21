@@ -277,17 +277,20 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 			return err
 		}
 		if have {
-			if !s.evmFamily() {
-				// Bitcoin: only the cancel of coins a refused payment left claimed under a compromised generation is renewed (the same guarded rule as EVM)
-				if held, err := s.btcClaimHeld(ctx, tx, o); err != nil || !held {
-					return err
-				}
-			}
 			// EVM: the cancel's job may have been refused only because its deadline passed before the zone could sign it (the successor was not active
 			// in some guard in time). Then, and only then, a new attempt is enqueued (renewCancel); otherwise the latest attempt is the one to follow.
 			latest, renew, err := s.cancelAttempt(ctx, tx, o, t)
 			if err != nil {
 				return err
+			}
+			if renew && !s.evmFamily() {
+				// Bitcoin: only the cancel of coins a refused payment left claimed under a compromised generation is renewed (the same guarded rule as
+				// EVM). The latest attempt is always the one to follow, whatever state the claim check is in now (a retry after a lost reply).
+				if held, err := s.btcClaimHeld(ctx, tx, o); err != nil {
+					return err
+				} else if !held {
+					renew = false
+				}
 			}
 			if !renew {
 				id = latest
