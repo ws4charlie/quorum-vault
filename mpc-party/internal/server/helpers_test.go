@@ -114,8 +114,8 @@ func startPair(t *testing.T, o pairOpts) *pair {
 		a.Shutdown(ctx)
 		b.Shutdown(ctx)
 	})
-	cl, conn := testenv.Dial(t, a.CallerAddr(), env.CertCaller, env.CertA.Pin)
-	bc, _ := testenv.Dial(t, b.CallerAddr(), env.CertCaller, env.CertB.Pin)
+	cl, conn := env.DialAs(t, a.CallerAddr(), env.CertCaller, env.CertA.Pin)
+	bc, _ := env.DialAs(t, b.CallerAddr(), env.CertCaller, env.CertB.Pin)
 	return &pair{storeA: storeA, storeB: storeB, Env: env, A: a, B: b, Client: cl, BCall: bc, ConnA: conn}
 }
 

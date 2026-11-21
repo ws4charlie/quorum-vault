@@ -13,7 +13,7 @@ Common flags: `-dir WORK` `-config zone.json` `-guard-dsn gateway=… -guard-dsn
 | Step | Command | What happens | Needs |
 |---|---|---|---|
 | 1 | `open -shard S -mode mpc\|hsm -reason "…"` | checks the shard has one active generation, none in flight, and the zone and core agree; writes the plan (old generation, new generation) | nothing |
-| 2 | `dkg` | **mpc:** a 2-of-3 ECDSA DKG on the three parties (keyset `<shard>-g<N>`); **hsm:** a new key in the shard's token, test-signed. The plan keeps the key reference, public key and address. Run again: it finds the key, makes no second one. Checks that the parties agree on the key | mpc: an operator's `qv-keysets party-auth -key admin.key -op dkg -keyset ID -out auth.json` made just before (valid for minutes, once) and given as `-admin-auth` |
+| 2 | `dkg` | **mpc:** a 2-of-3 ECDSA DKG on the three parties (keyset `<shard>-g<N>`); **hsm:** a new key in the shard's token, test-signed. The plan keeps the key reference, public key and address. Run again: it finds the key, makes no second one. Checks that the parties agree on the key | mpc: a request for `dkg` of the keyset `qv-rekey` prints (`qv-party-admin request`, then `sign` by the parties' `admin_threshold` admins; [key-ceremony.md](key-ceremony.md)) made just before (valid until its expiry, once) and given as `-admin-auth` |
 | 3 | `candidate` | prints the `qv-keysets sign … -action register-candidate -address … -key-ref … -public-key …` command and its sequence number. With `-change FILE`: applies it to the zone, then `POST candidates` to the core. The record carries the key reference and public key, so the zone can sign from the new key later; a candidate signs nothing | two operators sign (`-join` adds the second) |
 | 4 | `drain-start -cap ASSET=N …` | same pattern with `start-draining` (successor = the new generation). **Emergency:** add `-compromised` (the record is `mark-compromised`, successor and caps in the same record). The caps are the most **all** signed drains of an asset from the old key may move: the zone cannot read the chain. Give them room (a few times the balance) | two operators |
 | 5 | `activate` | `activate` in the zone, then the core. **The shard has no active key between 4 and 5: new withdrawals wait, so run 5 at once.** Prints the cold ceremony and, with `-rpc` and `-factory`, whether the factory already pays the new address | two operators |
@@ -88,7 +88,7 @@ The generation an input is under is read from the zone's own derivation: the pay
 **The flow** (same tool and same ceremony as an EVM shard; `-shard` is the tree ID)
 ```
 qv-rekey open        -shard qv-us/btc-main/deposit-tree/0 -mode mpc -reason "..."
-qv-rekey dkg         -admin-auth F          # a second HD keyset on the parties; F from `qv-keysets party-auth -op dkg -keyset <printed ID>`
+qv-rekey dkg         -admin-auth F          # a second HD keyset on the parties; F: a request for dkg of <printed ID> signed by the admins (key-ceremony.md)
 qv-rekey candidate   [-change F]            # zone record: -key-ref <keyset ID> -public-key <xpub | node>, no -address
 qv-rekey drain-start -cap BTC=SATS -window SECONDS [-change F]     # Solana: no -cap. The window is signed: the old generation may retire only after it
 qv-rekey activate    [-change F]            # new customers get generation 2 addresses; sweeps of old addresses now pay the new hot shard

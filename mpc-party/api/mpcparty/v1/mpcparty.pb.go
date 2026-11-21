@@ -359,14 +359,23 @@ func (Op) EnumDescriptor() ([]byte, []int) {
 	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{5}
 }
 
-// An operator's Ed25519 signature over ("qv-mpc-admin-v1\n" op "\n" keyset_id "\n" unix_seconds). Both parties verify it
-// with their own configured admin keys; party B refuses DKG, Refresh and Unfreeze that lack a valid one, so a
-// compromised party A cannot start them.
+// An operator authorization for DKG, Refresh and Unfreeze. Every party that takes part verifies it itself against its own
+// configured admin keys, so a compromised party A cannot start these operations alone.
+//
+// v1 (fields 1-3, kept for the roll-over): ONE operator's Ed25519 signature over ("qv-mpc-admin-v1\n" op "\n" keyset_id "\n"
+// unix_seconds). It covers neither the other request fields nor a quorum; a party accepts it only while its config says so
+// (`admin_allow_v1`, off once `admin_threshold` is set).
+//
+// v2 (field 4): signatures of at least `admin_threshold` distinct admin keys over ONE canonical message that binds the
+// operation, the keyset, the deployment domain, the hash of the whole request body (every field except this one), the
+// issue and expiry time and a nonce. The message is rebuilt by each party from the request it received: nothing signed
+// is taken on trust from the sender. See mpc-party/api/admin.
 type AdminAuth struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	UnixSeconds   int64                  `protobuf:"varint,1,opt,name=unix_seconds,json=unixSeconds,proto3" json:"unix_seconds,omitempty"`
-	PublicKey     []byte                 `protobuf:"bytes,2,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"` // which configured admin key signed (32 bytes)
-	Signature     []byte                 `protobuf:"bytes,3,opt,name=signature,proto3" json:"signature,omitempty"`
+	UnixSeconds   int64                  `protobuf:"varint,1,opt,name=unix_seconds,json=unixSeconds,proto3" json:"unix_seconds,omitempty"` // v1
+	PublicKey     []byte                 `protobuf:"bytes,2,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`        // v1: which configured admin key signed (32 bytes)
+	Signature     []byte                 `protobuf:"bytes,3,opt,name=signature,proto3" json:"signature,omitempty"`                         // v1
+	V2            *AdminAuthV2           `protobuf:"bytes,4,opt,name=v2,proto3" json:"v2,omitempty"`                                       // set: v2 (the v1 fields must then be empty)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -422,6 +431,141 @@ func (x *AdminAuth) GetSignature() []byte {
 	return nil
 }
 
+func (x *AdminAuth) GetV2() *AdminAuthV2 {
+	if x != nil {
+		return x.V2
+	}
+	return nil
+}
+
+type AdminAuthV2 struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Domain        string                 `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"` // the deployment name the parties are configured with (`admin_domain`), "" when none
+	IssuedUnix    int64                  `protobuf:"varint,2,opt,name=issued_unix,json=issuedUnix,proto3" json:"issued_unix,omitempty"`
+	ExpiresUnix   int64                  `protobuf:"varint,3,opt,name=expires_unix,json=expiresUnix,proto3" json:"expires_unix,omitempty"`
+	Nonce         []byte                 `protobuf:"bytes,4,opt,name=nonce,proto3" json:"nonce,omitempty"` // 16 random bytes
+	Signatures    []*AdminSignature      `protobuf:"bytes,5,rep,name=signatures,proto3" json:"signatures,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AdminAuthV2) Reset() {
+	*x = AdminAuthV2{}
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdminAuthV2) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdminAuthV2) ProtoMessage() {}
+
+func (x *AdminAuthV2) ProtoReflect() protoreflect.Message {
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdminAuthV2.ProtoReflect.Descriptor instead.
+func (*AdminAuthV2) Descriptor() ([]byte, []int) {
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *AdminAuthV2) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *AdminAuthV2) GetIssuedUnix() int64 {
+	if x != nil {
+		return x.IssuedUnix
+	}
+	return 0
+}
+
+func (x *AdminAuthV2) GetExpiresUnix() int64 {
+	if x != nil {
+		return x.ExpiresUnix
+	}
+	return 0
+}
+
+func (x *AdminAuthV2) GetNonce() []byte {
+	if x != nil {
+		return x.Nonce
+	}
+	return nil
+}
+
+func (x *AdminAuthV2) GetSignatures() []*AdminSignature {
+	if x != nil {
+		return x.Signatures
+	}
+	return nil
+}
+
+type AdminSignature struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PublicKey     []byte                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"` // 32 bytes, one of the party's admin keys
+	Signature     []byte                 `protobuf:"bytes,2,opt,name=signature,proto3" json:"signature,omitempty"`                  // 64 bytes, over the v2 message
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AdminSignature) Reset() {
+	*x = AdminSignature{}
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdminSignature) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdminSignature) ProtoMessage() {}
+
+func (x *AdminSignature) ProtoReflect() protoreflect.Message {
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdminSignature.ProtoReflect.Descriptor instead.
+func (*AdminSignature) Descriptor() ([]byte, []int) {
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *AdminSignature) GetPublicKey() []byte {
+	if x != nil {
+		return x.PublicKey
+	}
+	return nil
+}
+
+func (x *AdminSignature) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
 type DKGRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	KeysetId      string                 `protobuf:"bytes,1,opt,name=keyset_id,json=keysetId,proto3" json:"keyset_id,omitempty"`
@@ -434,7 +578,7 @@ type DKGRequest struct {
 
 func (x *DKGRequest) Reset() {
 	*x = DKGRequest{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[1]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -446,7 +590,7 @@ func (x *DKGRequest) String() string {
 func (*DKGRequest) ProtoMessage() {}
 
 func (x *DKGRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[1]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -459,7 +603,7 @@ func (x *DKGRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DKGRequest.ProtoReflect.Descriptor instead.
 func (*DKGRequest) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{1}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *DKGRequest) GetKeysetId() string {
@@ -499,7 +643,7 @@ type DKGResponse struct {
 
 func (x *DKGResponse) Reset() {
 	*x = DKGResponse{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[2]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -511,7 +655,7 @@ func (x *DKGResponse) String() string {
 func (*DKGResponse) ProtoMessage() {}
 
 func (x *DKGResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[2]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -524,7 +668,7 @@ func (x *DKGResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DKGResponse.ProtoReflect.Descriptor instead.
 func (*DKGResponse) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{2}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *DKGResponse) GetRootPublicKey() []byte {
@@ -544,7 +688,7 @@ type NodeRequest struct {
 
 func (x *NodeRequest) Reset() {
 	*x = NodeRequest{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[3]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -556,7 +700,7 @@ func (x *NodeRequest) String() string {
 func (*NodeRequest) ProtoMessage() {}
 
 func (x *NodeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[3]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -569,7 +713,7 @@ func (x *NodeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeRequest.ProtoReflect.Descriptor instead.
 func (*NodeRequest) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{3}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *NodeRequest) GetKeysetId() string {
@@ -596,7 +740,7 @@ type NodeResponse struct {
 
 func (x *NodeResponse) Reset() {
 	*x = NodeResponse{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[4]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -608,7 +752,7 @@ func (x *NodeResponse) String() string {
 func (*NodeResponse) ProtoMessage() {}
 
 func (x *NodeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[4]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -621,7 +765,7 @@ func (x *NodeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeResponse.ProtoReflect.Descriptor instead.
 func (*NodeResponse) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{4}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *NodeResponse) GetPublicKey() []byte {
@@ -649,7 +793,7 @@ type DeriveRequest struct {
 
 func (x *DeriveRequest) Reset() {
 	*x = DeriveRequest{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[5]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -661,7 +805,7 @@ func (x *DeriveRequest) String() string {
 func (*DeriveRequest) ProtoMessage() {}
 
 func (x *DeriveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[5]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -674,7 +818,7 @@ func (x *DeriveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeriveRequest.ProtoReflect.Descriptor instead.
 func (*DeriveRequest) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{5}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DeriveRequest) GetKeysetId() string {
@@ -708,7 +852,7 @@ type DeriveResponse struct {
 
 func (x *DeriveResponse) Reset() {
 	*x = DeriveResponse{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[6]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -720,7 +864,7 @@ func (x *DeriveResponse) String() string {
 func (*DeriveResponse) ProtoMessage() {}
 
 func (x *DeriveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[6]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -733,7 +877,7 @@ func (x *DeriveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeriveResponse.ProtoReflect.Descriptor instead.
 func (*DeriveResponse) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{6}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DeriveResponse) GetKeyId() string {
@@ -769,7 +913,7 @@ type SignRequest struct {
 
 func (x *SignRequest) Reset() {
 	*x = SignRequest{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[7]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -781,7 +925,7 @@ func (x *SignRequest) String() string {
 func (*SignRequest) ProtoMessage() {}
 
 func (x *SignRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[7]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -794,7 +938,7 @@ func (x *SignRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignRequest.ProtoReflect.Descriptor instead.
 func (*SignRequest) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{7}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SignRequest) GetKeyId() string {
@@ -840,18 +984,17 @@ func (x *SignRequest) GetPeer() string {
 }
 
 type SignResponse struct {
-	state     protoimpl.MessageState `protogen:"open.v1"`
-	Signature []byte                 `protobuf:"bytes,1,opt,name=signature,proto3" json:"signature,omitempty"`
-	Replayed  bool                   `protobuf:"varint,2,opt,name=replayed,proto3" json:"replayed,omitempty"` // true if the stored signature of an earlier call with the same job_id was returned
-	// 2-of-3: the peer that took part ("B" or "C"); empty on a replay (the stored signature does not record it)
-	SignedWith    string `protobuf:"bytes,3,opt,name=signed_with,json=signedWith,proto3" json:"signed_with,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Signature     []byte                 `protobuf:"bytes,1,opt,name=signature,proto3" json:"signature,omitempty"`
+	Replayed      bool                   `protobuf:"varint,2,opt,name=replayed,proto3" json:"replayed,omitempty"`                      // true if the stored signature of an earlier call with the same job_id was returned
+	SignedWith    string                 `protobuf:"bytes,3,opt,name=signed_with,json=signedWith,proto3" json:"signed_with,omitempty"` // 2-of-3: the peer that took part ("B" or "C"); empty on a replay (the stored signature does not record it)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SignResponse) Reset() {
 	*x = SignResponse{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[8]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -863,7 +1006,7 @@ func (x *SignResponse) String() string {
 func (*SignResponse) ProtoMessage() {}
 
 func (x *SignResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[8]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -876,7 +1019,7 @@ func (x *SignResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignResponse.ProtoReflect.Descriptor instead.
 func (*SignResponse) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{8}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SignResponse) GetSignature() []byte {
@@ -910,7 +1053,7 @@ type RefreshRequest struct {
 
 func (x *RefreshRequest) Reset() {
 	*x = RefreshRequest{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[9]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -922,7 +1065,7 @@ func (x *RefreshRequest) String() string {
 func (*RefreshRequest) ProtoMessage() {}
 
 func (x *RefreshRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[9]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -935,7 +1078,7 @@ func (x *RefreshRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RefreshRequest.ProtoReflect.Descriptor instead.
 func (*RefreshRequest) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{9}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RefreshRequest) GetKeysetId() string {
@@ -961,7 +1104,7 @@ type RefreshResponse struct {
 
 func (x *RefreshResponse) Reset() {
 	*x = RefreshResponse{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[10]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -973,7 +1116,7 @@ func (x *RefreshResponse) String() string {
 func (*RefreshResponse) ProtoMessage() {}
 
 func (x *RefreshResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[10]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -986,7 +1129,7 @@ func (x *RefreshResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RefreshResponse.ProtoReflect.Descriptor instead.
 func (*RefreshResponse) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{10}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *RefreshResponse) GetRootPublicKey() []byte {
@@ -1006,7 +1149,7 @@ type UnfreezeRequest struct {
 
 func (x *UnfreezeRequest) Reset() {
 	*x = UnfreezeRequest{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[11]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1018,7 +1161,7 @@ func (x *UnfreezeRequest) String() string {
 func (*UnfreezeRequest) ProtoMessage() {}
 
 func (x *UnfreezeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[11]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1031,7 +1174,7 @@ func (x *UnfreezeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnfreezeRequest.ProtoReflect.Descriptor instead.
 func (*UnfreezeRequest) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{11}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UnfreezeRequest) GetKeysetId() string {
@@ -1056,7 +1199,7 @@ type UnfreezeResponse struct {
 
 func (x *UnfreezeResponse) Reset() {
 	*x = UnfreezeResponse{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[12]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1068,7 +1211,7 @@ func (x *UnfreezeResponse) String() string {
 func (*UnfreezeResponse) ProtoMessage() {}
 
 func (x *UnfreezeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[12]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1081,7 +1224,7 @@ func (x *UnfreezeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnfreezeResponse.ProtoReflect.Descriptor instead.
 func (*UnfreezeResponse) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{12}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{14}
 }
 
 type KeysetStatus struct {
@@ -1100,7 +1243,7 @@ type KeysetStatus struct {
 
 func (x *KeysetStatus) Reset() {
 	*x = KeysetStatus{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[13]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1112,7 +1255,7 @@ func (x *KeysetStatus) String() string {
 func (*KeysetStatus) ProtoMessage() {}
 
 func (x *KeysetStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[13]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1125,7 +1268,7 @@ func (x *KeysetStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KeysetStatus.ProtoReflect.Descriptor instead.
 func (*KeysetStatus) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{13}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *KeysetStatus) GetKeysetId() string {
@@ -1195,7 +1338,7 @@ type PeerStatus struct {
 
 func (x *PeerStatus) Reset() {
 	*x = PeerStatus{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[14]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1207,7 +1350,7 @@ func (x *PeerStatus) String() string {
 func (*PeerStatus) ProtoMessage() {}
 
 func (x *PeerStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[14]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1220,7 +1363,7 @@ func (x *PeerStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PeerStatus.ProtoReflect.Descriptor instead.
 func (*PeerStatus) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{14}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *PeerStatus) GetName() string {
@@ -1245,7 +1388,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[15]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1257,7 +1400,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[15]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1270,7 +1413,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{15}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{17}
 }
 
 type HealthResponse struct {
@@ -1288,7 +1431,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[16]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1300,7 +1443,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[16]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1313,7 +1456,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{16}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *HealthResponse) GetRole() string {
@@ -1378,7 +1521,7 @@ type ErrorDetail struct {
 
 func (x *ErrorDetail) Reset() {
 	*x = ErrorDetail{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[17]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1390,7 +1533,7 @@ func (x *ErrorDetail) String() string {
 func (*ErrorDetail) ProtoMessage() {}
 
 func (x *ErrorDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[17]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1403,7 +1546,7 @@ func (x *ErrorDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ErrorDetail.ProtoReflect.Descriptor instead.
 func (*ErrorDetail) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{17}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ErrorDetail) GetKind() ErrorKind {
@@ -1452,7 +1595,7 @@ type Frame struct {
 
 func (x *Frame) Reset() {
 	*x = Frame{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[18]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1464,7 +1607,7 @@ func (x *Frame) String() string {
 func (*Frame) ProtoMessage() {}
 
 func (x *Frame) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[18]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1477,7 +1620,7 @@ func (x *Frame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Frame.ProtoReflect.Descriptor instead.
 func (*Frame) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{18}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Frame) GetSessionId() string {
@@ -1531,7 +1674,7 @@ type Open struct {
 
 func (x *Open) Reset() {
 	*x = Open{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[19]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1543,7 +1686,7 @@ func (x *Open) String() string {
 func (*Open) ProtoMessage() {}
 
 func (x *Open) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[19]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1556,7 +1699,7 @@ func (x *Open) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Open.ProtoReflect.Descriptor instead.
 func (*Open) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{19}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Open) GetOp() Op {
@@ -1706,7 +1849,7 @@ type Fin struct {
 
 func (x *Fin) Reset() {
 	*x = Fin{}
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[20]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1718,7 +1861,7 @@ func (x *Fin) String() string {
 func (*Fin) ProtoMessage() {}
 
 func (x *Fin) ProtoReflect() protoreflect.Message {
-	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[20]
+	mi := &file_mpcparty_v1_mpcparty_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1731,7 +1874,7 @@ func (x *Fin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Fin.ProtoReflect.Descriptor instead.
 func (*Fin) Descriptor() ([]byte, []int) {
-	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{20}
+	return file_mpcparty_v1_mpcparty_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Fin) GetOk() bool {
@@ -1808,12 +1951,26 @@ var File_mpcparty_v1_mpcparty_proto protoreflect.FileDescriptor
 
 const file_mpcparty_v1_mpcparty_proto_rawDesc = "" +
 	"\n" +
-	"\x1ampcparty/v1/mpcparty.proto\x12\x0eqv.mpcparty.v1\"k\n" +
+	"\x1ampcparty/v1/mpcparty.proto\x12\x0eqv.mpcparty.v1\"\x98\x01\n" +
 	"\tAdminAuth\x12!\n" +
 	"\funix_seconds\x18\x01 \x01(\x03R\vunixSeconds\x12\x1d\n" +
 	"\n" +
 	"public_key\x18\x02 \x01(\fR\tpublicKey\x12\x1c\n" +
-	"\tsignature\x18\x03 \x01(\fR\tsignature\"\xb7\x01\n" +
+	"\tsignature\x18\x03 \x01(\fR\tsignature\x12+\n" +
+	"\x02v2\x18\x04 \x01(\v2\x1b.qv.mpcparty.v1.AdminAuthV2R\x02v2\"\xbf\x01\n" +
+	"\vAdminAuthV2\x12\x16\n" +
+	"\x06domain\x18\x01 \x01(\tR\x06domain\x12\x1f\n" +
+	"\vissued_unix\x18\x02 \x01(\x03R\n" +
+	"issuedUnix\x12!\n" +
+	"\fexpires_unix\x18\x03 \x01(\x03R\vexpiresUnix\x12\x14\n" +
+	"\x05nonce\x18\x04 \x01(\fR\x05nonce\x12>\n" +
+	"\n" +
+	"signatures\x18\x05 \x03(\v2\x1e.qv.mpcparty.v1.AdminSignatureR\n" +
+	"signatures\"M\n" +
+	"\x0eAdminSignature\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\fR\tpublicKey\x12\x1c\n" +
+	"\tsignature\x18\x02 \x01(\fR\tsignature\"\xb7\x01\n" +
 	"\n" +
 	"DKGRequest\x12\x1b\n" +
 	"\tkeyset_id\x18\x01 \x01(\tR\bkeysetId\x12+\n" +
@@ -1993,7 +2150,7 @@ func file_mpcparty_v1_mpcparty_proto_rawDescGZIP() []byte {
 }
 
 var file_mpcparty_v1_mpcparty_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_mpcparty_v1_mpcparty_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_mpcparty_v1_mpcparty_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_mpcparty_v1_mpcparty_proto_goTypes = []any{
 	(Curve)(0),               // 0: qv.mpcparty.v1.Curve
 	(Algorithm)(0),           // 1: qv.mpcparty.v1.Algorithm
@@ -2002,66 +2159,70 @@ var file_mpcparty_v1_mpcparty_proto_goTypes = []any{
 	(FrameKind)(0),           // 4: qv.mpcparty.v1.FrameKind
 	(Op)(0),                  // 5: qv.mpcparty.v1.Op
 	(*AdminAuth)(nil),        // 6: qv.mpcparty.v1.AdminAuth
-	(*DKGRequest)(nil),       // 7: qv.mpcparty.v1.DKGRequest
-	(*DKGResponse)(nil),      // 8: qv.mpcparty.v1.DKGResponse
-	(*NodeRequest)(nil),      // 9: qv.mpcparty.v1.NodeRequest
-	(*NodeResponse)(nil),     // 10: qv.mpcparty.v1.NodeResponse
-	(*DeriveRequest)(nil),    // 11: qv.mpcparty.v1.DeriveRequest
-	(*DeriveResponse)(nil),   // 12: qv.mpcparty.v1.DeriveResponse
-	(*SignRequest)(nil),      // 13: qv.mpcparty.v1.SignRequest
-	(*SignResponse)(nil),     // 14: qv.mpcparty.v1.SignResponse
-	(*RefreshRequest)(nil),   // 15: qv.mpcparty.v1.RefreshRequest
-	(*RefreshResponse)(nil),  // 16: qv.mpcparty.v1.RefreshResponse
-	(*UnfreezeRequest)(nil),  // 17: qv.mpcparty.v1.UnfreezeRequest
-	(*UnfreezeResponse)(nil), // 18: qv.mpcparty.v1.UnfreezeResponse
-	(*KeysetStatus)(nil),     // 19: qv.mpcparty.v1.KeysetStatus
-	(*PeerStatus)(nil),       // 20: qv.mpcparty.v1.PeerStatus
-	(*HealthRequest)(nil),    // 21: qv.mpcparty.v1.HealthRequest
-	(*HealthResponse)(nil),   // 22: qv.mpcparty.v1.HealthResponse
-	(*ErrorDetail)(nil),      // 23: qv.mpcparty.v1.ErrorDetail
-	(*Frame)(nil),            // 24: qv.mpcparty.v1.Frame
-	(*Open)(nil),             // 25: qv.mpcparty.v1.Open
-	(*Fin)(nil),              // 26: qv.mpcparty.v1.Fin
+	(*AdminAuthV2)(nil),      // 7: qv.mpcparty.v1.AdminAuthV2
+	(*AdminSignature)(nil),   // 8: qv.mpcparty.v1.AdminSignature
+	(*DKGRequest)(nil),       // 9: qv.mpcparty.v1.DKGRequest
+	(*DKGResponse)(nil),      // 10: qv.mpcparty.v1.DKGResponse
+	(*NodeRequest)(nil),      // 11: qv.mpcparty.v1.NodeRequest
+	(*NodeResponse)(nil),     // 12: qv.mpcparty.v1.NodeResponse
+	(*DeriveRequest)(nil),    // 13: qv.mpcparty.v1.DeriveRequest
+	(*DeriveResponse)(nil),   // 14: qv.mpcparty.v1.DeriveResponse
+	(*SignRequest)(nil),      // 15: qv.mpcparty.v1.SignRequest
+	(*SignResponse)(nil),     // 16: qv.mpcparty.v1.SignResponse
+	(*RefreshRequest)(nil),   // 17: qv.mpcparty.v1.RefreshRequest
+	(*RefreshResponse)(nil),  // 18: qv.mpcparty.v1.RefreshResponse
+	(*UnfreezeRequest)(nil),  // 19: qv.mpcparty.v1.UnfreezeRequest
+	(*UnfreezeResponse)(nil), // 20: qv.mpcparty.v1.UnfreezeResponse
+	(*KeysetStatus)(nil),     // 21: qv.mpcparty.v1.KeysetStatus
+	(*PeerStatus)(nil),       // 22: qv.mpcparty.v1.PeerStatus
+	(*HealthRequest)(nil),    // 23: qv.mpcparty.v1.HealthRequest
+	(*HealthResponse)(nil),   // 24: qv.mpcparty.v1.HealthResponse
+	(*ErrorDetail)(nil),      // 25: qv.mpcparty.v1.ErrorDetail
+	(*Frame)(nil),            // 26: qv.mpcparty.v1.Frame
+	(*Open)(nil),             // 27: qv.mpcparty.v1.Open
+	(*Fin)(nil),              // 28: qv.mpcparty.v1.Fin
 }
 var file_mpcparty_v1_mpcparty_proto_depIdxs = []int32{
-	0,  // 0: qv.mpcparty.v1.DKGRequest.curve:type_name -> qv.mpcparty.v1.Curve
-	6,  // 1: qv.mpcparty.v1.DKGRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
-	2,  // 2: qv.mpcparty.v1.DKGRequest.scheme:type_name -> qv.mpcparty.v1.Scheme
-	1,  // 3: qv.mpcparty.v1.SignRequest.algorithm:type_name -> qv.mpcparty.v1.Algorithm
-	6,  // 4: qv.mpcparty.v1.RefreshRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
-	6,  // 5: qv.mpcparty.v1.UnfreezeRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
-	2,  // 6: qv.mpcparty.v1.KeysetStatus.scheme:type_name -> qv.mpcparty.v1.Scheme
-	19, // 7: qv.mpcparty.v1.HealthResponse.keysets:type_name -> qv.mpcparty.v1.KeysetStatus
-	20, // 8: qv.mpcparty.v1.HealthResponse.peers:type_name -> qv.mpcparty.v1.PeerStatus
-	3,  // 9: qv.mpcparty.v1.ErrorDetail.kind:type_name -> qv.mpcparty.v1.ErrorKind
-	4,  // 10: qv.mpcparty.v1.Frame.kind:type_name -> qv.mpcparty.v1.FrameKind
-	5,  // 11: qv.mpcparty.v1.Open.op:type_name -> qv.mpcparty.v1.Op
-	0,  // 12: qv.mpcparty.v1.Open.curve:type_name -> qv.mpcparty.v1.Curve
-	1,  // 13: qv.mpcparty.v1.Open.algorithm:type_name -> qv.mpcparty.v1.Algorithm
-	6,  // 14: qv.mpcparty.v1.Open.admin:type_name -> qv.mpcparty.v1.AdminAuth
-	2,  // 15: qv.mpcparty.v1.Open.scheme:type_name -> qv.mpcparty.v1.Scheme
-	3,  // 16: qv.mpcparty.v1.Fin.kind:type_name -> qv.mpcparty.v1.ErrorKind
-	7,  // 17: qv.mpcparty.v1.MpcParty.DKG:input_type -> qv.mpcparty.v1.DKGRequest
-	9,  // 18: qv.mpcparty.v1.MpcParty.Node:input_type -> qv.mpcparty.v1.NodeRequest
-	11, // 19: qv.mpcparty.v1.MpcParty.Derive:input_type -> qv.mpcparty.v1.DeriveRequest
-	13, // 20: qv.mpcparty.v1.MpcParty.Sign:input_type -> qv.mpcparty.v1.SignRequest
-	15, // 21: qv.mpcparty.v1.MpcParty.Refresh:input_type -> qv.mpcparty.v1.RefreshRequest
-	21, // 22: qv.mpcparty.v1.MpcParty.Health:input_type -> qv.mpcparty.v1.HealthRequest
-	17, // 23: qv.mpcparty.v1.MpcParty.Unfreeze:input_type -> qv.mpcparty.v1.UnfreezeRequest
-	24, // 24: qv.mpcparty.v1.Peer.Session:input_type -> qv.mpcparty.v1.Frame
-	8,  // 25: qv.mpcparty.v1.MpcParty.DKG:output_type -> qv.mpcparty.v1.DKGResponse
-	10, // 26: qv.mpcparty.v1.MpcParty.Node:output_type -> qv.mpcparty.v1.NodeResponse
-	12, // 27: qv.mpcparty.v1.MpcParty.Derive:output_type -> qv.mpcparty.v1.DeriveResponse
-	14, // 28: qv.mpcparty.v1.MpcParty.Sign:output_type -> qv.mpcparty.v1.SignResponse
-	16, // 29: qv.mpcparty.v1.MpcParty.Refresh:output_type -> qv.mpcparty.v1.RefreshResponse
-	22, // 30: qv.mpcparty.v1.MpcParty.Health:output_type -> qv.mpcparty.v1.HealthResponse
-	18, // 31: qv.mpcparty.v1.MpcParty.Unfreeze:output_type -> qv.mpcparty.v1.UnfreezeResponse
-	24, // 32: qv.mpcparty.v1.Peer.Session:output_type -> qv.mpcparty.v1.Frame
-	25, // [25:33] is the sub-list for method output_type
-	17, // [17:25] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	7,  // 0: qv.mpcparty.v1.AdminAuth.v2:type_name -> qv.mpcparty.v1.AdminAuthV2
+	8,  // 1: qv.mpcparty.v1.AdminAuthV2.signatures:type_name -> qv.mpcparty.v1.AdminSignature
+	0,  // 2: qv.mpcparty.v1.DKGRequest.curve:type_name -> qv.mpcparty.v1.Curve
+	6,  // 3: qv.mpcparty.v1.DKGRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
+	2,  // 4: qv.mpcparty.v1.DKGRequest.scheme:type_name -> qv.mpcparty.v1.Scheme
+	1,  // 5: qv.mpcparty.v1.SignRequest.algorithm:type_name -> qv.mpcparty.v1.Algorithm
+	6,  // 6: qv.mpcparty.v1.RefreshRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
+	6,  // 7: qv.mpcparty.v1.UnfreezeRequest.admin:type_name -> qv.mpcparty.v1.AdminAuth
+	2,  // 8: qv.mpcparty.v1.KeysetStatus.scheme:type_name -> qv.mpcparty.v1.Scheme
+	21, // 9: qv.mpcparty.v1.HealthResponse.keysets:type_name -> qv.mpcparty.v1.KeysetStatus
+	22, // 10: qv.mpcparty.v1.HealthResponse.peers:type_name -> qv.mpcparty.v1.PeerStatus
+	3,  // 11: qv.mpcparty.v1.ErrorDetail.kind:type_name -> qv.mpcparty.v1.ErrorKind
+	4,  // 12: qv.mpcparty.v1.Frame.kind:type_name -> qv.mpcparty.v1.FrameKind
+	5,  // 13: qv.mpcparty.v1.Open.op:type_name -> qv.mpcparty.v1.Op
+	0,  // 14: qv.mpcparty.v1.Open.curve:type_name -> qv.mpcparty.v1.Curve
+	1,  // 15: qv.mpcparty.v1.Open.algorithm:type_name -> qv.mpcparty.v1.Algorithm
+	6,  // 16: qv.mpcparty.v1.Open.admin:type_name -> qv.mpcparty.v1.AdminAuth
+	2,  // 17: qv.mpcparty.v1.Open.scheme:type_name -> qv.mpcparty.v1.Scheme
+	3,  // 18: qv.mpcparty.v1.Fin.kind:type_name -> qv.mpcparty.v1.ErrorKind
+	9,  // 19: qv.mpcparty.v1.MpcParty.DKG:input_type -> qv.mpcparty.v1.DKGRequest
+	11, // 20: qv.mpcparty.v1.MpcParty.Node:input_type -> qv.mpcparty.v1.NodeRequest
+	13, // 21: qv.mpcparty.v1.MpcParty.Derive:input_type -> qv.mpcparty.v1.DeriveRequest
+	15, // 22: qv.mpcparty.v1.MpcParty.Sign:input_type -> qv.mpcparty.v1.SignRequest
+	17, // 23: qv.mpcparty.v1.MpcParty.Refresh:input_type -> qv.mpcparty.v1.RefreshRequest
+	23, // 24: qv.mpcparty.v1.MpcParty.Health:input_type -> qv.mpcparty.v1.HealthRequest
+	19, // 25: qv.mpcparty.v1.MpcParty.Unfreeze:input_type -> qv.mpcparty.v1.UnfreezeRequest
+	26, // 26: qv.mpcparty.v1.Peer.Session:input_type -> qv.mpcparty.v1.Frame
+	10, // 27: qv.mpcparty.v1.MpcParty.DKG:output_type -> qv.mpcparty.v1.DKGResponse
+	12, // 28: qv.mpcparty.v1.MpcParty.Node:output_type -> qv.mpcparty.v1.NodeResponse
+	14, // 29: qv.mpcparty.v1.MpcParty.Derive:output_type -> qv.mpcparty.v1.DeriveResponse
+	16, // 30: qv.mpcparty.v1.MpcParty.Sign:output_type -> qv.mpcparty.v1.SignResponse
+	18, // 31: qv.mpcparty.v1.MpcParty.Refresh:output_type -> qv.mpcparty.v1.RefreshResponse
+	24, // 32: qv.mpcparty.v1.MpcParty.Health:output_type -> qv.mpcparty.v1.HealthResponse
+	20, // 33: qv.mpcparty.v1.MpcParty.Unfreeze:output_type -> qv.mpcparty.v1.UnfreezeResponse
+	26, // 34: qv.mpcparty.v1.Peer.Session:output_type -> qv.mpcparty.v1.Frame
+	27, // [27:35] is the sub-list for method output_type
+	19, // [19:27] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_mpcparty_v1_mpcparty_proto_init() }
@@ -2075,7 +2236,7 @@ func file_mpcparty_v1_mpcparty_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mpcparty_v1_mpcparty_proto_rawDesc), len(file_mpcparty_v1_mpcparty_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   21,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

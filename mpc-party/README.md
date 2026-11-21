@@ -200,7 +200,7 @@ pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Create the SoftHSM toke
 
 `metrics_listen` (optional): a plain-HTTP, read-only endpoint (`GET /metrics` only) with the party's failure counters, `qv_mpc_party_session_failures_total{party,side,op,peer,kind}` (`peer` is the suspected party, `none` when no single party is involved; every series starts at 0). Counts only: no keyset id, job id or any secret, and nothing in the party reads them back. Bind it to an address that only the monitoring host reaches. The rules and alerts are in `monitoring/mpc-blame.rules.yml`; the runbook is `docs/runbooks/mpc-failures.md`.
 
-`admin_keys` (required): operators' Ed25519 public keys. `DKG`, `Refresh` and `Unfreeze` carry an `AdminAuth` (a signature over `op, keyset, timestamp`, see `api/admin`) that BOTH parties verify against their own list; the timestamp must be within `admin_max_age_seconds` (300) and a signature works once.
+`admin_keys` (required): the admins' Ed25519 public keys, no key twice. `DKG`, `Refresh` and `Unfreeze` carry an `AdminAuth` that EVERY party that takes part verifies against its own list. **v2** (`api/admin`): signatures of at least `admin_threshold` distinct admin keys over one message that binds the operation, the keyset, `admin_domain`, the hash of the whole request body (every field but the `AdminAuth`, by reflection: a field added later is covered), the issue and expiry time and a nonce; a party rebuilds the message from the call it received. An unknown key, a key twice, a bad signature, an expired or too long-lived authorization (`admin_max_validity_seconds`, default 3600; issue time at most `admin_max_age_seconds`, 300, ahead of the clock) refuses the whole thing. `admin_threshold` unset: one signature is enough and the old **v1** format (one signature over operation, keyset and time) is still accepted; set, v1 is refused unless `admin_allow_v1` is true (roll-over only; each v1 acceptance is logged and counted in `qv_mpc_party_admin_auth_accepted_total{version="v1"}`). `admin_domain` names the deployment (the same on every party). See `docs/runbooks/key-ceremony.md`.
 
 Optional `limits`: `recv_timeout_ms` (5000), `session_timeout_ms` (30000), `max_peer_sessions` (2 x cores),
 `max_frame_bytes` (1 MiB; the largest DKG message measured is about 39 KB), `sessions_per_sec_key` (200),
@@ -235,9 +235,9 @@ duration, outcome, kind); no secrets.
   (`data_dir/freeze`). A frozen keyset refuses `Sign`, `Derive` and `Refresh` with kind `FROZEN`; `Unfreeze` needs an operator
   signature checked by both parties and is logged as `AUDIT keyset unfrozen`. A malicious A can freeze a keyset by sending
   garbage (denial of service, not theft); that is the price of failing closed.
-- **Admin replay memory**: each party accepts an admin signature once and remembers it in `data_dir/admin-seen.json` (written and fsynced before
-  the operation runs, sealed under the attested sealer, dropped when the timestamp is two `admin_max_age_seconds` old), so a restart does not
-  reopen the window. Also, a request signed before the party's process started is refused, which covers a rolled-back or deleted file; an
+- **Admin replay memory**: each party accepts an admin authorization once and remembers it in `data_dir/admin-seen.json` (written and fsynced before
+  the operation runs, sealed under the attested sealer). A v2 authorization is remembered by the hash of its signed message (so one request is spent once whichever admins signed it, in whichever order) until it has expired; a v1 signature until its timestamp is two `admin_max_age_seconds` old. A restart does not
+  reopen the window. Also, a request issued before the party's process started is refused, which covers a rolled-back or deleted file; an
   operator clock ahead of the party's by more than the gap between signing and restart is the one case only the file catches. A crash after
   the record and before the operation leaves the request spent: sign a new one. If the file cannot be read (`seen set unreadable`), remove it
   and restart the party. Each party keeps its own memory: a replay that one party has forgotten is refused by the others, as a whole operation.
