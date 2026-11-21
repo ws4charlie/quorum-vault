@@ -132,16 +132,17 @@ m = {
     "signer": {"identity": "$IDENTITY", "issuer": "$ISSUER" if "$PUBLISH" == "1" else "", "sbom": "BuildKit SBOM (SPDX) and SLSA provenance attestations inside each image index"},
     "images": images,
     # The inputs of the attestation allowlist (docs/runbooks/tee-broker.md). Two different things, kept apart:
-    #  production: what real hardware will measure (task T7: PCR0 of the enclave image built from this digest). TODAY NOTHING CAN USE IT: this build has no
-    #              attester and refuses sealer.type "attested", so no party of this image can ask the broker for a key.
+    #  production: what real hardware will measure: the PCRs of the enclave image (EIF) built from this digest and the deployment's configuration, by
+    #              deploy/images/eif-build.sh (task T7-prep). The party of this image has the Nitro attester (attester.type "nitro", Linux). The path is written and
+    #              tested against fakes and has NOT run on Nitro hardware.
     #  simulated:  what the simulated enclave measures: the party built with -tags teesim, a DIFFERENT binary from the one in the image (different bytes, different
     #              measurement). It is never published (the release rules refuse a tee-sim image); it is built from the same commit, and two builders' copies
     #              are checked equal by build.sh repro.
     # The measured configuration (peer pins, caller pins, admin keys) differs per deployment, so no PCR0 is a build-time value: pcr0 is null on purpose.
     "partyMeasurement": {
         "production": {"image": "mpc-party", "digest": images.get("mpc-party", {}).get("digest"), "binary": "/usr/local/bin/mpc-party", "pcr0": None,
-                       "recipe": "real Nitro: PCR0 of the enclave image built from this digest, with the AWS tooling (task T7, not built)",
-                       "status": "unusable today: the production party has no attester and refuses sealer.type attested"},
+                       "recipe": "deploy/images/eif-build.sh --party-image <image>@<digest> --config-dir <the party's measured config> --out DIR --epoch <sourceDateEpoch>; then deploy/cloud/aws/nitro/nitro-cli-to-allowlist.py < DIR/nitro-cli.out",
+                       "status": "usable only on Nitro hardware, which has not been tried (docs/runbooks/nitro-first-run.md); per deployment and per architecture (the measured configuration is part of the image)"},
         "simulated": {"image": None, "binary": "mpc-party-teesim (stage bins of deploy/images/Dockerfile, built with -tags teesim from this commit; never published)", "pcr0": None,
                       "formula": "sha384(len8(binary) || binary || len8(config) || config)",
                       "recipe": "docker buildx build -f deploy/images/Dockerfile --target bins --output type=local,dest=bins . && deploy/images/measure-release.py binary --binary bins/mpc-party-teesim --config <the party's measured config file>",

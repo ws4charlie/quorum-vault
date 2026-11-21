@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -19,6 +20,11 @@ type AllowEntry struct {
 	NotAfter    time.Time `json:"not_after"`         // the zero time: no end ("valid-until" is optional)
 	Version     string    `json:"version,omitempty"` // the release this measurement belongs to (informational, signed), e.g. v1.4.0
 	Status      string    `json:"status,omitempty"`  // "active" (default) or "revoked": a revoked entry refuses its measurement whatever other entries say
+	// PCRs makes the entry a Nitro entry (task T7-prep): more PCRs of the enclave image that must equal the evidence's, besides PCR0 (Measurement). Keys are
+	// the PCR numbers ("1" kernel and boot, "2" application, "8" the image signing certificate), values lower-case hex. The same set is what the KMS key
+	// policy of the enclave key requires (deploy/images/nitro-allowlist-to-tfvars.py), so the broker's allowlist and KMS cannot disagree about an image.
+	// An entry without PCRs is matched on PCR0 alone, as before; its signed bytes are unchanged.
+	PCRs map[string]string `json:"pcrs,omitempty"`
 }
 
 // Entry status values.
@@ -30,17 +36,18 @@ const (
 var versionRE = regexp.MustCompile(`^[A-Za-z0-9._+-]{1,64}$`)
 
 type allowEntryJSON struct {
-	Party       string     `json:"party"`
-	Measurement string     `json:"measurement"`
-	NotBefore   time.Time  `json:"not_before"`
-	NotAfter    *time.Time `json:"not_after,omitempty"`
-	Version     string     `json:"version,omitempty"`
-	Status      string     `json:"status,omitempty"`
+	Party       string            `json:"party"`
+	Measurement string            `json:"measurement"`
+	NotBefore   time.Time         `json:"not_before"`
+	NotAfter    *time.Time        `json:"not_after,omitempty"`
+	Version     string            `json:"version,omitempty"`
+	Status      string            `json:"status,omitempty"`
+	PCRs        map[string]string `json:"pcrs,omitempty"`
 }
 
 // MarshalJSON leaves not_after out when there is none.
 func (e AllowEntry) MarshalJSON() ([]byte, error) {
-	j := allowEntryJSON{e.Party, e.Measurement, e.NotBefore, nil, e.Version, e.Status}
+	j := allowEntryJSON{e.Party, e.Measurement, e.NotBefore, nil, e.Version, e.Status, e.PCRs}
 	if !e.NotAfter.IsZero() {
 		j.NotAfter = &e.NotAfter
 	}
@@ -60,7 +67,7 @@ func (e *AllowEntry) UnmarshalJSON(b []byte) error {
 	if dec.More() {
 		return errors.New("attest: allowlist entry: trailing data")
 	}
-	*e = AllowEntry{Party: j.Party, Measurement: j.Measurement, NotBefore: j.NotBefore, Version: j.Version, Status: j.Status}
+	*e = AllowEntry{Party: j.Party, Measurement: j.Measurement, NotBefore: j.NotBefore, Version: j.Version, Status: j.Status, PCRs: j.PCRs}
 	if j.NotAfter != nil {
 		e.NotAfter = *j.NotAfter
 	}
@@ -83,7 +90,35 @@ func validEntry(e AllowEntry, partyOK func(string) bool) ([]byte, bool) {
 	case e.Version != "" && !versionRE.MatchString(e.Version):
 		return nil, false
 	}
+	if _, ok := pcrBytes(e.PCRs); !ok {
+		return nil, false
+	}
 	return m, true
+}
+
+// pcrBytes decodes an entry's extra PCRs. A valid set has keys "1".."31" (PCR0 is Measurement) and values of 32, 48 or 64 bytes of hex.
+func pcrBytes(p map[string]string) (map[int][]byte, bool) {
+	out := make(map[int][]byte, len(p))
+	for k, v := range p {
+		n, err := strconv.Atoi(k)
+		b, herr := hex.DecodeString(v)
+		if err != nil || n < 1 || n >= maxPCRs || strconv.Itoa(n) != k || herr != nil || (len(b) != 32 && len(b) != 48 && len(b) != 64) {
+			return nil, false
+		}
+		out[n] = b
+	}
+	return out, true
+}
+
+// pcrsMatch reports whether every extra PCR of the entry equals the evidence's.
+func pcrsMatch(p map[string]string, c *Claims) bool {
+	want, _ := pcrBytes(p) // validated before
+	for n, b := range want {
+		if !bytes.Equal(c.Measurements[n], b) {
+			return false
+		}
+	}
+	return true
 }
 
 // Reason says why an allowlist check refused.
@@ -152,7 +187,7 @@ func CheckAllowlist(c *Claims, party string, entries []AllowEntry, now time.Time
 			continue
 		}
 		partyListed = true
-		if !bytes.Equal(want, pcr0) {
+		if !bytes.Equal(want, pcr0) || !pcrsMatch(e.PCRs, c) {
 			continue
 		}
 		measurementListed = true

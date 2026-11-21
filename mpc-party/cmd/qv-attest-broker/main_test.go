@@ -144,3 +144,28 @@ func TestToolRefusesUnknownFields(t *testing.T) {
 		t.Error("a signed copy of the bad file was written")
 	}
 }
+
+// A Nitro image enters the list with its further PCRs (nitro-cli build-enclave prints them); they are in the file, in what the operators sign, and a
+// malformed one is refused at once.
+func TestAllowlistAddNitroPCRs(t *testing.T) {
+	dir := t.TempDir()
+	p := func(n string) string { return filepath.Join(dir, n) }
+	if out, code := runCLI(t, "allowlist", "new", "-seq", "1", "-out", p("l1.json"), "-entry", "A,"+strings.Repeat("ab", 48)+",2026-01-01T00:00:00Z,"); code != 0 {
+		t.Fatalf("new: %s", out)
+	}
+	m, p1, p2 := strings.Repeat("cd", 48), strings.Repeat("11", 48), strings.Repeat("2f", 48)
+	out, code := runCLI(t, "allowlist", "add", "-in", p("l1.json"), "-out", p("l2.json"), "-party", "A", "-measurement", m, "-version", "v2",
+		"-pcr", "1="+p1, "-pcr", "2="+strings.ToUpper(p2))
+	if code != 0 {
+		t.Fatalf("add: %s", out)
+	}
+	b, _ := os.ReadFile(p("l2.json"))
+	if !strings.Contains(string(b), `"pcrs"`) || !strings.Contains(string(b), p2) || strings.Contains(string(b), strings.ToUpper(p2)) {
+		t.Fatalf("the PCRs are not in the file in lower case: %s", b)
+	}
+	for _, bad := range []string{"1", "0=" + p1, "3=zz", "2=" + p1[:90]} {
+		if _, code := runCLI(t, "allowlist", "add", "-in", p("l1.json"), "-out", p("x.json"), "-party", "A", "-measurement", m, "-pcr", bad); code == 0 {
+			t.Fatalf("-pcr %q accepted", bad)
+		}
+	}
+}
