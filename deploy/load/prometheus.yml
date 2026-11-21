@@ -1,0 +1,9 @@
+# Scrapes what a load run exposes: the generator and the stack's sampler (written by e2e/custody/load_test.go as file_sd targets).
+global:
+  scrape_interval: 2s
+  evaluation_interval: 5s
+scrape_configs:
+  - job_name: load
+    file_sd_configs:
+      - files: ["/targets/*.json"]
+        refresh_interval: 5s

@@ -1,0 +1,49 @@
+{
+  "name": "evm-closed",
+  "note": "The same mix with a fixed number of users who wait for the last operation to end before they start the next: for comparison with the open loop. A slow system shows as a lower rate, not as a longer latency under growing load. A deposit ends for its user when it is credited; the sweep is checked afterwards.",
+  "seed": 14,
+  "mode": "closed",
+  "concurrency": 16,
+  "setup": {
+    "withdraw_customers": 60,
+    "fund_each_eth": 40,
+    "deposit_customers": 64
+  },
+  "ramp_s": 0,
+  "hold_s": 60,
+  "drain_s": 120,
+  "background_reconcile_s": 10,
+  "streams": [
+    {
+      "op": "deposit",
+      "rate": 2,
+      "amount_eth": [
+        0.05,
+        2
+      ],
+      "until": "credited"
+    },
+    {
+      "op": "withdraw",
+      "tier": "auto",
+      "rate": 3,
+      "amount_eth": [
+        0.001,
+        0.05
+      ]
+    },
+    {
+      "op": "withdraw",
+      "tier": "two",
+      "rate": 0.2,
+      "amount_eth": [
+        1,
+        1.5
+      ]
+    }
+  ],
+  "objectives": {
+    "withdraw_p95_ms": 5000,
+    "error_rate": 0.001
+  }
+}

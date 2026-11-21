@@ -1,0 +1,42 @@
+{
+  "name": "evm-withdraw",
+  "note": "Only auto-approved withdrawals: the signing path (workflow, sign job, two-party signature, broadcast, settlement) without the deposit side. Rates rise in steps.",
+  "seed": 12,
+  "mode": "open",
+  "setup": {
+    "withdraw_customers": 80,
+    "fund_each_eth": 60,
+    "deposit_customers": 0
+  },
+  "ramp_s": 5,
+  "step_s": 30,
+  "steps": [
+    1,
+    2,
+    3,
+    4,
+    6,
+    8
+  ],
+  "drain_s": 120,
+  "background_reconcile_s": 10,
+  "streams": [
+    {
+      "op": "withdraw",
+      "tier": "auto",
+      "rate": 1,
+      "amount_eth": [
+        0.001,
+        0.05
+      ]
+    }
+  ],
+  "objectives": {
+    "withdraw_p95_ms": 5000,
+    "approved_to_broadcast_p95_ms": 3000,
+    "error_rate": 0.001,
+    "achieved_of_offered": 0.99
+  },
+  "max_inflight": 200,
+  "settle_s": 900
+}

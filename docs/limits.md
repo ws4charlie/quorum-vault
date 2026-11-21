@@ -7,7 +7,7 @@ Here's what QuorumVault can't do yet, so you don't have to find out the hard way
 **Not run for real**
 - **Local chains only.** Tests run against a local EVM node, Bitcoin regtest and a local Solana validator. Nothing has met a real fee market, a deep reorganisation or a congested network.
 - **No testnet or mainnet use.** Do not point it at real funds or real keys.
-- **No load test.** Numbers were measured on a laptop, not on target hardware ([measurements](measurements)).
+- **Load tested on one laptop only.** A local load test exists ([results](measurements/load-local.md)), with local chains, SoftHSM and every process on one machine. There is no run on a cluster, with real network delay, with a hardware HSM or on a real chain, so no figure is a capacity plan.
 - **No real cluster has run the charts.** The four-cluster shape is a design, checked by tests ([Deployment](deployment.md)).
 - **The first image release has not been made.** Images are built and checked, not published.
 - **Restore is drilled on one machine,** not across sites.

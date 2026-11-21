@@ -1,0 +1,51 @@
+{
+  "name": "evm-kind",
+  "note": "The auto-approved withdrawals and deposits of evm-mixed against the kind lane's pods (no people approvers there). Steps are low: the pods run on one node next to Keycloak, Temporal and the databases.",
+  "seed": 21,
+  "mode": "open",
+  "setup": {
+    "withdraw_customers": 30,
+    "fund_each_eth": 20,
+    "deposit_customers": 200
+  },
+  "ramp_s": 5,
+  "step_s": 40,
+  "steps": [
+    0.25,
+    0.5,
+    1,
+    1.5,
+    2
+  ],
+  "drain_s": 120,
+  "settle_s": 900,
+  "max_inflight": 150,
+  "background_reconcile_s": 10,
+  "streams": [
+    {
+      "op": "deposit",
+      "rate": 2,
+      "amount_eth": [
+        0.05,
+        2
+      ]
+    },
+    {
+      "op": "withdraw",
+      "tier": "auto",
+      "rate": 2.3,
+      "amount_eth": [
+        0.001,
+        0.05
+      ]
+    }
+  ],
+  "objectives": {
+    "withdraw_p95_ms": 5000,
+    "approved_to_broadcast_p95_ms": 3000,
+    "deposit_credit_p95_ms": 5000,
+    "sweep_p95_ms": 30000,
+    "error_rate": 0.001,
+    "achieved_of_offered": 0.99
+  }
+}
