@@ -205,6 +205,8 @@ func (d *Decider) btcGenRules(ctx context.Context, gt *GuardTx, kv *KeysetView, 
 		switch e.State {
 		case partition.StateActive, partition.StateDraining:
 			return nil // the cancel of work already signed
+		case partition.StateCompromised:
+			return d.btcCompromisedCancel(ctx, gt, tree, cc, e, label, i, info, known, now)
 		}
 		return reject(ReasonKeyset, "%s is %s: it signs no cancel", label, e.State)
 	}

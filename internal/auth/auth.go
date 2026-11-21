@@ -145,6 +145,8 @@ type Authenticator struct {
 
 	svcCert *serviceCert // when set, a service (client-credentials) caller must also present an allow-listed client certificate
 
+	sigs *sigCache // tokens whose signature was verified, for at most sigCacheTTL
+
 	mu        sync.Mutex
 	keys      *jose.JSONWebKeySet
 	fetchedAt time.Time
@@ -210,7 +212,7 @@ func New(cfg Config, env Environment, devActorHeader bool) (*Authenticator, erro
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	a := &Authenticator{cfg: cfg, env: env, dev: devActorHeader, jwksURL: cfg.JWKSURL, services: map[string]bool{}, roleMap: map[string]Role{}}
+	a := &Authenticator{cfg: cfg, env: env, dev: devActorHeader, jwksURL: cfg.JWKSURL, sigs: newSigCache(), services: map[string]bool{}, roleMap: map[string]Role{}}
 	for _, c := range cfg.ServiceClients {
 		a.services[c] = true
 	}
