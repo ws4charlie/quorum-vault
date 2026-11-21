@@ -262,7 +262,14 @@ func (s *Service) ExportRefill(ctx context.Context, id string) (coldsign.Request
 		return coldsign.RequestFile{}, perr
 	}
 	var req coldsign.Request
-	if r.Kind != RefillKind {
+	if r.Kind == coldsign.KindColdMove {
+		var err error
+		if req, err = s.coldMoveRequest(ctx, r, nonce, tip, maxFee); err != nil {
+			return coldsign.RequestFile{}, err
+		}
+		// "Everything" is known only now (the balance and the fee): the row carries what the request moves.
+		r.Amount, _ = new(big.Int).SetString(req.Amount, 10)
+	} else if r.Kind != RefillKind {
 		// A factory call: the offline tool builds the calldata from Kind and Param; Current is what the node says the value is now.
 		cur, err := s.factoryCurrent(ctx, rc, r.Kind)
 		if err != nil {
@@ -292,7 +299,8 @@ func (s *Service) ExportRefill(ctx context.Context, id string) (coldsign.Request
 		req.Revision = cur.Revision + 1
 		out = req.File()
 		b, _ := json.Marshal(req)
-		if _, err = tx.Exec(ctx, `UPDATE refills SET revision=$2, request=$3::jsonb, request_hash=$4, updated_at=now() WHERE id=$1`, id, req.Revision, string(b), out.RequestHash); err != nil {
+		if _, err = tx.Exec(ctx, `UPDATE refills SET revision=$2, request=$3::jsonb, request_hash=$4, amount=CASE WHEN kind='cold-move' THEN $5::numeric ELSE amount END, updated_at=now() WHERE id=$1`,
+			id, req.Revision, string(b), out.RequestHash, r.Amount.String()); err != nil {
 			return err
 		}
 		return auditEvent(ctx, tx, id, "refill.exported", map[string]any{"kind": r.Kind, "revision": req.Revision, "request_hash": out.RequestHash})
@@ -389,6 +397,12 @@ func (s *Service) recordRefillBroadcast(ctx context.Context, id, txHash string) 
 func (s *Service) bookRefillBroadcast(ctx context.Context, tx pgx.Tx, r Refill, txHash string) error {
 	if r.Status != RefillSigned {
 		return nil
+	}
+	if r.Kind == coldsign.KindColdMove { // the funds stay in the cold books: nothing is booked until the fee at settlement
+		if _, err := tx.Exec(ctx, `UPDATE refills SET status='broadcast', tx_hash=$2, updated_at=now() WHERE id=$1`, r.ID, txHash); err != nil {
+			return err
+		}
+		return emit(ctx, tx, outbox.TopicColdMoves, r.ID, "cold_move.broadcast", map[string]any{"tx": txHash, "asset": r.Asset, "amount": r.Amount.String()})
 	}
 	if err := s.transfer(ctx, tx, "rf-bcast:"+r.ID, refillAcct(s.Cfg.Chain, r.Asset), coldAcct(r.PartitionID), r.Amount, map[string]any{"refill": r.ID, "tx": txHash}); err != nil {
 		return err
@@ -490,7 +504,12 @@ func (s *Service) SettleRefill(ctx context.Context, id string, reverted bool) er
 			}
 		}
 		final, evt, reason := RefillConfirmed, "refill.confirmed", ""
-		if reverted {
+		if r.Kind == coldsign.KindColdMove {
+			// Same books, new address: only the network fee, which the old cold address paid, is booked below.
+			if reverted {
+				final, evt, reason = RefillFailed, "refill.failed", "transaction reverted"
+			}
+		} else if reverted {
 			final, evt, reason = RefillFailed, "refill.failed", "transaction reverted"
 			if err := s.transfer(ctx, tx, "rf-back:"+id, coldAcct(r.PartitionID), refillAcct(s.Cfg.Chain, r.Asset), r.Amount, map[string]any{"refill": id}); err != nil {
 				return err
@@ -568,7 +587,7 @@ func (s *Service) bookColdSignerFee(ctx context.Context, tx pgx.Tx, r Refill, fe
 		return err
 	}
 	meta := map[string]any{"refill": r.ID, "kind": "cold_network_fee", "signer": r.ColdAddress}
-	if cold, cerr := s.Cfg.EVM.ColdAddress(nativePart, s.Cfg.Native); cerr == nil && strings.EqualFold(cold.Hex(), r.ColdAddress) {
+	if s.isColdSigner(nativePart, r.ColdAddress) {
 		return s.transfer(ctx, tx, "rf-fee:"+r.TxHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), coldAcct(nativePart), fee, meta)
 	}
 	return s.transfer(ctx, tx, "rf-fee:"+r.TxHash, feeAcct(s.Cfg.Chain, s.Cfg.Native), opFundAcct(s.Cfg.Chain, s.Cfg.Native), fee, meta)
@@ -741,6 +760,29 @@ func (s *Service) ExportBTCRefill(ctx context.Context, id string) (coldsign.BTCR
 		}
 		if err != nil {
 			return err
+		}
+		if cur.Kind == coldsign.KindColdMove && cur.Status == RefillRequested {
+			// A cold-to-cold move: every available output of the retiring cold address into one output at the new one. It has no change, so it is never
+			// fee-bumped: a move that does not confirm waits, and a new request is built only if it was never signed.
+			cm, ok := s.Chain.(chain.ColdMover)
+			if !ok {
+				return fmt.Errorf("%w: this chain cell cannot move a cold address", ErrInvalid)
+			}
+			pool, err := partitionPool(cur.PartitionID)
+			if err != nil {
+				return err
+			}
+			mreq, err := cm.BuildColdMove(ctx, id, cur.Revision+1, pool)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrInvalid, err)
+			}
+			out = mreq.File()
+			b, _ := json.Marshal(mreq)
+			if _, err = tx.Exec(ctx, `UPDATE refills SET revision=$2, request=$3::jsonb, request_hash=$4, amount=$5::numeric, updated_at=now() WHERE id=$1`,
+				id, mreq.Revision, string(b), out.RequestHash, new(big.Int).SetUint64(mreq.Outputs[0].Value).String()); err != nil {
+				return err
+			}
+			return auditEvent(ctx, tx, id, "refill.exported", map[string]any{"kind": cur.Kind, "revision": mreq.Revision, "request_hash": out.RequestHash})
 		}
 		if (cur.Status != RefillRequested && cur.Status != RefillBroadcast) || cur.Kind != RefillKind {
 			return fmt.Errorf("%w: refill %s is %s; only a request not yet signed, or a broadcast refill that is stuck, can be exported", ErrInvalid, id, cur.Status)

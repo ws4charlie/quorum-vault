@@ -69,6 +69,7 @@ func (a *API) Handler() http.Handler {
 	a.handle(mux, "POST /v2/cold/fundings", a.fundCold)
 	a.handle(mux, "POST /v2/cold/spends", a.spendCold)
 	a.handle(mux, "POST /v2/cold/actions", a.requestAction)
+	a.handle(mux, "POST /v2/cold/moves", a.requestColdMove)
 	a.handle(mux, "POST /v2/refills/{id}/close", a.closeRefill)
 	a.handle(mux, "POST /v2/cold-setup/export", a.exportColdSetup)
 	a.handle(mux, "POST /v2/cold-setup/submit", a.submitColdSetup)
@@ -656,6 +657,23 @@ func (a *API) requestAction(w http.ResponseWriter, r *http.Request) {
 	x, err := a.svc.RequestAction(r.Context(), body.Kind, body.Param, body.Signer)
 	if err != nil {
 		a.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, refillJSON(x))
+}
+
+// requestColdMove opens (or returns) the next cold-to-cold request of a cold key replacement; {"done":true} when the old address holds nothing more.
+func (a *API) requestColdMove(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.actor(w, r); !ok {
+		return
+	}
+	x, found, err := a.svc.RequestColdMove(r.Context())
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	if !found {
+		writeJSON(w, http.StatusOK, map[string]any{"done": true})
 		return
 	}
 	writeJSON(w, http.StatusCreated, refillJSON(x))

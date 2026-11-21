@@ -412,6 +412,7 @@ func (a *Adapter) spentByConfirmedAttempt(ctx context.Context, txid string, vout
 }
 
 var (
+	_ chain.ColdMover    = (*Adapter)(nil)
 	_ chain.MoveCapacity = (*Adapter)(nil)
 	_ chain.ChainViewer  = (*Adapter)(nil)
 	_ chain.ColdRefiller = (*Adapter)(nil)
@@ -663,4 +664,70 @@ func (a *Adapter) DropUnsentAttempt(ctx context.Context, id string) error {
 func (a *Adapter) coldCaps() FeeCaps {
 	c := a.caps()
 	return FeeCaps{MaxTxFeeSats: min(c.MaxTxFeeSats, a.cfg.MaxTxFeeSats), MaxFeeRate: min(c.MaxFeeRate, a.cfg.MaxFeeRate)}
+}
+
+// ColdRetiringAvailable is what the available outputs of the pool's retiring cold address hold.
+func (a *Adapter) ColdRetiringAvailable(ctx context.Context, pool string) (string, *big.Int, error) {
+	old, ok := a.oldBy[pool]
+	if !ok {
+		return "", nil, fmt.Errorf("btc: pool %q has no retiring cold address", pool)
+	}
+	v, err := a.ColdAvailable(ctx, old)
+	return old, v, err
+}
+
+// BuildColdMove builds the request of a cold-to-cold move: the oldest available outputs of the retiring cold address, at most max_inputs of them, into one
+// output at the new cold address. There is no change: everything moves, less the fee at the node's rate under the core's caps. A cold address with more
+// outputs than one transaction holds takes several moves, one after the other.
+func (a *Adapter) BuildColdMove(ctx context.Context, id string, revision int, pool string) (coldsign.BTCRequest, error) {
+	if err := a.refreshCaps(ctx); err != nil {
+		return coldsign.BTCRequest{}, err
+	}
+	old, ok := a.oldBy[pool]
+	if !ok {
+		return coldsign.BTCRequest{}, fmt.Errorf("btc: pool %q has no retiring cold address", pool)
+	}
+	cur, ok := a.coldBy[pool]
+	if !ok {
+		return coldsign.BTCRequest{}, fmt.Errorf("btc: pool %q has no cold address", pool)
+	}
+	rows, err := a.pool.Query(ctx, `SELECT txid, vout, value FROM btc_utxos WHERE chain=$1 AND cold AND address=$2 AND status='available' ORDER BY created_at, txid, vout LIMIT $3`,
+		a.cfg.Chain, old, a.cfg.MaxInputs)
+	if err != nil {
+		return coldsign.BTCRequest{}, err
+	}
+	var picked []utxo
+	var sum uint64
+	for rows.Next() {
+		var u utxo
+		var v int64
+		if err := rows.Scan(&u.txid, &u.vout, &v); err != nil {
+			rows.Close()
+			return coldsign.BTCRequest{}, err
+		}
+		u.value = uint64(v)
+		picked = append(picked, u)
+		sum += u.value
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return coldsign.BTCRequest{}, err
+	}
+	if len(picked) == 0 {
+		return coldsign.BTCRequest{}, fmt.Errorf("%w: no available output at the retiring cold address %s", chain.ErrNotEnoughOutputs, old)
+	}
+	vs := vsize(len(picked), scriptOrDummy(cur, a))
+	fee := vs * a.feeRate(ctx)
+	if sum <= fee+DustLimit(KindP2WPKH) {
+		return coldsign.BTCRequest{}, fmt.Errorf("%w: the outputs at %s (%d sats) do not cover the fee of %d sats and a payment", chain.ErrNotEnoughOutputs, old, sum, fee)
+	}
+	if fee > a.coldCaps().MaxTxFeeSats || fee > a.coldCaps().MaxFeeRate*vs {
+		return coldsign.BTCRequest{}, fmt.Errorf("%w: a fee of %d sats is above the core's caps (%d sats, %d sat/vB)", ErrFeeTooHigh, fee, a.coldCaps().MaxTxFeeSats, a.coldCaps().MaxFeeRate)
+	}
+	r := coldsign.BTCRequest{Version: coldsign.BTCRequestVersion, ID: id, Revision: revision, Network: a.cfg.Network, Chain: a.cfg.Chain, Pool: pool, From: old, Kind: coldsign.KindColdMove}
+	for _, u := range picked {
+		r.Inputs = append(r.Inputs, coldsign.BTCInput{TxID: u.txid, Vout: u.vout, Value: u.value, Address: old})
+	}
+	r.Outputs = []coldsign.BTCOutput{{Address: cur, Value: sum - fee}}
+	return r, nil
 }
