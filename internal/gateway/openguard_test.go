@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // An operator's tool opens the guard of a zone that is deciding. Opening must run no DDL when the schema is current: DDL takes table locks even when it changes
@@ -63,7 +65,16 @@ func TestOpenGuardOfACurrentSchemaTakesNoTableLock(t *testing.T) {
 // A database behind the schema (no marker, or another version) is brought to it, by one opener at a time, also when several start together; and a second
 // open then runs no DDL.
 func TestOpenGuardAppliesAMissingOrOldSchemaOnceUnderALock(t *testing.T) {
-	pool := newGuardDB(t)
+	// A small pool: an opener that waits for the schema lock holds a connection, so the one that holds the lock must never need another (CI's pool is small).
+	big := newGuardDB(t)
+	cfg := big.Config().Copy()
+	cfg.MaxConns = 2
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	big.Close() // the pool the helper made is not used again; the database stays until the helper's cleanup
 	var wg sync.WaitGroup
 	errs := make(chan error, 6)
 	for i := 0; i < 6; i++ {

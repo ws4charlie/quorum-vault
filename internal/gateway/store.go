@@ -89,6 +89,9 @@ func OpenGuard(ctx context.Context, pool *pgxpool.Pool) (*Guard, error) {
 
 func applyStoreSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	// Several instances may start at once on a fresh database: CREATE TYPE and friends race and fail. One at a time.
+	// Everything below runs on the ONE connection of this transaction: an opener that holds a connection while it waits for the lock must never need a second
+	// one from the pool to finish (a small pool, several openers at once, would deadlock). Checks and the marker use savepoints, so a refused statement
+	// does not abort the transaction.
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("gateway: apply store schema: %w", err)
@@ -97,24 +100,31 @@ func applyStoreSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('qv-guard-schema'))`); err != nil {
 		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
-	if schemaCurrent(ctx, pool) { // another opener finished while this one waited for the lock (read outside the transaction: a refused read must not abort it)
-		return nil
+	if sp, err := tx.Begin(ctx); err == nil { // another opener finished while this one waited for the lock
+		current := schemaCurrent(ctx, sp)
+		sp.Rollback(ctx)
+		if current {
+			return nil
+		}
 	}
 	if _, err := tx.Exec(ctx, storeSQL); err != nil {
 		return fmt.Errorf("gateway: apply store schema: %w", err)
 	}
+	// The marker is best effort: a role that may create tables but not write a marker table that belongs to another role must still open the guard, as it
+	// always did (the next open then applies the schema again).
+	if sp, err := tx.Begin(ctx); err == nil {
+		if _, err := sp.Exec(ctx, `CREATE TABLE IF NOT EXISTS guard_schema (id int PRIMARY KEY CHECK (id = 1), version text NOT NULL)`); err == nil {
+			if _, err := sp.Exec(ctx, `INSERT INTO guard_schema (id, version) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version`, storeVersion); err == nil {
+				sp.Commit(ctx)
+			} else {
+				sp.Rollback(ctx)
+			}
+		} else {
+			sp.Rollback(ctx)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("gateway: apply store schema: %w", err)
-	}
-	// The marker is written after the schema, best effort and in its own transaction: a role that may create tables but not write the marker (it belongs to
-	// another role) must still open the guard, as it always did; the next open then applies the schema again.
-	if tx, err := pool.Begin(ctx); err == nil {
-		defer tx.Rollback(context.Background())
-		if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS guard_schema (id int PRIMARY KEY CHECK (id = 1), version text NOT NULL)`); err == nil {
-			if _, err := tx.Exec(ctx, `INSERT INTO guard_schema (id, version) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version`, storeVersion); err == nil {
-				_ = tx.Commit(ctx)
-			}
-		}
 	}
 	return nil
 }
