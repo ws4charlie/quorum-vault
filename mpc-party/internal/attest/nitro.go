@@ -156,6 +156,35 @@ func (v *NitroVerifier) Verify(evidence []byte, expect Expect, now time.Time) (*
 	if len(expect.Nonce) == 0 {
 		return nil, fail(RuleExpectation, "an expected nonce is required")
 	}
+	claims, err := v.authenticate(evidence, now)
+	if err != nil {
+		return nil, err
+	}
+	// 7. Binding to the request. [NSM-API]: nonce is the relying party's replay defence, public_key what the response is encrypted to,
+	//    user_data protocol-defined content. All three are compared in constant time.
+	if len(claims.Nonce) == 0 {
+		return nil, fail(RuleNonce, "document has no nonce")
+	}
+	if !ctEqual(claims.Nonce, expect.Nonce) {
+		return nil, fail(RuleNonce, "nonce differs from the expected one")
+	}
+	if !ctEqual(claims.UserData, expect.UserData) {
+		return nil, fail(RuleUserData, "user_data differs from the expected one")
+	}
+	if len(claims.PublicKey) == 0 {
+		return nil, fail(RulePublicKey, "document has no public_key")
+	}
+	if len(expect.PublicKey) > 0 && !ctEqual(claims.PublicKey, expect.PublicKey) {
+		return nil, fail(RulePublicKey, "public_key differs from the expected one")
+	}
+	return claims, nil
+}
+
+// authenticate runs every rule that is about the document itself, not about the request: envelope, algorithm, fields, certificate chain to the
+// configured root, signature, freshness, debug mode. It stays unexported on purpose: only Verify (which then checks the binding) is the API,
+// and a document that passed authenticate alone is not yet evidence for anything. In-package tests use it to check a real AWS document that
+// carries no nonce or public key.
+func (v *NitroVerifier) authenticate(evidence []byte, now time.Time) (*Claims, error) {
 	if len(evidence) == 0 || len(evidence) > maxDocBytes {
 		return nil, fail(RuleFormat, "document is %d bytes (allowed 1..%d)", len(evidence), maxDocBytes)
 	}
@@ -222,23 +251,6 @@ func (v *NitroVerifier) Verify(evidence []byte, expect Expect, now time.Time) (*
 		return nil, fail(RuleDebug, "debug-mode document (all-zero PCRs)")
 	}
 
-	// 7. Binding to the request. [NSM-API]: nonce is the relying party's replay defence, public_key what the response is encrypted to,
-	//    user_data protocol-defined content. All three are compared in constant time.
-	if len(doc.Nonce) == 0 {
-		return nil, fail(RuleNonce, "document has no nonce")
-	}
-	if !ctEqual(doc.Nonce, expect.Nonce) {
-		return nil, fail(RuleNonce, "nonce differs from the expected one")
-	}
-	if !ctEqual(doc.UserData, expect.UserData) {
-		return nil, fail(RuleUserData, "user_data differs from the expected one")
-	}
-	if len(doc.PublicKey) == 0 {
-		return nil, fail(RulePublicKey, "document has no public_key")
-	}
-	if len(expect.PublicKey) > 0 && !ctEqual(doc.PublicKey, expect.PublicKey) {
-		return nil, fail(RulePublicKey, "public_key differs from the expected one")
-	}
 	return claims, nil
 }
 
