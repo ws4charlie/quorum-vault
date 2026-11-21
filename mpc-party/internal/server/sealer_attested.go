@@ -20,6 +20,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/attest"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/attest/brokerclient"
+	"github.com/ws4charlie/quorum-vault/mpc-party/internal/attest/kmsrelease"
 )
 
 // The attested sealer (research/TEE.md, task TEE-T3). The party holds NO long-lived key. At start it proves what it runs (evidence from an
@@ -171,8 +172,8 @@ func NewAttestedSealerWith(party string, api BrokerAPI, att attest.Attester, cal
 	return &AttestedSealer{party: party, api: api, att: att, callerPin: callerPin, log: log, keys: map[SealScope]*dataKey{}}, nil
 }
 
-// attesterFactories are registered by build-tagged files: the simulated attester only under -tags teesim; the Nitro device attester (task T7) will
-// register itself here. A production build today has none, so sealer.type "attested" refuses to start in it.
+// attesterFactories are registered by build-tagged files: the simulated attester only under -tags teesim; the Nitro device attester (sealer_attested_nitro.go,
+// Linux) registers itself here. The production build has "nitro" and no "mock".
 var attesterFactories = map[string]func(AttesterConfig) (attest.Attester, error){}
 
 // NewAttestedSealer reads the config: broker address and pinned key, the party's certificate for the link, and the attester.
@@ -188,13 +189,20 @@ func NewAttestedSealer(role string, c SealerConfig) (*AttestedSealer, error) {
 		}
 		sort.Strings(have)
 		if len(have) == 0 {
-			return nil, fmt.Errorf("sealer attested: attester %q is not available: this build contains no attester (the AWS Nitro attester is not built yet, task TEE-T7; the simulated one exists only in builds made with -tags teesim). A party with sealer.type \"attested\" refuses to start without one; it never falls back to another sealer", c.Attester.Type)
+			return nil, fmt.Errorf("sealer attested: attester %q is not available: this build contains no attester (the Nitro attester needs Linux; the simulated one exists only in builds made with -tags teesim). A party with sealer.type \"attested\" refuses to start without one; it never falls back to another sealer", c.Attester.Type)
 		}
 		return nil, fmt.Errorf("sealer attested: attester %q is not available in this build (have: %s)", c.Attester.Type, strings.Join(have, ", "))
 	}
 	att, err := f(c.Attester)
 	if err != nil {
 		return nil, fmt.Errorf("sealer attested: attester: %w", err)
+	}
+	if c.Release.Type == "kms" {
+		api, err := newKMSReleaser(c.Release.KMS)
+		if err != nil {
+			return nil, err
+		}
+		return NewAttestedSealerWith(role, api, att, [32]byte{}, slog.Default()) // no broker link, so no TLS pin to bind: KMS binds by encryption context
 	}
 	cert, err := tls.LoadX509KeyPair(c.BrokerCertFile, c.BrokerKeyFile)
 	if err != nil {
@@ -241,6 +249,15 @@ func (e *brokerError) Allowlist() bool { return strings.HasPrefix(e.Code, "allow
 
 // classify turns any error of an exchange into a brokerError (and counts it).
 func (s *AttestedSealer) classify(err error) *brokerError {
+	var ke *kmsrelease.RefusedError
+	if errors.As(err, &ke) { // AWS KMS: an AccessDenied is the key policy refusing the image, the same case as the broker's allowlist
+		code := "kms:" + ke.Code
+		if ke.Code == "AccessDeniedException" {
+			code = "allowlist:kms_access_denied"
+		}
+		s.stats.add("refused:" + refusalClass(code))
+		return &brokerError{Kind: "refused", Code: code, Err: fmt.Errorf("%w: %s", ErrKeyRefused, err.Error())}
+	}
 	var re *brokerclient.RefusedError
 	if errors.As(err, &re) {
 		s.stats.add("refused:" + refusalClass(re.Code))
@@ -294,9 +311,18 @@ func (s *AttestedSealer) exchange(ctx context.Context, purpose, keyset string, g
 	if err != nil {
 		return nil, nil, s.classify(err)
 	}
-	priv, pub, err := attest.NewReleaseKey() // lives in this process only, for this call
-	if err != nil {
-		return nil, nil, err
+	var open func(aad, sealed []byte) ([]byte, error) // opens a released key with the key made here for this call
+	var pub []byte
+	if rk, ok := s.api.(attest.RecipientKeyMaker); ok { // AWS KMS needs an RSA key and answers with CMS
+		if pub, open, err = rk.NewRecipient(); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		priv, p, err := attest.NewReleaseKey() // lives in this process only, for this call
+		if err != nil {
+			return nil, nil, err
+		}
+		pub, open = p, func(aad, sealed []byte) ([]byte, error) { return attest.OpenFrom(priv, aad, sealed) }
 	}
 	ud := rc.UserData(blobs, s.callerPin)
 	ev, err := s.att.Attest(ch.Nonce, pub, ud)
@@ -331,7 +357,7 @@ func (s *AttestedSealer) exchange(ctx context.Context, purpose, keyset string, g
 			s.stats.add("error")
 			return keys, nil, &brokerError{Kind: "protocol", Err: fmt.Errorf("sealer attested: the broker answered generation %d where %d was asked", k.Generation, gens[i])}
 		}
-		pt, oerr := attest.OpenFrom(priv, attest.ResponseAAD(ud, ch.Nonce, k.Generation), k.Sealed)
+		pt, oerr := open(attest.ResponseAAD(ud, ch.Nonce, k.Generation), k.Sealed)
 		if oerr != nil {
 			s.stats.add("error")
 			return keys, nil, &brokerError{Kind: "protocol", Err: fmt.Errorf("sealer attested: the released key for generation %d does not open under this process's key: %w", k.Generation, oerr)}
