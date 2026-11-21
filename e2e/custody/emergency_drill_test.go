@@ -136,8 +136,19 @@ func TestEmergencyDrillStolenHotKey(t *testing.T) {
 	s.waitIdle(120 * time.Second)
 
 	// The withdrawal in flight settled, from one key or the other; one made now goes out from the new key.
-	s.waitWd(inflight.ID, "confirmed", 180*time.Second)
-	if from := s.senderOfWithdrawal(inflight.ID); from != gen1 && from != gen2 {
+	// It ends one of two ways: paid (from one key or the other), or, when the zone's decision came after the mark, refused and voided with the zone's
+	// reason, its hold released (the reconciliation below checks the books). It never waits for ever.
+	var iw wd
+	s.waitFor(180*time.Second, "the in-flight withdrawal to end", func() bool {
+		iw = s.getWd(inflight.ID)
+		return iw.Status == "confirmed" || iw.Status == "failed"
+	})
+	if iw.Status == "failed" {
+		if !strings.Contains(iw.Reason, "compromised") {
+			t.Fatalf("the in-flight withdrawal failed for another reason: %s", iw.Reason)
+		}
+		t.Logf("the in-flight withdrawal was refused by the zone after the mark and voided: %s", iw.Reason)
+	} else if from := s.senderOfWithdrawal(inflight.ID); from != gen1 && from != gen2 {
 		t.Fatalf("the in-flight withdrawal came from %s", from)
 	}
 	w := s.withdrawETH("em-after", 1e15)
