@@ -26,6 +26,7 @@ type Adapter struct {
 	byAddr map[string]shard  // canonical address -> shard
 	cold   map[string]string // canonical cold address -> pool
 	coldBy map[string]string // pool -> canonical cold address
+	oldBy  map[string]string // pool -> canonical retiring cold address (a key replacement), also in cold
 
 	view *FeeCapsView // the fee caps in force: the configured ones, or the newest signed change (feecaps.go)
 
@@ -59,7 +60,7 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 	if pool == nil {
 		return nil, errors.New("btc: nil database pool")
 	}
-	a := &Adapter{cfg: v, rpc: NewRPC(cfg.RPCURL, cfg.RPCUser, cfg.RPCPass), pool: pool, acct: &Account{Params: v.params, key: v.account}, byAddr: map[string]shard{}, cold: map[string]string{}, coldBy: map[string]string{}}
+	a := &Adapter{cfg: v, rpc: NewRPC(cfg.RPCURL, cfg.RPCUser, cfg.RPCPass), pool: pool, acct: &Account{Params: v.params, key: v.account}, byAddr: map[string]shard{}, cold: map[string]string{}, coldBy: map[string]string{}, oldBy: map[string]string{}}
 	a.acct.SetGenerationLoader(func(gen uint32) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -89,6 +90,14 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 		}
 		pool := strings.TrimSuffix(k, "/native")
 		a.cold[d.Canonical], a.coldBy[pool] = pool, d.Canonical
+	}
+	for k, addr := range v.ColdRetiring {
+		d, err := DecodeAddress(addr, v.params)
+		if err != nil {
+			return nil, err
+		}
+		pool := strings.TrimSuffix(k, "/native")
+		a.cold[d.Canonical], a.oldBy[pool] = pool, d.Canonical
 	}
 	static := FeeCaps{MaxTxFeeSats: v.MaxTxFeeSats, MaxFeeRate: v.MaxFeeRate}
 	if v.FeeCaps != nil {
