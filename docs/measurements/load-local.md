@@ -137,22 +137,24 @@ The dashboard above is the live view of this run (Grafana over the generator's a
 
 ### On the kind lane (the charts)
 
-`make kind-up` installs the real charts on one kind node (business zone, gateway, three parties by pods, Temporal, Keycloak, Postgres by CloudNativePG; [kind lane](../../ci/kind/README.md)); `make load-kind` runs the same generator against it through port-forwards (`loadtest/kind/run.sh`), with Keycloak's real tokens. Only auto-approved withdrawals and deposits (the lane has no keys for people approvers). Two runs of `evm-kind`, scales 0.25 to 2, one right after the other, on a quieter machine (load average about 6) with the generator, anvil and the port-forwards outside the cluster. The first run (the table; its 52 "chain" errors are the generator's own: it opened a connection per poll through the port-forward and ran out of ports, fixed before the second run):
+`make kind-up` installs the real charts on one kind node (business zone, gateway, three parties by pods, Temporal, Keycloak, Postgres by CloudNativePG; [kind lane](../../ci/kind/README.md)); `make load-kind` runs the same generator against it through port-forwards (`loadtest/kind/run.sh`), with Keycloak's real tokens. Only auto-approved withdrawals and deposits (the lane has no keys for people approvers). Scenario `evm-kind`, scales 0.25 to 2, on current main (kind lane piece 3 merged), a machine with load average about 6, the generator, anvil and the port-forwards outside the cluster; one hot shard:
 
 | Step (rate scale) | deposit:ETH: offered /s | ended well /s | p50 s | p95 s | withdraw:auto: offered /s | ended well /s | p50 s | p95 s | Objectives broken |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| ramp | - | - | - | - | 0.40 | 0.40 | 0.7 | 1.3 |  |
-| 0 (x0.25) | 0.60 | 0.60 | 4.8 | 79.6 | 0.55 | 0.55 | 1.1 | 1.4 | ETH sent to swept p95 79601 ms over 30000 ms |
-| 1 (x0.5) | 0.93 | 0.90 | 4.7 | 59.8 | 1.30 | 1.30 | 1.1 | 1.8 | ETH error rate 2.7% over 0.1%; ETH only 97% of what arrived ended well; ETH sent to swept p95 59777 ms over 30000 ms |
-| 2 (x1) | 1.88 | 1.77 | 5.1 | 8.1 | 2.35 | 2.35 | 1.5 | 2.6 | ETH error rate 5.3% over 0.1%; ETH only 95% of what arrived ended well |
-| 3 (x1.5) | 3.38 | 2.60 | 9.3 | 75.9 | 3.27 | 3.27 | 4.1 | 7.3 | ETH error rate 23.0% over 0.1%; ETH only 77% of what arrived ended well; ETH sent to swept p95 75923 ms over 30000 ms; auto request to confirmed p95 7291 ms over 5000 ms; auto approved to broadcast p95 6448 ms over 3000 ms |
-| 4 (x2) | 4.28 | 1.76 | 17.5 | 43.7 | 5.71 | 5.38 | 9.3 | 10.7 | ETH error rate 59.0% over 0.1%; ETH only 41% of what arrived ended well; ETH sent to swept p95 43691 ms over 30000 ms; auto error rate 5.8% over 0.1%; auto only 94% of what arrived ended well; auto request to confirmed p95 10748 ms over 5000 ms; auto approved to broadcast p95 10299 ms over 3000 ms |
+| ramp | - | - | - | - | 0.40 | 0.40 | 0.9 | 1.3 |  |
+| 0 (x0.25) | 0.60 | 0.60 | 4.9 | 7.4 | 0.55 | 0.55 | 1.1 | 1.6 |  |
+| 1 (x0.5) | 0.93 | 0.93 | 6.0 | 9.3 | 1.30 | 1.30 | 1.2 | 4.8 | auto approved to broadcast p95 3345 ms over 3000 ms |
+| 2 (x1) | 1.88 | 1.88 | 5.3 | 9.1 | 2.35 | 2.35 | 1.2 | 1.8 |  |
+| 3 (x1.5) | 3.38 | 3.38 | 7.8 | 102.7 | 3.27 | 3.27 | 1.5 | 2.8 | ETH sent to swept p95 102739 ms over 30000 ms |
+| 4 (x2) | 3.51 | 3.51 | 21.5 | 72.6 | 4.84 | 4.84 | 5.9 | 7.1 | ETH sent to swept p95 72568 ms over 30000 ms; auto request to confirmed p95 7127 ms over 5000 ms; auto approved to broadcast p95 6757 ms over 3000 ms |
 
-What the kind shape costs, as far as one run says: **withdrawals through the pods answer as fast as the process stack up to about 2.4 a second (p50 1.1 to 1.5 s; the compose stack at the same rate: 0.8 to 1.5 s) and start to queue at 3.3 a second (p95 7.3 s)**, a lower rate than the 4 to 5 a second at which the compose stack broke the same objective, with one hot shard instead of two and Temporal, Postgres and the parties in a VM that also runs everything else. Deposits are credited as fast (the scan runs every 2 s there, 500 ms in compose) but **swept slowly: p50 4.7 to 6.7 s and p95 60 to 80 s at every step**, because the lane's sweep planner runs every 5 s (the production default; compose uses 300 ms) and the zone allows 600 sweeps and 600 withdrawals an hour.
+Arrivals stopped at 197 s (7 s into the last step). All checks passed: 454 withdrawals paid exactly once, no hold left, Reconcile clean, audit chain verified, every address swept.
 
-**The zone's hourly limits are what the second run hit.** An hour after the first run's 350 withdrawals, 60 withdrawals of the second were refused by the gateway with `policy_withdrawal_rate: 600 withdrawals in the last hour, limit 600`, and 123 deposit addresses were left unswept. Correctness held: the 60 refused withdrawals paid nothing and their holds were released, 247 paid exactly once, 28 were still open after 15 minutes (their destinations held nothing or the full amount), the customers' books matched, Reconcile was clean and the audit chain verified. The lane's limits are a test setting, not a capacity: they show that the limit a deployment sets is a rate limit on throughput like any other, and that the limit works under load.
+What the kind shape costs, as far as one run says: **withdrawals through the pods answer as fast as the process stack up to 3.3 a second (p50 1.1 to 1.5 s, p95 2.8 s at 3.3) and break the objectives at 4.8 a second (p95 7.1 s)**, close to the 4 to 5 a second where the compose stack with two hot shards broke. Deposits are credited and swept in 5 to 8 s p50 up to 1.9 a second, then the sweeps fall behind at 3.4 a second (p95 103 s). The lane's sweep planner runs every 5 s (the production default; compose uses 300 ms) and the scan every 2 s (500 ms in compose), which is most of the 5 s. The signing path is the same code and the same single signing loop, so the same first limit is expected; the kind run does not measure it separately (no queue sampler on the cluster).
 
-This is one node and one run each: it does not show what four clusters cost.
+**The zone's hourly limits.** In an earlier kind run on the same cluster, made an hour after another one, 60 withdrawals were refused by the gateway with `policy_withdrawal_rate: 600 withdrawals in the last hour, limit 600` and 123 deposit addresses were left unswept. Correctness held: the refused withdrawals paid nothing and their holds were released, 247 paid exactly once, the books matched, Reconcile was clean. The lane's limits (600 sweeps and 600 withdrawals an hour) are a test setting, not a capacity; they show that a limit set in the zone caps throughput like any other and that it works under load.
+
+This is one node and one run: it does not show what four clusters cost.
 
 ### Closed loop, for comparison
 
@@ -174,7 +176,7 @@ The closed loop settles at **about 4.1 withdrawals and 2.6 deposits a second wit
 | Deposits only | the sweep pipeline (sweeps open stuck at 7 to 8, sign jobs not waiting) | 6.2 a second | credit p95 1.1 to 1.6 s at every step, sweep p95 from 3.8 s to 93 s |
 | Mixed | the same signing loop, shared by sweeps and withdrawals | 9 operations a second (scale 2; the queue starts to fill at 6.4, scale 1.5) | sign jobs waiting 1.0, 5.2, 20.9, 53.3 |
 | Parties 20 ms apart | the same signing loop, 790 ms a job | below 4.2 withdrawals a second | 1.3 jobs a second |
-| On kind | withdrawals queue from 3.3 a second; sweeps are slow from the start (5 s planner) and capped by the zone's 600 an hour | 3.3 withdrawals a second | p95 7.3 s; sweep p95 60 to 80 s; gateway refusals in the second run |
+| On kind | withdrawals queue from 4.8 a second; sweeps lag from 3.4 deposits a second (5 s planner), and the zone's 600 an hour caps a longer run | 4.8 withdrawals a second | p95 7.1 s; sweep p95 103 s; gateway refusals in an earlier run |
 | Behind all of them | Temporal (server and its database use about 2 cores together) and the chain node (anvil, a block per transaction) | at 8 or more operations a second | their CPU and the workflow-task queue |
 
 ## Findings in the product
@@ -205,7 +207,7 @@ These came out of running it under load. None is fixed here (this task changes n
 - **Bitcoin and Solana are not driven.** The generator's operation layer is written for the EVM deposit and withdrawal; a Bitcoin driver (xpub addresses, batched withdrawals, consolidation) and a Solana driver (durable nonces, token deposits) need their own stack launchers: the Bitcoin and Solana end-to-end harnesses are separate and were not reused. The workload model above says what they would run.
 - **No profile with a Go profiler.** The services expose no pprof endpoint, and adding one is service code, which this task does not change. The profiles are macOS `sample` call graphs of the gateway, the parties, the worker and the core (kept in `data/load/profiles` of the run, not committed: about 180 KB each).
 - **Hot-to-cold moves and the audit archive were not exercised under load.**
-- **The kind run is two runs on one node**, with the lane's own configuration (5 s planner, 600 an hour limits), not tuned; scale-out and delay were not run on kind.
+- **The kind run is one run on one node** (plus an earlier one that hit the hourly limits), with the lane's own configuration (5 s planner, 600 an hour limits), not tuned; scale-out and delay were not run on kind.
 
 ## Backlog from the measurements
 
