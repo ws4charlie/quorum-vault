@@ -40,6 +40,9 @@ const (
 	KindSetGuardian    = "set-guardian"
 	KindTransferAdmin  = "transfer-admin"
 	KindAcceptAdmin    = "accept-admin"
+	// KindColdMove moves funds from this cold address to the NEW cold address of a key replacement (docs/runbooks/cold-key-replacement.md). It builds the same
+	// transfer as a refill; the offline tool takes the destination from its own config (cold_move.new_cold), never from a list the request can pick from.
+	KindColdMove = "cold-move"
 )
 
 // AdminKinds are the factory calls.
@@ -179,7 +182,7 @@ func (r Request) Tx() (*types.Transaction, error) {
 	if r.Version != RequestVersion {
 		return nil, fmt.Errorf("request version %q, want %q", r.Version, RequestVersion)
 	}
-	if r.Kind != "" && r.Kind != KindRefill {
+	if r.Kind != "" && r.Kind != KindRefill && r.Kind != KindColdMove {
 		return r.adminTx()
 	}
 	to, err := parseAddr("destination", r.To)
@@ -294,12 +297,15 @@ func (r Request) Summary(decimals int) string {
 	if r.Token != "" {
 		kind = r.Asset + " token " + r.Token
 	}
-	if r.Kind != "" && r.Kind != KindRefill {
+	if r.Kind != "" && r.Kind != KindRefill && r.Kind != KindColdMove {
 		return r.adminSummary()
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "  request   %s (revision %d)\n", r.ID, r.Revision)
 	fmt.Fprintf(&b, "  chain     %s (chain id %d), pool %s\n", r.Chain, r.ChainID, r.Pool)
+	if r.Kind == KindColdMove {
+		fmt.Fprintf(&b, "  action    COLD-TO-COLD MOVE: the old cold key sends funds to the NEW cold address (a key replacement)\n")
+	}
 	fmt.Fprintf(&b, "  from      %s (the cold address)\n", r.From)
 	fmt.Fprintf(&b, "  to        %s\n", r.To)
 	fmt.Fprintf(&b, "  asset     %s\n", kind)

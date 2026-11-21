@@ -59,6 +59,9 @@ type SOLRequest struct {
 	ComputeUnitPrice uint64 `json:"compute_unit_price"` // micro-lamports per unit; 0 for none
 	// CreateDestAccount makes the cold address open the hot shard's associated token account first (rent from the cold address); for a token only.
 	CreateDestAccount bool `json:"create_dest_account,omitempty"`
+	// CloseSource (a cold-move of a token): after the transfer the old cold address closes its token account, the rent going to the new cold address. The
+	// chain refuses it unless the account is then empty, so it is only asked for when the whole balance moves.
+	CloseSource bool `json:"close_source,omitempty"`
 
 	// Setup only: the pool nonce accounts of the cold address to create (indexes), the rent each holds, and the mints whose associated token account of the
 	// cold address to create. NonceValue is then a recent blockhash (there is no nonce yet to sign with), and the setup expires with it.
@@ -75,6 +78,11 @@ const (
 	KindSOLSetup  = "setup"
 	// KindSOLClose closes retired nonce accounts of the cold address: it withdraws the whole balance of each back to the cold address itself.
 	KindSOLClose = "close"
+	// KindSOLColdMove moves SOL or one SPL token from this cold address to the NEW cold address of a key replacement (docs/runbooks/cold-key-replacement.md),
+	// on a durable nonce like a refill. KindSOLColdMoveClose closes nonce accounts of the old cold address and sends their rent to the new one: the last
+	// step, so the old address ends with nothing.
+	KindSOLColdMove      = KindColdMove
+	KindSOLColdMoveClose = "cold-move-close"
 )
 
 // SOLRequestFile is what is carried to the offline machine: the request and its hash.
@@ -112,8 +120,12 @@ func (r SOLRequest) fields() []string {
 	for i, n := range r.Lamports {
 		lam[i] = strconv.FormatUint(n, 10)
 	}
-	return []string{r.Version, r.Kind, strings.Join(idx, ","), strings.Join(lam, ","), strconv.FormatUint(r.NonceRent, 10), strings.Join(r.Mints, ","), r.ID, strconv.Itoa(r.Revision), r.Chain, r.Pool, r.Asset, r.Mint, strconv.Itoa(r.Decimals), r.From, r.To, r.Amount, r.NonceAccount,
+	f := []string{r.Version, r.Kind, strings.Join(idx, ","), strings.Join(lam, ","), strconv.FormatUint(r.NonceRent, 10), strings.Join(r.Mints, ","), r.ID, strconv.Itoa(r.Revision), r.Chain, r.Pool, r.Asset, r.Mint, strconv.Itoa(r.Decimals), r.From, r.To, r.Amount, r.NonceAccount,
 		r.NonceValue, strconv.FormatUint(uint64(r.ComputeUnitLimit), 10), strconv.FormatUint(r.ComputeUnitPrice, 10), strconv.FormatBool(r.CreateDestAccount)}
+	if r.CloseSource { // only when set: the hash of every other request is what it was
+		f = append(f, "close-source")
+	}
+	return f
 }
 
 // Hash is what operators approve: every field, length-prefixed, under a domain tag.
@@ -137,7 +149,11 @@ func (r SOLRequest) File() SOLRequestFile {
 // nonce (a re-export with a higher price), so signing both cannot pay twice; the nonce lets only one land anyway.
 func (r SOLRequest) ContentHash() string {
 	b := []byte(solContentTag)
-	for _, f := range []string{r.Chain, r.Asset, r.Mint, r.From, r.To, r.Amount, r.NonceAccount, r.NonceValue, strconv.FormatBool(r.CreateDestAccount)} {
+	fs := []string{r.Chain, r.Asset, r.Mint, r.From, r.To, r.Amount, r.NonceAccount, r.NonceValue, strconv.FormatBool(r.CreateDestAccount)}
+	if r.Kind == KindSOLColdMove {
+		fs = append(fs, "kind:"+r.Kind, strconv.FormatBool(r.CloseSource))
+	}
+	for _, f := range fs {
 		b = lp(b, f)
 	}
 	h := sha256.Sum256(b)
@@ -171,6 +187,9 @@ func (r SOLRequest) Message() ([]byte, error) {
 	if r.Kind == KindSOLClose {
 		return r.closeMessage(from)
 	}
+	if r.Kind == KindSOLColdMoveClose {
+		return r.coldMoveCloseMessage(from)
+	}
 	to, err := solAddr("to", r.To)
 	if err != nil {
 		return nil, err
@@ -178,8 +197,11 @@ func (r SOLRequest) Message() ([]byte, error) {
 	if from == to {
 		return nil, errors.New("the cold address cannot pay itself")
 	}
-	if r.Kind != "" && r.Kind != KindSOLRefill {
+	if r.Kind != "" && r.Kind != KindSOLRefill && r.Kind != KindSOLColdMove {
 		return nil, fmt.Errorf("unknown request kind %q", r.Kind)
+	}
+	if r.CloseSource && (r.Kind != KindSOLColdMove || r.Mint == "") {
+		return nil, errors.New("close_source is for the cold-move of a token only")
 	}
 	nonce, err := solAddr("nonce account", r.NonceAccount)
 	if err != nil {
@@ -228,6 +250,9 @@ func (r SOLRequest) Message() ([]byte, error) {
 			return nil, errors.New("decimals out of range")
 		}
 		ixs = append(ixs, solmsg.CheckedTransferIx(src, mint, dst, from, amount.Uint64(), uint8(r.Decimals)))
+		if r.CloseSource { // the old token account goes away and its rent to the new cold address (the chain refuses it unless it is empty)
+			ixs = append(ixs, solmsg.CloseAccountIx(src, to, from))
+		}
 	}
 	return solmsg.Compile(from, value, ixs...), nil
 }
@@ -243,6 +268,11 @@ func (r SOLRequest) Summary(decimals int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "  request   %s (revision %d)\n", r.ID, r.Revision)
 	fmt.Fprintf(&b, "  chain     %s, pool %s\n", r.Chain, r.Pool)
+	if r.Kind == KindSOLColdMoveClose {
+		fmt.Fprintf(&b, "  action    COLD-TO-COLD MOVE, LAST STEP: closes nonce accounts %v of the old cold address (%v lamports); the rent goes to the NEW cold address %s\n", r.NonceIndexes, r.Lamports, r.To)
+		fmt.Fprintf(&b, "  from      %s (the old cold address)\n  blockhash %s\n", r.From, r.NonceValue)
+		return b.String()
+	}
 	if r.Kind == KindSOLClose {
 		fmt.Fprintf(&b, "  CLOSE     nonce accounts %v of the cold address, %v lamports; the rent goes back to the cold address\n", r.NonceIndexes, r.Lamports)
 		fmt.Fprintf(&b, "  from      %s (the cold address)\n  blockhash %s\n", r.From, r.NonceValue)
@@ -254,7 +284,15 @@ func (r SOLRequest) Summary(decimals int) string {
 		return b.String()
 	}
 	fmt.Fprintf(&b, "  from      %s (the cold address)\n", r.From)
-	fmt.Fprintf(&b, "  to        %s (a hot shard)\n", r.To)
+	if r.Kind == KindSOLColdMove {
+		fmt.Fprintf(&b, "  action    COLD-TO-COLD MOVE: the old cold key sends funds to the NEW cold address (a key replacement)\n")
+		fmt.Fprintf(&b, "  to        %s (the new cold address)\n", r.To)
+		if r.CloseSource {
+			fmt.Fprintf(&b, "  also      closes the old token account afterwards; its rent goes to the new cold address\n")
+		}
+	} else {
+		fmt.Fprintf(&b, "  to        %s (a hot shard)\n", r.To)
+	}
 	fmt.Fprintf(&b, "  asset     %s\n", kind)
 	fmt.Fprintf(&b, "  amount    %s (%s base units)\n", Human(amt, decimals), r.Amount)
 	fmt.Fprintf(&b, "  nonce     account %s, value %s\n", r.NonceAccount, r.NonceValue)
@@ -294,6 +332,25 @@ type SOLConfig struct {
 	PublicKey           string    `json:"public_key"` // the cold key, 32 bytes, hex
 	HSM                 HSMConfig `json:"hsm"`
 	RecordDir           string    `json:"record_dir"` // durable record of every nonce value ever signed
+
+	// ColdMove allows the cold-to-cold ceremony of a key replacement. Absent: this signer signs none.
+	ColdMove *SOLColdMoveConfig `json:"cold_move,omitempty"`
+}
+
+// SOLColdMoveConfig pins the successor cold address of a Solana cold key and bounds a move.
+type SOLColdMoveConfig struct {
+	NewCold string `json:"new_cold"`
+	// MaxAmount caps one move per asset in base units (the treasury's size, not a refill's); an asset with no entry is not moved.
+	MaxAmount map[string]string `json:"max_amount"`
+	// MinApprovals is how many operators a move needs (default and floor: the config's threshold).
+	MinApprovals int `json:"min_approvals,omitempty"`
+}
+
+func (c *SOLConfig) approvalsNeeded(r SOLRequest) int {
+	if (r.Kind == KindSOLColdMove || r.Kind == KindSOLColdMoveClose) && c.ColdMove != nil && c.ColdMove.MinApprovals > c.Threshold {
+		return c.ColdMove.MinApprovals
+	}
+	return c.Threshold
 }
 
 // IsSOLConfig reports whether a config file's JSON is a Solana config.
@@ -366,6 +423,33 @@ func (c *SOLConfig) Validate() error {
 			return errors.New("config: a destination is the cold address")
 		}
 	}
+	if m := c.ColdMove; m != nil {
+		if _, err := solAddr("cold_move.new_cold", m.NewCold); err != nil {
+			return fmt.Errorf("config: %w", err)
+		}
+		if m.NewCold == cold {
+			return errors.New("config: cold_move.new_cold is this signer's own cold address")
+		}
+		for _, d := range c.Destinations {
+			if d == m.NewCold {
+				return errors.New("config: cold_move.new_cold is a hot shard")
+			}
+		}
+		if len(m.MaxAmount) == 0 {
+			return errors.New("config: cold_move needs max_amount per asset")
+		}
+		for a, v := range m.MaxAmount {
+			if _, ok := c.Assets[a]; !ok {
+				return fmt.Errorf("config: cold_move.max_amount names asset %q, which is not configured", a)
+			}
+			if _, err := parseAmt("cold_move max_amount "+a, v); err != nil {
+				return fmt.Errorf("config: %w", err)
+			}
+		}
+		if m.MinApprovals < 0 || m.MinApprovals > len(c.Operators) {
+			return fmt.Errorf("config: cold_move.min_approvals %d with %d operators", m.MinApprovals, len(c.Operators))
+		}
+	}
 	for a, p := range c.Assets {
 		if _, err := parseAmt(a+" max_amount", p.MaxAmount); err != nil {
 			return fmt.Errorf("config: %w", err)
@@ -405,14 +489,27 @@ func (c *SOLConfig) Check(rf SOLRequestFile) (SOLRequest, []byte, error) {
 	if r.Kind == KindSOLClose {
 		return c.checkClose(r, cold)
 	}
-	if r.Kind != "" && r.Kind != KindSOLRefill {
+	if r.Kind == KindSOLColdMoveClose {
+		return c.checkColdMoveClose(r, cold)
+	}
+	if r.Kind != "" && r.Kind != KindSOLRefill && r.Kind != KindSOLColdMove {
 		return r, nil, refuse("unknown request kind %q", r.Kind)
+	}
+	if r.CloseSource && (r.Kind != KindSOLColdMove || r.Mint == "") {
+		return r, nil, refuse("close_source is for the cold-move of a token only")
 	}
 	pinned := false
 	for _, d := range c.Destinations {
 		pinned = pinned || d == r.To
 	}
-	if !pinned {
+	if r.Kind == KindSOLColdMove {
+		if c.ColdMove == nil {
+			return r, nil, refuse("this signer's config has no cold_move: it signs no cold-to-cold move")
+		}
+		if r.To != c.ColdMove.NewCold {
+			return r, nil, refuse("a cold-to-cold move may only go to the pinned new cold address %s, the request says %s", c.ColdMove.NewCold, r.To)
+		}
+	} else if !pinned {
 		return r, nil, refuse("%s is not one of this pool's hot shards; a refill may only go to them", r.To)
 	}
 	pol, ok := c.Assets[r.Asset]
@@ -427,6 +524,13 @@ func (c *SOLConfig) Check(rf SOLRequestFile) (SOLRequest, []byte, error) {
 		return r, nil, refuse("%v", err)
 	}
 	max, _ := parseAmt("max_amount", pol.MaxAmount)
+	if r.Kind == KindSOLColdMove {
+		mv, ok := c.ColdMove.MaxAmount[r.Asset]
+		if !ok {
+			return r, nil, refuse("asset %q has no cold_move max_amount: this signer does not move it", r.Asset)
+		}
+		max, _ = parseAmt("cold_move max_amount", mv)
+	}
 	if amount.Sign() == 0 || amount.Cmp(max) > 0 {
 		return r, nil, refuse("amount %s is zero or above the per-ceremony cap %s", amount, max)
 	}
@@ -535,8 +639,8 @@ func (c *SOLConfig) Sign(ctx context.Context, rf SOLRequestFile, approvals []App
 		return SOLSigned{}, nil, err
 	}
 	names, ignored := c.CountApprovals(rf.RequestHash, approvals)
-	if len(names) < c.Threshold {
-		return SOLSigned{}, ignored, refuse("%d valid approval(s) from distinct configured operators, %d required%s", len(names), c.Threshold, ignoredNote(ignored))
+	if need := c.approvalsNeeded(r); len(names) < need {
+		return SOLSigned{}, ignored, refuse("%d valid approval(s) from distinct configured operators, %d required%s", len(names), need, ignoredNote(ignored))
 	}
 	rs, err := openNonceRecord(c.RecordDir)
 	if err != nil {
@@ -548,7 +652,7 @@ func (c *SOLConfig) Sign(ctx context.Context, rf SOLRequestFile, approvals []App
 	}
 	switch r.Kind {
 	case KindSOLSetup: // no nonce value: the recent blockhash expires by itself
-	case KindSOLClose:
+	case KindSOLClose, KindSOLColdMoveClose:
 		if err := rs.markClosed(r); err != nil { // before the signature exists: a refill on a closed account is never signed afterwards
 			return SOLSigned{}, names, err
 		}
@@ -801,3 +905,74 @@ func (c *SOLConfig) checkClose(r SOLRequest, cold string) (SOLRequest, []byte, e
 	}
 	return r, msg, nil
 }
+
+// coldMoveCloseMessage withdraws the whole balance of each listed nonce account of the old cold address to the NEW cold address (r.To). The old cold
+// address is the authority and the fee payer; the blockhash is a recent one, since the accounts it would sign with are being closed.
+func (r SOLRequest) coldMoveCloseMessage(from [32]byte) ([]byte, error) {
+	bh, err := solAddr("blockhash", r.NonceValue)
+	if err != nil {
+		return nil, err
+	}
+	to, err := solAddr("to", r.To)
+	if err != nil {
+		return nil, err
+	}
+	if to == from {
+		return nil, errors.New("the cold address cannot send its rent to itself")
+	}
+	if len(r.NonceIndexes) == 0 || len(r.NonceIndexes) != len(r.Lamports) || len(r.NonceIndexes) > 8 {
+		return nil, errors.New("a close names 1 to 8 nonce accounts, each with its balance")
+	}
+	if r.ComputeUnitLimit == 0 {
+		return nil, errors.New("compute unit limit is zero")
+	}
+	ixs := []solmsg.Ix{solmsg.SetLimitIx(r.ComputeUnitLimit)}
+	if r.ComputeUnitPrice > 0 {
+		ixs = append(ixs, solmsg.SetPriceIx(r.ComputeUnitPrice))
+	}
+	seen := map[int]bool{}
+	for k, i := range r.NonceIndexes {
+		if i < 0 || seen[i] || r.Lamports[k] == 0 {
+			return nil, fmt.Errorf("nonce index %d is negative or repeated, or its balance is zero", i)
+		}
+		seen[i] = true
+		ixs = append(ixs, solmsg.WithdrawNonceIx(solmsg.NonceAddress(from, i), to, from, r.Lamports[k]))
+	}
+	return solmsg.Compile(from, bh, ixs...), nil
+}
+
+// checkColdMoveClose applies the rules of the last step of a cold-to-cold move: only the cold address's own pool accounts, the rent only to the pinned new
+// cold address, a balance that is a nonce account's and not more.
+func (c *SOLConfig) checkColdMoveClose(r SOLRequest, cold string) (SOLRequest, []byte, error) {
+	if c.ColdMove == nil {
+		return r, nil, refuse("this signer's config has no cold_move: it signs no cold-to-cold move")
+	}
+	if r.To != c.ColdMove.NewCold {
+		return r, nil, refuse("a cold-to-cold move may only go to the pinned new cold address %s, the request says %s", c.ColdMove.NewCold, r.To)
+	}
+	if r.Amount != "" && r.Amount != "0" || r.Asset != "" || r.Mint != "" || r.NonceAccount != "" || r.CreateDestAccount || r.CloseSource || len(r.Mints) != 0 || r.NonceRent != 0 {
+		return r, nil, refuse("the last step of a cold-to-cold move closes nonce accounts and nothing else: it has no amount, asset, mint or setup field")
+	}
+	if c.NonceRent == 0 {
+		return r, nil, refuse("this config has no nonce_rent: it signs no close of nonce accounts")
+	}
+	for k, i := range r.NonceIndexes {
+		if i < 0 || i >= c.NoncePool {
+			return r, nil, refuse("nonce index %d is outside the pool of %d accounts", i, c.NoncePool)
+		}
+		if k < len(r.Lamports) && r.Lamports[k] > 100*c.NonceRent {
+			return r, nil, refuse("balance %d of nonce account %d is above 100 times the rent %d: it is not a nonce account's", r.Lamports[k], i, c.NonceRent)
+		}
+	}
+	if r.ComputeUnitLimit == 0 || r.ComputeUnitLimit > c.MaxComputeUnits || r.ComputeUnitPrice > c.MaxMicroLamports {
+		return r, nil, refuse("compute unit limit %d / price %d is outside the caps %d / %d", r.ComputeUnitLimit, r.ComputeUnitPrice, c.MaxComputeUnits, c.MaxMicroLamports)
+	}
+	msg, err := r.Message()
+	if err != nil {
+		return r, nil, refuse("%v", err)
+	}
+	return r, msg, nil
+}
+
+// Required is how many distinct operators this request needs: the config's threshold, or more for a cold-to-cold move that asks for more.
+func (c *SOLConfig) Required(r SOLRequest) int { return c.approvalsNeeded(r) }
