@@ -484,7 +484,16 @@ func (s *Service) FailDrainBeforeBroadcast(ctx context.Context, id, reason, feeT
 		if err := s.recordFee(ctx, tx, feeTx, part, fee); err != nil {
 			return err
 		}
-		if err := setDrainState(ctx, tx, shard, gen, "waiting", reason, s.drainRetryAfter()); err != nil {
+		held, err := s.holdClaimedCoins(ctx, tx, reason)
+		if err != nil {
+			return err
+		}
+		retry := s.drainRetryAfter()
+		if held > 0 {
+			reason += " (the coin is held out of the drain moves; the other coins move on)"
+			retry = 0 // nothing to wait for: the next move does not contain it
+		}
+		if err := setDrainState(ctx, tx, shard, gen, "waiting", reason, retry); err != nil {
 			return err
 		}
 		return emit(ctx, tx, outbox.TopicColdMoves, id, "drain.failed", map[string]any{"reason": reason})
