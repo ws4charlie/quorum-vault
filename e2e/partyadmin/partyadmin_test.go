@@ -350,7 +350,10 @@ func TestLocalRefusalsAndDisagreement(t *testing.T) {
 	if out, err := r.send("refresh", file); err == nil || !strings.Contains(out, "DISAGREE") {
 		t.Fatalf("refresh with C down: %v\n%s", err, out)
 	}
-	// the file was not used up: with C back it works
+	// the refusal did not use the file up: the same file is refused the same way, not as "already used"
+	if out, err := r.send("refresh", file); err == nil || !strings.Contains(out, "DISAGREE") {
+		t.Fatalf("the same file again with C down: %v\n%s", err, out)
+	}
 	r.s.C.Start(t)
 	deadline := time.Now().Add(90 * time.Second)
 	for {
@@ -362,7 +365,10 @@ func TestLocalRefusalsAndDisagreement(t *testing.T) {
 		}
 		time.Sleep(2 * time.Second)
 	}
-	if out, err := r.send("refresh", file); err != nil {
+	// A file signed before C restarted is no longer good for C: a party refuses what was issued before its own start, because its record of
+	// used files is gone with the restart (admin authorisation, "older than this party's start"). Whether the file still passes therefore depends
+	// on whether the signing and the restart fell in the same second, which is no assumption for a test to make: sign a new one.
+	if out, err := r.send("refresh", r.sign("refresh", "k4")); err != nil {
 		t.Fatalf("refresh after C is back: %v\n%s", err, out)
 	}
 }

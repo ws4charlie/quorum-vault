@@ -873,6 +873,15 @@ func (v *Verifier) sweep(s *shape, rest []MsgInstruction, i signjob.Intent, idxs
 	if len(gens) != 0 && len(gens) != len(idxs) {
 		return reject("the payload names %d deposit generations for %d deposit indices", len(gens), len(idxs))
 	}
+	// The payload names the generation of each key only when one of them is a later one: all generation 1 is written as no list (so one transaction has
+	// one form). In a list, generation 1 is written as 1, because a sweep may spend the keys of the old and the new generation together.
+	later := false
+	for _, g := range gens {
+		later = later || g > 1
+	}
+	if len(gens) != 0 && !later {
+		return reject("deposit generation 1 is written as no generation")
+	}
 	type legKey struct{ gen, idx uint32 }
 	seen := map[legKey]bool{}
 	var from []string
@@ -880,9 +889,6 @@ func (v *Verifier) sweep(s *shape, rest []MsgInstruction, i signjob.Intent, idxs
 		gen := uint32(1)
 		if len(gens) != 0 {
 			gen = gens[k]
-			if gen == 1 {
-				return reject("deposit generation 1 is written as no generation")
-			}
 			if gen == 0 {
 				return reject("deposit generation 0")
 			}
