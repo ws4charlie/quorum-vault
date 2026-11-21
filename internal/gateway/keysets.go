@@ -946,25 +946,26 @@ func (d *Decider) compromisedCancel(ctx context.Context, gt *GuardTx, kv *Keyset
 	if succ == nil || succ.State != partition.StateActive {
 		return d.keysetLag(i, now, "the successor of generation %d of %s is not active here: a compromised key signs its cancel only once its drain may start", src.Generation, shard)
 	}
-	if d.mode != ModeCosigner {
-		if len(info.Claims) != 1 {
-			return reject(ReasonKeyset, "a cancel names one nonce")
-		}
-		cl, err := gt.Claim(ctx, info.Claims[0])
+	if len(info.Claims) != 1 {
+		return reject(ReasonKeyset, "a cancel names one nonce")
+	}
+	cl, err := gt.Claim(ctx, info.Claims[0])
+	if err != nil {
+		return err
+	}
+	switch {
+	case cl != nil && cl.Kind == signjob.KindDrain:
+		// In both modes: a drain's claim is never cancellable by this rule, so a compromised gateway cannot use it to knock out the drain's own transactions.
+		return reject(ReasonKeyset, "%s is claimed by a drain: a compromised key's cancel does not take over a drain", info.Claims[0])
+	case cl == nil && d.mode != ModeCosigner:
+		return reject(ReasonKeyset, "%s is not a nonce this zone signed for: a compromised key cancels only what the guard claimed", info.Claims[0])
+	case cl != nil && cl.Kind != "cancel" && d.mode != ModeCosigner:
+		held, err := gt.Intent(ctx, cl.IntentID)
 		if err != nil {
 			return err
 		}
-		if cl == nil {
-			return reject(ReasonKeyset, "%s is not a nonce this zone signed for: a compromised key cancels only what the guard claimed", info.Claims[0])
-		}
-		if cl.Kind != "cancel" {
-			held, err := gt.Intent(ctx, cl.IntentID)
-			if err != nil {
-				return err
-			}
-			if held == nil || held.Sender != info.Sender {
-				return reject(ReasonKeyset, "%s is claimed by an intent of another sender", info.Claims[0])
-			}
+		if held == nil || held.Sender != info.Sender {
+			return reject(ReasonKeyset, "%s is claimed by an intent of another sender", info.Claims[0])
 		}
 	}
 	if known {

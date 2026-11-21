@@ -159,3 +159,28 @@ func TestCompromisedCancelEveryPairOfViews(t *testing.T) {
 		}
 	}
 }
+
+// A compromised generation's cancel never takes over a claim held by a drain, in either mode: a compromised gateway must not be able to use the rule to knock
+// out the drain's own transactions at the cosigners.
+func TestCompromisedCancelNeverTakesADrainsClaim(t *testing.T) {
+	r := newKSRig(t)
+	cosGuard := mustGuard(t, r.harness)
+	cos := NewDecider(r.cfg, r.gw.codecs, cosGuard, ModeCosigner, r.clock)
+	pub := r.signer.PublicKey()
+	r.compromised(r.guard, cosGuard)
+	dj := r.drain("d0", addrG2, 100, 0, "ETH")
+	r.mustSign(dj)
+	if _, err := cos.Decide(t.Context(), dj, pub); err != nil { // the cosigner holds the drain's claim too
+		t.Fatal(err)
+	}
+	r.mustReject(r.cancelJob("on-drain", 0), ReasonKeyset)
+	if _, err := cos.Decide(t.Context(), r.cancelJob("on-drain-cos", 0), pub); err == nil {
+		t.Fatal("the cosigner authorized a cancel of a drain's nonce")
+	} else if why, ok := IsRejection(err); !ok || !contains(why, "claimed by a drain") {
+		t.Fatalf("%v", err)
+	}
+	// a cosigner that holds no claim authorizes a cancel at another nonce (the gateway's claim check is part of every signature)
+	if v, err := cos.Decide(t.Context(), r.cancelJob("free", 5), pub); err != nil || !v.NeedSign {
+		t.Fatalf("cosigner without a claim: %v", err)
+	}
+}
