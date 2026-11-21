@@ -213,6 +213,9 @@ func TestLoadLocal(t *testing.T) {
 	// moment later: counted apart as transient scan lag (a finding, see the report); any other alert fails the run.
 	var alerts, transient []string
 	for _, l := range s.alertLines() {
+		if strings.Contains(l, "ALERT no -brokers") { // the harness starts the cosigners without Kafka: their start-up notice, not the system under load
+			continue
+		}
 		if strings.Contains(l, "check=scan_caught_up") || strings.Contains(l, "check=deposit_addresses") {
 			transient = append(transient, l)
 		} else {
