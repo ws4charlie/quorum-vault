@@ -331,6 +331,15 @@ func (t *GuardTx) SignedCancelCountFrom(ctx context.Context, sender string) (int
 	return n, err
 }
 
+// SignedCancelCountFromGen is SignedCancelCountFrom for Bitcoin, where a generation of the account key is the unit: the cancels reserved or signed while this
+// guard's own view had generation gen compromised, whatever derivation path (hot shard, deposit address) they spent under. One generation has one allowance.
+func (t *GuardTx) SignedCancelCountFromGen(ctx context.Context, gen string) (int, error) {
+	var n int
+	err := t.tx.QueryRow(ctx, `SELECT count(*) FROM signed_intents i WHERE i.chain=$1 AND i.kind='cancel' AND i.gen_ref=$2 AND i.gen_state='compromised'
+		AND EXISTS (SELECT 1 FROM signed_digests d WHERE d.intent_id = i.intent_id)`, t.chain, gen).Scan(&n)
+	return n, err
+}
+
 // CountSince counts intents of kind on this chain first signed at or after since.
 func (t *GuardTx) CountSince(ctx context.Context, kind string, since time.Time) (int, error) {
 	var n int
@@ -384,25 +393,29 @@ func (t *GuardTx) Parent(ctx context.Context, txid string) (*ParentRecord, error
 type Release struct {
 	// GenState is the state of the sender's keyset generation as THIS guard's own view had it when the intent was admitted (EVM; empty elsewhere). It is
 	// recorded with the intent, so the bound of a compromised generation's cancels counts only cancels admitted under that state.
-	GenState    string
-	IntentID    string
-	IntentHash  []byte
-	Kind        string
-	Asset       string
-	Amount      *big.Int
-	Sender      string
-	PartitionID string
-	Claims      []string // what the transaction consumes
-	Pins        []string // one per claim, or none (EVM); the codec's pin of each claim
-	Identity    string   // the codec's identity of the transaction; empty when the chain has none
-	Digest      []byte
-	Fees        []*big.Int
-	PayloadHash []byte
-	Signature   []byte    // nil: reservation
-	At          time.Time // reservation time
-	NewIntent   bool      // false: another signature for an intent already recorded
-	NewClaims   []string  // claims nobody holds yet, taken by this intent
-	TakeClaims  []string  // a cancel taking over the claims of a different intent
+	GenState string
+	// CosignerFreeCancel: a cosigner admits the cancel of a compromised Bitcoin generation by shape when it holds none of the claims (it refused the refused
+	// payment before it reserved); it then takes them (decider.go, replay). Not stored.
+	CosignerFreeCancel bool
+	GenRef             string // Bitcoin: the generation of the account key the inputs are under ("1", "2", ...)
+	IntentID           string
+	IntentHash         []byte
+	Kind               string
+	Asset              string
+	Amount             *big.Int
+	Sender             string
+	PartitionID        string
+	Claims             []string // what the transaction consumes
+	Pins               []string // one per claim, or none (EVM); the codec's pin of each claim
+	Identity           string   // the codec's identity of the transaction; empty when the chain has none
+	Digest             []byte
+	Fees               []*big.Int
+	PayloadHash        []byte
+	Signature          []byte    // nil: reservation
+	At                 time.Time // reservation time
+	NewIntent          bool      // false: another signature for an intent already recorded
+	NewClaims          []string  // claims nobody holds yet, taken by this intent
+	TakeClaims         []string  // a cancel taking over the claims of a different intent
 	// Parent, when set, is recorded as the change of the transaction Identity (see ParentFacts).
 	Parent *ParentFacts
 	// Members are the withdrawals of a batch, recorded as rows of their own when the batch is first reserved (NewIntent).
@@ -445,9 +458,9 @@ func (t *GuardTx) IdentityConflict(ctx context.Context, identity string, payload
 // claim make a double release fail even if the lock were bypassed.
 func (t *GuardTx) Record(ctx context.Context, r Release) error {
 	if r.NewIntent {
-		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at, gen_state)
-			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10, NULLIF($11,''))`,
-			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.PartitionID, r.At, r.GenState); err != nil {
+		if _, err := t.tx.Exec(ctx, `INSERT INTO signed_intents (intent_id, intent_hash, kind, chain, asset, amount, sender, claims, partition_id, created_at, gen_state, gen_ref)
+			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10, NULLIF($11,''), NULLIF($12,''))`,
+			r.IntentID, r.IntentHash, r.Kind, t.chain, r.Asset, r.Amount.String(), r.Sender, r.Claims, r.PartitionID, r.At, r.GenState, r.GenRef); err != nil {
 			return fmt.Errorf("record intent: %w", err)
 		}
 		for _, m := range r.Members {

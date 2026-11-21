@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -277,16 +278,23 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 				}
 			}
 		}
+		genRef := ""
+		if kv != nil && cc.Family == FamilyBTC {
+			if e := kv.tree(cc.Name)[int(info.Gen)]; e != nil {
+				genState, genRef = e.State, strconv.Itoa(int(info.Gen))
+			}
+		}
 		if err := d.policy(ctx, gt, cc, intent, codec, info, amount, valid, known, genState == "compromised", now); err != nil {
 			return err
 		}
 
 		// 5. Replay guard.
-		rel := Release{GenState: genState, IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
+		rel := Release{GenState: genState, GenRef: genRef, IntentID: intent.ID, IntentHash: hash[:], Kind: intent.Kind, Asset: intent.Asset, Amount: amount,
 			Sender: info.Sender, PartitionID: intent.PartitionID, Claims: info.Claims, Pins: info.Pins, Identity: info.Identity, Digest: guardKey, Fees: info.Fees, PayloadHash: payloadHash(job.Payload), At: now}
 		if intent.Kind == "withdrawal" || intent.Kind == "to-cold" {
 			rel.Parent = info.Parent // kinds that keep a change: a child may pull them in later
 		}
+		rel.CosignerFreeCancel = intent.Kind == "cancel" && cc.Family == FamilyBTC && genState == "compromised" && d.mode == ModeCosigner
 		return d.admit(ctx, gt, codec, job, intent, rec, &rel, info, key, v, arec, now)
 	})
 	if err != nil {
@@ -682,7 +690,7 @@ func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec
 	}
 	rel.NewIntent = true
 	if i.Kind == "cancel" {
-		if sc, ok := codec.(StrictCancelCodec); ok && sc.StrictCancel() {
+		if sc, ok := codec.(StrictCancelCodec); ok && sc.StrictCancel() && !(rel.CosignerFreeCancel && noClaims(claims)) {
 			if err := d.strictCancel(ctx, gt, i, rel, claims); err != nil {
 				return nil, err
 			}
@@ -702,6 +710,16 @@ func (d *Decider) replay(ctx context.Context, gt *GuardTx, i signjob.Intent, rec
 		}
 	}
 	return nil, nil
+}
+
+// noClaims reports whether none of the claims exists in this guard.
+func noClaims(claims map[string]*Claim) bool {
+	for _, c := range claims {
+		if c != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // sameSet reports whether a and b hold the same strings.

@@ -21,6 +21,8 @@ ALTER TABLE signed_intents ADD COLUMN IF NOT EXISTS claims text[];
 -- The state of the sender's keyset generation in this guard's own view when the intent was admitted (EVM): the bound of a compromised generation's cancels counts only
 -- those admitted under that state.
 ALTER TABLE signed_intents ADD COLUMN IF NOT EXISTS gen_state text;
+-- The generation of the account key the intent's inputs are under (Bitcoin): the bound of a compromised generation's cancels is per generation.
+ALTER TABLE signed_intents ADD COLUMN IF NOT EXISTS gen_ref text;
 
 -- One row per transaction digest. Reserved first (signature NULL), finished after signing. A transaction with several
 -- signatures has one row per digest, all with the same payload_hash; a replacement adds rows with another payload_hash

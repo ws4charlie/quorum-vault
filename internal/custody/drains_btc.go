@@ -1,6 +1,7 @@
 package custody
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -123,10 +124,19 @@ func (s *Service) planBTCDrain(ctx context.Context, log *slog.Logger, d btcDrain
 	if err != nil {
 		return wait("cannot derive the successor's shard address: " + err.Error())
 	}
-	if n, err := d.ReservedUnder(ctx, part, from.Generation); err != nil {
+	reserved, err := d.ReservedUnder(ctx, part, from.Generation)
+	if err != nil {
 		return nil, btcDrainState{}, err
-	} else if n > 0 {
-		return wait(fmt.Sprintf("%d outputs of the old shard are reserved by transactions that are not final; the drain starts when they are", n))
+	}
+	// A draining generation waits for the transactions it has in flight. A compromised one does not: nothing new is signed from it but its own cancels, so the
+	// coins that are free move at once, and the held ones (reserved by a payment the zone refused: its cancel is on the way) are picked up when they come back.
+	compromised := from.State == partition.StateCompromised
+	if reserved > 0 && !compromised {
+		return wait(fmt.Sprintf("%d outputs of the old shard are reserved by transactions that are not final; the drain starts when they are", reserved))
+	}
+	note := ""
+	if reserved > 0 {
+		note = s.btcHeldNote(ctx, d, part, from.Generation)
 	}
 	plan, err := d.PlanDrain(ctx, part, fromAddr)
 	if err != nil {
@@ -136,6 +146,9 @@ func (s *Service) planBTCDrain(ctx context.Context, log *slog.Logger, d btcDrain
 		return wait(plan.Wait)
 	}
 	if plan.Amount == nil || plan.Amount.Sign() <= 0 {
+		if reserved > 0 {
+			return wait(cmp.Or(note, fmt.Sprintf("%d outputs of the old shard are reserved by transactions that are not final; the drain starts when they are", reserved)))
+		}
 		return nil, btcDrainState{state: "drained"}, nil
 	}
 	id := "dr-" + uuid.NewString()
@@ -157,6 +170,9 @@ func (s *Service) planBTCDrain(ctx context.Context, log *slog.Logger, d btcDrain
 			"to_generation": succ.Generation, "from": fromAddr, "to": toAddr, "asset": c.Native, "amount": plan.Amount.String()})
 	})
 	st := btcDrainState{state: "moving", reason: fmt.Sprintf("moving %s %s in %d outputs", plan.Amount, c.Native, plan.Inputs)}
+	if note != "" {
+		st.reason += "; " + note
+	}
 	return made, st, err
 }
 

@@ -278,7 +278,10 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 		}
 		if have {
 			if !s.evmFamily() {
-				return nil
+				// Bitcoin: only the cancel of coins a refused payment left claimed under a compromised generation is renewed (the same guarded rule as EVM)
+				if held, err := s.btcClaimHeld(ctx, tx, o); err != nil || !held {
+					return err
+				}
 			}
 			// EVM: the cancel's job may have been refused only because its deadline passed before the zone could sign it (the successor was not active
 			// in some guard in time). Then, and only then, a new attempt is enqueued (renewCancel); otherwise the latest attempt is the one to follow.
@@ -311,13 +314,21 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 		}
 		// A chain whose attempts can be released (Bitcoin) needs a cancel only when a signature may exist. If none can, the caller releases
 		// the reservation instead (ReleaseIfUnsigned), which is what "nothing to free" means there.
+		claimHeld := false
 		if _, ok := s.Chain.(chain.Releaser); ok {
 			_, may, err := jobStates(ctx, tx, o)
 			if err != nil {
 				return err
 			}
 			if !may {
-				return chain.ErrNotSupported
+				// Bitcoin, a compromised generation, refused by a cosigner after the gateway claimed the coins: no signature, but the claim stays and only
+				// the cancel frees it (btc_claim.go).
+				if claimHeld, err = s.btcClaimHeld(ctx, tx, o); err != nil {
+					return err
+				}
+				if !claimHeld {
+					return chain.ErrNotSupported
+				}
 			}
 		}
 		u, err := s.Chain.BuildCancel(ctx, tx, o.Kind, o.ID)
@@ -333,6 +344,12 @@ func (s *Service) EnqueueCancel(ctx context.Context, o Owner) (string, error) {
 		}
 		intent := signjob.Intent{Kind: "cancel", ID: string(t), PartitionID: o.PartitionID, Chain: s.Cfg.Chain,
 			Asset: s.Cfg.Native, To: res.Account, Amount: "0"}
+		if claimHeld {
+			intent.NotAfter = s.Now().Add(CancelWindow).Unix()
+			if id != t.FirstJob() {
+				intent.ID = id
+			}
+		}
 		if s.evmFamily() {
 			// The zone waits for a compromised generation's successor to be active only until the intent's not_after (a cancel signed after the mark needs the
 			// drain to be possible: gateway keysets.go, compromisedCancel). A day is longer than any pause of an emergency run (CancelWindow); a cancel refused because even that passed is renewed (cancelAttempt).
@@ -532,6 +549,9 @@ func (s *Service) releaseIfUnsignedTx(ctx context.Context, tx pgx.Tx, o Owner) (
 	pending, may, err := jobStates(ctx, tx, o)
 	if err != nil || may {
 		return false, err
+	}
+	if held, err := s.btcClaimHeld(ctx, tx, o); err != nil || held {
+		return false, err // the zone holds a claim on the coins: they are not released, the cancel frees them
 	}
 	for _, id := range pending {
 		if _, err := tx.Exec(ctx, `UPDATE sign_jobs SET status='rejected', reject_reason='sibling_refused: another job of the attempt was refused', updated_at=now() WHERE id=$1 AND status='pending'`, id); err != nil {

@@ -90,6 +90,21 @@ The cancel waits up to a day for the successor to become active in every guard (
 2. Broadcast and not confirming for a long time: look at the transaction on the node. It is real, so the drain does not start under it (it would spend the balance the transaction needs and queue behind its nonce). The system has no way to replace it, because the old key may not sign a fee bump. It mines when the fee allows. If the node dropped it, nothing replaces it (the replacement would be signed by the old key too): the decision to go on without it is a human one, and no tool makes it for you (backlog: a drain transfer that replaces it at the same nonce).
 3. A row is `parked` (an `ALERT` named it): read its reason, fix the cause, clear the parked reason as the other runbooks describe, and run the command again.
 
+## Work in flight at the mark (Bitcoin)
+
+The signing gateway claims every coin a payment spends before the parties sign. When a cosigner that already has the mark refuses the payment (`signer_refused: ... is compromised`) no signature exists but the claim stays, and a drain move that spends that coin is refused `replay_nonce_taken`. Before this rule one such coin stopped every move behind it: the whole shard stayed at the old key.
+
+| State at the mark | What the system does | What you see |
+|---|---|---|
+| refused by a rule, before anything was claimed | the coins are released; the withdrawal is voided | nothing waits |
+| refused by a cosigner after the gateway claimed the coins (`signer_refused`) | the coins are **not** released. The core asks for the cancel; the zone signs a compromised generation's strict cancel (exactly the claimed coins, one output back to the same generation's hot shard, within the fee cap and `max_cancels_per_source`, default 16 for each compromised generation, once the successor is active). When it confirms, the payment ends cancelled (hold released, fee booked) and the output is an ordinary coin that the next drain move takes. The drain does not wait: every other coin moves at once | the drain state says `N coins held by a refused payment: cancel pending / cancel signed, waiting for confirmation` |
+| signed, broadcast | real: it confirms, or the cancel replaces it (the chain mines one of the two; the books follow whichever confirms: paid, or voided with the hold released) | the withdrawal's own status |
+| a drain refused `replay_nonce_taken` for a coin the core did not know was claimed (a refused CPFP child, or a payment the core had already released) | the coin is held out of the drain moves (reserved, owner `claimed`) and the other coins move on | `N coins held by a payment the zone says it claimed ... an operator must cancel it` |
+
+No tool cancels a held `claimed` coin yet (backlog): it needs the strict cancel of the intent named in the state text, signed through the zone, and engineering to release the reservation afterwards. Do not release it before that cancel confirms: a drain would be refused again.
+
+**Rollout.** Gateway and every cosigner together, as for EVM. A cosigner on the old binary refuses the cancel (safe: the old residual returns).
+
 ## Verify
 
 - `qv-rekey status` shows the old generation `compromised`, drain `drained`; Reconcile is clean.
