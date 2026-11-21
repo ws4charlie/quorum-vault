@@ -398,7 +398,8 @@ func TestReconcileBTCStuckScanAlerts(t *testing.T) {
 	}
 	now = now.Add(s.Cfg.ReconcileScanStuckAfter + time.Second)
 	rep := mustReconcile(t, s)
-	if got := failedNames(rep); len(got) != 1 || got[0] != "scan_caught_up" {
+	// A stuck scan explains nothing: the outputs it has not booked are differences again.
+	if got := failedNames(rep); len(got) < 2 || got[0] != "scan_caught_up" {
 		t.Fatalf("%v", got)
 	}
 	if !strings.Contains(buf.String(), "check=scan_caught_up") {

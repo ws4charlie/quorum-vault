@@ -276,7 +276,7 @@ func TestReconcileCatchesEveryKindOfDifference(t *testing.T) {
 	// 1. Coins sent to a hot address outside the system, before the scan reaches them.
 	s.worker.stop()
 	s.node.pay(map[string]string{s.hotAddr: btcAmount(1_000_000)})
-	s.node.mine(6, "")
+	s.node.mine(20, "") // the scan is stopped: more blocks than reconcile.max_scan_lag_blocks (6) leave it behind, so nothing explains the coins and Reconcile alerts
 	r := mustFail("coins on a hot address the scan has not reached", "hot ", "outputs_on_chain")
 	if r.Height == 0 {
 		t.Fatal("the report does not say which height it read")
@@ -583,7 +583,7 @@ func TestReconcileCleanWithAWithdrawalInFlightAndACatchesARealDifference(t *test
 	s.waitWd(id, "broadcast", 60*time.Second)
 	s.worker.stop()
 	s.node.pay(map[string]string{s.hotAddr: btcAmount(1_000_000)})
-	s.node.mine(6, "")
+	s.node.mine(20, "") // the scan is stopped: more blocks than reconcile.max_scan_lag_blocks (6) leave it behind, so nothing explains the coins and Reconcile alerts
 	r := s.reconcile()
 	if r.Clean || r.InFlight == 0 || !strings.Contains(r.failedNames(), "hot ") || !strings.Contains(r.failedNames(), "outputs_on_chain") {
 		t.Fatalf("a real difference during an open withdrawal: clean=%v in flight %d failed: %s", r.Clean, r.InFlight, r.failedNames())

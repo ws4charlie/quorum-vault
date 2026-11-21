@@ -43,6 +43,16 @@ func (w *scanWatch) observe(cur uint64, now time.Time) time.Duration {
 	return now.Sub(w.since)
 }
 
+// stuckFor is how long the cursor has been where it is, without recording a new look (0 if it was never seen there).
+func (w *scanWatch) stuckFor(cur uint64, now time.Time) time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.set || w.cur != cur {
+		return 0
+	}
+	return now.Sub(w.since)
+}
+
 // scanLag is how many blocks of the chain up to the safe head h the scan has not read: 0 when its cursor is past h.
 func scanLag(cur, h uint64) uint64 {
 	if cur > h {

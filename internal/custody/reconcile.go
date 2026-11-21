@@ -266,7 +266,7 @@ func (s *Service) reconcileBTC(ctx context.Context, rep *Report) error {
 		var pend *pendingScan
 		if cur0, err := s.Cursor(ctx); err != nil {
 			return err
-		} else if lag := scanLag(cur0, h0); lag > 0 && lag <= s.Cfg.ReconcileMaxScanLag {
+		} else if lag := scanLag(cur0, h0); lag > 0 && lag <= s.Cfg.ReconcileMaxScanLag && s.scanSeen.stuckFor(cur0, s.Now()) < s.Cfg.ReconcileScanStuckAfter {
 			p := s.readPendingScan(ctx, cur0)
 			pend = &p
 		}
