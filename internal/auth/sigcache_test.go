@@ -303,3 +303,81 @@ func BenchmarkVerifyManyTokens(b *testing.B) {
 		}
 	})
 }
+
+// aFullCache fills the cache of a verifier with live tokens and returns one more token that does not fit.
+func aFullCache(tb testing.TB) (*auth.Authenticator, string, string) {
+	tb.Helper()
+	is := authtest.New(iss, aud)
+	a, err := auth.New(is.Config(), auth.Test, false)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	first := is.Token(authtest.Spec{Sub: "u-first", Roles: []string{"approver"}})
+	ctx := context.Background()
+	a.Verify(ctx, first)
+	a.Verify(ctx, first) // the first use of a static-key verifier stores nothing only for a fetched set; here it stores
+	for i := 0; i < 8192+100; i++ {
+		if _, err := a.Verify(ctx, is.Token(authtest.Spec{Sub: fmt.Sprintf("u-%d", i), Lifetime: time.Hour + time.Duration(i)*time.Second})); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	return a, first, is.Token(authtest.Spec{Sub: "u-extra"})
+}
+
+func TestAFullCacheStillServesStoredTokensAndVerifiesTheOthers(t *testing.T) {
+	a, first, extra := aFullCache(t)
+	ctx := context.Background()
+	h0, _ := counts(t, a)
+	for i := 0; i < 3; i++ {
+		if _, err := a.Verify(ctx, first); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if h1, _ := counts(t, a); h1 != h0+3 {
+		t.Fatal("a stored token stopped being a hit when the cache filled")
+	}
+	for i := 0; i < 3; i++ { // a token that does not fit is verified in full each time, correctly
+		if p, err := a.Verify(ctx, extra); err != nil || p.Sub != "u-extra" {
+			t.Fatal(p, err)
+		}
+	}
+	if h2, _ := counts(t, a); h2 != h0+3 {
+		t.Fatal("a token that did not fit was counted as a hit")
+	}
+}
+
+func BenchmarkVerifyOneToken_FullCache(b *testing.B) {
+	a, first, _ := aFullCache(b)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := a.Verify(ctx, first); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// Many more distinct live tokens than the bound: most are misses, none may make the others wait on a scan.
+func BenchmarkVerifyAboveTheBound(b *testing.B) {
+	is := authtest.New(iss, aud)
+	a, _ := auth.New(is.Config(), auth.Test, false)
+	toks := make([]string, 3*8192)
+	for i := range toks {
+		toks[i] = is.Token(authtest.Spec{Sub: fmt.Sprintf("u-%d", i), Lifetime: time.Hour + time.Duration(i)*time.Second})
+	}
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			i++
+			if _, err := a.Verify(ctx, toks[i%len(toks)]); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}

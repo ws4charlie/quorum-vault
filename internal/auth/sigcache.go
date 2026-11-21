@@ -23,12 +23,15 @@ const (
 	// own overhead), so 8192 entries are under 1 MB per replica. Only tokens that passed full verification are stored, so a caller
 	// without a valid token cannot fill it; it holds as many entries as there are live tokens of this identity provider's users and services.
 	sigCacheMax = 8192
+	// sigCacheSweep is the least time between two passes that remove dead entries from a full cache.
+	sigCacheSweep = time.Second
 )
 
 type sigCache struct {
-	mu  sync.Mutex
-	m   map[[sha256.Size]byte]time.Time // digest of the raw token -> when the entry stops counting
-	gen uint64                          // advanced whenever the key set changes; a store made under an older value is dropped
+	mu    sync.Mutex
+	m     map[[sha256.Size]byte]time.Time // digest of the raw token -> when the entry stops counting
+	swept time.Time                       // last pass over a full cache
+	gen   uint64                          // advanced whenever the key set changes; a store made under an older value is dropped
 
 	hits, misses atomic.Uint64
 }
@@ -60,7 +63,8 @@ func (c *sigCache) has(h [sha256.Size]byte, now time.Time) bool {
 	return true
 }
 
-// store remembers h until the earlier of the token's exp and sigCacheTTL from now, unless the key set changed since gen was read.
+// store remembers h until the earlier of the token's exp and sigCacheTTL from now, unless the key set changed since gen was read or the
+// cache is full of live entries (then h is not stored). It takes O(1) time, except for one sweep per sigCacheSweep when full.
 func (c *sigCache) store(h [sha256.Size]byte, tokenExp, now time.Time, gen uint64) {
 	until := now.Add(sigCacheTTL)
 	if tokenExp.Before(until) {
@@ -75,16 +79,19 @@ func (c *sigCache) store(h [sha256.Size]byte, tokenExp, now time.Time, gen uint6
 		return
 	}
 	if _, ok := c.m[h]; !ok && len(c.m) >= sigCacheMax {
-		for k, e := range c.m { // first the dead ones
-			if !now.Before(e) {
-				delete(c.m, k)
+		// Full. Dead entries are swept at most once per sigCacheSweep, so a flood of new tokens costs one pass per interval, not one per
+		// token (hits take the same lock). If nothing was freed the token is simply not stored: it costs one signature check per use,
+		// which is the price without a cache.
+		if now.Before(c.swept) || now.Sub(c.swept) >= sigCacheSweep {
+			c.swept = now
+			for k, e := range c.m {
+				if !now.Before(e) {
+					delete(c.m, k)
+				}
 			}
 		}
-		for k := range c.m { // then any one: all live entries are equal, each costs one signature check to rebuild
-			if len(c.m) < sigCacheMax {
-				break
-			}
-			delete(c.m, k)
+		if len(c.m) >= sigCacheMax {
+			return
 		}
 	}
 	c.m[h] = until
@@ -94,6 +101,7 @@ func (c *sigCache) store(h [sha256.Size]byte, tokenExp, now time.Time, gen uint6
 func (c *sigCache) clear() {
 	c.mu.Lock()
 	c.m = map[[sha256.Size]byte]time.Time{}
+	c.swept = time.Time{}
 	c.gen++
 	c.mu.Unlock()
 }
