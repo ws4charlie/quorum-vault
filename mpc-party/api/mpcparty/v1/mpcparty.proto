@@ -285,6 +285,7 @@ enum Op {
   OP_FREEZE_NOTICE = 8; // 2-of-3: "I froze this keyset"; the receiver freezes too (Open.reason)
   OP_ADMIN_SET = 9;     // a change of the admin set, forwarded to B and C; every member verifies it itself
   OP_RECOVERY_KEY = 10; // a change of the recovery-key registry, the same way
+  OP_FREEZE_STATE = 11; // 2-of-3, read only: "is this keyset frozen on your side?" Answer: a FIN with ok and result {1} (frozen) or {0}; nothing is recorded, signed or counted
 }
 
 message Open {

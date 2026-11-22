@@ -17,12 +17,15 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
+	mrand "math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -92,24 +95,42 @@ var (
 	freeGiven = map[string]bool{}
 )
 
-// FreeAddr returns 127.0.0.1:port for a port that was free a moment ago. The kernel may hand out a port again as soon as it is
-// closed, so one test could give the same port to two processes: an address is never returned twice in a test binary.
+// FreeAddr returns 127.0.0.1:port for a port that was free a moment ago. A port is looked for below the kernel's dynamic range
+// (20000 to 31999) first: any client socket of any process can take a port from that range between our probe and the party's bind
+// (the cause of "bind: address already in use" in CI, as in e2e/mpcstack.FreeAddr). An address is never returned twice in a test
+// binary; only EADDRINUSE is retried, any other error ends the test; the kernel's choice is the bounded fallback.
 func FreeAddr(t testing.TB) string {
 	t.Helper()
 	freeMu.Lock()
 	defer freeMu.Unlock()
-	for {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
+	try := func(addr string) string {
+		l, err := net.Listen("tcp", addr)
 		if err != nil {
+			if errors.Is(err, syscall.EADDRINUSE) {
+				return ""
+			}
 			t.Fatal(err)
 		}
-		addr := l.Addr().String()
+		got := l.Addr().String()
 		l.Close()
-		if !freeGiven[addr] {
-			freeGiven[addr] = true
-			return addr
+		if freeGiven[got] {
+			return ""
+		}
+		freeGiven[got] = true
+		return got
+	}
+	for i := 0; i < 300; i++ {
+		if a := try(fmt.Sprintf("127.0.0.1:%d", 20000+mrand.IntN(12000))); a != "" {
+			return a
 		}
 	}
+	for i := 0; i < 1000; i++ {
+		if a := try("127.0.0.1:0"); a != "" {
+			return a
+		}
+	}
+	t.Fatal("FreeAddr: no free port after 1300 tries")
+	return ""
 }
 
 // Env is a full set of identities for one A/B pair plus a legitimate caller.

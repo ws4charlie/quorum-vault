@@ -91,20 +91,70 @@ func (s *Server) openGroup(ctx context.Context, name string, open *pb.Open, with
 			return nil, fromWrapper(name, &transportErr{err})
 		}
 	}
+	// Both ACKs are awaited at the same time. B's ACK depends on C's link, so when C refuses the operation B cannot ACK, and a
+	// coordinator that waits for B first never reads C's refusal on its own stream to C: the caller would see B's silence
+	// (a transport timeout) instead of C's answer. The first failure ends the wait for the other member only for a short
+	// grace period, in which the worse kind wins (a refusal beats the transport trouble it caused).
+	type ackResult struct {
+		role string
+		err  error
+	}
+	results := make(chan ackResult, 2)
+	wctx, stopWait := context.WithCancel(ctx)
+	defer stopWait()
 	for _, role := range []string{"B", "C"} {
-		c, cancel := context.WithTimeout(ctx, 2*s.cfg.Limits.RecvTimeout())
-		err := out[role].tr.waitAck(c)
-		cancel()
-		if err != nil {
-			abort("a member did not accept the session")
-			var f *Fail
-			if errors.As(err, &f) {
-				return nil, f
+		go func(role string) {
+			c, cancel := context.WithTimeout(wctx, 2*s.cfg.Limits.RecvTimeout())
+			defer cancel()
+			results <- ackResult{role, out[role].tr.waitAck(c)}
+		}(role)
+	}
+	var worst *Fail
+	pending := 2
+	for pending > 0 {
+		var r ackResult
+		if worst == nil {
+			r = <-results
+		} else {
+			select {
+			case r = <-results:
+			case <-time.After(ackGrace):
+				pending = 0
+				continue
 			}
-			return nil, fromWrapper(name, &transportErr{err})
+		}
+		pending--
+		if r.err == nil {
+			continue
+		}
+		f := ackFail(name, r.role, r.err)
+		if worst == nil || severity(f.Kind) > severity(worst.Kind) {
+			worst = f
 		}
 	}
+	if worst != nil {
+		stopWait()
+		abort("a member did not accept the session")
+		return nil, worst
+	}
 	return out, nil
+}
+
+// ackGrace is how long the coordinator keeps listening to the other member after the first one failed the session.
+const ackGrace = 400 * time.Millisecond
+
+// ackFail names the member whose answer ended the opening of a three-party session. A member's own refusal, limit, freeze
+// or unavailability keeps its kind and code; anything else (the wait ran out, the stream broke) is a transport failure.
+func ackFail(name, role string, err error) *Fail {
+	var f *Fail
+	if errors.As(err, &f) {
+		c := *f
+		c.Msg = "party " + role + ": " + f.Msg
+		return &c
+	}
+	c := fromWrapper(name, &transportErr{err})
+	c.Msg = "party " + role + " did not accept the session: " + c.Msg
+	return c
 }
 
 // coordinateGroup runs DKG or Refresh of a 2-of-3 keyset as party A.

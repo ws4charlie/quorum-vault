@@ -5,10 +5,12 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/server"
@@ -25,12 +27,22 @@ type tamperProxy struct {
 	n      atomic.Int32
 	count  [2]atomic.Int32
 	hit    atomic.Bool
+	// slowBA delays every frame from B to A by this much (nanoseconds): a slow return path, as a loaded machine has.
+	slowBA atomic.Int64
+	// dropFinBA: B's FIN frames never reach A (a link that resets right after B sent its verdict).
+	dropFinBA atomic.Bool
+	// refuseFrom: sessions from this number on (counted from set, 0 is the first) are refused; -1: none. sessions counts them.
+	refuseFrom atomic.Int32
+	sessions   atomic.Int32
 }
 
 func (p *tamperProxy) set(dir, n int) {
 	p.count[0].Store(0)
 	p.count[1].Store(0)
 	p.hit.Store(false)
+	p.sessions.Store(0)
+	p.refuseFrom.Store(-1)
+	p.dropFinBA.Store(false)
 	p.dir.Store(int32(dir))
 	p.n.Store(int32(n))
 }
@@ -48,39 +60,59 @@ func (p *tamperProxy) mutate(dir int, f *pb.Frame) {
 }
 
 func (p *tamperProxy) Session(in pb.Peer_SessionServer) error {
+	n := p.sessions.Add(1) - 1
+	if p.refuseFrom.Load() >= 0 && n >= p.refuseFrom.Load() {
+		return status.Error(codes.Unavailable, "proxy: link cut")
+	}
+	dropFin := p.dropFinBA.Load() && n == 0 // only the first session after set loses its verdict, not a later probe
 	out, err := p.client.Session(in.Context())
 	if err != nil {
 		return err
 	}
-	done := make(chan struct{}, 2)
+	toB, toA := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(toB)
 		for {
 			f, err := in.Recv()
 			if err != nil {
 				out.CloseSend()
-				break
+				return
 			}
 			p.mutate(0, f)
 			if out.Send(f) != nil {
-				break
+				return
 			}
 		}
-		done <- struct{}{}
 	}()
 	go func() {
+		defer close(toA)
 		for {
 			f, err := out.Recv()
 			if err != nil {
-				break
+				return
 			}
 			p.mutate(1, f)
+			if f.Kind == pb.FrameKind_FRAME_KIND_FIN && dropFin {
+				continue
+			}
+			if d := p.slowBA.Load(); d > 0 {
+				time.Sleep(time.Duration(d))
+			}
 			if in.Send(f) != nil {
-				break
+				return
 			}
 		}
-		done <- struct{}{}
 	}()
-	<-done
+	// The session ends when B's side has ended and everything B sent (its FIN) was handed to A. A's side ending first
+	// (B already finished, so A's next frame found no stream) must not cut B's last frames off: a real link delivers them.
+	select {
+	case <-toA:
+	case <-toB:
+		select {
+		case <-toA:
+		case <-time.After(5 * time.Second):
+		}
+	}
 	return nil
 }
 
@@ -95,6 +127,7 @@ func startProxy(t *testing.T, env *testenv.Env, bPeer string, proxyCert testenv.
 	t.Cleanup(func() { conn.Close() })
 	p := &tamperProxy{client: pb.NewPeerClient(conn)}
 	p.n.Store(-1)
+	p.refuseFrom.Store(-1)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

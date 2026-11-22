@@ -65,6 +65,7 @@ func startLink(t *testing.T, targetAddr, targetPin, clientPin string, proxyCert 
 	t.Cleanup(func() { conn.Close() })
 	p := &tamperProxy{client: pb.NewPeerClient(conn)}
 	p.n.Store(-1)
+	p.refuseFrom.Store(-1)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -396,8 +397,16 @@ func TestTrioNoFallbackMidProtocol(t *testing.T) {
 			tr := startTrio(t, trioOpts{scheme: sc, recvMS: 700,
 				auth: map[string]server.Authorizer{"C": cAuth},
 				fi:   map[string]*server.FaultInjection{"B": {BeforeSign: func(role string) { time.Sleep(3 * time.Second) }}}})
-			pub := tr.dkg(t, "k")
-			_ = pub
+			// The receive limit here is 700 ms so that the stall below is noticed: on a loaded machine the DKG itself can run into it.
+			// A DKG that ends in a transport failure leaves nothing behind (the candidate is dropped), so it is asked again.
+			var derr error
+			for try := 0; try < 5; try++ {
+				_, derr = tr.Client["A"].DKG(ctx30(t), &pb.DKGRequest{KeysetId: "k", Scheme: tr.sc(), Admin: tr.Env.Admin("dkg", "k")})
+				if k, _ := server.KindOfStatus(derr); derr == nil || k != pb.ErrorKind_ERROR_KIND_TRANSPORT {
+					break
+				}
+			}
+			mustOK(t, derr)
 			_, err := tr.sign("A", "k", "stall", 1)
 			if err == nil {
 				t.Fatal("signed although B stalled")

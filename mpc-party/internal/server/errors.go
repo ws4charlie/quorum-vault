@@ -35,6 +35,8 @@ func (f *Fail) Error() string {
 }
 func (f *Fail) Unwrap() error { return f.Err }
 
+func (f *Fail) withPeer() *Fail { f.Peer = true; return f }
+
 func failf(kind pb.ErrorKind, c codes.Code, op, format string, a ...any) *Fail {
 	return &Fail{Kind: kind, Code: c, Op: op, Msg: fmt.Sprintf(format, a...)}
 }
