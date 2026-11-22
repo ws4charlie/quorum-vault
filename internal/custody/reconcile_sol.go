@@ -121,6 +121,11 @@ func (s *Service) reconcileSOL(ctx context.Context, rep *Report) error {
 		}
 		rep.ScanCursor = cur
 		rep.ChainHeight = view.Slot
+		// The balances above are read as at the scan cursor (the view waits for finalized activity the scan has not covered), so a scan that is behind
+		// cannot make a difference; it is a status, and an ALERT only when it is behind by too much or stuck.
+		chk, lag := s.scanCheck(cur, h)
+		rep.ScanLag = lag
+		rep.add(chk)
 		for _, sym := range c.AssetList {
 			sum := new(big.Int)
 			for _, b := range view.Balance[sym] {

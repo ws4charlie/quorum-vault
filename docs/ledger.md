@@ -16,7 +16,7 @@ When a customer asks to withdraw, the amount is held first, so two requests can'
 
 ## Reconcile checks the books against the chain
 
-Reconcile reads every address the system owns from the chain and compares it with the books, down to the smallest unit. Money on its way is explained from the chain's own record of each transaction, so the books match at every step, not only when things are quiet. After a key has been replaced, the addresses of the old and new key are added together and compared with the one account, so moving funds between them changes nothing.
+Reconcile reads every address the system owns from the chain and compares it with the books, down to the smallest unit. Money on its way is explained from the chain's own record of each transaction, so the books match at every step, not only when things are quiet. After a key has been replaced, the addresses of the old and new key are added together and compared with the one account, so moving funds between them changes nothing. The comparison is made as at the height the deposit scan has reached: a scan that is a few blocks behind is a status, not a difference, and only a stuck or far-behind scan raises an alert.
 
 ## What Reconcile says when the answer is unclear
 

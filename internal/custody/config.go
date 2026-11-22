@@ -47,6 +47,13 @@ type File struct {
 type ReconcileFile struct {
 	// MaxSkip is how long the chain comparisons may be skipped (a block kept arriving during each read) before an ALERT is raised. Default 15m.
 	MaxSkip string `json:"max_skip"`
+	// MaxScanLagBlocks is how many blocks the deposit scan may be behind the safe head before "scan_caught_up" raises an ALERT. Inside it the lag is a
+	// status (the report's scan_lag_blocks, the metric qv_scan_lag_blocks) and the deposits of the blocks the scan has not read are accounted for in the
+	// comparison. 0 takes the chain family's default: EVM 32 (about 6 minutes of 12 s blocks), Bitcoin 6 (about an hour), Solana 600 (about 4 minutes of slots).
+	MaxScanLagBlocks uint64 `json:"max_scan_lag_blocks"`
+	// ScanStuckAfter is how long the scan cursor may stay where it is while the safe head is ahead of it before "scan_caught_up" raises an ALERT.
+	// Default 5m: a healthy scan reads every few seconds, so a cursor that has not moved for that long is stuck, whatever the lag in blocks.
+	ScanStuckAfter string `json:"scan_stuck_after"`
 }
 
 // ColdFile configures hot-to-cold moves. Without addresses and limits nothing is moved. The business config's copy of the
@@ -206,8 +213,11 @@ type Config struct {
 	SweepK           int
 	SweepRetryAfter  time.Duration
 	ReconcileMaxSkip time.Duration
-	MinSweepWei      *big.Int
-	PlanInterval     time.Duration
+	// ReconcileMaxScanLag and ReconcileScanStuckAfter: see ReconcileFile.
+	ReconcileMaxScanLag     uint64
+	ReconcileScanStuckAfter time.Duration
+	MinSweepWei             *big.Int
+	PlanInterval            time.Duration
 
 	ApprovalWindow  time.Duration
 	ApprovalTimeout time.Duration
@@ -615,6 +625,19 @@ func (f File) Build() (*Config, error) {
 	}
 	if c.ReconcileMaxSkip, err = dur("reconcile max_skip", f.Reconcile.MaxSkip, 15*time.Minute); err != nil {
 		return nil, err
+	}
+	if c.ReconcileScanStuckAfter, err = dur("reconcile scan_stuck_after", f.Reconcile.ScanStuckAfter, 5*time.Minute); err != nil {
+		return nil, err
+	}
+	if c.ReconcileMaxScanLag = f.Reconcile.MaxScanLagBlocks; c.ReconcileMaxScanLag == 0 {
+		switch c.Family {
+		case FamilyBTC:
+			c.ReconcileMaxScanLag = 6
+		case FamilySOL:
+			c.ReconcileMaxScanLag = 600
+		default:
+			c.ReconcileMaxScanLag = 32
+		}
 	}
 	if c.Family == FamilyBTC {
 		c.BTC.SweepK = uint64(c.SweepK)

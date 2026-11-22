@@ -170,7 +170,7 @@ func run(log *slog.Logger) error {
 		}
 		mux := http.NewServeMux()
 		if tsrc != nil {
-			mux.Handle("/metrics", pki.WithMetrics(auth.WithMetrics(custody.EmergencyMetrics(pool), authn), tsrc)) // certificate metrics, then the compromised-key metrics (docs/runbooks/stolen-hot-key.md)
+			mux.Handle("/metrics", pki.WithMetrics(custody.ScanLagMetrics(auth.WithMetrics(custody.EmergencyMetrics(pool), authn)), tsrc)) // certificate metrics, then the scan lag, then the compromised-key metrics (docs/runbooks/stolen-hot-key.md)
 		}
 		msrv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		go func() {
