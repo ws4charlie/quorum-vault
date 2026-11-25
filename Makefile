@@ -170,7 +170,7 @@ test-e2e-evm-drill:
 # signing zone (software key) and of an HSM key, and the core's liability accounting is read through the real reader. The tests set the chain id of the node
 # at QV_ANVIL_RPC (a CI lane's own anvil) to 84532 themselves; `make base-up` starts a separate dev node of 84532 on 18546.
 test-e2e-x402:
-	QV_REQUIRE_CHAIN=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 15m -v -run 'TestEIP3009SignedByTheZoneIsAcceptedByTheToken|TestX402LiabilityOnALocalBaseSepolia|TestHSMSignedEIP712DigestIsAcceptedByTheToken' ./internal/gateway ./internal/custody ./internal/hsmsigner
+	QV_REQUIRE_CHAIN=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 15m -v -run 'TestEIP3009SignedByTheZoneIsAcceptedByTheToken|TestGateCredentialPaymentsLandOnAnvil|TestX402LiabilityOnALocalBaseSepolia|TestHSMSignedEIP712DigestIsAcceptedByTheToken' ./internal/gateway ./internal/custody ./internal/hsmsigner
 base-up:
 	docker compose --profile x402 up -d --wait anvil-base-sepolia
 base-down:

@@ -305,7 +305,11 @@ func transferPayment(cc *ChainConfig, payload []byte) (PaymentFacts, error) {
 		if value.Sign() == 0 {
 			return PaymentFacts{}, errors.New("a native transfer of zero")
 		}
-		f.Asset, f.AssetSymbol, f.Payee, f.Amount = gatecred.NativeAsset, cc.EVM.NativeAsset, to.Hex(), value
+		native := cc.EVM.NativeAsset
+		if native == "" {
+			native = evm.DefaultNativeAsset
+		}
+		f.Asset, f.AssetSymbol, f.Payee, f.Amount = gatecred.NativeAsset, native, to.Hex(), value
 		return f, nil
 	}
 	symbol := ""

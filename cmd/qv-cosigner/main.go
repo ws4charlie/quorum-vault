@@ -116,6 +116,8 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// The Gate credential rule is in every decider (gateway.NewDecider); this loop prunes its replay records (docs/gate-credential.md).
+	go gateway.RunGatePruner(ctx, guard, time.Hour, log)
 	if *brokers == "" {
 		log.Error("ALERT no -brokers: this zone's audit chain heads are not published, so a truncated or rewritten chain cannot be detected from outside the database")
 	}

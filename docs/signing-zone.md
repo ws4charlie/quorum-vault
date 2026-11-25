@@ -27,6 +27,10 @@ The approver list is more than a settings file. Enrolling, disabling or revoking
 
 Each hot key also has a state (new, active, draining, retired). The zone learns it only from records that zone operators have signed, never from the business side. The state decides what the key may sign. A key that is being replaced can only move its funds to its successor, and the zone operators' signatures that start the move count as its approval ([Key replacement](key-replacement.md)). A key marked as stolen may also cancel its own pending payment, so that a payment refused around the moment of the mark cannot block the move of its funds.
 
+## Payments that AgentGate approves
+
+Some hot wallets pay only what AgentGate approved. For such a wallet, every payment needs a short-lived credential that Gate signed for exactly that payment, and approvers cannot replace it. Which wallets these are, which Gate keys count, and how much may go out per payment, per hour and per day is a setting that several zone operators sign. The gateway and every cosigner each check the credential against the transaction they are about to sign, record it so it is used once, and count it against the limits ([Gate credential](gate-credential.md), [runbook](runbooks/gate-setting.md)).
+
 ## Two cosigners that do not trust each other
 
 Parties B and C each have their own cosigner: an independent checker that reads every job, with its own rules and records. Even if someone takes over the gateway, party A or the business database, they still cannot get a payment that nobody approved.
