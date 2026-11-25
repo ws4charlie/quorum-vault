@@ -2,6 +2,7 @@ package custody
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -10,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"strings"
 )
@@ -100,4 +102,45 @@ func (r *EVMReader) Receipt(ctx context.Context, txHash string) (Receipt, bool, 
 		out.Fee = new(big.Int).Mul(new(big.Int).SetUint64(rc.GasUsed), rc.EffectiveGasPrice)
 	}
 	return out, true, nil
+}
+
+// authorizationUsedTopic is keccak256("AuthorizationUsed(address,bytes32)"), the event of EIP-3009 tokens (Circle USDC among them).
+var authorizationUsedTopic = crypto.Keccak256Hash([]byte("AuthorizationUsed(address,bytes32)"))
+
+// x402LogChunk is the block span of one eth_getLogs call (public RPC nodes limit it).
+const x402LogChunk = 2000
+
+var _ AuthorizationReader = (*EVMReader)(nil)
+
+// AuthorizationsUsed implements AuthorizationReader: the AuthorizationUsed events of the token configured as asset, for payer, in blocks [from, to].
+func (r *EVMReader) AuthorizationsUsed(ctx context.Context, asset, payer string, from, to uint64) ([]UsedAuthorization, error) {
+	a, ok := r.cfg.Assets[asset]
+	if !ok || a.Native() {
+		return nil, fmt.Errorf("custody: %q is not a token", asset)
+	}
+	var out []UsedAuthorization
+	for lo := from; lo <= to; lo += x402LogChunk {
+		hi := min(lo+x402LogChunk-1, to)
+		logs, err := r.ec.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: new(big.Int).SetUint64(lo), ToBlock: new(big.Int).SetUint64(hi),
+			Addresses: []common.Address{a.Address}, Topics: [][]common.Hash{{authorizationUsedTopic}, {common.BytesToHash(common.HexToAddress(payer).Bytes())}}})
+		if err != nil {
+			return nil, fmt.Errorf("custody: filter AuthorizationUsed: %w", err)
+		}
+		for _, l := range logs {
+			if l.Removed || len(l.Topics) != 3 {
+				continue
+			}
+			out = append(out, UsedAuthorization{Nonce: "0x" + hex.EncodeToString(l.Topics[2].Bytes()), Block: l.BlockNumber, TxHash: l.TxHash.Hex()})
+		}
+	}
+	return out, nil
+}
+
+// BlockTime implements AuthorizationReader.
+func (r *EVMReader) BlockTime(ctx context.Context, height uint64) (uint64, error) {
+	h, err := r.ec.HeaderByNumber(ctx, new(big.Int).SetUint64(height))
+	if err != nil {
+		return 0, fmt.Errorf("custody: header %d: %w", height, err)
+	}
+	return h.Time, nil
 }

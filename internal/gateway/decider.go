@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
+	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
@@ -43,7 +44,22 @@ type Decider struct {
 	guard  *Guard
 	mode   Mode
 	now    func() time.Time
+	// payments is the rule every payment authorization (kind eip3009) must pass, on top of the zone's own checks. Nil means no rule exists in this
+	// process, and then every authorization is refused: a build never signs one without the credential rule (docs/evm.md, "x402 authorizations").
+	payments PaymentRule
 }
+
+// PaymentRule judges a payment authorization the zone decoded from the payload it is about to sign (TxInfo.Payment): the seam for the payment
+// credential (GC2). It runs inside the replay guard's transaction, so a rule that records what it consumed (a used credential id) commits or rolls
+// back with the claim of the authorization. It returns a refusal with reject(...) (ReasonPaymentRule), or nil to allow. Every comparison must be
+// against p, never against anything beside the payload.
+type PaymentRule interface {
+	CheckPayment(ctx context.Context, gt *GuardTx, job signjob.Job, i signjob.Intent, p PaymentFacts) error
+}
+
+// SetPaymentRule installs the rule for payment authorizations. Without one, the decider refuses them all. A zone has one rule, installed at start-up;
+// there is no flag or setting that removes it.
+func (d *Decider) SetPaymentRule(r PaymentRule) { d.payments = r }
 
 // NewDecider builds a Decider. now may be nil (time.Now).
 func NewDecider(cfg *Config, codecs map[string]ChainCodec, guard *Guard, mode Mode, now func() time.Time) *Decider {
@@ -284,7 +300,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 				genState, genRef = e.State, strconv.Itoa(int(info.Gen))
 			}
 		}
-		if err := d.policy(ctx, gt, cc, intent, codec, info, amount, valid, known, genState == "compromised", now); err != nil {
+		if err := d.policy(ctx, gt, job, cc, intent, codec, info, amount, valid, known, genState == "compromised", now); err != nil {
 			return err
 		}
 
@@ -395,7 +411,7 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 		return i, reject(ReasonIntent, "intent has no id")
 	}
 	switch i.Kind {
-	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate", "cpfp", signjob.KindDrain, sol.KindNonceSetup, sol.KindNonceClose:
+	case "withdrawal", "sweep", "cancel", "to-cold", "rebalance", "consolidate", "cpfp", signjob.KindDrain, sol.KindNonceSetup, sol.KindNonceClose, evm.KindEIP3009:
 	default:
 		return i, reject(ReasonIntent, "intent kind %q", i.Kind)
 	}
@@ -438,7 +454,7 @@ func (d *Decider) checkRequester(set *ApproverSet, i signjob.Intent, approvers [
 	return nil
 }
 
-func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i signjob.Intent, codec ChainCodec,
+func (d *Decider) policy(ctx context.Context, gt *GuardTx, job signjob.Job, cc *ChainConfig, i signjob.Intent, codec ChainCodec,
 	info TxInfo, amount *big.Int, valid int, known, compromised bool, now time.Time) error {
 	switch i.Kind {
 	case "withdrawal":
@@ -582,6 +598,36 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, cc *ChainConfig, i si
 		}
 		if !codec.OwnsSender(info.Sender) {
 			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
+		}
+	case evm.KindEIP3009:
+		// A payment authorization (x402): the hot wallet signs typed data that a facilitator submits. The verifier checked the shape and the
+		// config bounds (token, domain, payer, payee, amount, limit, window length); the replay guard holds the token nonce as a claim. What is left
+		// is the clock and the rule that says who may order it. Approvals are ignored: whoever may order a payment is the rule's business, and with
+		// no rule installed nothing is signed.
+		if d.payments == nil {
+			return reject(ReasonPaymentRule, "this zone has no payment credential rule: payment authorizations are not signed")
+		}
+		if info.Payment == nil {
+			return reject(ReasonTx, "no payment decoded from the payload")
+		}
+		if !codec.OwnsSender(info.Sender) {
+			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
+		}
+		if !known {
+			x, ok := cc.EVM.X402[i.Asset]
+			maxWindow := x.MaxWindowSeconds
+			t := uint64(now.Unix())
+			switch {
+			case !ok:
+				return reject(ReasonPolicyAsset, "no x402 policy for %s on %s", i.Asset, cc.Name)
+			case info.Payment.ValidBefore <= t:
+				return reject(ReasonPaymentWindow, "the authorization ended at %d, now %d", info.Payment.ValidBefore, t)
+			case info.Payment.ValidBefore > t+maxWindow:
+				return reject(ReasonPaymentWindow, "validBefore %d is more than %d s ahead of now %d", info.Payment.ValidBefore, maxWindow, t)
+			}
+		}
+		if err := d.payments.CheckPayment(ctx, gt, job, i, *info.Payment); err != nil {
+			return err
 		}
 	case "cpfp":
 		// Needs no approval: the chain verifier refused anything but a child that spends the shard's own coins back to the shard, and checkCPFP that one of them

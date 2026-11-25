@@ -22,7 +22,7 @@ export DATABASE_URL
 QV_SIGNING_DB_URL ?= postgres://qv@localhost:$(or $(QV_SIGNING_DB_PORT),55433)/qv_signing?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/signing/admin/ca.crt&sslcert=$(QV_PKI_DIR)/signing/admin/tls.crt&sslkey=$(QV_PKI_DIR)/signing/admin/tls.key
 export QV_SIGNING_DB_URL
 
-.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-drill test-e2e-evm-identity test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery test-e2e-tee-sim mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images e2e-lane e2e-clean e2e-clean-stale e2e-slots e2e-repeat
+.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-drill test-e2e-evm-identity test-e2e-x402 base-up base-down test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery test-e2e-tee-sim mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images e2e-lane e2e-clean e2e-clean-stale e2e-slots e2e-repeat
 
 setup: softhsm pki db-up chain-up
 
@@ -166,6 +166,15 @@ test-e2e-evm-flows:
 E2E_EVM_DRILL := TestDrainMovesAShardToItsSuccessor|TestDrainCrashBetweenBroadcastAndConfirmAndBetweenAssets|TestEmergencyDrillStolenHotKey
 test-e2e-evm-drill:
 	$(E2E_EVM_ENV) go test -count=$(or $(QV_DRILL_COUNT),1) -p 1 -timeout $(or $(QV_DRILL_TIMEOUT),12m) -v -run '$(or $(QV_DRILL_RUN),$(E2E_EVM_DRILL))' ./e2e/custody/...
+# x402 on a local Base Sepolia (docs/evm.md, "x402 authorizations"): a token with EIP-3009 on an anvil node of chain id 84532 takes the signatures of the
+# signing zone (software key) and of an HSM key, and the core's liability accounting is read through the real reader. The tests set the chain id of the node
+# at QV_ANVIL_RPC (a CI lane's own anvil) to 84532 themselves; `make base-up` starts a separate dev node of 84532 on 18546.
+test-e2e-x402:
+	QV_REQUIRE_CHAIN=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 15m -v -run 'TestEIP3009SignedByTheZoneIsAcceptedByTheToken|TestX402LiabilityOnALocalBaseSepolia|TestHSMSignedEIP712DigestIsAcceptedByTheToken' ./internal/gateway ./internal/custody ./internal/hsmsigner
+base-up:
+	docker compose --profile x402 up -d --wait anvil-base-sepolia
+base-down:
+	docker compose --profile x402 rm -sf anvil-base-sepolia
 # Real identity provider: a two-approver withdrawal with tokens from the dev Keycloak (docker compose profile identity; `make keycloak-up` first).
 test-e2e-evm-identity:
 	./scripts/keycloak-env.sh

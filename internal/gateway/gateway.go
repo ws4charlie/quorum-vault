@@ -50,6 +50,8 @@ const (
 	ReasonIdentity        = "replay_identity_reused"   // 5 the transaction identity was signed under another payload (Bitcoin: same txid, other values)
 	ReasonMemberReused    = "replay_withdrawal_reused" // 5 a withdrawal id the zone signed appears again outside a replacement of its own batch
 	ReasonCPFP            = "policy_cpfp"              // 4 a cpfp child that does not spend the change of a send this zone signed, or whose package is over the fee caps
+	ReasonPaymentRule     = "policy_payment_rule"      // 4 a payment authorization (eip3009) with no credential rule in this zone, or one the rule refused
+	ReasonPaymentWindow   = "policy_payment_window"    // 4 an authorization that is already over, or valid far beyond the zone's own window
 	ReasonSignerRefused   = "signer_refused"           // 6 the signer's other party (cb-mpc party B) refused; nothing was signed
 )
 
@@ -86,6 +88,8 @@ type Options struct {
 	Lease    time.Duration // how long a claimed job stays ours before others may reclaim it
 	Logger   *slog.Logger
 	Now      func() time.Time // default time.Now
+	// PaymentRule is the rule payment authorizations (kind eip3009) must pass; nil refuses them all (Decider.SetPaymentRule).
+	PaymentRule PaymentRule
 	// MessageSigners and DepositSigners are the Ed25519 signers of the chains whose codec is a MessageCodec (Solana): per partition, the hot shard's
 	// signer and the signer of the deposit key tree. ECDSA chains use the signers argument of New.
 	MessageSigners map[string]signer.MessageSigner
@@ -144,6 +148,7 @@ func New(cfg *Config, codecs map[string]ChainCodec, signers map[string]signer.Si
 		opt.Now = time.Now
 	}
 	dec := NewDecider(cfg, codecs, guard, ModeGateway, opt.Now)
+	dec.SetPaymentRule(opt.PaymentRule)
 	g := &Gateway{cfg: cfg, codecs: codecs, signers: signers, guard: guard, dec: dec, jobs: jobs, opt: opt}
 	// A later generation of a deposit tree is reached through the partition's own party A connection, so the zone can build it from the record alone.
 	if g.opt.MessageGenerations == nil {

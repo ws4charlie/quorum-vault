@@ -52,6 +52,27 @@ type TxInfo struct {
 	To      string
 	Value   *big.Int
 	DataLen int
+	// Payment is set for a payment authorization (EVM kind eip3009: an x402 payment the facilitator will submit): what the zone decoded from the
+	// typed data it is about to sign. This is what a credential is compared with (PaymentRule); nothing beside the payload is trusted.
+	Payment *PaymentFacts
+}
+
+// PaymentFacts is a payment as the zone itself decoded it from the payload of a job, in the terms of a payment credential (docs/gate-credential.md):
+// chain as a CAIP-2 name, asset as the token contract address, payee and amount exactly as the signed bytes say.
+type PaymentFacts struct {
+	Chain       string   // "eip155:<chain id>"
+	Asset       string   // the token contract address (EIP-55)
+	Payee       string   // the recipient, canonical form of the chain's family
+	Amount      *big.Int // base units
+	ValidAfter  uint64   // seconds since the epoch; the authorization is usable when ValidAfter < t < ValidBefore
+	ValidBefore uint64
+	// Nonce names the authorization at the token ("0x" and 64 hex digits). It is also the claim the replay guard holds, so it is signed once.
+	Nonce string
+	// Payer is the hot wallet address that pays (the key that signs).
+	Payer string
+	// ChainName and AssetSymbol are this zone's names for Chain and Asset (config keys).
+	ChainName   string
+	AssetSymbol string
 }
 
 // ParentFacts is what the guard remembers about a signed transaction's change: its size and fee, and which output is the change and what it holds.
@@ -178,6 +199,22 @@ func NewEVMCodec(cfg evm.Config) (*EVMCodec, error) {
 		hot[a] = true
 	}
 	return &EVMCodec{Verifier: v, hot: hot}, nil
+}
+
+var _ IntentDecoder = (*EVMCodec)(nil)
+
+// DecodeFor implements IntentDecoder: the payload of an eip3009 job is typed data, every other EVM kind's is a transaction.
+func (c *EVMCodec) DecodeFor(u chain.UnsignedTx, i signjob.Intent) (TxInfo, error) {
+	if i.Kind != evm.KindEIP3009 {
+		return c.Decode(u)
+	}
+	a, err := c.Verifier.DecodeAuthorization(u.Payload)
+	if err != nil {
+		return TxInfo{}, err
+	}
+	return TxInfo{Sender: a.From.Hex(), Destination: a.To.Hex(), Claims: []string{a.Claim()}, To: a.Token.Hex(), Value: new(big.Int).Set(a.Value),
+		Payment: &PaymentFacts{Chain: fmt.Sprintf("eip155:%d", a.ChainID), Asset: a.Token.Hex(), Payee: a.To.Hex(), Amount: new(big.Int).Set(a.Value),
+			ValidAfter: a.ValidAfter, ValidBefore: a.ValidBefore, Nonce: fmt.Sprintf("0x%x", a.Nonce), Payer: a.From.Hex(), ChainName: a.Chain, AssetSymbol: a.Asset}}, nil
 }
 
 // Decode implements ChainCodec for the evm.Payload JSON.

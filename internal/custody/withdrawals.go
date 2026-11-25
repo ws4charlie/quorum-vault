@@ -275,7 +275,14 @@ func (s *Service) freeHot(ctx context.Context, q interface {
 		partitionID).Scan(&leaving); err != nil {
 		return nil, err
 	}
+	// An x402 authorization that is open (requested or signed) may be used on chain any moment: its amount is promised.
+	var promised string
+	if err := q.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::text FROM x402_authorizations WHERE partition_id=$1 AND status IN ('requested','signed')`,
+		partitionID).Scan(&promised); err != nil {
+		return nil, err
+	}
 	free := new(big.Int).Neg(parseBig(posted))
+	free.Sub(free, parseBig(promised))
 	free.Sub(free, parseBig(reserved))
 	free.Sub(free, parseBig(leaving))
 	return free.Sub(free, parseBig(moving)), nil
