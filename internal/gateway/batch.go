@@ -90,6 +90,20 @@ func (d *Decider) decideBatch(ctx context.Context, job signjob.Job, key SignerKe
 	if gk, ok := codec.(GuardKeyCodec); ok {
 		guardKey = gk.GuardKey(u, info)
 	}
+	// A Gate-governed wallet pays one payment per credential: it signs no batch, and no member carries a credential.
+	scope, err := d.payments.Scope(ctx, cc, kv, job, signjob.Intent{Kind: signjob.KindBatch, ID: b.ID, PartitionID: b.PartitionID, Chain: b.Chain}, info)
+	if err != nil {
+		return nil, err
+	}
+	arec.gate = scope
+	if scope.Governed() {
+		return nil, reject(ReasonPaymentRule, "partition %q is Gate-governed wallet %s: it pays one credential-bound payment at a time, never a batch", b.PartitionID, scope.WalletID)
+	}
+	for _, m := range b.Members {
+		if m.Intent.Credential != "" {
+			return nil, reject(ReasonIntent, "batch member %s carries a Gate credential: a credential pays one payment of a Gate-governed wallet, never a batch member", m.Intent.ID)
+		}
+	}
 
 	// 3 and 4 (the part that needs no guard). Each member as a single withdrawal is judged.
 	hash := b.Hash()

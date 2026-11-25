@@ -33,6 +33,8 @@ type Guard struct {
 	approverIgnored atomic.Int64
 	// keysetIgnored is the same for the keyset log (keysets.go).
 	keysetIgnored atomic.Int64
+	// gateIgnored is the same for the gate setting log (gate.go).
+	gateIgnored atomic.Int64
 	// drainRefused counts the drains this process refused (keysets.go).
 	drainRefused atomic.Int64
 	// drainMetrics counts them by mode, chain and reason for qv_drain_refusals_total (drainmetrics.go).
