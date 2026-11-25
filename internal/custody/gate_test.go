@@ -268,6 +268,7 @@ func TestGateStatusCodes(t *testing.T) {
 		{signjob.StatusRejected, "policy_payment_rule: kid_unknown (kid): no key \"x\"", 403, "kid_unknown", "kid"},
 		{signjob.StatusRejected, "policy_payment_rule: payment_mismatch (amount): 5 != 6", 403, "payment_mismatch", "amount"},
 		{signjob.StatusRejected, "fast_lane_cap: per hour", 403, "fast_lane_cap", ""},
+		{signjob.StatusRejected, "credential_malformed: field obligation_id: 129 bytes", 400, "credential_malformed", "obligation_id"},
 		{signjob.StatusRejected, "replayed: credential used", 409, "replayed", ""},
 		{signjob.StatusRejected, "tx_mismatch: payer", 422, "payload_invalid", ""},
 		{signjob.StatusRejected, "keyset_state: lagging", 503, "signing_failed", ""},
@@ -420,6 +421,8 @@ func TestGatePrune(t *testing.T) {
 
 func TestGateZoneRefusalMapping(t *testing.T) {
 	for reason, want := range map[string]GateRefusal{
+		"payment_mismatch: field amount: 5 != 6": {Code: "payment_mismatch", Field: "amount"},
+		"wallet_not_gate_governed: wallet x":       {Code: "wallet_not_gate_governed"},
 		"expired: at 5":                                    {Code: "expired"},
 		"policy_payment_rule: not_yet_valid (issued_at): x": {Code: "not_yet_valid", Field: "issued_at"},
 		"policy_payment_rule: this zone has no payment credential rule: payment authorizations are not signed": {Code: GateSigningFailed},

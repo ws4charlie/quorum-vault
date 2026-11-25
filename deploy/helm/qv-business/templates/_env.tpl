@@ -7,7 +7,7 @@ QV_OIDC_ISSUER: {{ .Values.oidc.issuer | quote }}
 QV_OIDC_AUDIENCE: {{ .Values.oidc.audience | quote }}
 QV_OIDC_ROLES_CLAIM: {{ .Values.oidc.rolesClaim | quote }}
 QV_OIDC_STEPUP_ACR: {{ .Values.oidc.stepupAcr | quote }}
-QV_CORE_SERVICE_ALLOW: {{ .Values.serviceAllow | quote }}
+QV_CORE_SERVICE_ALLOW: {{ ternary (printf "%s,business/agentgate" .Values.serviceAllow) .Values.serviceAllow (and .Values.agentgate .Values.agentgate.enabled) | quote }}
 {{- with .Values.oidc.jwksUrl }}
 QV_OIDC_JWKS_URL: {{ . | quote }}
 {{- end }}

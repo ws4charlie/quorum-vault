@@ -198,13 +198,20 @@ func gateBody(status int, v any) (int, []byte) {
 	return status, b
 }
 
-// gateZoneRefusal maps a refusal of the signing zone (the job's reject reason, "<code>: <detail>") to the API's code. A spec code is taken from the
-// reason's code or, when the zone wraps it (e.g. "policy_payment_rule: payment_mismatch (amount): ..."), from the start of the detail, with its field.
+// gateZoneRefusal maps a refusal of the signing zone (the job's reject reason, "<code>: <detail>" or "<code>: field <field>: <detail>") to the API's
+// code and field. A spec code is taken from the reason's code or, when a reason wraps it (e.g. "policy_payment_rule: payment_mismatch (amount): ..."), from the start of the detail, with its field.
 // The zone's own refusals that have a meaning in the table map to it; anything else is signing_failed (503), never a success.
 func gateZoneRefusal(reason string) GateRefusal {
 	code, detail, _ := strings.Cut(reason, ": ")
 	if GateStatus(code) != 503 {
-		return GateRefusal{Code: code, Message: reason}
+		// The zone's form (internal/gateway, GateRefusal): "<code>: <detail>" or "<code>: field <field>: <detail>".
+		field := ""
+		if rest, ok := strings.CutPrefix(detail, "field "); ok {
+			if f, _, ok := strings.Cut(rest, ": "); ok && !strings.ContainsAny(f, " :") {
+				field = f
+			}
+		}
+		return GateRefusal{Code: code, Field: field, Message: reason}
 	}
 	head, _, _ := strings.Cut(detail, ":")
 	inner, field, hasField := strings.Cut(strings.TrimSpace(head), " (")
