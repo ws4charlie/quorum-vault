@@ -17,6 +17,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/audit"
 	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/coldsign"
+	"github.com/ws4charlie/quorum-vault/internal/gatecred"
 	"github.com/ws4charlie/quorum-vault/internal/ledger"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
@@ -87,6 +88,7 @@ func (a *API) Handler() http.Handler {
 	a.handle(mux, "POST /v2/keysets/drains", a.startDrainingKeyset)
 	a.handle(mux, "POST /v2/keysets/retirements", a.retireKeyset)
 	a.handle(mux, "POST /v2/keysets/compromises", a.compromiseKeyset)
+	a.handle(mux, "POST /v2/gate/signatures", a.gateSign)
 	return approvalCORS(mux)
 }
 
@@ -875,4 +877,23 @@ func (a *API) cancelBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	a.log.Info("batch cancel requested", "batch", id, "actor", actor)
 	writeJSON(w, http.StatusAccepted, map[string]any{"batch": id, "requested_by": actor})
+}
+
+// gateSign is the signing API for AgentGate (gate.go, docs/gate-credential.md "The signing API"). Every answer is JSON: a success, or a refusal with
+// code, field and message.
+func (a *API) gateSign(w http.ResponseWriter, r *http.Request) {
+	var body GateRequest
+	if err := decode(r, &body); err != nil {
+		status, b := refusal(gatecred.RequestInvalid, "", "%v", err)
+		writeRaw(w, status, b)
+		return
+	}
+	status, b := a.svc.GateSign(r.Context(), body, a.log)
+	writeRaw(w, status, b)
+}
+
+func writeRaw(w http.ResponseWriter, code int, b []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write(b)
 }

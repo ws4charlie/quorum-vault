@@ -35,10 +35,16 @@ const (
 	Operator Role = "operator"
 	// Admin changes what the factory contracts do (destination, guardian, admin, freeze). Admin does not imply any other role.
 	Admin Role = "admin"
+	// Gate is the AgentGate service: it may ask for the signature of a Gate-governed payment (docs/gate-credential.md, "The signing API") and
+	// nothing else. The core refuses a caller that holds it on every other route, whatever other roles it holds.
+	Gate Role = "gate"
 )
 
 // Roles lists every role, for configuration checks.
-var Roles = []Role{Requester, Approver, Operator, Admin}
+var Roles = []Role{Requester, Approver, Operator, Admin, Gate}
+
+// PersonRoles are the roles of people: the X-Actor dev principal holds all of them and never Gate, which is a service's only role.
+var PersonRoles = []Role{Requester, Approver, Operator, Admin}
 
 // Environment says how strict start-up is. The default is Production: an unset QV_ENV is production.
 type Environment string
@@ -106,6 +112,9 @@ type Principal struct {
 	Session  string    // sid
 	Service  bool
 	Dev      bool // came from the X-Actor dev header: nothing was verified
+	// Cert is the name (spiffe://quorumvault/<zone>/<service>) of the TLS client certificate a service presented and Authenticate checked
+	// against the allow-list; empty for people and when no certificate is required.
+	Cert string
 }
 
 // Has reports whether the principal holds role.
@@ -121,6 +130,7 @@ func (p *Principal) Has(r Role) bool {
 // Failure is an authentication or authorization refusal with its HTTP form.
 type Failure struct {
 	Status    int
+	Code      string // a stable code for callers that branch on it (e.g. client_not_authorized); empty for most refusals
 	Message   string
 	Challenge string // WWW-Authenticate value, if any
 }
@@ -134,7 +144,11 @@ func (f *Failure) Write(w http.ResponseWriter) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(f.Status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": f.Message})
+	body := map[string]string{"error": f.Message}
+	if f.Code != "" {
+		body["code"], body["message"] = f.Code, f.Message
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // Authenticator verifies bearer tokens. The zero value is not usable; use New.
@@ -271,7 +285,7 @@ func (a *Authenticator) Authenticate(r *http.Request) (*Principal, *Failure) {
 			if !a.dev {
 				return nil, &Failure{Status: http.StatusUnauthorized, Message: "X-Actor is not accepted; send a bearer token", Challenge: `Bearer realm="qv-core"`}
 			}
-			return &Principal{Issuer: "dev:x-actor", Sub: actor, Name: actor, Roles: append([]Role(nil), Roles...), Dev: true, ACR: a.cfg.StepUpACR, AuthTime: a.cfg.Now()}, nil
+			return &Principal{Issuer: "dev:x-actor", Sub: actor, Name: actor, Roles: append([]Role(nil), PersonRoles...), Dev: true, ACR: a.cfg.StepUpACR, AuthTime: a.cfg.Now()}, nil
 		}
 		return nil, &Failure{Status: http.StatusUnauthorized, Message: "a bearer token is required", Challenge: `Bearer realm="qv-core"`}
 	}
@@ -287,9 +301,11 @@ func (a *Authenticator) Authenticate(r *http.Request) (*Principal, *Failure) {
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 			return nil, &Failure{Status: http.StatusForbidden, Message: "a service must present its TLS client certificate"}
 		}
-		if _, err := pki.CheckPeer(r.TLS.PeerCertificates[0], a.svcCert.zone, a.svcCert.allow); err != nil {
+		id, err := pki.CheckPeer(r.TLS.PeerCertificates[0], a.svcCert.zone, a.svcCert.allow)
+		if err != nil {
 			return nil, &Failure{Status: http.StatusForbidden, Message: "service certificate refused: " + err.Error()}
 		}
+		p.Cert = id
 	}
 	return p, nil
 }

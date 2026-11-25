@@ -67,6 +67,10 @@ var Catalog = []Entry{
 	{Zone: ZoneBusiness, Service: "guardian", Usage: Client, Clusters: biz},
 	{Zone: ZoneBusiness, Service: "admin", Usage: Client, Operator: true, Clusters: biz}, // operators and tests: creates databases, Kafka superuser, Temporal client (Postgres role qv)
 	{Zone: ZoneBusiness, Service: "migrator", Usage: Client, Clusters: biz},              // the migration Job only: Postgres role qv (owner), no other rights anywhere
+	// AgentGate, the one outside caller of the core: it asks for the signature of Gate-governed payments (docs/gate-credential.md) and may call nothing
+	// else. It runs outside Vault, so like an operator's certificate it is never made in a Vault cluster: the business issuer issues it to AgentGate's
+	// deployment (docs/runbooks/agentgate-client.md). The kind and CI lane makes it with the operator certificates.
+	{Zone: ZoneBusiness, Service: "agentgate", Usage: Client, Operator: true, Clusters: biz},
 	{Zone: ZoneBusiness, Service: "postgres", DNS: append([]string{"postgres"}, localNames...), IPs: localIPs, Usage: Server, Clusters: biz},
 	{Zone: ZoneBusiness, Service: "temporal-db", DNS: append([]string{"temporal-db"}, localNames...), IPs: localIPs, Usage: Server, Clusters: biz},
 	{Zone: ZoneBusiness, Service: "kafka", DNS: append([]string{"redpanda"}, localNames...), IPs: localIPs, Usage: Server, Clusters: biz},

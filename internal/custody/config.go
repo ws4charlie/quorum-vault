@@ -52,6 +52,8 @@ type File struct {
 	Scan       ScanFile       `json:"scan"`
 	Cold       ColdFile       `json:"cold"`
 	Reconcile  ReconcileFile  `json:"reconcile"`
+	// Gate turns on the signing API for AgentGate (docs/gate-credential.md, gate.go). Absent: the route refuses every request.
+	Gate *GateFile `json:"gate,omitempty"`
 }
 
 // ReconcileFile configures Reconcile.
@@ -223,6 +225,8 @@ type Config struct {
 	SinkShard int
 	// X402Shard is the hot shard that pays the x402 authorizations of each token configured in EVM.X402.
 	X402Shard map[string]int
+	// Gate is the signing API's setting; nil when the API is off.
+	Gate *GateConfig
 	Assets    map[string]Asset
 	AssetList []string // sorted
 
@@ -728,6 +732,9 @@ func (f File) Build() (*Config, error) {
 		return nil, err
 	}
 	if err := c.buildRebalance(f.Cold.Rebalance); err != nil {
+		return nil, err
+	}
+	if err := c.buildGate(f.Gate); err != nil {
 		return nil, err
 	}
 	return c, nil

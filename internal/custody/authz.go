@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ws4charlie/quorum-vault/internal/auth"
+	"github.com/ws4charlie/quorum-vault/internal/pki"
 )
 
 var (
@@ -18,7 +19,14 @@ var (
 	operators     = []auth.Role{auth.Operator, auth.Admin}
 	adminsOnly    = []auth.Role{auth.Admin}
 	requesterOnly = []auth.Role{auth.Requester}
+	gateOnly      = []auth.Role{auth.Gate}
 )
+
+// GateRoute is the signing API for AgentGate. It is the only route AgentGate may call, and only AgentGate may call it (handle).
+const GateRoute = "POST /v2/gate/signatures"
+
+// GateClient is the name of AgentGate's client certificate (internal/pki Catalog).
+var GateClient = pki.ID(pki.ZoneBusiness, "agentgate")
 
 // routeRules is what every route needs. A route without a rule does not start (Handler panics), so a new route cannot be open by omission.
 //
@@ -62,6 +70,7 @@ var routeRules = map[string]auth.Rule{
 	"POST /v2/keysets/drains":                   {Roles: adminsOnly, StepUp: true, HumanOnly: true},
 	"POST /v2/keysets/retirements":              {Roles: adminsOnly, StepUp: true, HumanOnly: true},
 	"POST /v2/keysets/compromises":              {Roles: adminsOnly, StepUp: true, HumanOnly: true},
+	GateRoute:                                   {Roles: gateOnly},
 }
 
 // handle registers a route behind its rule: the caller is authenticated, checked against the rule, recorded in the audit trail if the
@@ -77,9 +86,15 @@ func (a *API) handle(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
 			fail = &auth.Failure{Status: http.StatusUnauthorized, Message: "the token's sub is not usable as an actor id"}
 		}
 		if fail == nil {
+			fail = gateAuthorize(p, pattern)
+		}
+		if fail == nil {
 			fail = a.authn.Authorize(p, rule)
 		}
 		if fail != nil {
+			if pattern == GateRoute && fail.Code == "" {
+				fail.Code = "client_not_authorized" // the signing API answers every refusal with a code (docs/gate-credential.md)
+			}
 			fail.Write(w)
 			return
 		}
@@ -95,6 +110,24 @@ func (a *API) handle(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
 		}
 		h(w, r.WithContext(ctx))
 	})
+}
+
+// gateAuthorize keeps AgentGate and the signing API to each other. A caller is AgentGate when it holds the gate role or shows AgentGate's
+// certificate; such a caller is refused on every other route, whatever other roles its token carries. The signing API takes only a service that
+// holds the role AND shows AgentGate's certificate (so a stolen token without the certificate's key, or another service's certificate, is refused).
+// Without TLS (the dev plaintext switch) no caller has a certificate, so the API is closed.
+func gateAuthorize(p *auth.Principal, pattern string) *auth.Failure {
+	isGate := p.Has(auth.Gate) || p.Cert == GateClient
+	if pattern != GateRoute {
+		if isGate {
+			return &auth.Failure{Status: http.StatusForbidden, Code: "client_not_authorized", Message: "AgentGate may call only " + GateRoute}
+		}
+		return nil
+	}
+	if !p.Service || !p.Has(auth.Gate) || p.Cert != GateClient {
+		return &auth.Failure{Status: http.StatusForbidden, Code: "client_not_authorized", Message: "only AgentGate (its service token and its client certificate) may call this route"}
+	}
+	return nil
 }
 
 func (a *API) auditWrite(ctx context.Context, r *http.Request, p *auth.Principal) error {
