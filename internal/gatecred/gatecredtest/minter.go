@@ -11,7 +11,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 
@@ -54,7 +54,7 @@ func FromCredential(c gatecred.Credential) Fields {
 }
 
 // Canonical encodes f as RFC 8785 JSON. It is written apart from gatecred's
-// encoder (it leans on encoding/json for strings) so that the vectors check
+// encoder (string escaping written rune by rune) so that the vectors check
 // two implementations against each other.
 func Canonical(f Fields) []byte {
 	names := make([]string, 0, len(f))
@@ -83,14 +83,36 @@ func Canonical(f Fields) []byte {
 	return b.Bytes()
 }
 
+// jsonString writes s as RFC 8785 requires, rune by rune: the quote, the
+// backslash and the controls escaped, every other character as UTF-8. (Go's
+// encoding/json would also escape U+2028 and U+2029, which RFC 8785 does not.)
 func jsonString(s string) []byte {
 	var b bytes.Buffer
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(s); err != nil {
-		panic(err)
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"':
+			b.WriteString(`\"`)
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == '\b':
+			b.WriteString(`\b`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\f':
+			b.WriteString(`\f`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r < 0x20:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			b.WriteRune(r)
+		}
 	}
-	return bytes.TrimRight(b.Bytes(), "\n")
+	b.WriteByte('"')
+	return b.Bytes()
 }
 
 // SignedBytes is the domain prefix plus the canonical bytes.

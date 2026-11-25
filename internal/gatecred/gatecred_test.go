@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ws4charlie/quorum-vault/internal/gatecred"
 	"github.com/ws4charlie/quorum-vault/internal/gatecred/gatecredtest"
@@ -60,12 +61,10 @@ func paymentOf(p gatecredtest.VPayment) gatecred.Payment {
 
 func check(t *testing.T, err error, want gatecredtest.VExpect, used map[string]bool, id string) {
 	t.Helper()
-	// The pure package has no replay store; this stands in for the zone's.
-	if err == nil && want.Code == string(gatecred.Replayed) {
-		if used[id] {
-			return
-		}
-		t.Fatalf("expected replayed but %s was never used", id)
+	// The pure package has no replay store; this stands in for the zone's:
+	// the replay check comes after the pure checks (step 12).
+	if err == nil && used[id] {
+		err = &gatecred.Error{Code: gatecred.Replayed}
 	}
 	if want.OK {
 		if err != nil {
@@ -86,7 +85,7 @@ func check(t *testing.T, err error, want gatecredtest.VExpect, used map[string]b
 func TestVectors(t *testing.T) {
 	v := loadVectors(t)
 	cfg := configOf(t, v)
-	if len(v.Cases) < 40 {
+	if len(v.Cases) < 60 {
 		t.Fatalf("only %d cases", len(v.Cases))
 	}
 	names := map[string]bool{}
@@ -105,14 +104,24 @@ func TestVectors(t *testing.T) {
 			if c.Credential != nil {
 				raw = []byte(*c.Credential)
 			}
+			if c.CredentialHex != "" {
+				var herr error
+				if raw, herr = hex.DecodeString(c.CredentialHex); herr != nil {
+					t.Fatal(herr)
+				}
+			}
 			cred, err := cfg.Verify(raw, paymentOf(c.Payment), time.Unix(now, 0))
 			check(t, err, c.Expect, nil, "")
 			used := map[string]bool{}
 			if err == nil && len(c.Then) > 0 {
 				used[cred.CredentialID] = true
 				for _, then := range c.Then {
-					_, err2 := cfg.Verify(raw, paymentOf(c.Payment), time.Unix(now, 0))
-					check(t, err2, then, used, cred.CredentialID)
+					p := c.Payment
+					if then.Payment != nil {
+						p = *then.Payment
+					}
+					_, err2 := cfg.Verify(raw, paymentOf(p), time.Unix(now, 0))
+					check(t, err2, then.VExpect, used, cred.CredentialID)
 				}
 			}
 			// signed bytes: present exactly when the credential parses
@@ -281,6 +290,10 @@ func FuzzParse(f *testing.F) {
 			f.Add([]byte(*c.Credential))
 		}
 	}
+	for _, r := range []string{"caf\u00e9 \U0001F600", `\ud83d\ude00`, `\ud800`, `\udc00x`, "a\u2028b", "\x01", "\xc3\x28", `"\\`} {
+		w := string(gatecredtest.WireWithSig(gatecredtest.Fields{"v": int64(1), "decision_reason": "X"}, "s"))
+		f.Add([]byte(strings.Replace(w, "X", r, 1)))
+	}
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`{"v":1,"v":1}`))
 	f.Fuzz(func(t *testing.T, raw []byte) {
@@ -300,6 +313,9 @@ func FuzzParse(f *testing.F) {
 		}
 		if !bytes.Equal(c.SignedBytes(), gatecredtest.SignedBytes(gatecredtest.FromCredential(*c))) {
 			t.Fatal("two encoders disagree")
+		}
+		if !utf8.ValidString(c.DecisionReason) || strings.ContainsAny(c.DecisionReason, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x1f") {
+			t.Fatalf("accepted a bad decision_reason %q", c.DecisionReason)
 		}
 		if len(c.Sig) != ed25519.SignatureSize || c.V != 1 || c.ExpiresAt <= c.IssuedAt {
 			t.Fatalf("accepted a credential that breaks the rules: %+v", c)

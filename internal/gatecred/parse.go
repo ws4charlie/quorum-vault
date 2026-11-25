@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
@@ -32,6 +33,74 @@ var fieldNames = []string{
 }
 
 var intFields = map[string]bool{"v": true, "issued_at": true, "expires_at": true}
+
+// opaque reports whether s may be an opaque field: 1..max bytes of valid UTF-8
+// with no control character (U+0000-U+001F). The bytes are kept as given; no
+// normalisation is ever applied.
+func opaque(s string, max int) bool {
+	if len(s) < 1 || len(s) > max || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 {
+			return false
+		}
+	}
+	return true
+}
+
+// escapesAreSound refuses a lone UTF-16 surrogate written as a \u escape: the
+// JSON decoder would silently turn it into U+FFFD, a different string from the
+// one the sender signed.
+func escapesAreSound(raw []byte) bool {
+	hex4 := func(i int) (int, bool) {
+		if i+4 > len(raw) {
+			return 0, false
+		}
+		n := 0
+		for _, c := range raw[i : i+4] {
+			switch {
+			case c >= '0' && c <= '9':
+				n = n<<4 | int(c-'0')
+			case c >= 'a' && c <= 'f':
+				n = n<<4 | int(c-'a'+10)
+			case c >= 'A' && c <= 'F':
+				n = n<<4 | int(c-'A'+10)
+			default:
+				return 0, false
+			}
+		}
+		return n, true
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' {
+			continue
+		}
+		if i+1 < len(raw) && raw[i+1] == 'u' {
+			n, ok := hex4(i + 2)
+			if !ok {
+				return false
+			}
+			i += 5
+			switch {
+			case n >= 0xdc00 && n <= 0xdfff:
+				return false // low surrogate without a high one
+			case n >= 0xd800 && n <= 0xdbff:
+				if i+6 >= len(raw) || raw[i+1] != '\\' || raw[i+2] != 'u' {
+					return false
+				}
+				m, ok := hex4(i + 3)
+				if !ok || m < 0xdc00 || m > 0xdfff {
+					return false
+				}
+				i += 6
+			}
+			continue
+		}
+		i++ // skip the escaped character
+	}
+	return true
+}
 
 // printable reports whether s is 1..max characters of printable ASCII (0x20-0x7e).
 func printable(s string, max int) bool {
@@ -56,6 +125,12 @@ func Parse(raw []byte) (*Credential, error) {
 	}
 	if len(raw) > MaxCredentialBytes {
 		return nil, fail(CredentialMalformed, "", "credential is %d bytes, limit %d", len(raw), MaxCredentialBytes)
+	}
+	if !utf8.Valid(raw) {
+		return nil, fail(CredentialMalformed, "", "not valid UTF-8")
+	}
+	if !escapesAreSound(raw) {
+		return nil, fail(CredentialMalformed, "", "unpaired surrogate escape")
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -204,8 +279,8 @@ func (c *Credential) checkFormats() *Error {
 		return bad("kid", "must be 1-64 characters of [A-Za-z0-9._-]")
 	case !reUUID.MatchString(c.CredentialID):
 		return bad("credential_id", "must be a lower-case UUID")
-	case !printable(c.ObligationID, 128):
-		return bad("obligation_id", "must be 1-128 printable ASCII characters")
+	case !opaque(c.ObligationID, 128):
+		return bad("obligation_id", "must be 1-128 bytes of UTF-8 without control characters")
 	case !reAudience.MatchString(c.Audience):
 		return bad("audience", "must be 1-64 characters of [a-z0-9._-]")
 	case !reUUID.MatchString(c.WalletID):
@@ -222,10 +297,10 @@ func (c *Credential) checkFormats() *Error {
 		return bad("issued_at", "must be at least 1")
 	case c.ExpiresAt <= c.IssuedAt:
 		return bad("expires_at", "must be after issued_at")
-	case !printable(c.PolicyVersion, 64):
-		return bad("policy_version", "must be 1-64 printable ASCII characters")
-	case !printable(c.DecisionReason, 256):
-		return bad("decision_reason", "must be 1-256 printable ASCII characters")
+	case !opaque(c.PolicyVersion, 64):
+		return bad("policy_version", "must be 1-64 bytes of UTF-8 without control characters")
+	case !opaque(c.DecisionReason, 256):
+		return bad("decision_reason", "must be 1-256 bytes of UTF-8 without control characters")
 	}
 	if a, ok := new(big.Int).SetString(c.Amount, 10); !ok || a.Cmp(maxUint256) > 0 {
 		return bad("amount", "exceeds 2^256-1")
@@ -233,10 +308,11 @@ func (c *Credential) checkFormats() *Error {
 	return nil
 }
 
-// Canonical returns the credential without "sig" in RFC 8785 form. Every
-// string is printable ASCII and every number a non-negative integer below
-// 2^53, so the RFC's rules reduce to: names in byte order, no white space,
-// integers in decimal, and only the quote and the backslash escaped.
+// Canonical returns the credential without "sig" in RFC 8785 form. Member names
+// are ASCII, so sorting by UTF-16 code unit is sorting by byte. Numbers are
+// non-negative integers below 2^53, written in decimal. Strings follow the
+// RFC: escape the quote, the backslash and the controls; everything else
+// (including non-ASCII and characters above the BMP) is written as UTF-8.
 func (c *Credential) Canonical() []byte {
 	strs := map[string]string{
 		"kid": c.KID, "credential_id": c.CredentialID, "obligation_id": c.ObligationID,
@@ -265,13 +341,34 @@ func (c *Credential) Canonical() []byte {
 }
 
 func quote(s string) string {
+	const hexd = "0123456789abcdef"
 	var b strings.Builder
 	b.WriteByte('"')
 	for i := 0; i < len(s); i++ {
-		if s[i] == '"' || s[i] == '\\' {
+		c := s[i]
+		switch c {
+		case '"', '\\':
 			b.WriteByte('\\')
+			b.WriteByte(c)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			if c < 0x20 {
+				b.WriteString(`\u00`)
+				b.WriteByte(hexd[c>>4])
+				b.WriteByte(hexd[c&15])
+			} else {
+				b.WriteByte(c)
+			}
 		}
-		b.WriteByte(s[i])
 	}
 	b.WriteByte('"')
 	return b.String()

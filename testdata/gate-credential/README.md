@@ -7,11 +7,12 @@ TEST ONLY. `vectors.json` is the shared test data of the Gate credential contrac
 - `config`: the audience, skew (seconds), maximum lifetime (seconds) and the key set (`kid` and public key, base64url without padding). The keys are derived from the public strings in `seed_string`: seed = SHA-256 of those ASCII bytes. A third key (`test-only-3`) is used by one case and is not in the set.
 - `now`: the fixed clock, in Unix seconds. A case may carry its own `now`.
 - `cases[]`:
-  - `credential`: the exact text received; `null` means none was sent.
+  - `credential`: the exact text received; `null` means none was sent, unless `credential_hex` is present: then those are the exact bytes (not valid UTF-8, so not storable as text).
   - `signed_bytes_hex`: the bytes the verifier computes from the parsed credential (the domain prefix, then the RFC 8785 form without `sig`). Check your encoder against it byte for byte. Absent when the credential does not parse.
   - `payment`: what the zone decoded from the payload (`valid_after` and `valid_before` only for EIP-3009).
   - `expect`: `ok`, or the error `code` and `field`.
-  - `then_expect_on_reuse`: results of presenting the same credential again after the first use. Needs a used-credential store; a pure verifier skips it.
+  - `then_expect_on_reuse`: results of presenting the same credential again after the first use, each with its own `payment` when it has one (another payload digest, or another amount). Needs a used-credential store: run the pure checks, and if they pass and the `credential_id` was used, the result is `replayed`. A pure verifier without a store skips it.
+- The opaque fields (`obligation_id`, `policy_version`, `decision_reason`) are UTF-8 kept byte for byte; check your encoder against the cases with non-ASCII text, a character above U+FFFF, U+2028, quote and backslash.
 
 ## Use
 

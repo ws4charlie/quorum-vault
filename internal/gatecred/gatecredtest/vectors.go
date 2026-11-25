@@ -41,6 +41,9 @@ type VPayment struct {
 	Amount      string `json:"amount"`
 	ValidAfter  *int64 `json:"valid_after,omitempty"`
 	ValidBefore *int64 `json:"valid_before,omitempty"`
+	// PayloadDigest: hex SHA-256 of the payload bytes the zone would sign.
+	// Not compared by the pure verifier; a checker's replay record keeps it.
+	PayloadDigest string `json:"payload_digest,omitempty"`
 }
 
 type VExpect struct {
@@ -50,17 +53,20 @@ type VExpect struct {
 }
 
 type VCase struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Credential  *string  `json:"credential"`
-	SignedBytes string   `json:"signed_bytes_hex,omitempty"`
-	Payment     VPayment `json:"payment"`
-	Now         *int64   `json:"now,omitempty"`
-	Expect      VExpect  `json:"expect"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Credential  *string `json:"credential"`
+	// CredentialHex replaces Credential when the bytes are not valid UTF-8
+	// (a JSON file cannot hold them as text); Credential is then null.
+	CredentialHex string   `json:"credential_hex,omitempty"`
+	SignedBytes   string   `json:"signed_bytes_hex,omitempty"`
+	Payment       VPayment `json:"payment"`
+	Now           *int64   `json:"now,omitempty"`
+	Expect        VExpect  `json:"expect"`
 	// Then lists the results of further uses of the same credential after the
 	// first one, in order. Only a checker with a used-credential store can
 	// produce them.
-	Then []VExpect `json:"then_expect_on_reuse,omitempty"`
+	Then []VReuse `json:"then_expect_on_reuse,omitempty"`
 }
 
 type Vectors struct {
@@ -72,6 +78,13 @@ type Vectors struct {
 	Now          int64    `json:"now"`
 	Cases        []VCase  `json:"cases"`
 	Notes        []string `json:"notes"`
+}
+
+// VReuse is a later presentation of the same credential, optionally with
+// another payment description (default: the same one).
+type VReuse struct {
+	Payment *VPayment `json:"payment,omitempty"`
+	VExpect
 }
 
 func ok() VExpect                              { return VExpect{OK: true} }
@@ -129,7 +142,9 @@ func Generate() ([]byte, error) {
 			"signed_bytes_hex is what the verifier computes from the parsed credential: domain_prefix, then the RFC 8785 form of every field except sig. It is present when the credential parses (even if the signature is wrong).",
 			"payment is what the zone decoded from the bytes it would sign; compare by exact string equality.",
 			"now is the case's clock; when absent use the top-level now.",
-			"then_expect_on_reuse: present the same credential again after the first use was accepted; needs a used-credential store. Pure verifiers skip these checks.",
+			"then_expect_on_reuse: present the same credential again after its first use was accepted, with the entry's payment if it has one (else the case's). A pure verifier runs the pure checks; if they pass and the credential_id was already used, the result is replayed. The checker records credential_id (and the payload digest) at first use and refuses any later use whatever the payload, once the payment check has passed. The zone never returns a stored result for a repeat; only GC4's API layer does, for an identical request.",
+			"credential_hex: when present, the exact bytes of the credential (not valid UTF-8, so they cannot sit in this file as text); credential is then null.",
+			"Opaque fields (obligation_id, policy_version, decision_reason) are UTF-8 kept byte for byte, with no normalisation; control characters U+0000-U+001F and invalid UTF-8 are refused; limits are in bytes.",
 			"The codes wallet_not_gate_governed, fast_lane_cap, client_not_authorized and payload_invalid depend on zone state or the request and have no vector here.",
 		},
 	}
@@ -163,6 +178,20 @@ func Generate() ([]byte, error) {
 	add(VCase{Name: "valid_other_byte_layout", Description: "Same credential with fields in another order, spaces around tokens and an escaped digit (\\u0031): valid, because the signature covers the canonical form, not the received text.",
 		Credential: &re, SignedBytes: hex.EncodeToString(SignedBytes(good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a08"))), Payment: basePayment(), Expect: ok()})
 
+	id := func(n string) string { return "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e" + n }
+	for _, u := range []struct{ name, desc, reason, id string }{
+		{"valid_decision_reason_non_ascii", "decision_reason with non-ASCII letters (kept byte for byte, no normalisation).", "caf\u00e9 \u5ba1\u6279\u901a\u8fc7 \u00fcber", "1f01"},
+		{"valid_decision_reason_outside_bmp", "decision_reason with characters above U+FFFF (a 4-byte UTF-8 sequence, a surrogate pair if escaped).", "ok \U0001F600 \U0001D4B3", "1f02"},
+		{"valid_decision_reason_quote_backslash", "decision_reason with a quote and a backslash: the canonical form escapes both.", `say "yes" to C:\pay\x`, "1f03"},
+		{"valid_decision_reason_line_separator", "decision_reason with U+2028 and U+007F: RFC 8785 writes them as they are (Go's encoding/json would escape U+2028).", "a\u2028b\u007fc", "1f04"},
+		{"valid_decision_reason_decomposed", "decision_reason in decomposed form (e + U+0301): not normalised, so it differs from the composed form byte for byte.", "cafe\u0301", "1f05"},
+	} {
+		add(build(u.name, u.desc, good.with("credential_id", id(u.id), "decision_reason", u.reason, "obligation_id", "obl-\u00e9-1", "policy_version", "v\u00e9"), by(k1), basePayment(), ok()))
+	}
+	escaped := string(Wire(k1, good.with("credential_id", id("1f06"), "decision_reason", "ok \U0001F600")))
+	escaped = strings.Replace(escaped, "\U0001F600", `\ud83d\ude00`, 1)
+	add(VCase{Name: "valid_surrogate_pair_escape", Description: "The same non-BMP character written as the escape pair \\ud83d\\ude00: valid, equal to the character itself.", Credential: &escaped, SignedBytes: hex.EncodeToString(SignedBytes(good.with("credential_id", id("1f06"), "decision_reason", "ok \U0001F600"))), Payment: basePayment(), Expect: ok()})
+
 	// Signature cases.
 	f := good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1b01")
 	sigBytes, _ := base64.RawURLEncoding.DecodeString(Sign(k1, f))
@@ -178,7 +207,6 @@ func Generate() ([]byte, error) {
 
 	// Binding and time cases (all correctly signed).
 	sg := func(name, desc string, f Fields, p VPayment, e VExpect) { add(build(name, desc, f, by(k1), p, e)) }
-	id := func(n string) string { return "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e" + n }
 	sg("audience_mismatch", "Credential names another deployment.", good.with("audience", "qv-prod", "credential_id", id("1c01")), basePayment(), refuse(gatecred.AudienceMismatch, "audience"))
 	wp := basePayment()
 	wp.WalletID = "aaaaaaaa-0000-4000-8000-000000000001"
@@ -245,7 +273,15 @@ func Generate() ([]byte, error) {
 	malSigned("credential_id_upper_case", "credential_id in upper case.", good.with("credential_id", strings.ToUpper(id("2c0d"))), "credential_id")
 	malSigned("expires_before_issued", "expires_at not after issued_at.", good.with("credential_id", id("2c0e"), "issued_at", VectorsNow, "expires_at", VectorsNow), "expires_at")
 	malSigned("time_as_string", "issued_at sent as a string.", good.with("credential_id", id("2c0f"), "issued_at", "1789999990"), "issued_at")
-	malSigned("decision_reason_non_ascii", "decision_reason with a non-ASCII character.", good.with("credential_id", id("2c10"), "decision_reason", "café"), "decision_reason")
+	malSigned("decision_reason_control_character", "decision_reason holds a raw control character (U+0001).", good.with("credential_id", id("2c10"), "decision_reason", "a\x01b"), "decision_reason")
+	malSigned("decision_reason_newline", "decision_reason holds a line feed (written as \\n in the text).", good.with("credential_id", id("2c13"), "decision_reason", "line one\nline two"), "decision_reason")
+	malSigned("obligation_id_too_long_in_bytes", "obligation_id of 43 three-byte characters = 129 bytes: limits count bytes.", good.with("credential_id", id("2c14"), "obligation_id", strings.Repeat("\u4e2d", 43)), "obligation_id")
+	bad8 := []byte(string(Wire(k1, good.with("credential_id", id("2c15"), "decision_reason", "XX"))))
+	bad8 = bytes.Replace(bad8, []byte("XX"), []byte{0xc3, 0x28}, 1)
+	add(VCase{Name: "decision_reason_invalid_utf8", Description: "decision_reason holds the bytes C3 28, which are not valid UTF-8 (see credential_hex).", CredentialHex: hex.EncodeToString(bad8), Payment: basePayment(), Expect: refuse(gatecred.CredentialMalformed, "")})
+	lone := string(Wire(k1, good.with("credential_id", id("2c16"), "decision_reason", "XXXXXX")))
+	lone = strings.Replace(lone, "XXXXXX", `\ud800`, 1)
+	mal("decision_reason_lone_surrogate_escape", "decision_reason written with the escape \\ud800 alone, which is not a character.", lone, "")
 	malSigned("kid_bad_character", "kid with a space.", good.with("credential_id", id("2c11"), "kid", "test only"), "kid")
 	w2 := string(Wire(k1, good.with("credential_id", id("2c12"))))
 	w2 = strings.Replace(w2, `"issued_at":1789999990`, `"issued_at":1.78999999e9`, 1)
@@ -253,8 +289,20 @@ func Generate() ([]byte, error) {
 
 	// Replay: a pair of uses of one credential.
 	r := build("replay_pair", "The same credential presented twice: the first use is accepted, the second is refused as replayed.", good.with("credential_id", id("3a01")), by(k1), basePayment(), ok())
-	r.Then = []VExpect{refuse(gatecred.Replayed, "")}
+	r.Then = []VReuse{{VExpect: refuse(gatecred.Replayed, "")}}
 	add(r)
+	// Same decoded payment, different bytes to sign (for example another nonce or fee).
+	dA, dB := "aa"+strings.Repeat("00", 31), "bb"+strings.Repeat("00", 31)
+	pA, pB := basePayment(), basePayment()
+	pA.PayloadDigest, pB.PayloadDigest = dA, dB
+	r3 := build("replay_same_credential_other_payload", "First use with payload digest A is accepted and records credential_id with A. A second use with payload B that decodes to the same payment passes every pure check and is refused as replayed: the checker refuses any later use of a recorded credential_id, whatever the payload.", good.with("credential_id", id("3a03")), by(k1), pA, ok())
+	r3.Then = []VReuse{{Payment: &pB, VExpect: refuse(gatecred.Replayed, "")}}
+	add(r3)
+	pC := basePayment()
+	pC.Amount, pC.PayloadDigest = "1000000000000001", dB
+	r4 := build("replay_same_credential_other_amount", "A second use whose payload decodes to another amount fails the payment check first (payment_mismatch); the replay record is only reached by a payload that decodes to the credential's payment.", good.with("credential_id", id("3a04")), by(k1), pA, ok())
+	r4.Then = []VReuse{{Payment: &pC, VExpect: refuse(gatecred.PaymentMismatch, "amount")}}
+	add(r4)
 
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)

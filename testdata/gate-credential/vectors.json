@@ -153,6 +153,102 @@
       }
     },
     {
+      "name": "valid_decision_reason_non_ascii",
+      "description": "decision_reason with non-ASCII letters (kept byte for byte, no normalisation).",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1f01\",\"decision_reason\":\"café 审批通过 über\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-é-1\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"vé\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"Awj9pDNZygzovPmqI20h6TWhA_Ms8rb54isqYR1jC3KI6KYW_1-f7OCp1SD4zlzGJee6S4B7CO35j0YGYfckAA\"}",
+      "signed_bytes_hex": "71762d676174652d63726564656e7469616c2d76310a7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396531663031222c226465636973696f6e5f726561736f6e223a22636166c3a920e5aea1e689b9e9809ae8bf8720c3bc626572222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2dc3a92d31222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a2276c3a9222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133227d",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "valid_decision_reason_outside_bmp",
+      "description": "decision_reason with characters above U+FFFF (a 4-byte UTF-8 sequence, a surrogate pair if escaped).",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1f02\",\"decision_reason\":\"ok 😀 𝒳\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-é-1\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"vé\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"bam7LT4V5hBsBcl7OwbaWcwEt0JlIDAqqu4-p9zM0s3ipvzyHnIu0CgKz-T-ceQ9PktJ_dtE0UXqMAcfVC3aAg\"}",
+      "signed_bytes_hex": "71762d676174652d63726564656e7469616c2d76310a7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396531663032222c226465636973696f6e5f726561736f6e223a226f6b20f09f988020f09d92b3222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2dc3a92d31222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a2276c3a9222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133227d",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "valid_decision_reason_quote_backslash",
+      "description": "decision_reason with a quote and a backslash: the canonical form escapes both.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1f03\",\"decision_reason\":\"say \\\"yes\\\" to C:\\\\pay\\\\x\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-é-1\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"vé\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"M1EaH4QF6GMToy6g4fM7oPA5nNeS1hAeTmsaW0pFxlnFuPSeK01De_dS25QQv7CUSM8fN6Z3anjVMHisl21pDg\"}",
+      "signed_bytes_hex": "71762d676174652d63726564656e7469616c2d76310a7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396531663033222c226465636973696f6e5f726561736f6e223a22736179205c227965735c2220746f20433a5c5c7061795c5c78222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2dc3a92d31222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a2276c3a9222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133227d",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "valid_decision_reason_line_separator",
+      "description": "decision_reason with U+2028 and U+007F: RFC 8785 writes them as they are (Go's encoding/json would escape U+2028).",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1f04\",\"decision_reason\":\"a\u2028bc\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-é-1\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"vé\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"OkoJNypsHmvn9hllZBwPdVXqU4_3EGkvRwGTuOdkiA_rMGELLvCrjuVeTtWajgkt40oFbn5XdoGEMpwcQE6zBA\"}",
+      "signed_bytes_hex": "71762d676174652d63726564656e7469616c2d76310a7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396531663034222c226465636973696f6e5f726561736f6e223a2261e280a8627f63222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2dc3a92d31222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a2276c3a9222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133227d",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "valid_decision_reason_decomposed",
+      "description": "decision_reason in decomposed form (e + U+0301): not normalised, so it differs from the composed form byte for byte.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1f05\",\"decision_reason\":\"café\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-é-1\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"vé\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"PJIQKmt2HfAY5sslOQTTMK-jNCKbwvduVgQnSOIA7SXCkeHpYGfGtQsH_MmosBt-bM0TMKVvqMBc4ZPfpm4fBA\"}",
+      "signed_bytes_hex": "71762d676174652d63726564656e7469616c2d76310a7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396531663035222c226465636973696f6e5f726561736f6e223a2263616665cc81222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2dc3a92d31222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a2276c3a9222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133227d",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "name": "valid_surrogate_pair_escape",
+      "description": "The same non-BMP character written as the escape pair \\ud83d\\ude00: valid, equal to the character itself.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1f06\",\"decision_reason\":\"ok \\ud83d\\ude00\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"05clVEZqp54-8k9AzndNGcK7rvwzAozKRK4mI9iG-YHQB6TmOvRtNRUxyjp8e1l6Xhnay02CQU7umbj4odNjBQ\"}",
+      "signed_bytes_hex": "71762d676174652d63726564656e7469616c2d76310a7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396531663036222c226465636973696f6e5f726561736f6e223a226f6b20f09f9880222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2d323032362d30392d32312d30303031222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a22706f6c6963792d763132222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133227d",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
       "name": "bad_signature",
       "description": "One bit of the signature flipped.",
       "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1b01\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"5-aETfWk-L3Ko0uCxIhvu5iZF-wJyAiTQYrQsSgyaJOfDTRkanylFx8aJE4yfR8_Gv74pQv0VKlgzhB7L9_-Bg\"}",
@@ -859,9 +955,9 @@
       }
     },
     {
-      "name": "decision_reason_non_ascii",
-      "description": "decision_reason with a non-ASCII character.",
-      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2c10\",\"decision_reason\":\"café\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"YvfyPReNuymqYK7754rCkXyzxWIuyex9WGiUI2yZntK1KnC8jX25e2jtvFbb4pEpZYP421S4j4alHWHEP26nAQ\"}",
+      "name": "decision_reason_control_character",
+      "description": "decision_reason holds a raw control character (U+0001).",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2c10\",\"decision_reason\":\"a\\u0001b\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"SQyeWgbK6Ux94uFap8fEkVs1rJPcx9AJIkaXKvZ10c85SnWkK7kK-hI20fWazs1pD-0LQW7zj-pYTtc4-3BDDw\"}",
       "payment": {
         "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
         "chain": "eip155:84532",
@@ -873,6 +969,73 @@
         "ok": false,
         "code": "credential_malformed",
         "field": "decision_reason"
+      }
+    },
+    {
+      "name": "decision_reason_newline",
+      "description": "decision_reason holds a line feed (written as \\n in the text).",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2c13\",\"decision_reason\":\"line one\\nline two\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"ffZWtki7AOPH0N7s7MipqOGAlsSb6dePViIeKbQiAuxk52LCVGsjk5ZEcXGr9PwFSWTFw6oCz1qOqrt2N1pYBw\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed",
+        "field": "decision_reason"
+      }
+    },
+    {
+      "name": "obligation_id_too_long_in_bytes",
+      "description": "obligation_id of 43 three-byte characters = 129 bytes: limits count bytes.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2c14\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"-I5g5QSdXMruCYbMA4xucAXXWXhlak-dqladTINQYgvgGllqBzG9w_7bQHdIrIQc0Xw7JkXmBk7lYn-ZAUBJCQ\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed",
+        "field": "obligation_id"
+      }
+    },
+    {
+      "name": "decision_reason_invalid_utf8",
+      "description": "decision_reason holds the bytes C3 28, which are not valid UTF-8 (see credential_hex).",
+      "credential": null,
+      "credential_hex": "7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396532633135222c226465636973696f6e5f726561736f6e223a22c328222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2d323032362d30392d32312d30303031222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a22706f6c6963792d763132222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133222c22736967223a226d5841655435426d7551556b455338367457635263397445574e56414a654448524152784166387677665531656d6d704f6744457675447858624f757a596a336568364568336d4d637636494c427374494d704f4477227d",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed"
+      }
+    },
+    {
+      "name": "decision_reason_lone_surrogate_escape",
+      "description": "decision_reason written with the escape \\ud800 alone, which is not a character.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2c16\",\"decision_reason\":\"\\ud800\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"Vkj1jJ1Ouh1Am89ujmdBGGSZAR-2hQ1r3g9xukYgELGAHSWUh7j0m091kpb0kIjontLjZOCCwOYjt3ZpyftrCQ\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed"
       }
     },
     {
@@ -930,6 +1093,69 @@
           "code": "replayed"
         }
       ]
+    },
+    {
+      "name": "replay_same_credential_other_payload",
+      "description": "First use with payload digest A is accepted and records credential_id with A. A second use with payload B that decodes to the same payment passes every pure check and is refused as replayed: the checker refuses any later use of a recorded credential_id, whatever the payload.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e3a03\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"PKdr4USEidHa4Pg9cWqaOquUMjiOXVeem_fJqSorbNE7dZOmjdEA5P6TTxSYo_t1cHh8mgCu1ekr995k8VNrDQ\"}",
+      "signed_bytes_hex": "71762d676174652d63726564656e7469616c2d76310a7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396533613033222c226465636973696f6e5f726561736f6e223a2277697468696e206461696c79206275646765743b20746f6f6c2063616c6c20617070726f7665642062792072756c6520722d37222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2d323032362d30392d32312d30303031222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a22706f6c6963792d763132222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133227d",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000",
+        "payload_digest": "aa00000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expect": {
+        "ok": true
+      },
+      "then_expect_on_reuse": [
+        {
+          "payment": {
+            "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+            "chain": "eip155:84532",
+            "asset": "native",
+            "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+            "amount": "1000000000000000",
+            "payload_digest": "bb00000000000000000000000000000000000000000000000000000000000000"
+          },
+          "ok": false,
+          "code": "replayed"
+        }
+      ]
+    },
+    {
+      "name": "replay_same_credential_other_amount",
+      "description": "A second use whose payload decodes to another amount fails the payment check first (payment_mismatch); the replay record is only reached by a payload that decodes to the credential's payment.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e3a04\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"z20eA1Lsi3La2jYSbQmZVgQhd3q5B9ltRGprWuuxFl_e8XFcQo1EdYStQil_iJ0jvFCS-pP2g9-L9AoJ10FuCA\"}",
+      "signed_bytes_hex": "71762d676174652d63726564656e7469616c2d76310a7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396533613034222c226465636973696f6e5f726561736f6e223a2277697468696e206461696c79206275646765743b20746f6f6c2063616c6c20617070726f7665642062792072756c6520722d37222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2d323032362d30392d32312d30303031222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a22706f6c6963792d763132222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133227d",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000",
+        "payload_digest": "aa00000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expect": {
+        "ok": true
+      },
+      "then_expect_on_reuse": [
+        {
+          "payment": {
+            "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+            "chain": "eip155:84532",
+            "asset": "native",
+            "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+            "amount": "1000000000000001",
+            "payload_digest": "bb00000000000000000000000000000000000000000000000000000000000000"
+          },
+          "ok": false,
+          "code": "payment_mismatch",
+          "field": "amount"
+        }
+      ]
     }
   ],
   "notes": [
@@ -937,7 +1163,9 @@
     "signed_bytes_hex is what the verifier computes from the parsed credential: domain_prefix, then the RFC 8785 form of every field except sig. It is present when the credential parses (even if the signature is wrong).",
     "payment is what the zone decoded from the bytes it would sign; compare by exact string equality.",
     "now is the case's clock; when absent use the top-level now.",
-    "then_expect_on_reuse: present the same credential again after the first use was accepted; needs a used-credential store. Pure verifiers skip these checks.",
+    "then_expect_on_reuse: present the same credential again after its first use was accepted, with the entry's payment if it has one (else the case's). A pure verifier runs the pure checks; if they pass and the credential_id was already used, the result is replayed. The checker records credential_id (and the payload digest) at first use and refuses any later use whatever the payload, once the payment check has passed. The zone never returns a stored result for a repeat; only GC4's API layer does, for an identical request.",
+    "credential_hex: when present, the exact bytes of the credential (not valid UTF-8, so they cannot sit in this file as text); credential is then null.",
+    "Opaque fields (obligation_id, policy_version, decision_reason) are UTF-8 kept byte for byte, with no normalisation; control characters U+0000-U+001F and invalid UTF-8 are refused; limits are in bytes.",
     "The codes wallet_not_gate_governed, fast_lane_cap, client_not_authorized and payload_invalid depend on zone state or the request and have no vector here."
   ]
 }
