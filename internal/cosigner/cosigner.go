@@ -47,6 +47,11 @@ func New(cfg *gateway.Config, guard *gateway.Guard, log *slog.Logger, now func()
 	return &Cosigner{dec: gateway.NewDecider(cfg, codecs, guard, gateway.ModeCosigner, now), log: log}, nil
 }
 
+// SetPaymentRule installs the rule payment authorizations must pass; without one the cosigner refuses them all (gateway.Decider.SetPaymentRule).
+func (c *Cosigner) SetPaymentRule(r gateway.PaymentRule) {
+	c.dec.SetPaymentRule(r)
+}
+
 // Decide answers one request. Every doubt is a refusal.
 func (c *Cosigner) Decide(ctx context.Context, r wire.Request) wire.Response {
 	resp := c.decide(ctx, r)

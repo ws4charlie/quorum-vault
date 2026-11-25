@@ -163,6 +163,7 @@ func run(log *slog.Logger) error {
 			Interval: *wdEvery, StallAfter: *wdStall, Log: log}
 		go wd.Run(ctx)
 	}
+	go svc.RunX402(ctx, cfg.ScanInterval, log) // x402 authorizations: books the ones the token shows used, releases the ones that expired (no-op without x402 config)
 	log.Info("qv-worker started", "chain", cfg.Chain, "failpoint", workflow.Armed())
 	probe.SetReady(true)
 	// SIGTERM: not ready at once (the probe, see health.Serve), then the worker stops polling and waits up to -stop-timeout for the activities

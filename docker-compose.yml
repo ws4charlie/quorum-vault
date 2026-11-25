@@ -65,6 +65,20 @@ services:
       timeout: 3s
       retries: 30
 
+  # Local stand-in for Base Sepolia (chain ID 84532, the testnet x402 payments run on): the devnet for the EIP-3009 tests (`make base-up`, profile
+  # x402, host port 18546). The tests deploy their own USDC-like token (contracts/test/mocks/Tokens.sol). Nothing here talks to a public network.
+  anvil-base-sepolia:
+    image: ghcr.io/foundry-rs/foundry:v1.8.5
+    profiles: ["x402"]
+    command: ["anvil --host 0.0.0.0 --chain-id 84532"]
+    ports:
+      - "127.0.0.1:${QV_ANVIL_BASE_PORT:-18546}:8545"
+    healthcheck:
+      test: ["CMD", "cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # ---- Phase 2 infrastructure (profile "infra"; `make infra-up`) ----
   # Temporal keeps its own Postgres, separate from the business database.
   # Pinned: temporalio/server + admin-tools 1.32.1 (2026-10-08), ui 2.56.0

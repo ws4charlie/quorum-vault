@@ -173,6 +173,8 @@ func (s *Service) postedQ(ctx context.Context, q booksQ, acct string) (*big.Int,
 type evmAdj struct {
 	delta map[string]*big.Int // ledger account -> change of its posted amount that puts the books in the terms of the chain at h
 	mined int                 // open items whose transaction has mined at or below h
+	// x402Unreadable is set when open x402 authorizations exist and the reader cannot read the token's events: they cannot be explained.
+	x402Unreadable string
 }
 
 func newEVMAdj() *evmAdj {
@@ -535,6 +537,16 @@ func (s *Service) evmPending(ctx context.Context, q booksQ, rr ReceiptReader, h 
 		}
 	}
 
+	// x402 authorizations: the hot wallet pays nothing when it signs one. The payment is on the chain at the block of the token's AuthorizationUsed
+	// event, and in the books when the worker's pass has posted its hold; an event at or below h that is not booked yet is put on the books' side.
+	if len(c.EVM.X402) > 0 {
+		why, err := s.x402Pending(ctx, q, rr, h, a)
+		if err != nil {
+			return nil, err
+		}
+		a.x402Unreadable = why
+	}
+
 	// Refills: the cold ceremony's transaction is not one of our allocations; its hash is on the row from the moment it is imported.
 	rrows, err := q.Query(ctx, `SELECT `+refillCols+` FROM refills WHERE chain=$1 AND COALESCE(tx_hash,'') <> '' AND (status IN ('signed','broadcast')
 		OR (status='failed' AND failure_reason='transaction reverted' AND updated_at > now() - interval '`+recentRevert+`')) ORDER BY created_at`, c.Chain)
@@ -632,7 +644,8 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 		+ (SELECT count(*) FROM cold_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM rebalance_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
 		+ (SELECT count(*) FROM drain_moves WHERE chain=$1 AND status NOT IN ('confirmed','failed'))
-		+ (SELECT count(*) FROM refills WHERE chain=$1 AND status IN ('signed','broadcast'))`, c.Chain).Scan(&open); err != nil {
+		+ (SELECT count(*) FROM refills WHERE chain=$1 AND status IN ('signed','broadcast'))
+		+ (SELECT count(*) FROM x402_authorizations WHERE chain=$1 AND status IN ('requested','signed'))`, c.Chain).Scan(&open); err != nil {
 		return nil, 0, false, lag, err
 	}
 	note := func(_ string, d *big.Int) string {
@@ -839,6 +852,26 @@ func (s *Service) evmChecks(ctx context.Context, q booksQ, rr ReceiptReader, h, 
 			}
 		}
 		checks = append(checks, Check{Name: "deposit_addresses", Asset: sym, Ledger: want.String(), Chain: sum.String(), OK: want.Cmp(sum) == 0, Detail: detail})
+	}
+
+	// x402 liabilities: what the ledger holds against the hot wallet for authorizations that are neither used nor expired is exactly what the open rows say.
+	for _, sym := range c.AssetList {
+		if _, ok := c.EVM.X402[sym]; !ok {
+			continue
+		}
+		var held, rows string
+		if err := q.QueryRow(ctx, `SELECT held::text FROM ledger_accounts WHERE id=$1`, x402Acct(c.Chain, sym)).Scan(&held); err != nil {
+			return nil, 0, false, lag, fmt.Errorf("custody: account %s: %w", x402Acct(c.Chain, sym), err)
+		}
+		if err := q.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::text FROM x402_authorizations WHERE chain=$1 AND asset=$2 AND status IN ('requested','signed')`, c.Chain, sym).Scan(&rows); err != nil {
+			return nil, 0, false, lag, err
+		}
+		detail := "the holds on the x402 account against the authorizations that are neither used nor expired"
+		ok := held == rows
+		if adj.x402Unreadable != "" {
+			ok, detail = false, adj.x402Unreadable
+		}
+		checks = append(checks, Check{Name: "x402_liability", Asset: sym, Subject: x402Acct(c.Chain, sym), Ledger: held, Chain: rows, OK: ok, Detail: detail})
 	}
 
 	// Clearing residuals: zero, once the broadcast bookings of the items not mined yet are out and the mined ones are settled.

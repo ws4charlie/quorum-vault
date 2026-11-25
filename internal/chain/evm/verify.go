@@ -41,6 +41,9 @@ func reject(format string, args ...any) error {
 // transaction does exactly what i says.
 func (v *Verifier) Verify(u chain.UnsignedTx, i signjob.Intent) error {
 	cfg := v.cfg
+	if i.Kind == KindEIP3009 {
+		return v.verifyEIP3009(u, i) // typed data, not a transaction
+	}
 	if u.Chain != cfg.Chain || i.Chain != cfg.Chain {
 		return reject("chain %q/%q, want %q", u.Chain, i.Chain, cfg.Chain)
 	}

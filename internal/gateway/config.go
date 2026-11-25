@@ -174,6 +174,19 @@ type EVMFile struct {
 	Tokens        map[string]TokenFile `json:"tokens"`
 	NativeAsset   string               `json:"native_asset"`
 	MaxTxFeeWei   string               `json:"max_tx_fee_wei"`
+	// X402 lists the tokens the hot wallet may sign x402 (EIP-3009) payment authorizations for, by asset symbol (each also in tokens). It holds what the
+	// token contract itself uses for its EIP-712 domain, and the zone's own bounds. An authorization is signed only for a token listed here.
+	X402 map[string]X402File `json:"x402,omitempty"`
+}
+
+// X402File is the x402 section of one token: the EIP-712 domain the token contract uses, and the zone's bounds on an authorization.
+type X402File struct {
+	Name    string `json:"name"`    // the domain name, as the token's name() / DOMAIN_SEPARATOR use it (Circle USDC: "USDC")
+	Version string `json:"version"` // the domain version (Circle USDC: "2")
+	// MaxWindowSeconds bounds validBefore - validAfter and how far ahead of the zone's clock validBefore may lie.
+	MaxWindowSeconds uint64 `json:"max_window_seconds"`
+	// PerPaymentLimit is the most one authorization may pay, in base units.
+	PerPaymentLimit string `json:"per_payment_limit"`
 }
 
 // BTCFile is the signing-zone config of a Bitcoin chain. Everything the zone trusts about keys and addresses is here.
@@ -605,6 +618,16 @@ func (cf ChainFile) build(name string, enabledApprovers int) (*ChainConfig, erro
 	}
 	if ec.MaxTxFeeWei, err = amount("max_tx_fee_wei", e.MaxTxFeeWei); err != nil {
 		return nil, err
+	}
+	for s, x := range e.X402 {
+		if ec.X402 == nil {
+			ec.X402 = map[string]evm.X402Token{}
+		}
+		lim, err := amount("x402 "+s+" per_payment_limit", x.PerPaymentLimit)
+		if err != nil {
+			return nil, err
+		}
+		ec.X402[s] = evm.X402Token{Name: x.Name, Version: x.Version, MaxWindowSeconds: x.MaxWindowSeconds, PerPaymentLimit: lim}
 	}
 	if len(ec.HotAddresses) == 0 {
 		return nil, fmt.Errorf("gateway: config: chain %q has no hot addresses", name)

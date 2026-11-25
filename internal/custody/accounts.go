@@ -102,6 +102,12 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 					return err
 				}
 			}
+			if _, ok := c.EVM.X402[sym]; ok && c.Family != FamilyBTC && c.Family != FamilySOL {
+				// What the hot wallet pays to facilitators (x402.go): the holds on it are the authorizations still open.
+				if err := s.Led.EnsureAccount(ctx, tx, ledger.Account{ID: x402Acct(c.Chain, sym), Kind: ledger.KindFee, Chain: c.Chain, Asset: sym, AllowNegative: true}); err != nil {
+					return err
+				}
+			}
 			for i := 0; i < c.shardCount(); i++ {
 				k := c.PartitionKey(sym, i)
 				if _, err := tx.Exec(ctx, `INSERT INTO partitions (id, entity, chain, asset, tier, pool, shard) VALUES ($1,$2,$3,$4,$5,$6,$7)

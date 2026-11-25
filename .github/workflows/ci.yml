@@ -484,6 +484,33 @@ jobs:
       - name: make test-e2e-tee-sim
         run: ci/run-in-image.sh make test-e2e-tee-sim
 
+  # x402 on a local Base Sepolia: the EIP-3009 signing kind against a token on the lane's anvil (its chain id is set to 84532 by the tests), the HSM, and the
+  # core's liability accounting through the real chain reader (docs/evm.md, "x402 authorizations").
+  e2e-x402:
+    runs-on: ubuntu-24.04
+    needs: image
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          postgres: "true"
+      - name: make test-e2e-x402
+        run: ci/run-in-image.sh make test-e2e-x402
+
   e2e-evm-identity:
     runs-on: ubuntu-24.04
     needs: image
