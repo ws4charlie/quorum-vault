@@ -14,7 +14,7 @@ import (
 
 // The whole zone path against a token on a local node that stands in for Base Sepolia (chain 84532): the zone decodes and checks the typed data, signs the
 // EIP-712 digest with the hot key, and the token accepts the signature in transferWithAuthorization, submitted by another account (the facilitator).
-// Run: QV_REQUIRE_CHAIN=1 QV_ANVIL_RPC=http://127.0.0.1:18545 (the test sets the node's chain id to 84532).
+// Run: QV_REQUIRE_CHAIN=1 QV_ANVIL_RPC=http://127.0.0.1:18546 (the test sets the node chain id to 84532 and restores it).
 func TestEIP3009SignedByTheZoneIsAcceptedByTheToken(t *testing.T) {
 	node := evmtest.Anvil(t, evmtest.BaseSepoliaChainID)
 	token := node.DeployToken(t, "USDC")

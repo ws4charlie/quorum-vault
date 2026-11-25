@@ -16,7 +16,7 @@ import (
 
 // The HSM signs the 32-byte EIP-712 digest of a transferWithAuthorization with the key it holds (no transaction around it), and a token on a local node
 // that stands in for Base Sepolia (chain 84532) accepts r, s, v: the token recovers the HSM key's address as the payer. Run:
-// QV_REQUIRE_CHAIN=1 QV_REQUIRE_HSM=1 QV_ANVIL_RPC=http://127.0.0.1:18545 (the test sets the node's chain id to 84532).
+// QV_REQUIRE_CHAIN=1 QV_REQUIRE_HSM=1 QV_ANVIL_RPC=http://127.0.0.1:18546 (the test sets the node chain id to 84532 and restores it).
 func TestHSMSignedEIP712DigestIsAcceptedByTheToken(t *testing.T) {
 	ctx := context.Background()
 	node := evmtest.Anvil(t, evmtest.BaseSepoliaChainID)

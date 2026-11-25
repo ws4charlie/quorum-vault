@@ -18,7 +18,7 @@ import (
 
 // The liability accounting against a real token on a local node that stands in for Base Sepolia (chain 84532), read through the real EVMReader: an
 // authorization the facilitator uses is booked as a payment, one nobody uses is released once a block is past its validBefore, and Reconcile compares
-// the books with the token's balances and stays clean at every step. Run: QV_REQUIRE_CHAIN=1 QV_ANVIL_RPC=http://127.0.0.1:18545 (the test sets the
+// the books with the token's balances and stays clean at every step. Run: QV_REQUIRE_CHAIN=1 QV_ANVIL_RPC=http://127.0.0.1:18546 (the test sets the
 // node's chain id to 84532).
 func TestX402LiabilityOnALocalBaseSepolia(t *testing.T) {
 	node := evmtest.Anvil(t, evmtest.BaseSepoliaChainID)

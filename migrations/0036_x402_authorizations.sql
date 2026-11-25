@@ -3,7 +3,7 @@
 -- AuthorizationUsed for it (the payment: the hold is posted to the hot account) or its validBefore has passed on a final block (released). Rows are
 -- written by the core when an authorization is requested and settled by the worker's x402 pass; the rows explain the open holds to Reconcile.
 CREATE TABLE x402_authorizations (
-    id            text PRIMARY KEY,                           -- the caller's idempotency key (GC4: the credential's obligation)
+    id            text PRIMARY KEY,                           -- the caller's idempotency key (GC4 uses the credential_id)
     chain         text NOT NULL,
     asset         text NOT NULL,
     partition_id  text NOT NULL REFERENCES partitions (id),   -- the hot shard that pays

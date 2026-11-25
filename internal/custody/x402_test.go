@@ -3,6 +3,7 @@ package custody
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -383,5 +384,132 @@ func TestX402ConfigBuildsAndRefusesBadEntries(t *testing.T) {
 		if _, err := build(x); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// An open authorization reserves the funds: freeHot (what every planner and withdrawal reads) shows them as gone, and a request that the free balance
+// cannot cover is refused with nothing recorded. Expiry gives them back.
+func TestX402OpenAuthorizationsReserveTheShardBalance(t *testing.T) {
+	e := x402World(t)
+	ctx := context.Background()
+	part := e.s.Cfg.PartitionKey(x402Asset, 0).String()
+	free := func() int64 {
+		f, err := e.s.freeHot(ctx, e.s.Pool, part)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f.Int64()
+	}
+	if free() != 1_000_000 {
+		t.Fatalf("free %d", free())
+	}
+	e.request(t, "r1", 400_000, 1)
+	e.request(t, "r2", 400_000, 2)
+	if free() != 200_000 {
+		t.Fatalf("free after two authorizations %d", free())
+	}
+	// A third that does not fit is refused; so is one for the remaining balance plus one (what a withdrawal would also see).
+	for i, amt := range []int64{400_000, 200_001} {
+		_, _, err := e.s.RequestX402(ctx, X402Request{ID: "r3" + string(rune('a'+i)), Asset: x402Asset, Payee: "0x00000000000000000000000000000000000fac01",
+			Amount: big.NewInt(amt), ValidAfter: 990, ValidBefore: 1300, Nonce: [32]byte{31: byte(10 + i)}})
+		if !errors.Is(err, ErrX402InsufficientFunds) {
+			t.Fatalf("amount %d: %v", amt, err)
+		}
+	}
+	var n int
+	e.s.Pool.QueryRow(ctx, `SELECT count(*) FROM x402_authorizations`).Scan(&n)
+	if n != 2 || e.held(t) != 800_000 {
+		t.Fatalf("%d rows, held %d", n, e.held(t))
+	}
+	e.request(t, "r4", 200_000, 5) // exactly the rest fits
+	if free() != 0 {
+		t.Fatalf("free %d", free())
+	}
+	// Expiry gives it back.
+	e.zoneSigns(t, "r1")
+	e.m.blockTime = 1300
+	if res, err := e.s.SettleX402(ctx); err != nil || res.Expired != 3 {
+		t.Fatalf("settle %+v %v", res, err)
+	}
+	if free() != 1_000_000 {
+		t.Fatalf("free after expiry %d", free())
+	}
+}
+
+// The payer is the address of the shard's active key generation, not the configured one: after a replacement the old key is never asked.
+func TestX402PayerFollowsTheActiveGeneration(t *testing.T) {
+	e := x402World(t)
+	ctx := context.Background()
+	newKey, _ := crypto.GenerateKey()
+	newAddr := crypto.PubkeyToAddress(newKey.PublicKey)
+	shard := string(e.s.Cfg.shardIDOf(0))
+	for _, q := range []string{
+		`UPDATE keysets SET state='retired' WHERE shard_id='` + shard + `' AND generation=1`,
+		`INSERT INTO keysets (shard_id, generation, key_ref, address, public_key, state) VALUES ('` + shard + `', 2, 'ref2', '` + newAddr.Hex() + `', '\x02', 'active')`,
+	} {
+		if _, err := e.s.Pool.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.s.Pool.Exec(ctx, `UPDATE x402_authorizations SET status=status`) // no-op: the table is reachable
+	// The new generation holds the funds now.
+	if err := e.s.FundHotAsset(ctx, "seed2", 0, x402Asset, big.NewInt(1)); err != nil {
+		t.Fatal(err)
+	}
+	a := e.request(t, "g1", 1000, 1)
+	if a.Payer != newAddr.Hex() || a.Payer == e.payer.Hex() {
+		t.Fatalf("payer %s, active generation %s, old %s", a.Payer, newAddr.Hex(), e.payer.Hex())
+	}
+	job, err := signjob.Get(ctx, e.s.Pool, "x402:g1")
+	if err != nil || !strings.Contains(strings.ToLower(string(job.Payload)), strings.ToLower(newAddr.Hex())) || strings.Contains(strings.ToLower(string(job.Payload)), strings.ToLower(e.payer.Hex())) {
+		t.Fatalf("the typed data names the wrong payer: %v %s", err, job.Payload)
+	}
+}
+
+// A retry of a request that was answered is answered again, whatever the clock says now; another request under the id is still a conflict.
+func TestX402LateRetryReturnsTheStoredRow(t *testing.T) {
+	e := x402World(t)
+	ctx := context.Background()
+	a := e.request(t, "l1", 1000, 1)
+	e.s.Now = func() time.Time { return time.Unix(5000, 0) } // long after validBefore (1300)
+	req := X402Request{ID: "l1", Asset: x402Asset, Payee: a.Payee, Amount: big.NewInt(1000), ValidAfter: 990, ValidBefore: 1300, Nonce: [32]byte{31: 1}}
+	b, created, err := e.s.RequestX402(ctx, req)
+	if err != nil || created || b.ID != "l1" || b.Status != X402Requested {
+		t.Fatalf("late retry: %+v created=%v err=%v", b, created, err)
+	}
+	req.Amount = big.NewInt(1001)
+	if _, _, err := e.s.RequestX402(ctx, req); !errors.Is(err, ErrX402Conflict) {
+		t.Fatalf("another body: %v", err)
+	}
+	// A new id with that window is refused: it is over.
+	req.ID, req.Amount, req.Nonce = "l2", big.NewInt(1000), [32]byte{31: 2}
+	if _, _, err := e.s.RequestX402(ctx, req); err == nil {
+		t.Fatal("a new request with a past window was accepted")
+	}
+}
+
+// A failed read of the final head refuses the request and records nothing (a stored 0 would make the event search start at the first block).
+type headFails struct{ *x402Model }
+
+func (headFails) SafeHead(context.Context) (uint64, error) { return 0, errors.New("node unreachable") }
+
+func TestX402FailedHeadReadRecordsNothing(t *testing.T) {
+	e := x402World(t)
+	ctx := context.Background()
+	e.s.Reader = headFails{e.m}
+	_, _, err := e.s.RequestX402(ctx, X402Request{ID: "h1", Asset: x402Asset, Payee: "0x00000000000000000000000000000000000fac01", Amount: big.NewInt(1000),
+		ValidAfter: 990, ValidBefore: 1300, Nonce: [32]byte{31: 1}})
+	if err == nil || !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("err %v", err)
+	}
+	var n, jobs int
+	e.s.Pool.QueryRow(ctx, `SELECT count(*) FROM x402_authorizations`).Scan(&n)
+	e.s.Pool.QueryRow(ctx, `SELECT count(*) FROM sign_jobs`).Scan(&jobs)
+	if n != 0 || jobs != 0 || e.held(t) != 0 {
+		t.Fatalf("rows %d jobs %d held %d", n, jobs, e.held(t))
+	}
+	e.s.Reader = e.m // the node is back: the same request goes through
+	if a := e.request(t, "h1", 1000, 1); a.SinceBlock != 60 {
+		t.Fatalf("since_block %d", a.SinceBlock)
 	}
 }

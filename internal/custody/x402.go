@@ -56,6 +56,8 @@ const (
 var (
 	ErrX402NotConfigured = errors.New("custody: x402 is not configured for this asset")
 	ErrX402Conflict      = errors.New("custody: x402 request id reused with a different request")
+	// ErrX402InsufficientFunds: the paying shard's free balance (what freeHot says, open authorizations included) is below the amount.
+	ErrX402InsufficientFunds = errors.New("custody: x402: insufficient free funds on the paying shard")
 )
 
 // X402Authorization is a row of x402_authorizations.
@@ -134,11 +136,16 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 	if r.Amount == nil || r.Amount.Sign() <= 0 || r.Amount.Cmp(x.PerPaymentLimit) > 0 {
 		return a, false, fmt.Errorf("custody: x402 amount %v must be in (0, %s]", r.Amount, x.PerPaymentLimit)
 	}
+	body := r.bodyHash(payee)
+	// An id that exists is answered first, whatever the clock says now: a retry after validBefore gets the stored row, another request under the id is a
+	// conflict. The window is judged only for a new row.
+	if ex, found, err := s.x402Existing(ctx, s.Pool, r.ID, body); err != nil || found {
+		return ex, false, err
+	}
 	now := uint64(s.Now().Unix())
 	if r.ValidBefore <= now || r.ValidBefore <= r.ValidAfter || r.ValidBefore-r.ValidAfter > x.MaxWindowSeconds || r.ValidBefore > now+x.MaxWindowSeconds {
 		return a, false, fmt.Errorf("custody: x402 window (%d, %d) is not within %d s of now %d", r.ValidAfter, r.ValidBefore, x.MaxWindowSeconds, now)
 	}
-	body := r.bodyHash(payee)
 	nonce := r.Nonce
 	if nonce == ([32]byte{}) {
 		if _, err := rand.Read(nonce[:]); err != nil {
@@ -146,15 +153,19 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 		}
 	}
 	part := c.PartitionKey(r.Asset, c.X402Shard[r.Asset]).String()
-	payer, ok := c.EVM.HotAddresses[part]
-	if !ok {
-		return a, false, fmt.Errorf("custody: x402: no hot address for %s", part)
+	// The payer is the address of the shard's active key generation, as for every other payment, never the configured address.
+	payerAddr, _, err := s.ShardAddressOf(part)
+	if err != nil {
+		return a, false, fmt.Errorf("custody: x402 payer: %w", err)
 	}
-	var since uint64
-	if s.Reader != nil {
-		if h, err := s.Reader.SafeHead(ctx); err == nil {
-			since = h
-		}
+	payer := common.HexToAddress(payerAddr)
+	// Where the event search starts. Without it nothing is recorded: a stored 0 would read the chain from its first block.
+	if s.Reader == nil {
+		return a, false, errors.New("custody: x402: no chain reader to place the request")
+	}
+	since, err := s.Reader.SafeHead(ctx)
+	if err != nil {
+		return a, false, fmt.Errorf("custody: x402: read the final head (nothing recorded, retry): %w", err)
 	}
 	payload, digest, err := c.EVM.NewPayload3009(r.Asset, payer, common.HexToAddress(payee), r.Amount, r.ValidAfter, r.ValidBefore, nonce)
 	if err != nil {
@@ -163,22 +174,25 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 	jobID := "x402:" + r.ID
 	err = InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		created = false
-		tag, err := tx.Exec(ctx, `INSERT INTO x402_authorizations (id, chain, asset, partition_id, payer, payee, amount, valid_after, valid_before, nonce, body_hash, job_id, since_block, status)
-			VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,$12,$13,'requested') ON CONFLICT (id) DO NOTHING`,
-			r.ID, c.Chain, r.Asset, part, payer.Hex(), payee, r.Amount.String(), int64(r.ValidAfter), int64(r.ValidBefore), fmt.Sprintf("0x%x", nonce), body, jobID, int64(since))
-		if err != nil {
-			return err // a second request with another id and the same nonce: the unique key says no
-		}
-		if tag.RowsAffected() == 0 {
-			var same bool
-			if err := tx.QueryRow(ctx, `SELECT body_hash=$2 FROM x402_authorizations WHERE id=$1`, r.ID, body).Scan(&same); err != nil {
-				return err
-			}
-			if !same {
-				return fmt.Errorf("%w: %s", ErrX402Conflict, r.ID)
-			}
-			a, err = scanX402(tx.QueryRow(ctx, `SELECT `+x402Cols+` FROM x402_authorizations WHERE id=$1`, r.ID))
+		// The same lock the withdrawal path takes: reservations of one shard are serialized.
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM partitions WHERE id=$1 FOR UPDATE`, part); err != nil {
 			return err
+		}
+		if ex, found, err := s.x402Existing(ctx, tx, r.ID, body); err != nil || found {
+			a = ex
+			return err
+		}
+		free, err := s.freeHot(ctx, tx, part)
+		if err != nil {
+			return err
+		}
+		if free.Cmp(r.Amount) < 0 {
+			return fmt.Errorf("%w: %s has %s free, the authorization needs %s", ErrX402InsufficientFunds, part, free, r.Amount)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO x402_authorizations (id, chain, asset, partition_id, payer, payee, amount, valid_after, valid_before, nonce, body_hash, job_id, since_block, status)
+			VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,$12,$13,'requested')`,
+			r.ID, c.Chain, r.Asset, part, payer.Hex(), payee, r.Amount.String(), int64(r.ValidAfter), int64(r.ValidBefore), fmt.Sprintf("0x%x", nonce), body, jobID, int64(since)); err != nil {
+			return err // another id with the same token nonce: the unique key says no
 		}
 		created = true
 		if a, err = scanX402(tx.QueryRow(ctx, `SELECT `+x402Cols+` FROM x402_authorizations WHERE id=$1`, r.ID)); err != nil {
@@ -197,6 +211,23 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 		return EnqueueUnsigned(ctx, tx, jobID, part, u, ib, nil)
 	})
 	return a, created, err
+}
+
+// x402Existing returns the row of id when there is one: the same request gives the row, another request under the id is ErrX402Conflict.
+func (s *Service) x402Existing(ctx context.Context, q booksQ, id string, body []byte) (X402Authorization, bool, error) {
+	var same bool
+	err := q.QueryRow(ctx, `SELECT body_hash=$2 FROM x402_authorizations WHERE id=$1`, id, body).Scan(&same)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return X402Authorization{}, false, nil
+	}
+	if err != nil {
+		return X402Authorization{}, false, err
+	}
+	if !same {
+		return X402Authorization{}, false, fmt.Errorf("%w: %s", ErrX402Conflict, id)
+	}
+	a, err := scanX402(q.QueryRow(ctx, `SELECT `+x402Cols+` FROM x402_authorizations WHERE id=$1`, id))
+	return a, true, err
 }
 
 // X402Result is what the zone made of an authorization. When Status is X402Signed, R, S and V are the signature in the form EIP-3009 and x402 expect

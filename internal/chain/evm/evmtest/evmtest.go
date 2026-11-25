@@ -2,7 +2,7 @@
 // token (contracts/test/mocks/Tokens.sol, Eip3009Token, behaving as Circle's USDC does), and the call a facilitator makes. It is test support: nothing
 // outside tests imports it, and it refuses any node that is not a local anvil.
 //
-// A node is taken from QV_ANVIL_RPC (default http://127.0.0.1:18545). In a CI lane that node is the lane's own anvil, so a test may set its chain id
+// A node is taken from QV_ANVIL_RPC (default http://127.0.0.1:18546, the compose node `anvil-base-sepolia`). In a CI lane that node is the lane's own anvil, so a test may set its chain id
 // (anvil_setChainId) to 84532; the lane belongs to the group that runs it. A test is skipped without a node unless QV_REQUIRE_CHAIN=1.
 package evmtest
 
@@ -44,7 +44,7 @@ func Anvil(t testing.TB, chainID uint64) *Node {
 	t.Helper()
 	u := os.Getenv("QV_ANVIL_RPC")
 	if u == "" {
-		u = "http://127.0.0.1:18545"
+		u = "http://127.0.0.1:18546" // the Base Sepolia node of docker-compose.yml (make base-up), not the Sepolia one the other e2e tests use
 	}
 	fail := func(format string, args ...any) {
 		t.Helper()
@@ -84,6 +84,15 @@ func Anvil(t testing.TB, chainID uint64) *Node {
 		if err := c.CallContext(ctx, nil, "anvil_setChainId", hexutil.Uint64(chainID)); err != nil {
 			t.Fatalf("evmtest: anvil_setChainId %d: %v", chainID, err)
 		}
+		// A node that was not ours stays as it was found: the chain id goes back when the test ends (before the connection closes).
+		orig := id.ToInt().Uint64()
+		t.Cleanup(func() {
+			rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer rcancel()
+			if err := c.CallContext(rctx, nil, "anvil_setChainId", hexutil.Uint64(orig)); err != nil {
+				t.Errorf("evmtest: restore chain id %d: %v", orig, err)
+			}
+		})
 	}
 	var accts []common.Address
 	if err := c.CallContext(ctx, &accts, "eth_accounts"); err != nil || len(accts) == 0 {
