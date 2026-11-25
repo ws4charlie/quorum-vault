@@ -45,11 +45,13 @@ type Config struct {
 	// ColdAddresses is where hot-to-cold moves go, per pool and asset class: key "<pool>/native" or "<pool>/token". The
 	// verifier accepts a "to-cold" intent only when its destination is exactly this address. It lives in signing-zone
 	// config, so the business side cannot change it.
-	ColdAddresses    map[string]common.Address
-	Assets           map[string]Token // symbol -> token (the native asset is implicit)
-	NativeAsset      string           // default "ETH"
-	FeeBumpPercent   uint64           // replacement bump, default 15
-	StuckAfterBlocks uint64           // default 50
+	ColdAddresses map[string]common.Address
+	Assets        map[string]Token // symbol -> token (the native asset is implicit)
+	// X402 lists the tokens the hot wallet may sign EIP-3009 authorizations for (kind "eip3009", eip3009.go), by asset symbol; each must be in Assets.
+	X402             map[string]X402Token
+	NativeAsset      string // default "ETH"
+	FeeBumpPercent   uint64 // replacement bump, default 15
+	StuckAfterBlocks uint64 // default 50
 	// MaxTxFeeWei caps gas x max_fee_per_gas of every transaction. Required: the
 	// hot wallet pays it and it is not part of the intent.
 	MaxTxFeeWei *big.Int
@@ -95,6 +97,9 @@ func (c Config) validate() error {
 		if s == "" || s == c.NativeAsset || t.Address == (common.Address{}) {
 			return fmt.Errorf("evm: config: bad asset entry %q", s)
 		}
+	}
+	if err := c.validateX402(); err != nil {
+		return err
 	}
 	hot := map[common.Address]bool{}
 	for _, a := range c.HotAddresses {

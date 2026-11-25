@@ -21,6 +21,8 @@ docker run --rm -v "$root":/repo -w /repo/contracts --entrypoint sh "$image" -c 
   forge inspect TransferSender abi --json > /repo/internal/chain/evm/testdata/TransferSender.abi.json
   forge inspect BoolToken bytecode        > /repo/internal/chain/evm/testdata/BoolToken.bin
   forge inspect UsdtLike abi --json       > /repo/internal/chain/evm/testdata/Token.abi.json
+  forge inspect Eip3009Token bytecode     > /repo/internal/chain/evm/testdata/Eip3009Token.bin
+  forge inspect Eip3009Token abi --json   > /repo/internal/chain/evm/testdata/Eip3009Token.abi.json
   rm -rf out cache
 "
 echo "rebuilt $art (Forwarder, ForwarderFactory) and testdata (mock tokens)"
