@@ -90,6 +90,11 @@ test-short:
 vet:
 	go vet ./...
 
+# Rewrite the shared Gate credential test vectors (TEST ONLY keys); a test fails if the file drifts.
+.PHONY: gate-vectors
+gate-vectors:
+	go run ./internal/gatecred/gatecredtest/gen > testdata/gate-credential/vectors.json
+
 # Phase 2 / P3a: signing gateway and outbox relay.
 .PHONY: build-gateway build-relay test-gateway test-relay
 
