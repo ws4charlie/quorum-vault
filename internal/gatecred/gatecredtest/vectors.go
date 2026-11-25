@@ -46,6 +46,11 @@ type VPayment struct {
 	PayloadDigest string `json:"payload_digest,omitempty"`
 }
 
+type VSub struct {
+	Find string `json:"find"`
+	With string `json:"with_hex"`
+}
+
 type VExpect struct {
 	OK    bool   `json:"ok"`
 	Code  string `json:"code,omitempty"`
@@ -56,13 +61,14 @@ type VCase struct {
 	Name        string  `json:"name"`
 	Description string  `json:"description"`
 	Credential  *string `json:"credential"`
-	// CredentialHex replaces Credential when the bytes are not valid UTF-8
-	// (a JSON file cannot hold them as text); Credential is then null.
-	CredentialHex string   `json:"credential_hex,omitempty"`
-	SignedBytes   string   `json:"signed_bytes_hex,omitempty"`
-	Payment       VPayment `json:"payment"`
-	Now           *int64   `json:"now,omitempty"`
-	Expect        VExpect  `json:"expect"`
+	// Substitute: before use, replace the one occurrence of Find in Credential
+	// with the bytes With (hex). For bytes that are not valid UTF-8, which a
+	// JSON file cannot hold as text.
+	Substitute  *VSub    `json:"substitute,omitempty"`
+	SignedBytes string   `json:"signed_bytes_hex,omitempty"`
+	Payment     VPayment `json:"payment"`
+	Now         *int64   `json:"now,omitempty"`
+	Expect      VExpect  `json:"expect"`
 	// Then lists the results of further uses of the same credential after the
 	// first one, in order. Only a checker with a used-credential store can
 	// produce them.
@@ -143,7 +149,7 @@ func Generate() ([]byte, error) {
 			"payment is what the zone decoded from the bytes it would sign; compare by exact string equality.",
 			"now is the case's clock; when absent use the top-level now.",
 			"then_expect_on_reuse: present the same credential again after its first use was accepted, with the entry's payment if it has one (else the case's). A pure verifier runs the pure checks; if they pass and the credential_id was already used, the result is replayed. The checker records credential_id (and the payload digest) at first use and refuses any later use whatever the payload, once the payment check has passed. The zone never returns a stored result for a repeat; only GC4's API layer does, for an identical request.",
-			"credential_hex: when present, the exact bytes of the credential (not valid UTF-8, so they cannot sit in this file as text); credential is then null.",
+			"substitute: when present, replace the one occurrence of find in credential by the bytes with_hex before use (for bytes that are not valid UTF-8 and cannot sit in this file as text).",
 			"Opaque fields (obligation_id, policy_version, decision_reason) are UTF-8 kept byte for byte, with no normalisation; control characters U+0000-U+001F and invalid UTF-8 are refused; limits are in bytes.",
 			"The codes wallet_not_gate_governed, fast_lane_cap, client_not_authorized and payload_invalid depend on zone state or the request and have no vector here.",
 		},
@@ -277,9 +283,8 @@ func Generate() ([]byte, error) {
 	malSigned("decision_reason_control_character", "decision_reason holds a raw control character (U+0001).", good.with("credential_id", id("2c10"), "decision_reason", "a\x01b"), "decision_reason")
 	malSigned("decision_reason_newline", "decision_reason holds a line feed (written as \\n in the text).", good.with("credential_id", id("2c13"), "decision_reason", "line one\nline two"), "decision_reason")
 	malSigned("obligation_id_too_long_in_bytes", "obligation_id of 43 three-byte characters = 129 bytes: limits count bytes.", good.with("credential_id", id("2c14"), "obligation_id", strings.Repeat("\u4e2d", 43)), "obligation_id")
-	bad8 := []byte(string(Wire(k1, good.with("credential_id", id("2c15"), "decision_reason", "XX"))))
-	bad8 = bytes.Replace(bad8, []byte("XX"), []byte{0xc3, 0x28}, 1)
-	add(VCase{Name: "decision_reason_invalid_utf8", Description: "decision_reason holds the bytes C3 28, which are not valid UTF-8 (see credential_hex).", CredentialHex: hex.EncodeToString(bad8), Payment: basePayment(), Expect: refuse(gatecred.CredentialMalformed, "")})
+	badUTF8 := string(Wire(k1, good.with("credential_id", id("2c15"), "decision_reason", "XX")))
+	add(VCase{Name: "decision_reason_invalid_utf8", Description: "decision_reason holds the bytes C3 28, which are not valid UTF-8: replace XX in credential by them (substitute).", Credential: &badUTF8, Substitute: &VSub{Find: "XX", With: "c328"}, Payment: basePayment(), Expect: refuse(gatecred.CredentialMalformed, "")})
 	lone := string(Wire(k1, good.with("credential_id", id("2c16"), "decision_reason", "XXXXXX")))
 	lone = strings.Replace(lone, "XXXXXX", `\ud800`, 1)
 	mal("decision_reason_lone_surrogate_escape", "decision_reason written with the escape \\ud800 alone, which is not a character.", lone, "")

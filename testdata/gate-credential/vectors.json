@@ -1025,9 +1025,12 @@
     },
     {
       "name": "decision_reason_invalid_utf8",
-      "description": "decision_reason holds the bytes C3 28, which are not valid UTF-8 (see credential_hex).",
-      "credential": null,
-      "credential_hex": "7b22616d6f756e74223a2231303030303030303030303030303030222c226173736574223a226e6174697665222c2261756469656e6365223a2271762d74657374222c22636861696e223a226569703135353a3834353332222c2263726564656e7469616c5f6964223a2230623663316435322d386134662d346531372d623364392d356632613763396532633135222c226465636973696f6e5f726561736f6e223a22c328222c22657870697265735f6174223a313739303030303539302c226973737565645f6174223a313738393939393939302c226b6964223a22746573742d6f6e6c792d31222c226f626c69676174696f6e5f6964223a226f626c2d323032362d30392d32312d30303031222c227061796565223a22307837303939373937306335313831326463336130313063376430316235306530643137646337396338222c22706f6c6963795f76657273696f6e223a22706f6c6963792d763132222c2276223a312c2277616c6c65745f6964223a2237633166306135322d336238652d346436612d396632312d356530623761346338643133222c22736967223a226d5841655435426d7551556b455338367457635263397445574e56414a654448524152784166387677665531656d6d704f6744457675447858624f757a596a336568364568336d4d637636494c427374494d704f4477227d",
+      "description": "decision_reason holds the bytes C3 28, which are not valid UTF-8: replace XX in credential by them (substitute).",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2c15\",\"decision_reason\":\"XX\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"mXAeT5BmuQUkES86tWcRc9tEWNVAJeDHRARxAf8vwfU1emmpOgDEvuDxXbOuzYj3eh6Eh3mMcv6ILBstIMpODw\"}",
+      "substitute": {
+        "find": "XX",
+        "with_hex": "c328"
+      },
       "payment": {
         "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
         "chain": "eip155:84532",
@@ -1182,7 +1185,7 @@
     "payment is what the zone decoded from the bytes it would sign; compare by exact string equality.",
     "now is the case's clock; when absent use the top-level now.",
     "then_expect_on_reuse: present the same credential again after its first use was accepted, with the entry's payment if it has one (else the case's). A pure verifier runs the pure checks; if they pass and the credential_id was already used, the result is replayed. The checker records credential_id (and the payload digest) at first use and refuses any later use whatever the payload, once the payment check has passed. The zone never returns a stored result for a repeat; only GC4's API layer does, for an identical request.",
-    "credential_hex: when present, the exact bytes of the credential (not valid UTF-8, so they cannot sit in this file as text); credential is then null.",
+    "substitute: when present, replace the one occurrence of find in credential by the bytes with_hex before use (for bytes that are not valid UTF-8 and cannot sit in this file as text).",
     "Opaque fields (obligation_id, policy_version, decision_reason) are UTF-8 kept byte for byte, with no normalisation; control characters U+0000-U+001F and invalid UTF-8 are refused; limits are in bytes.",
     "The codes wallet_not_gate_governed, fast_lane_cap, client_not_authorized and payload_invalid depend on zone state or the request and have no vector here."
   ]

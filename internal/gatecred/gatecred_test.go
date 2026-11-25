@@ -104,11 +104,12 @@ func TestVectors(t *testing.T) {
 			if c.Credential != nil {
 				raw = []byte(*c.Credential)
 			}
-			if c.CredentialHex != "" {
-				var herr error
-				if raw, herr = hex.DecodeString(c.CredentialHex); herr != nil {
-					t.Fatal(herr)
+			if c.Substitute != nil {
+				with, herr := hex.DecodeString(c.Substitute.With)
+				if herr != nil || bytes.Count(raw, []byte(c.Substitute.Find)) != 1 {
+					t.Fatalf("bad substitute: %v", herr)
 				}
+				raw = bytes.Replace(raw, []byte(c.Substitute.Find), with, 1)
 			}
 			cred, err := cfg.Verify(raw, paymentOf(c.Payment), time.Unix(now, 0))
 			check(t, err, c.Expect, nil, "")
