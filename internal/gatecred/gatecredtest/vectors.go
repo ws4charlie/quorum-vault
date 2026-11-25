@@ -182,7 +182,7 @@ func Generate() ([]byte, error) {
 	for _, u := range []struct{ name, desc, reason, id string }{
 		{"valid_decision_reason_non_ascii", "decision_reason with non-ASCII letters (kept byte for byte, no normalisation).", "caf\u00e9 \u5ba1\u6279\u901a\u8fc7 \u00fcber", "1f01"},
 		{"valid_decision_reason_outside_bmp", "decision_reason with characters above U+FFFF (a 4-byte UTF-8 sequence, a surrogate pair if escaped).", "ok \U0001F600 \U0001D4B3", "1f02"},
-		{"valid_decision_reason_quote_backslash", "decision_reason with a quote and a backslash: the canonical form escapes both.", `say "yes" to C:\pay\x`, "1f03"},
+		{"valid_decision_reason_quote_backslash", "decision_reason with a quote and a backslash: the canonical form escapes both.", `say "yes" to C:\pay\x <a&b>`, "1f03"},
 		{"valid_decision_reason_line_separator", "decision_reason with U+2028 and U+007F: RFC 8785 writes them as they are (Go's encoding/json would escape U+2028).", "a\u2028b\u007fc", "1f04"},
 		{"valid_decision_reason_decomposed", "decision_reason in decomposed form (e + U+0301): not normalised, so it differs from the composed form byte for byte.", "cafe\u0301", "1f05"},
 	} {
@@ -212,6 +212,7 @@ func Generate() ([]byte, error) {
 	wp.WalletID = "aaaaaaaa-0000-4000-8000-000000000001"
 	sg("wallet_mismatch", "The payment is from another wallet than the credential names.", good.with("credential_id", id("1c02")), wp, refuse(gatecred.WalletMismatch, "wallet_id"))
 	sg("ttl_too_long", "Lifetime 601 s, limit 600 s.", good.with("credential_id", id("1c03"), "issued_at", VectorsNow-10, "expires_at", VectorsNow+591), basePayment(), refuse(gatecred.TTLTooLong, "expires_at"))
+	sg("ttl_overflow", "Lifetime of about 10^10 s: a verifier that multiplies seconds into nanoseconds in 64 bits wraps and accepts it.", good.with("credential_id", id("1c06"), "issued_at", VectorsNow-10, "expires_at", int64(11790000000)), basePayment(), refuse(gatecred.TTLTooLong, "expires_at"))
 	sg("future_dated", "issued_at is now+31 s, one second past the skew.", good.with("credential_id", id("1c04"), "issued_at", VectorsNow+31, "expires_at", VectorsNow+631), basePayment(), refuse(gatecred.NotYetValid, "issued_at"))
 	sg("expired", "now is expires_at+30 s: the skew is used up.", good.with("credential_id", id("1c05"), "issued_at", VectorsNow-600, "expires_at", VectorsNow-30), basePayment(), refuse(gatecred.Expired, "expires_at"))
 	mm := func(name, field string, mut func(*VPayment)) {

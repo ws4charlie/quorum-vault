@@ -189,7 +189,7 @@ func (c *Config) Verify(raw []byte, p Payment, now time.Time) (*Credential, erro
 	if cred.WalletID != p.WalletID {
 		return nil, fail(WalletMismatch, "wallet_id", "credential is for another wallet")
 	}
-	if time.Duration(cred.ExpiresAt-cred.IssuedAt)*time.Second > c.MaxTTL {
+	if cred.ExpiresAt-cred.IssuedAt > int64(c.MaxTTL/time.Second) { // seconds, never multiplied: a huge span must not wrap
 		return nil, fail(TTLTooLong, "expires_at", "lifetime %ds exceeds %s", cred.ExpiresAt-cred.IssuedAt, c.MaxTTL)
 	}
 	n := now.Unix()
