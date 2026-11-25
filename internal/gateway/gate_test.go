@@ -726,3 +726,119 @@ func TestGateRefusalParses(t *testing.T) {
 		}
 	}
 }
+
+// ---- fix 1: a retired key never comes back ----
+
+// A public key retired in a version cannot come back under a new kid, neither in the same version nor in a later one, and a credential it signs is
+// refused whichever kid it names.
+func TestGateRetiredKeyNeverReturnsUnderAnotherKid(t *testing.T) {
+	z := newGateZone(t, 84532)
+	k1, k2 := gatecredtest.TestKey(1), gatecredtest.TestKey(2)
+	z.keys = []gatecredtest.Key{k1, k2}
+	z.govern()
+	ctx := context.Background()
+	refused := func(what string, f GateSettingFile) {
+		t.Helper()
+		if err := z.guard.ApplyGateChange(ctx, z.cfg, z.signed(f, z.version+1), z.clock(), "test"); err == nil {
+			t.Fatalf("%s: the version was applied", what)
+		}
+	}
+	// Same version: retire k1 and add its public key as "k1-again".
+	same := z.settingFile()
+	same.Keys = []GateKeyFile{{KID: k2.KID, PublicKey: b64(k2.Pub)}, {KID: "k1-again", PublicKey: b64(k1.Pub)}}
+	same.Retired = []string{k1.KID}
+	refused("retire and re-add in one version", same)
+	// Two later versions: retire k1, then add it under a new kid.
+	z.keys = []gatecredtest.Key{k2}
+	retire := z.settingFile()
+	retire.Retired = []string{k1.KID}
+	z.apply(retire)
+	later := z.settingFile()
+	later.Keys = append(later.Keys, GateKeyFile{KID: "k1-later", PublicKey: b64(k1.Pub)})
+	refused("re-add in a later version", later)
+	// A credential signed by k1 is refused under any kid.
+	payee := common.HexToAddress(gatecredtest.VectorsPayee)
+	a := big.NewInt(10)
+	for _, kid := range []string{k1.KID, "k1-again", "k1-later", k2.KID} {
+		now := z.clock().Unix()
+		c := gatecred.Credential{V: 1, KID: kid, CredentialID: uuid.NewString(), ObligationID: "o", Audience: gatecredtest.VectorsAudience, WalletID: z.wallet,
+			Chain: "eip155:84532", Asset: gatecred.NativeAsset, Payee: strings.ToLower(payee.Hex()), Amount: "10", IssuedAt: now - 10, ExpiresAt: now + 300,
+			PolicyVersion: "p", DecisionReason: "r"}
+		code := string(gatecred.KIDUnknown)
+		if kid == k2.KID {
+			code = string(gatecred.SignatureInvalid) // k2's kid, k1's signature
+		}
+		want(t, "signed by k1 as "+kid, z.gate(z.native("rk-"+kid, payee, a, string(gatecredtest.Mint(k1, c)))), code, "")
+	}
+}
+
+// ---- fix 2: a retry after expiry ----
+
+// A retry of the same digest after the credential expired gets the decision already made: the stored signature (gateway), the same digest allowed
+// again (cosigner); no new record, nothing counted again. Another payload under that credential_id after expiry is refused as expired: the pure checks
+// (9) run before the replay record (12), in the spec's order.
+func TestGateRetryAfterExpiry(t *testing.T) {
+	z := newGateZone(t, 84532)
+	z.limits = map[string]GateLimitFile{"ETH": {PerPayment: "100", PerHour: "100", PerDay: "100"}}
+	z.govern()
+	payee := common.HexToAddress(gatecredtest.VectorsPayee)
+	a := big.NewInt(100)
+	cred := z.cred(gatecred.NativeAsset, payee.Hex(), a, nil) // expires now+590
+	j := z.native("e1", payee, a, cred)
+	d := z.run(j)
+	if d.Outcome != OutcomeSigned {
+		t.Fatalf("first: %s %s", d.Outcome, d.Reason)
+	}
+	want(t, "first (cosigner)", z.cosign(j), "", "")
+	z.advance(600*time.Second + 31*time.Second) // past expires_at + skew
+	again := j
+	again.ID = "e1-retry"
+	d2 := z.run(again)
+	if d2.Outcome != OutcomeReplayed || string(d2.Sig) != string(d.Sig) {
+		t.Fatalf("retry at the gateway after expiry: %s %s", d2.Outcome, d2.Reason)
+	}
+	want(t, "retry (cosigner) after expiry", z.cosign(j), "", "")
+	for _, db := range []*pgxpool.Pool{z.guardDB, z.cosDB} {
+		var n int
+		db.QueryRow(context.Background(), `SELECT count(*) FROM gate_credentials_used`).Scan(&n)
+		if n != 1 {
+			t.Fatalf("%d records, want 1", n)
+		}
+	}
+	var retries int
+	z.guardDB.QueryRow(context.Background(), `SELECT count(*) FROM audit_log WHERE payload->'gate'->>'retry' = 'true'`).Scan(&retries)
+	if retries != 1 {
+		t.Fatalf("%d retries audited at the gateway, want 1", retries)
+	}
+	other := z.native("e2", payee, a, cred) // another nonce: another digest
+	want(t, "other payload after expiry (gateway)", z.gate(other), string(gatecred.Expired), "expires_at")
+	want(t, "other payload after expiry (cosigner)", z.cosign(other), string(gatecred.Expired), "expires_at")
+	if z.signer.calls.Load() != 1 {
+		t.Fatalf("signed %d times", z.signer.calls.Load())
+	}
+}
+
+// ---- fix 3: the zone's own refusals carry the gate facts ----
+
+func TestGateFactsOnTheZonesOwnRefusals(t *testing.T) {
+	z := newGateZone(t, 84532)
+	cc := z.cfg.Chains[testChain]
+	p := cc.Assets["ETH"]
+	p.AnyDestination, p.Destinations = false, map[string]bool{addrUser.Hex(): true}
+	cc.Assets["ETH"] = p
+	z.govern()
+	payee := common.HexToAddress(gatecredtest.VectorsPayee)
+	a := big.NewInt(10)
+	cred := z.cred(gatecred.NativeAsset, payee.Hex(), a, nil)
+	want(t, "destination outside the list", z.gate(z.native("f1", payee, a, cred)), ReasonDestination, "")
+	var raw []byte
+	if err := z.guardDB.QueryRow(context.Background(), `SELECT payload->'gate' FROM audit_log WHERE type=$1 AND payload->>'job'='f1'`, EventSignRefused).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var g map[string]any
+	json.Unmarshal(raw, &g)
+	parsed, _ := gatecred.Parse([]byte(cred))
+	if g["credential_id"] != parsed.CredentialID || g["code"] != ReasonDestination || g["wallet_id"] != z.wallet || g["payment"] == nil {
+		t.Fatalf("gate facts %v", g)
+	}
+}

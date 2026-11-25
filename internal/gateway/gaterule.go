@@ -102,7 +102,9 @@ func GateRefusal(reason string) (code gatecred.Code, field string, ok bool) {
 }
 
 // Scope reads the setting in force and finds the Gate-governed wallet the job pays from, if any.
-func (r *GateRule) Scope(ctx context.Context, cc *ChainConfig, kv *KeysetView, _ signjob.Job, i signjob.Intent, info TxInfo) (*PaymentScope, error) {
+// The facts of the audit trail are filled here, before any check that can refuse, so every refusal of a governed payment (or of a job that carries
+// a credential) has them, whichever check refuses: the zone's own withdrawal rules too.
+func (r *GateRule) Scope(ctx context.Context, cc *ChainConfig, kv *KeysetView, job signjob.Job, i signjob.Intent, info TxInfo) (*PaymentScope, error) {
 	s, err := r.guard.EffectiveGate(ctx, r.cfg)
 	if err != nil {
 		return nil, err
@@ -111,7 +113,68 @@ func (r *GateRule) Scope(ctx context.Context, cc *ChainConfig, kv *KeysetView, _
 	if w := s.walletFor(cc, kv, i.PartitionID, info.Sender); w != nil {
 		sc.WalletID, sc.wallet = w.WalletID, w
 	}
+	if !sc.Governed() && i.Credential == "" {
+		return sc, nil
+	}
+	sc.fact("checker", r.mode.actor())
+	if sc.Governed() {
+		sc.fact("wallet_id", sc.WalletID)
+	}
+	if i.Credential != "" {
+		sc.credentialFacts([]byte(i.Credential))
+	}
+	var p *PaymentFacts
+	switch {
+	case i.Kind == evm.KindEIP3009:
+		p = info.Payment
+	case i.Kind == "withdrawal":
+		if f, err := transferPayment(cc, job.Payload); err == nil {
+			p = &f
+		}
+	}
+	if p != nil && p.Amount != nil {
+		sc.paymentFacts(p)
+	}
 	return sc, nil
+}
+
+// credentialFacts records a credential as received: its fields (opaque ones unchanged) when it parses, else only its size and hash, since its text
+// is not trusted.
+func (s *PaymentScope) credentialFacts(raw []byte) {
+	if parsed, perr := gatecred.Parse(raw); perr == nil {
+		s.fact("credential_id", parsed.CredentialID)
+		s.fact("obligation_id", parsed.ObligationID)
+		s.fact("policy_version", parsed.PolicyVersion)
+		s.fact("decision_reason", parsed.DecisionReason)
+		s.fact("kid", parsed.KID)
+		s.fact("credential_wallet_id", parsed.WalletID)
+		s.fact("expires_at", parsed.ExpiresAt)
+		return
+	}
+	h := sha256.Sum256(raw)
+	s.fact("credential_size", len(raw))
+	s.fact("credential_sha256", hex.EncodeToString(h[:]))
+}
+
+// payment is a decoded payment in the credential's terms (lower-case addresses, "native").
+func (s *PaymentScope) payment(i signjob.Intent, p *PaymentFacts) gatecred.Payment {
+	pay := gatecred.Payment{WalletID: s.WalletID, Chain: p.Chain, Asset: gatecred.NativeAsset, Payee: strings.ToLower(p.Payee), Amount: p.Amount.String()}
+	if p.Asset != gatecred.NativeAsset {
+		pay.Asset = strings.ToLower(p.Asset)
+	}
+	if i.Kind == evm.KindEIP3009 {
+		va, vb := int64(min(p.ValidAfter, uint64(gatecred.MaxTimestamp))), int64(min(p.ValidBefore, uint64(gatecred.MaxTimestamp)))
+		pay.ValidAfter, pay.ValidBefore = &va, &vb
+	}
+	return pay
+}
+
+func (s *PaymentScope) paymentFacts(p *PaymentFacts) {
+	asset := gatecred.NativeAsset
+	if p.Asset != gatecred.NativeAsset {
+		asset = strings.ToLower(p.Asset)
+	}
+	s.fact("payment", map[string]any{"chain": p.Chain, "asset": asset, "payee": strings.ToLower(p.Payee), "amount": p.Amount.String()})
 }
 
 // walletFor returns the Gate-governed wallet a job of partitionID sent from sender pays from, or nil. A wallet covers its hot shard: every partition
@@ -168,38 +231,15 @@ func (r *GateRule) CheckPayment(ctx context.Context, gt *GuardTx, job signjob.Jo
 	}
 	s.fact("wallet_id", s.WalletID)
 	set := s.setting
-	pay := gatecred.Payment{WalletID: s.WalletID, Chain: p.Chain, Asset: gatecred.NativeAsset, Payee: strings.ToLower(p.Payee), Amount: p.Amount.String()}
-	if p.Asset != gatecred.NativeAsset {
-		pay.Asset = strings.ToLower(p.Asset)
-	}
-	if i.Kind == evm.KindEIP3009 {
-		va, vb := int64(min(p.ValidAfter, uint64(gatecred.MaxTimestamp))), int64(min(p.ValidBefore, uint64(gatecred.MaxTimestamp)))
-		pay.ValidAfter, pay.ValidBefore = &va, &vb
-	}
-	s.fact("payment", map[string]any{"chain": pay.Chain, "asset": pay.Asset, "payee": pay.Payee, "amount": pay.Amount})
+	pay := s.payment(i, &p)
+	s.paymentFacts(&p)
 	if i.Credential == "" {
 		s.fact("code", string(gatecred.CredentialMissing))
 		return gateReject(gatecred.CredentialMissing, "", "a payment from Gate-governed wallet %s needs a Gate credential; approvals do not replace it", s.WalletID)
 	}
 	raw := []byte(i.Credential)
-	gc := &gatecred.Config{Audience: set.Audience, Keys: set.KeysAt(now), Skew: set.Skew, MaxTTL: set.MaxTTL}
-	if parsed, perr := gatecred.Parse(raw); perr == nil {
-		// Recorded as received (opaque fields unchanged), whether or not the checks below pass.
-		s.fact("credential_id", parsed.CredentialID)
-		s.fact("obligation_id", parsed.ObligationID)
-		s.fact("policy_version", parsed.PolicyVersion)
-		s.fact("decision_reason", parsed.DecisionReason)
-		s.fact("kid", parsed.KID)
-		s.fact("credential_wallet_id", parsed.WalletID)
-		s.fact("expires_at", parsed.ExpiresAt)
-	} else {
-		// Not parsed: its text is not trusted, so only its size and hash are recorded.
-		h := sha256.Sum256(raw)
-		s.fact("credential_size", len(raw))
-		s.fact("credential_sha256", hex.EncodeToString(h[:]))
-	}
-	cred, err := gc.Verify(raw, pay, now)
-	if err != nil {
+	s.credentialFacts(raw)
+	refuse := func(err error) error {
 		var ge *gatecred.Error
 		if !errors.As(err, &ge) {
 			return err
@@ -211,20 +251,43 @@ func (r *GateRule) CheckPayment(ctx context.Context, gt *GuardTx, job signjob.Jo
 		return gateReject(ge.Code, ge.Field, "%s", ge.Detail)
 	}
 
-	// 12. Replay: the first use wins at this checker. The same payload again is a retry of the same signing (the guard's known path answers it).
+	// A decision this checker already made: the same credential_id with the same payload digest and wallet in its own records. It is a retry of that
+	// signing (the gateway returns the stored signature, a cosigner allows the same digest again), so the time checks (7 to 9) and the fast lane do not
+	// run again: the credential may have expired since, and the payment is already counted. Signature, audience, wallet and payment are checked again
+	// (they cannot differ for the same digest, and cost nothing). Nothing is written.
 	var prevDigest []byte
 	var prevWallet string
-	err = gt.tx.QueryRow(ctx, `SELECT payload_digest, wallet_id FROM gate_credentials_used WHERE credential_id=$1`, cred.CredentialID).Scan(&prevDigest, &prevWallet)
-	switch {
-	case err == nil && bytes.Equal(prevDigest, job.Digest) && prevWallet == s.WalletID:
-		s.fact("retry", true)
-		s.fact("code", "accepted")
-		return nil
-	case err == nil:
+	used := false
+	if parsed, perr := gatecred.Parse(raw); perr == nil {
+		err := gt.tx.QueryRow(ctx, `SELECT payload_digest, wallet_id FROM gate_credentials_used WHERE credential_id=$1`, parsed.CredentialID).Scan(&prevDigest, &prevWallet)
+		switch {
+		case err == nil:
+			used = true
+		case !errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("gateway: read gate credential: %w", err)
+		}
+		if used && bytes.Equal(prevDigest, job.Digest) && prevWallet == s.WalletID {
+			check := &gatecred.Config{Audience: set.Audience, Keys: set.KeysAt(now), Skew: set.Skew, MaxTTL: set.MaxTTL}
+			if _, err := check.Verify(raw, pay, time.Unix(parsed.IssuedAt, 0)); err != nil { // the clock of the first decision's window
+				return refuse(err)
+			}
+			s.fact("retry", true)
+			s.fact("code", "accepted")
+			return nil
+		}
+	}
+
+	// 1 to 11, every check, at this checker's clock.
+	gc := &gatecred.Config{Audience: set.Audience, Keys: set.KeysAt(now), Skew: set.Skew, MaxTTL: set.MaxTTL}
+	cred, err := gc.Verify(raw, pay, now)
+	if err != nil {
+		return refuse(err)
+	}
+
+	// 12. Replay: the first use wins at this checker; any other payload under a used credential_id is refused.
+	if used {
 		s.fact("code", string(gatecred.Replayed))
 		return gateReject(gatecred.Replayed, "", "credential %s was already used at this checker for another payload", cred.CredentialID)
-	case !errors.Is(err, pgx.ErrNoRows):
-		return fmt.Errorf("gateway: read gate credential: %w", err)
 	}
 
 	// 13. Fast lane, from this guard's own records at signing time. A replacement of the same intent under a new credential is not counted twice.

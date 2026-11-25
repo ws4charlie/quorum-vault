@@ -154,6 +154,11 @@ func (d *Decider) DecideKey(ctx context.Context, job signjob.Job, key SignerKey)
 				return nil, lag
 			}
 			arec.reason = rj
+			if g := arec.gate; g != nil && len(g.facts) > 0 && g.facts["code"] == nil {
+				// A refusal by the zone's own rules (destination, caps, rates, expiry...) of a Gate payment: the gate facts name its code too.
+				code, _, _ := strings.Cut(rj, ": ")
+				g.fact("code", code)
+			}
 			d.noteDrainRefusal(job, rj)
 			if aerr := d.guard.auditAlone(ctx, *arec, EventSignRefused); aerr != nil {
 				return nil, aerr

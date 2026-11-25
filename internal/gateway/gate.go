@@ -273,13 +273,20 @@ func (s *GateSetting) apply(cfg *Config, c GateChange, strict bool) error {
 		}
 		next.retiredKIDs[kid] = true
 	}
-	// The key set: the bootstrap keys and this version's, without what any version so far retired. A key a version names that was retired before
-	// (by kid or by public key) refuses the version: retired is for good.
+	// The complete retired set of this version first: what earlier versions retired, and the public key of every key known so far (bootstrap or
+	// earlier version) whose kid this version retires. Every candidate key is then checked against it by public key, so a key retired now cannot come
+	// back in the same version under a new kid, and one retired before never comes back under any kid.
+	for _, k := range append(slices.Clone(s.Keys), cfg.GateBootstrap...) {
+		if next.retiredKIDs[k.KID] {
+			next.retiredKeys[string(k.Public)] = true
+		}
+	}
+	// The key set: the bootstrap keys and this version's, without what is retired. A key a version names that is retired (by kid or by public key)
+	// refuses the version: retired is for good.
 	keys := map[string]GateKey{}
 	order := []string{}
 	for _, k := range cfg.GateBootstrap {
-		if next.retiredKIDs[k.KID] {
-			next.retiredKeys[string(k.Public)] = true
+		if next.retiredKIDs[k.KID] || next.retiredKeys[string(k.Public)] {
 			continue
 		}
 		keys[k.KID] = k
@@ -295,7 +302,7 @@ func (s *GateSetting) apply(cfg *Config, c GateChange, strict bool) error {
 			return fmt.Errorf("kid %q is listed twice", k.KID)
 		}
 		seen[k.KID] = true
-		if s.retiredKIDs[k.KID] || s.retiredKeys[string(k.Public)] || next.retiredKIDs[k.KID] {
+		if next.retiredKIDs[k.KID] || next.retiredKeys[string(k.Public)] {
 			return fmt.Errorf("key %q was retired: a retired kid or key is never used again", k.KID)
 		}
 		if b, ok := keys[k.KID]; ok && !bytes.Equal(b.Public, k.Public) {
@@ -311,11 +318,6 @@ func (s *GateSetting) apply(cfg *Config, c GateChange, strict bool) error {
 			if kid < other && bytes.Equal(keys[kid].Public, keys[other].Public) {
 				return fmt.Errorf("keys %q and %q are the same public key", kid, other)
 			}
-		}
-	}
-	for _, k := range append(slices.Clone(s.Keys), cfg.GateBootstrap...) { // a key retired now by kid is retired by public key too
-		if next.retiredKIDs[k.KID] {
-			next.retiredKeys[string(k.Public)] = true
 		}
 	}
 	kmap := map[string]ed25519.PublicKey{}
