@@ -104,6 +104,10 @@ func (a *API) handle(mux *http.ServeMux, pattern string, h http.HandlerFunc) {
 			// Every write leaves a row naming who sent it, before anything changes. If the row cannot be written, nothing happens.
 			if err := a.auditWrite(ctx, r, p); err != nil {
 				a.log.Error("could not record the request in the audit trail", "error", err.Error())
+				if pattern == GateRoute { // the signing API's error shape (docs/gate-credential.md): nothing was decided, the same request may come again
+					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"code": GateRetryLater, "message": "audit trail unavailable; send the same request again"})
+					return
+				}
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit trail unavailable"})
 				return
 			}

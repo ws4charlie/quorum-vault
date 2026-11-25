@@ -112,8 +112,8 @@ type Principal struct {
 	Session  string    // sid
 	Service  bool
 	Dev      bool // came from the X-Actor dev header: nothing was verified
-	// Cert is the name (spiffe://quorumvault/<zone>/<service>) of the TLS client certificate a service presented and Authenticate checked
-	// against the allow-list; empty for people and when no certificate is required.
+	// Cert is the name (spiffe://quorumvault/<zone>/<service>) of the TLS client certificate the caller presented and Authenticate checked
+	// against the allow-list, person or service; empty when none was shown or no certificate is required.
 	Cert string
 }
 
@@ -297,15 +297,23 @@ func (a *Authenticator) Authenticate(r *http.Request) (*Principal, *Failure) {
 	if err != nil {
 		return nil, &Failure{Status: http.StatusUnauthorized, Message: "invalid token: " + err.Error(), Challenge: `Bearer realm="qv-core", error="invalid_token"`}
 	}
-	if p.Service && a.svcCert != nil {
-		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+	if a.svcCert != nil {
+		hasCert := r.TLS != nil && len(r.TLS.PeerCertificates) > 0
+		if p.Service && !hasCert {
 			return nil, &Failure{Status: http.StatusForbidden, Message: "a service must present its TLS client certificate"}
 		}
-		id, err := pki.CheckPeer(r.TLS.PeerCertificates[0], a.svcCert.zone, a.svcCert.allow)
-		if err != nil {
-			return nil, &Failure{Status: http.StatusForbidden, Message: "service certificate refused: " + err.Error()}
+		if hasCert {
+			// The certificate's name is recorded for every caller that shows one, person or service, so a route can confine a certificate (AgentGate's)
+			// whatever token comes with it. A service's certificate must pass; a person's that does not pass names nobody (the TLS handshake already
+			// checked the chain and the allow-list).
+			id, err := pki.CheckPeer(r.TLS.PeerCertificates[0], a.svcCert.zone, a.svcCert.allow)
+			if err != nil && p.Service {
+				return nil, &Failure{Status: http.StatusForbidden, Message: "service certificate refused: " + err.Error()}
+			}
+			if err == nil {
+				p.Cert = id
+			}
 		}
-		p.Cert = id
 	}
 	return p, nil
 }

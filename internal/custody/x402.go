@@ -116,6 +116,8 @@ type X402Request struct {
 	ValidAfter  uint64
 	ValidBefore uint64
 	Nonce       [32]byte
+	// KeepNonce signs Nonce as given, all-zero included (the signing API: the nonce is the caller's). Without it a zero Nonce is drawn at random.
+	KeepNonce bool
 }
 
 func (r X402Request) bodyHash(payee string) []byte {
@@ -158,7 +160,7 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 		return a, false, fmt.Errorf("%w: (%d, %d) is not within %d s of now %d", ErrX402Window, r.ValidAfter, r.ValidBefore, x.MaxWindowSeconds, now)
 	}
 	nonce := r.Nonce
-	if nonce == ([32]byte{}) {
+	if nonce == ([32]byte{}) && !r.KeepNonce {
 		if _, err := rand.Read(nonce[:]); err != nil {
 			return a, false, err
 		}

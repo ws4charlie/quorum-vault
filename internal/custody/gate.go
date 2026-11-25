@@ -232,15 +232,16 @@ func gateZoneRefusal(reason string) GateRefusal {
 	return GateRefusal{Code: GateSigningFailed, Message: reason}
 }
 
-// gateBodyHash is the identity of a request: wallet, kind, payload (JSON without insignificant space) and the credential (its canonical form and
-// signature, so a re-spaced copy is the same request).
+// gateBodyHash is the identity of a request: wallet, kind, payload and the credential. The payload is hashed in a canonical form (members sorted, no
+// insignificant space, numbers as written) and the credential as its canonical form and signature, so a copy with members in another order or other
+// spacing is the same request.
 func gateBodyHash(r GateRequest, cred *gatecred.Credential) ([]byte, error) {
-	var payload bytes.Buffer
-	if err := json.Compact(&payload, r.Payload); err != nil {
+	payload, err := canonicalJSON(r.Payload)
+	if err != nil {
 		return nil, err
 	}
 	b := []byte("qv-gate-request-v1\n")
-	for _, f := range [][]byte{[]byte(r.WalletID), []byte(r.Kind), payload.Bytes(), cred.Wire()} {
+	for _, f := range [][]byte{[]byte(r.WalletID), []byte(r.Kind), payload, cred.Wire()} {
 		b = binary.BigEndian.AppendUint32(b, uint32(len(f)))
 		b = append(b, f...)
 	}
@@ -248,12 +249,36 @@ func gateBodyHash(r GateRequest, cred *gatecred.Credential) ([]byte, error) {
 	return h[:], nil
 }
 
+// canonicalJSON re-encodes one JSON value with object members sorted by name, no insignificant space and numbers exactly as written. It is the form
+// the request hash uses; it is never sent anywhere.
+func canonicalJSON(raw []byte) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, errors.New("trailing data")
+	}
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil { // maps are written with sorted keys
+		return nil, err
+	}
+	return bytes.TrimRight(out.Bytes(), "\n"), nil
+}
+
 // GateSign serves one request of the signing API and returns the HTTP status and body. It repeats harmlessly (see the package comment above).
+//
+// Order: what depends only on the request (shape, the credential parses, the body hash) comes first; then the row of the credential_id, so a request
+// already answered gets its stored answer (or waits on its job) whatever the configuration, the clock or the keysets say now. Only a new request runs
+// the checks that depend on the current state.
 func (s *Service) GateSign(ctx context.Context, r GateRequest, log *slog.Logger) (int, []byte) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	g := s.Cfg.Gate
 	// 1. Shape.
 	switch {
 	case !reGateUUID.MatchString(r.WalletID):
@@ -265,16 +290,17 @@ func (s *Service) GateSign(ctx context.Context, r GateRequest, log *slog.Logger)
 	case len(bytes.TrimSpace(r.Payload)) == 0 || bytes.Equal(bytes.TrimSpace(r.Payload), []byte("null")):
 		return refusal(gatecred.RequestInvalid, "payload", "payload is required")
 	}
-	// 2. The wallet is one of this core's Gate-governed wallets.
-	var w GateWallet
-	ok := false
-	if g != nil {
-		w, ok = g.Wallets[r.WalletID]
+	// The EIP-3009 nonce is Gate's: it is required, and it is signed as given (an all-zero nonce included), never drawn by Vault.
+	var shape struct {
+		Message map[string]json.RawMessage `json:"message"`
 	}
-	if !ok {
-		return refusal(gatecred.WalletNotGateGoverned, "", "wallet %s is not Gate-governed in this deployment", r.WalletID)
+	if err := json.Unmarshal(r.Payload, &shape); err != nil {
+		return refusal(gatecred.RequestInvalid, "payload", "payload is not a JSON object: %v", err)
 	}
-	// 3. The credential is there and parses; it names this deployment and this wallet.
+	if _, ok := shape.Message["nonce"]; !ok {
+		return refusal(gatecred.RequestInvalid, "payload", "payload.message.nonce is required")
+	}
+	// 2. The credential is there and parses.
 	if raw := bytes.TrimSpace(r.Credential); len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return refusal(gatecred.CredentialMissing, "", "a credential is required")
 	}
@@ -286,33 +312,69 @@ func (s *Service) GateSign(ctx context.Context, r GateRequest, log *slog.Logger)
 		}
 		return refusal(gatecred.CredentialMalformed, "", "%v", err)
 	}
+	hash, err := gateBodyHash(r, cred)
+	if err != nil {
+		return refusal(gatecred.RequestInvalid, "payload", "payload is not JSON")
+	}
+	// 3. A credential_id seen before: another body is replayed, a stored answer is returned as it was, a placed request waits on its job.
+	row, err := s.gateLookup(ctx, cred.CredentialID, hash)
+	if err != nil {
+		log.Error("gate request could not be read", "credential_id", cred.CredentialID, "error", err.Error())
+		return refusal(GateRetryLater, "", "the request could not be read; send it again")
+	}
+	switch {
+	case row.replayed:
+		return refusal(gatecred.Replayed, "credential_id", "credential %s was used with another request", cred.CredentialID)
+	case row.stored != nil:
+		return row.status, row.stored
+	case row.placed:
+		return s.gateWait(ctx, log, cred, r)
+	}
+	// 4. A new request (or one recorded but not placed): the checks against the current state.
+	g := s.Cfg.Gate
+	var w GateWallet
+	ok := false
+	if g != nil {
+		w, ok = g.Wallets[r.WalletID]
+	}
+	if !ok {
+		return refusal(gatecred.WalletNotGateGoverned, "", "wallet %s is not Gate-governed in this deployment", r.WalletID)
+	}
 	if cred.Audience != g.Audience {
 		return refusal(gatecred.AudienceMismatch, "audience", "credential is for %q", cred.Audience)
 	}
 	if cred.WalletID != r.WalletID {
 		return refusal(gatecred.WalletMismatch, "wallet_id", "credential is for another wallet")
 	}
-	// 4. The payload decodes into an authorization of the wallet's asset, paid by the wallet's address.
-	a, perr := s.gateDecode(w, r.Payload)
+	// A new request with an expired credential is refused (the zone would too), so a request that comes back after its row was pruned cannot bring an
+	// old authorization back to life.
+	if !row.found && s.Now().Unix() >= cred.ExpiresAt+int64(g.Skew/time.Second) {
+		return refusal(gatecred.Expired, "expires_at", "the credential expired at %d", cred.ExpiresAt)
+	}
+	a, code, perr := s.gateDecode(w, r.Payload)
 	if perr != "" {
-		return refusal(gatecred.PayloadInvalid, "", "%s", perr)
+		if code == GateRetryLater {
+			log.Warn("gate: the wallet's address could not be read", "credential_id", cred.CredentialID, "error", perr)
+		}
+		return refusal(gatecred.Code(code), "", "%s", perr)
 	}
-	hash, err := gateBodyHash(r, cred)
-	if err != nil {
-		return refusal(gatecred.RequestInvalid, "payload", "payload is not JSON")
-	}
-	// 5. One row per credential_id: the same request continues; another body is replayed; a stored answer is returned as it was.
-	status, body, done, err := s.gateClaim(ctx, r, cred, hash)
-	if err != nil {
+	// 5. One row per credential_id.
+	if err := s.gateInsert(ctx, r, cred, hash); err != nil {
 		log.Error("gate request could not be recorded", "credential_id", cred.CredentialID, "error", err.Error())
 		return refusal(GateRetryLater, "", "the request could not be recorded; send it again")
 	}
-	if done {
-		return status, body
+	if row, err = s.gateLookup(ctx, cred.CredentialID, hash); err != nil { // another request may have made it first
+		return refusal(GateRetryLater, "", "the request could not be read; send it again")
+	}
+	switch {
+	case row.replayed:
+		return refusal(gatecred.Replayed, "credential_id", "credential %s was used with another request", cred.CredentialID)
+	case row.stored != nil:
+		return row.status, row.stored
 	}
 	// 6. The authorization and its sign job (idempotent by id: a repeat finds the same row and job).
 	_, _, err = s.RequestX402(ctx, X402Request{ID: cred.CredentialID, Asset: w.Asset, Partition: w.Partition, Payee: a.To.Hex(), Amount: a.Value,
-		ValidAfter: a.ValidAfter, ValidBefore: a.ValidBefore, Nonce: a.Nonce, Credential: r.Credential})
+		ValidAfter: a.ValidAfter, ValidBefore: a.ValidBefore, Nonce: a.Nonce, KeepNonce: true, Credential: r.Credential})
 	switch {
 	case errors.Is(err, ErrX402Amount):
 		return s.gateFinish(ctx, log, cred, r, refusalOf(gatecred.FastLaneCap, "amount", err))
@@ -335,70 +397,70 @@ func refusalOf(code gatecred.Code, field string, err error) GateRefusal {
 }
 
 // gateDecode reads the typed data strictly (the zone's own decoder) and checks what the core can: the token is the wallet's asset and the payer is
-// the wallet's address. It returns a reason when the payload does not fit.
-func (s *Service) gateDecode(w GateWallet, payload []byte) (evm.Authorization, string) {
+// the wallet's address. It returns a code and a reason when it cannot accept: payload_invalid when the payload is wrong, retry_later when what it is
+// compared with (the configuration's verifier, the wallet's active address) could not be read.
+func (s *Service) gateDecode(w GateWallet, payload []byte) (evm.Authorization, string, string) {
 	v, err := evm.NewVerifier(s.Cfg.EVM)
 	if err != nil {
-		return evm.Authorization{}, err.Error()
+		return evm.Authorization{}, GateRetryLater, err.Error()
 	}
 	a, err := v.DecodeAuthorization(payload)
 	if err != nil {
-		return a, err.Error()
+		return a, string(gatecred.PayloadInvalid), err.Error()
 	}
 	if a.Asset != w.Asset {
-		return a, fmt.Sprintf("the authorization is for %s; wallet %s pays %s", a.Asset, w.ID, w.Asset)
+		return a, string(gatecred.PayloadInvalid), fmt.Sprintf("the authorization is for %s; wallet %s pays %s", a.Asset, w.ID, w.Asset)
 	}
 	payer, _, err := s.ShardAddressOf(w.Partition)
 	if err != nil {
-		return a, fmt.Sprintf("the wallet's address: %v", err)
+		return a, GateRetryLater, fmt.Sprintf("the wallet's address could not be read: %v", err)
 	}
 	if !strings.EqualFold(payer, a.From.Hex()) {
-		return a, fmt.Sprintf("from %s is not the wallet's address %s", a.From.Hex(), payer)
+		return a, string(gatecred.PayloadInvalid), fmt.Sprintf("from %s is not the wallet's address %s", a.From.Hex(), payer)
 	}
-	return a, ""
+	return a, "", ""
 }
 
-// gateClaim finds or makes the row of the credential. done is true when the answer is already known (stored, or replayed).
-func (s *Service) gateClaim(ctx context.Context, r GateRequest, cred *gatecred.Credential, hash []byte) (status int, body []byte, done bool, err error) {
-	read := func() (bool, error) {
-		var same bool
-		var st string
-		var hs *int
-		var res *string
-		err := s.Pool.QueryRow(ctx, `SELECT body_hash=$2, status, http_status, result FROM gate_requests WHERE credential_id=$1`, cred.CredentialID, hash).
-			Scan(&same, &st, &hs, &res)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		switch {
-		case !same:
-			status, body = refusal(gatecred.Replayed, "credential_id", "credential %s was used with another request", cred.CredentialID)
-			done = true
-		case st != gatePending && hs != nil && res != nil:
-			status, body, done = *hs, []byte(*res), true
-		}
-		return true, nil
+// gateRow is what gate_requests holds for a credential_id, seen against a request's body hash.
+type gateRow struct {
+	found    bool   // a row exists
+	replayed bool   // with another body
+	stored   []byte // the stored answer, when final
+	status   int
+	placed   bool // pending, and its authorization (and sign job) exist
+}
+
+func (s *Service) gateLookup(ctx context.Context, id string, hash []byte) (gateRow, error) {
+	var out gateRow
+	var same, placed bool
+	var st string
+	var hs *int
+	var res *string
+	err := s.Pool.QueryRow(ctx, `SELECT g.body_hash=$2, g.status, g.http_status, g.result, EXISTS (SELECT 1 FROM x402_authorizations x WHERE x.id=g.credential_id)
+		FROM gate_requests g WHERE g.credential_id=$1`, id, hash).Scan(&same, &st, &hs, &res, &placed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return out, nil
 	}
-	found, err := read()
-	if err != nil || found {
-		return status, body, done, err
+	if err != nil {
+		return out, err
 	}
-	// A new request: the core refuses a credential that has already expired (the zone would too), so a request that comes back after its row was
-	// pruned cannot bring an old authorization back to life.
-	if now := s.Now().Unix(); now >= cred.ExpiresAt+int64(s.Cfg.Gate.Skew/time.Second) {
-		status, body = refusal(gatecred.Expired, "expires_at", "the credential expired at %d", cred.ExpiresAt)
-		return status, body, true, nil
+	out.found = true
+	switch {
+	case !same:
+		out.replayed = true
+	case st != gatePending && hs != nil && res != nil:
+		out.stored, out.status = []byte(*res), *hs
+	case st == gatePending:
+		out.placed = placed
 	}
-	if _, err := s.Pool.Exec(ctx, `INSERT INTO gate_requests (credential_id, body_hash, wallet_id, kind, job_id, status, expires_at)
+	return out, nil
+}
+
+func (s *Service) gateInsert(ctx context.Context, r GateRequest, cred *gatecred.Credential, hash []byte) error {
+	_, err := s.Pool.Exec(ctx, `INSERT INTO gate_requests (credential_id, body_hash, wallet_id, kind, job_id, status, expires_at)
 		VALUES ($1,$2,$3,$4,$5,'pending',$6) ON CONFLICT (credential_id) DO NOTHING`,
-		cred.CredentialID, hash, r.WalletID, r.Kind, "x402:"+cred.CredentialID, time.Unix(cred.ExpiresAt, 0).UTC()); err != nil {
-		return 0, nil, false, err
-	}
-	_, err = read() // another request may have made it first
-	return status, body, done, err
+		cred.CredentialID, hash, r.WalletID, r.Kind, "x402:"+cred.CredentialID, time.Unix(cred.ExpiresAt, 0).UTC())
+	return err
 }
 
 // gateWait waits for the zone's answer on the job, at most the configured wait, and stores a final one.

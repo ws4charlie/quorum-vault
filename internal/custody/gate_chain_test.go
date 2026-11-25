@@ -172,8 +172,7 @@ func TestGateAPIThroughTheZoneOnALocalBaseSepolia(t *testing.T) {
 
 	// AgentGate's request: the typed data of the authorization and a credential of the test minter for exactly that payment.
 	now := uint64(clock().Unix())
-	var nonce [32]byte
-	_, _ = rand.Read(nonce[:])
+	var nonce [32]byte // all zero: Gate's nonce is signed as given, and the token accepts it
 	payload, _, err := cfg.EVM.NewPayload3009("USDT", payer, common.HexToAddress(gatePayee), big.NewInt(250_000), now-60, now+240, nonce)
 	if err != nil {
 		t.Fatal(err)

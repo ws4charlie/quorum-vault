@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ws4charlie/quorum-vault/internal/auth"
+	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/auth/authtest"
 	"github.com/ws4charlie/quorum-vault/internal/gatecred"
 	"github.com/ws4charlie/quorum-vault/internal/gatecred/gatecredtest"
@@ -196,6 +197,7 @@ func TestGateRouteAndAgentGateKeepToEachOther(t *testing.T) {
 		"gate role, no cert":                        {"POST", "/v2/gate/signatures", gateToken, "", 403},
 		"operator service, guardian cert":           {"POST", "/v2/gate/signatures", operatorSvc, "guardian", 403},
 		"AgentGate cert, operator token, gate API":  {"POST", "/v2/gate/signatures", operatorSvc, "agentgate", 403},
+		"AgentGate cert, a person's token":         {"GET", "/v2/reconcile", person, "agentgate", 403},
 		"a person":                                  {"POST", "/v2/gate/signatures", person, "", 403},
 	} {
 		w := g.call(c.method, c.path, c.spec, c.cert, []byte(`{}`))
@@ -250,7 +252,7 @@ func TestGateStatusCodes(t *testing.T) {
 		"other wallet":       {good(8, 100, func(c *gatecred.Credential) { c.WalletID = other }), 403, "wallet_mismatch"},
 		"expired":            {good(9, 100, func(c *gatecred.Credential) { c.IssuedAt, c.ExpiresAt = 600, 900 }), 403, "expired"},
 		"over the limit":     {good(10, 600_000, nil), 403, "fast_lane_cap"},
-		"payload not 3009":   {with(good(11, 100, nil), func(m map[string]any) { m["payload"] = map[string]any{"to": gatePayee} }), 422, "payload_invalid"},
+		"payload not 3009":   {with(good(11, 100, nil), func(m map[string]any) { m["payload"] = map[string]any{"primaryType": "Permit", "message": map[string]any{"nonce": "0x01"}} }), 422, "payload_invalid"},
 		"another payer":      {g.body(t, g.cred(id(12), 100, nil), g.typedFrom(t, common.HexToAddress("0x00000000000000000000000000000000000000a2"), 100, 12)), 422, "payload_invalid"},
 		"not answered (503)": {good(13, 100, nil), 503, "retry_later"},
 	} {
@@ -482,5 +484,127 @@ func TestGateConfig(t *testing.T) {
 		if _, err := f.Build(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// Fix 1: the EIP-3009 nonce is Gate's. An all-zero nonce is signed as given (never replaced by a random one); a payload without a nonce is refused.
+func TestGateNonceIsTheCallers(t *testing.T) {
+	g := gateWorld(t)
+	const id = "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a20"
+	payload := g.typed(t, 100, 0) // nonce 0x00…00
+	if w := g.post(g.body(t, g.cred(id, 100, nil), payload)); w.Code != 503 || code(t, w) != "retry_later" {
+		t.Fatalf("first: %d %s", w.Code, w.Body)
+	}
+	job, err := signjob.Get(context.Background(), g.s.Pool, "x402:"+id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p evm.Payload3009
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Message.Nonce != "0x"+strings.Repeat("00", 32) {
+		t.Fatalf("the job signs nonce %s", p.Message.Nonce)
+	}
+	want := evm.Digest712("USDC", "2", 1, g.s.Cfg.Assets[x402Asset].Address, g.payer, common.HexToAddress(gatePayee), big.NewInt(100), 990, 1300, [32]byte{})
+	if !bytes.Equal(job.Digest, want[:]) {
+		t.Fatalf("digest %x, want the digest of the caller's typed data %x", job.Digest, want)
+	}
+	g.zoneSigns(t, id)
+	g.checkSigned(t, g.post(g.body(t, g.cred(id, 100, nil), payload)), id)
+	// Without a nonce: refused before anything is recorded.
+	var m map[string]any
+	_ = json.Unmarshal(g.typed(t, 100, 5), &m)
+	delete(m["message"].(map[string]any), "nonce")
+	nn, _ := json.Marshal(m)
+	if w := g.post(g.body(t, g.cred("0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a21", 100, nil), nn)); w.Code != 400 || code(t, w) != "request_invalid" {
+		t.Fatalf("no nonce: %d %s", w.Code, w.Body)
+	}
+}
+
+// Fix 2: the payload's member order and spacing do not make another request.
+func TestGatePayloadMemberOrderIsTheSameRequest(t *testing.T) {
+	g := gateWorld(t)
+	const id = "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a22"
+	payload := g.typed(t, 100, 6)
+	_ = g.post(g.body(t, g.cred(id, 100, nil), payload))
+	g.zoneSigns(t, id)
+	sig := g.checkSigned(t, g.post(g.body(t, g.cred(id, 100, nil), payload)), id)
+	var m map[string]any // re-encoded: members sorted by name, unlike the struct order of the original
+	_ = json.Unmarshal(payload, &m)
+	reordered, _ := json.MarshalIndent(m, "", "   ")
+	if bytes.Equal(reordered, payload) {
+		t.Fatal("the reordered payload is the same bytes")
+	}
+	if s2 := g.checkSigned(t, g.post(g.body(t, g.cred(id, 100, nil), reordered)), id); s2 != sig {
+		t.Fatalf("reordered: %s != %s", s2, sig)
+	}
+	if n := g.jobs(t); n != 1 {
+		t.Fatalf("%d jobs", n)
+	}
+}
+
+// Fix 3: a request already answered gets its answer whatever the state says now (another hot key, the wallet gone from the config, the clock past the
+// credential's expiry); only a new request is checked against the current state.
+func TestGateStoredAnswerOutlivesStateChanges(t *testing.T) {
+	g := gateWorld(t)
+	const id = "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a23"
+	b := g.body(t, g.cred(id, 100, nil), g.typed(t, 100, 7))
+	_ = g.post(b)
+	g.zoneSigns(t, id)
+	sig := g.checkSigned(t, g.post(b), id)
+	// A placed but unanswered request waits on its job whatever the state too.
+	const id2 = "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a24"
+	b2 := g.body(t, g.cred(id2, 100, nil), g.typed(t, 100, 8))
+	_ = g.post(b2)
+	// The hot key is replaced, and then the wallet leaves the config, and the clock passes the expiry.
+	part := g.s.Cfg.PartitionKey(x402Asset, 0).String()
+	g.s.Cfg.EVM.HotAddresses[part] = common.HexToAddress("0x00000000000000000000000000000000000000a9")
+	if s2 := g.checkSigned(t, g.post(b), id); s2 != sig {
+		t.Fatalf("after the key change: %s != %s", s2, sig)
+	}
+	g.s.Cfg.Gate.Wallets = map[string]GateWallet{}
+	g.s.Now = func() time.Time { return time.Unix(5000, 0) }
+	if s2 := g.checkSigned(t, g.post(b), id); s2 != sig {
+		t.Fatalf("after the wallet left the config: %s != %s", s2, sig)
+	}
+	g.zoneSigns(t, id2)
+	g.checkSigned(t, g.post(b2), id2)
+	// A new request is judged now: the wallet is no longer Gate-governed here.
+	if w := g.post(g.body(t, g.cred("0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a25", 100, nil), g.typed(t, 100, 9))); w.Code != 403 || code(t, w) != "wallet_not_gate_governed" {
+		t.Fatalf("new request: %d %s", w.Code, w.Body)
+	}
+}
+
+// Fix 4: when the wallet's address cannot be read, the answer is retry_later and nothing is stored: the same request succeeds once it can.
+func TestGateAddressLookupFailureIsRetryLater(t *testing.T) {
+	g := gateWorld(t)
+	const id = "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a26"
+	b := g.body(t, g.cred(id, 100, nil), g.typed(t, 100, 10))
+	w0 := g.s.Cfg.Gate.Wallets[gateWallet]
+	broken := w0
+	broken.Partition = "qv-us/" + testChain + "/" + x402Asset + "/hot/omnibus/9" // a shard the config does not have: the lookup fails
+	g.s.Cfg.Gate.Wallets[gateWallet] = broken
+	if w := g.post(b); w.Code != 503 || code(t, w) != "retry_later" {
+		t.Fatalf("failing lookup: %d %s", w.Code, w.Body)
+	}
+	var n int
+	_ = g.s.Pool.QueryRow(context.Background(), `SELECT count(*) FROM gate_requests`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d rows stored", n)
+	}
+	g.s.Cfg.Gate.Wallets[gateWallet] = w0
+	_ = g.post(b)
+	g.zoneSigns(t, id)
+	g.checkSigned(t, g.post(b), id)
+}
+
+// Fix 6: when the audit trail cannot be written, the signing API answers in its own error shape.
+func TestGateAuditFailureAnswersWithACode(t *testing.T) {
+	g := gateWorld(t)
+	g.s.Pool.Close()
+	w := g.post(g.body(t, g.cred("0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a27", 100, nil), g.typed(t, 100, 11)))
+	if w.Code != 503 || code(t, w) != "retry_later" {
+		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 }
