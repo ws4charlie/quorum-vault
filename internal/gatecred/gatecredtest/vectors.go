@@ -1,0 +1,267 @@
+package gatecredtest
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"strings"
+
+	"github.com/ws4charlie/quorum-vault/internal/gatecred"
+)
+
+// Fixed values of the vectors. Everything here is public test data.
+const (
+	VectorsNow      int64 = 1790000000
+	VectorsAudience       = "qv-test"
+	VectorsWallet         = "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13"
+	VectorsChain          = "eip155:84532"
+	VectorsPayee          = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+	VectorsToken          = "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+)
+
+type VKey struct {
+	KID       string `json:"kid"`
+	PublicKey string `json:"public_key"`
+	Seed      string `json:"seed_string,omitempty"`
+}
+
+type VConfig struct {
+	Audience   string `json:"audience"`
+	SkewSecs   int64  `json:"skew_seconds"`
+	MaxTTLSecs int64  `json:"max_ttl_seconds"`
+	Keys       []VKey `json:"keys"`
+}
+
+type VPayment struct {
+	WalletID    string `json:"wallet_id"`
+	Chain       string `json:"chain"`
+	Asset       string `json:"asset"`
+	Payee       string `json:"payee"`
+	Amount      string `json:"amount"`
+	ValidAfter  *int64 `json:"valid_after,omitempty"`
+	ValidBefore *int64 `json:"valid_before,omitempty"`
+}
+
+type VExpect struct {
+	OK    bool   `json:"ok"`
+	Code  string `json:"code,omitempty"`
+	Field string `json:"field,omitempty"`
+}
+
+type VCase struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Credential  *string  `json:"credential"`
+	SignedBytes string   `json:"signed_bytes_hex,omitempty"`
+	Payment     VPayment `json:"payment"`
+	Now         *int64   `json:"now,omitempty"`
+	Expect      VExpect  `json:"expect"`
+	// Then lists the results of further uses of the same credential after the
+	// first one, in order. Only a checker with a used-credential store can
+	// produce them.
+	Then []VExpect `json:"then_expect_on_reuse,omitempty"`
+}
+
+type Vectors struct {
+	TestOnly     string   `json:"TEST_ONLY"`
+	Format       string   `json:"format"`
+	DomainPrefix string   `json:"domain_prefix"`
+	KeyDerive    string   `json:"key_derivation"`
+	Config       VConfig  `json:"config"`
+	Now          int64    `json:"now"`
+	Cases        []VCase  `json:"cases"`
+	Notes        []string `json:"notes"`
+}
+
+func ok() VExpect                              { return VExpect{OK: true} }
+func refuse(c gatecred.Code, f string) VExpect { return VExpect{Code: string(c), Field: f} }
+
+func basePayment() VPayment {
+	return VPayment{WalletID: VectorsWallet, Chain: VectorsChain, Asset: "native", Payee: VectorsPayee, Amount: "1000000000000000"}
+}
+
+func baseFields(kid string) Fields {
+	return Fields{
+		"v": int64(1), "kid": kid,
+		"credential_id": "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a01",
+		"obligation_id": "obl-2026-09-21-0001", "audience": VectorsAudience,
+		"wallet_id": VectorsWallet, "chain": VectorsChain, "asset": "native",
+		"payee": VectorsPayee, "amount": "1000000000000000",
+		"issued_at": VectorsNow - 10, "expires_at": VectorsNow + 590,
+		"policy_version": "policy-v12", "decision_reason": "within daily budget; tool call approved by rule r-7",
+	}
+}
+
+func (f Fields) with(kv ...any) Fields {
+	g := Fields{}
+	for k, v := range f {
+		g[k] = v
+	}
+	for i := 0; i < len(kv); i += 2 {
+		if kv[i+1] == nil {
+			delete(g, kv[i].(string))
+		} else {
+			g[kv[i].(string)] = kv[i+1]
+		}
+	}
+	return g
+}
+
+func i64(n int64) *int64 { return &n }
+
+// Generate returns the exact bytes of testdata/gate-credential/vectors.json.
+func Generate() ([]byte, error) {
+	k1, k2, k3 := TestKey(1), TestKey(2), TestKey(3)
+	pk := func(k Key) string { return base64.RawURLEncoding.EncodeToString(k.Pub) }
+	v := Vectors{
+		TestOnly:     "TEST ONLY. Every key in this file is derived from a public string and signs nothing real. Never configure these keys anywhere that matters.",
+		Format:       "qv-gate-credential-vectors/1",
+		DomainPrefix: gatecred.DomainPrefix,
+		KeyDerive:    "Ed25519 seed = SHA-256 of the ASCII bytes of seed_string (RFC 8032 seed form). Only public keys are listed; derive the signing key with that rule to mint more cases. Key 3 is deliberately not in config.keys.",
+		Config: VConfig{
+			Audience: VectorsAudience, SkewSecs: 30, MaxTTLSecs: 600,
+			Keys: []VKey{{KID: k1.KID, PublicKey: pk(k1), Seed: k1.Seed}, {KID: k2.KID, PublicKey: pk(k2), Seed: k2.Seed}},
+		},
+		Now: VectorsNow,
+		Notes: []string{
+			"credential is the exact text received (a JSON object); null means no credential was sent.",
+			"signed_bytes_hex is what the verifier computes from the parsed credential: domain_prefix, then the RFC 8785 form of every field except sig. It is present when the credential parses (even if the signature is wrong).",
+			"payment is what the zone decoded from the bytes it would sign; compare by exact string equality.",
+			"now is the case's clock; when absent use the top-level now.",
+			"then_expect_on_reuse: present the same credential again after the first use was accepted; needs a used-credential store. Pure verifiers skip these checks.",
+			"The codes wallet_not_gate_governed, fast_lane_cap, client_not_authorized and payload_invalid depend on zone state or the request and have no vector here.",
+		},
+	}
+	add := func(c VCase) { v.Cases = append(v.Cases, c) }
+	// valid builds a case whose credential parses; the signature may be bad.
+	build := func(name, desc string, f Fields, sig func(Fields) string, p VPayment, e VExpect) VCase {
+		w := string(WireWithSig(f, sig(f)))
+		return VCase{Name: name, Description: desc, Credential: &w, SignedBytes: hex.EncodeToString(SignedBytes(f)), Payment: p, Expect: e}
+	}
+	by := func(k Key) func(Fields) string { return func(f Fields) string { return Sign(k, f) } }
+	good := baseFields(k1.KID)
+	tok := good.with("asset", VectorsToken, "amount", "2500000", "credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a02")
+	tokPay := basePayment()
+	tokPay.Asset, tokPay.Amount = VectorsToken, "2500000"
+
+	add(build("valid_evm_native", "Native transfer, key 1.", good, by(k1), basePayment(), ok()))
+	add(build("valid_evm_token", "Token transfer: asset is the token contract, payee the recipient of transfer(), amount its value.", tok, by(k1), tokPay, ok()))
+	e3 := tok.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a03")
+	p3 := tokPay
+	p3.ValidAfter, p3.ValidBefore = i64(VectorsNow-10), i64(VectorsNow+300)
+	add(build("valid_eip3009", "EIP-3009 transferWithAuthorization: asset=verifyingContract, payee=to, amount=value, window inside the credential's.", e3, by(k1), p3, ok()))
+	add(build("valid_second_key", "Signed by key 2 (rotation: both keys active).", good.with("kid", k2.KID, "credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a04"), by(k2), basePayment(), ok()))
+	add(build("valid_ttl_exactly_max", "Lifetime of exactly 600 s is accepted.", good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a05", "issued_at", VectorsNow-10, "expires_at", VectorsNow+590), by(k1), basePayment(), ok()))
+	c := build("valid_issued_at_skew_edge", "issued_at is exactly now+30 s: inside the skew.", good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a06", "issued_at", VectorsNow+30, "expires_at", VectorsNow+630), by(k1), basePayment(), ok())
+	add(c)
+	c = build("valid_expired_within_skew", "now is expires_at+29 s: still inside the skew.", good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a07", "issued_at", VectorsNow-600, "expires_at", VectorsNow-29), by(k1), basePayment(), ok())
+	add(c)
+	// Same credential as valid_evm_native, in another byte layout: reordered fields, spaces, an escaped letter.
+	w := string(Wire(k1, good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a08")))
+	re := `{ "sig" : ` + w[strings.Index(w, `"sig":`)+6:len(w)-1] + `, "decision_reason":"within daily budget; tool call approved by rule r-7", "payee":"` + VectorsPayee + `", "kid":"test-only-1", "v":1, "amount":"1000000000000000", "asset":"native", "chain":"` + VectorsChain + `", "credential_id":"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a08", "obligation_id":"obl-2026-09-21-0001", "policy_version":"policy-v\u0031\u0032" , "audience":"` + VectorsAudience + `", "wallet_id":"` + VectorsWallet + `", "issued_at":` + "1789999990" + `, "expires_at":1790000590 }`
+	add(VCase{Name: "valid_other_byte_layout", Description: "Same credential with fields in another order, spaces around tokens and an escaped digit (\\u0031): valid, because the signature covers the canonical form, not the received text.",
+		Credential: &re, SignedBytes: hex.EncodeToString(SignedBytes(good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a08"))), Payment: basePayment(), Expect: ok()})
+
+	// Signature cases.
+	f := good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1b01")
+	sigBytes, _ := base64.RawURLEncoding.DecodeString(Sign(k1, f))
+	sigBytes[0] ^= 0x01
+	add(build("bad_signature", "One bit of the signature flipped.", f, func(Fields) string { return base64.RawURLEncoding.EncodeToString(sigBytes) }, basePayment(), refuse(gatecred.SignatureInvalid, "")))
+	orig := good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1b02")
+	tampered := orig.with("amount", "9000000000000000")
+	tp := basePayment()
+	tp.Amount = "9000000000000000"
+	add(build("amount_tampered_after_signing", "Signed for 1000000000000000, then the amount was edited (the payment matches the edit): the signature fails.", tampered, func(Fields) string { return Sign(k1, orig) }, tp, refuse(gatecred.SignatureInvalid, "")))
+	add(build("kid_claims_wrong_key", "Signed by key 2 but names key 1.", good.with("credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1b03"), by(k2), basePayment(), refuse(gatecred.SignatureInvalid, "")))
+	add(build("unknown_kid", "Signed by key 3, which is not in the key set.", good.with("kid", k3.KID, "credential_id", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1b04"), by(k3), basePayment(), refuse(gatecred.KIDUnknown, "kid")))
+
+	// Binding and time cases (all correctly signed).
+	sg := func(name, desc string, f Fields, p VPayment, e VExpect) { add(build(name, desc, f, by(k1), p, e)) }
+	id := func(n string) string { return "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e" + n }
+	sg("audience_mismatch", "Credential names another deployment.", good.with("audience", "qv-prod", "credential_id", id("1c01")), basePayment(), refuse(gatecred.AudienceMismatch, "audience"))
+	wp := basePayment()
+	wp.WalletID = "aaaaaaaa-0000-4000-8000-000000000001"
+	sg("wallet_mismatch", "The payment is from another wallet than the credential names.", good.with("credential_id", id("1c02")), wp, refuse(gatecred.WalletMismatch, "wallet_id"))
+	sg("ttl_too_long", "Lifetime 601 s, limit 600 s.", good.with("credential_id", id("1c03"), "issued_at", VectorsNow-10, "expires_at", VectorsNow+591), basePayment(), refuse(gatecred.TTLTooLong, "expires_at"))
+	sg("future_dated", "issued_at is now+31 s, one second past the skew.", good.with("credential_id", id("1c04"), "issued_at", VectorsNow+31, "expires_at", VectorsNow+631), basePayment(), refuse(gatecred.NotYetValid, "issued_at"))
+	sg("expired", "now is expires_at+30 s: the skew is used up.", good.with("credential_id", id("1c05"), "issued_at", VectorsNow-600, "expires_at", VectorsNow-30), basePayment(), refuse(gatecred.Expired, "expires_at"))
+	mm := func(name, field string, mut func(*VPayment)) {
+		p := basePayment()
+		mut(&p)
+		sg(name, "The payload decoded by the zone differs in "+field+".", good.with("credential_id", id("1d"+map[string]string{"chain": "01", "asset": "02", "payee": "03", "amount": "04"}[field])), p, refuse(gatecred.PaymentMismatch, field))
+	}
+	mm("payment_chain_mismatch", "chain", func(p *VPayment) { p.Chain = "eip155:8453" })
+	mm("payment_asset_mismatch", "asset", func(p *VPayment) { p.Asset = VectorsToken })
+	mm("payment_payee_mismatch", "payee", func(p *VPayment) { p.Payee = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc" })
+	mm("payment_amount_mismatch", "amount", func(p *VPayment) { p.Amount = "1000000000000001" })
+	e3b := e3.with("credential_id", id("1e01"))
+	pw := p3
+	pw.ValidAfter = i64(VectorsNow - 11)
+	sg("authorization_starts_before_credential", "EIP-3009 validAfter is one second before issued_at.", e3b, pw, refuse(gatecred.AuthorizationWindow, ""))
+	pw2 := p3
+	pw2.ValidBefore = i64(VectorsNow + 591)
+	sg("authorization_ends_after_credential", "EIP-3009 validBefore is one second after expires_at.", e3b.with("credential_id", id("1e02")), pw2, refuse(gatecred.AuthorizationWindow, ""))
+
+	// Missing and malformed.
+	add(VCase{Name: "credential_absent", Description: "No credential sent.", Credential: nil, Payment: basePayment(), Expect: refuse(gatecred.CredentialMissing, "")})
+	empty := ""
+	add(VCase{Name: "credential_empty_string", Description: "Empty credential text.", Credential: &empty, Payment: basePayment(), Expect: refuse(gatecred.CredentialMissing, "")})
+	mal := func(name, desc string, w string, field string) {
+		add(VCase{Name: name, Description: desc, Credential: &w, Payment: basePayment(), Expect: refuse(gatecred.CredentialMalformed, field)})
+	}
+	malSigned := func(name, desc string, f Fields, field string) {
+		// correctly signed with key 1: the refusal is for the format, not the signature
+		w := string(Wire(k1, f))
+		c := VCase{Name: name, Description: desc, Credential: &w, Payment: basePayment(), Expect: refuse(gatecred.CredentialMalformed, field)}
+		add(c)
+	}
+	mal("not_json", "Text that is not JSON.", "credential", "")
+	mal("json_array", "A JSON array.", "[]", "")
+	mal("trailing_data", "A valid credential followed by more text.", string(Wire(k1, good.with("credential_id", id("2a01"))))+" {}", "")
+	dup := string(Wire(k1, good.with("credential_id", id("2a02"))))
+	dup = dup[:len(dup)-1] + `,"amount":"1"}`
+	mal("duplicate_field", "A field name appears twice (the second amount would win in many parsers).", dup, "amount")
+	malSigned("unknown_field", "A correctly signed credential with an extra field: refused, never ignored.", good.with("credential_id", id("2b01"), "note", "hello"), "note")
+	malSigned("missing_field", "A correctly signed credential without decision_reason.", good.with("credential_id", id("2b02"), "decision_reason", nil), "decision_reason")
+	nosig := string(WireWithSig(good.with("credential_id", id("2b03")), ""))
+	nosig = strings.Replace(nosig, `,"sig":""`, "", 1)
+	mal("missing_signature", "No sig field.", nosig, "sig")
+	pad := string(WireWithSig(good.with("credential_id", id("2b04")), Sign(k1, good.with("credential_id", id("2b04")))+"=="))
+	mal("signature_with_padding", "Signature in base64 with padding: refused, not tolerated.", pad, "sig")
+	mal("signature_wrong_length", "Signature of 63 bytes.", string(WireWithSig(good.with("credential_id", id("2b05")), base64.RawURLEncoding.EncodeToString(make([]byte, 63)))), "sig")
+	malSigned("version_2", "v is 2, which this contract does not define.", good.with("credential_id", id("2c01"), "v", int64(2)), "v")
+	malSigned("amount_zero", "amount \"0\".", good.with("credential_id", id("2c02"), "amount", "0"), "amount")
+	malSigned("amount_leading_zero", "amount \"01000\".", good.with("credential_id", id("2c03"), "amount", "01000"), "amount")
+	malSigned("amount_negative", "amount \"-5\".", good.with("credential_id", id("2c04"), "amount", "-5"), "amount")
+	malSigned("amount_decimal_point", "amount \"1.5\".", good.with("credential_id", id("2c05"), "amount", "1.5"), "amount")
+	malSigned("amount_above_uint256", "amount is 2^256 (one more than the largest value).", good.with("credential_id", id("2c06"), "amount", "115792089237316195423570985008687907853269984665640564039457584007913129639936"), "amount")
+	malSigned("amount_is_number", "amount sent as a JSON number.", good.with("credential_id", id("2c07"), "amount", int64(1000)), "amount")
+	malSigned("payee_checksum_case", "payee in mixed (EIP-55) case: the contract wants lower case only.", good.with("credential_id", id("2c08"), "payee", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"), "payee")
+	malSigned("payee_short", "payee with 39 hex digits.", good.with("credential_id", id("2c09"), "payee", VectorsPayee[:41]), "payee")
+	malSigned("asset_bad", "asset \"NATIVE\".", good.with("credential_id", id("2c0a"), "asset", "NATIVE"), "asset")
+	malSigned("chain_leading_zero", "chain \"eip155:084532\".", good.with("credential_id", id("2c0b"), "chain", "eip155:084532"), "chain")
+	malSigned("chain_other_namespace", "chain from a namespace this version does not define.", good.with("credential_id", id("2c0c"), "chain", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"), "chain")
+	malSigned("credential_id_upper_case", "credential_id in upper case.", good.with("credential_id", strings.ToUpper(id("2c0d"))), "credential_id")
+	malSigned("expires_before_issued", "expires_at not after issued_at.", good.with("credential_id", id("2c0e"), "issued_at", VectorsNow, "expires_at", VectorsNow), "expires_at")
+	malSigned("time_as_string", "issued_at sent as a string.", good.with("credential_id", id("2c0f"), "issued_at", "1789999990"), "issued_at")
+	malSigned("decision_reason_non_ascii", "decision_reason with a non-ASCII character.", good.with("credential_id", id("2c10"), "decision_reason", "café"), "decision_reason")
+	malSigned("kid_bad_character", "kid with a space.", good.with("credential_id", id("2c11"), "kid", "test only"), "kid")
+	w2 := string(Wire(k1, good.with("credential_id", id("2c12"))))
+	w2 = strings.Replace(w2, `"issued_at":1789999990`, `"issued_at":1.78999999e9`, 1)
+	mal("time_as_float", "issued_at written as 1.78999999e9.", w2, "issued_at")
+
+	// Replay: a pair of uses of one credential.
+	r := build("replay_pair", "The same credential presented twice: the first use is accepted, the second is refused as replayed.", good.with("credential_id", id("3a01")), by(k1), basePayment(), ok())
+	r.Then = []VExpect{refuse(gatecred.Replayed, "")}
+	add(r)
+
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
+}
