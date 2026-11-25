@@ -26,3 +26,8 @@ A hot address numbers its transactions. The number is taken in the same database
 | The nonce was used by something else | The withdrawal is parked with an alert |
 
 A stuck withdrawal is never voided, because the old transaction may still be mined.
+
+## x402 payments are signed, not sent
+
+An x402 service is paid with a signed permit that the service's facilitator submits itself, so nothing leaves the hot wallet when the permit is signed. The signing zone reads the permit, checks the token, the payer, the payee, the amount and the time window against its own settings, and signs it at most once. Until the facilitator uses it or the time runs out, the books carry it as owed, and Reconcile explains both endings. The zone refuses every permit until the payment credential check is in place ([runbook](runbooks/x402-hot-wallet.md)).
+

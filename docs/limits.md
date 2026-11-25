@@ -11,6 +11,7 @@ This page lists what QuorumVault cannot do yet, so you don't have to find out th
 - **No real cluster has run the charts.** The four-cluster shape is a design, checked by tests ([Deployment](deployment.md)).
 - **The first image release has not been made.** Images are built and checked, not published.
 - **Restore is drilled on one machine,** not across sites.
+- **x402 permits are refused in every build until the payment credential check lands (GATE-CONNECT, GC2).** The zone decodes and checks them, and tests sign them with a test-only rule. The two-party MPC signer is not run on a permit in CI for the same reason: its cosigner needs that rule. Only a local node of chain 84532 has seen them; nothing has run on the public Base Sepolia ([runbook](runbooks/x402-hot-wallet.md)).
 
 **Simulated parts**
 - **CloudHSM support is untested on hardware.** The party's sealing module has a profile for AWS CloudHSM, proven against its documentation and a test double. Nobody has run it on a real cluster; the first run follows [a checklist](runbooks/cloudhsm-sealer.md).

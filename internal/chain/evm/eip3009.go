@@ -376,3 +376,33 @@ func SignatureRSV(digest [32]byte, sig signer.Signature, pub *ecdsa.PublicKey) (
 	}
 	return r, s, 0, errors.New("evm: no recovery id recovers the public key")
 }
+
+// SignatureRSVFor is SignatureRSV for a caller that knows the payer's address and not its public key (the core: the hot address of a shard). v is the
+// recovery id for which ecrecover(digest, r, s, v) is the payer; a signature that recovers to anyone else is an error.
+func SignatureRSVFor(digest [32]byte, sig signer.Signature, payer common.Address) (r, s [32]byte, v byte, err error) {
+	if sig.R == nil || sig.S == nil || sig.R.Sign() <= 0 || sig.S.Sign() <= 0 {
+		return r, s, 0, errors.New("evm: empty signature")
+	}
+	sig = signer.NormalizeLowS(sig)
+	sig.R.FillBytes(r[:])
+	sig.S.FillBytes(s[:])
+	sig65 := make([]byte, 65)
+	copy(sig65[0:32], r[:])
+	copy(sig65[32:64], s[:])
+	for rec := byte(0); rec <= 1; rec++ {
+		sig65[64] = rec
+		if pub, err := crypto.SigToPub(digest[:], sig65); err == nil && crypto.PubkeyToAddress(*pub) == payer {
+			return r, s, 27 + rec, nil
+		}
+	}
+	return r, s, 0, fmt.Errorf("evm: the signature does not recover to %s", payer)
+}
+
+// NewVerifierForTest returns a Verifier of cfg and panics on a bad config: for tests that decode typed data with the zone's own decoder.
+func NewVerifierForTest(cfg Config) *Verifier {
+	v, err := NewVerifier(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}

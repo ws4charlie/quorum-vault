@@ -30,6 +30,17 @@ const (
 	FamilySOL = "sol"
 )
 
+// X402File is the x402 section of one token in the business config.
+type X402File struct {
+	Name             string `json:"name"`
+	Version          string `json:"version"`
+	MaxWindowSeconds uint64 `json:"max_window_seconds"`
+	PerPaymentLimit  string `json:"per_payment_limit"`
+	// Shard is the index of the hot shard that holds the x402 balance and signs the authorizations (default 0). Keep it a shard with a small balance:
+	// the refill tiers (docs/tiers.md) top it up, and an unused authorization can never take more than the wallet holds.
+	Shard int `json:"shard,omitempty"`
+}
+
 // File is the JSON form of Config. Amounts are canonical decimal strings,
 // durations are Go duration strings.
 type File struct {
@@ -121,7 +132,10 @@ type ChainFile struct {
 	// BTC is the section of the btc family; the evm fields below are not read for it.
 	BTC *BTCFile `json:"btc,omitempty"`
 	// SOL is the section of the sol family (Solana); the evm fields below are not read for it.
-	SOL              *SOLFile             `json:"sol,omitempty"`
+	SOL *SOLFile `json:"sol,omitempty"`
+	// X402 lists the tokens whose hot wallet signs x402 (EIP-3009) payment authorizations, by asset symbol: the same values as the signing zone's x402
+	// section for the token (the zone refuses an authorization that differs), and Shard, the hot shard that pays them (default 0).
+	X402             map[string]X402File  `json:"x402,omitempty"`
 	Name             string               `json:"name"`
 	ChainID          uint64               `json:"chain_id"`
 	RPCURL           string               `json:"rpc_url"`
@@ -207,6 +221,8 @@ type Config struct {
 
 	HotShards []common.Address
 	SinkShard int
+	// X402Shard is the hot shard that pays the x402 authorizations of each token configured in EVM.X402.
+	X402Shard map[string]int
 	Assets    map[string]Asset
 	AssetList []string // sorted
 
@@ -793,6 +809,25 @@ func (c *Config) buildEVM(cf ChainFile) (map[string]common.Address, error) {
 		Chain: cf.Name, ChainID: cf.ChainID, RPCURL: cf.RPCURL, Confirmations: cf.Confirmations,
 		Factory: common.HexToAddress(cf.Factory), SweepDestination: dest, HotAddresses: hot,
 		Assets: evmAssets, NativeAsset: c.Native, MaxTxFeeWei: fee, StuckAfterBlocks: cf.StuckAfterBlocks,
+	}
+	for sym, x := range cf.X402 {
+		lim, err := amount("x402 "+sym+" per_payment_limit", x.PerPaymentLimit)
+		if err != nil {
+			return nil, err
+		}
+		if x.Shard < 0 || x.Shard >= len(c.HotShards) {
+			return nil, fmt.Errorf("custody: config: x402 %s: shard %d is not one of the %d hot shards", sym, x.Shard, len(c.HotShards))
+		}
+		if c.EVM.X402 == nil {
+			c.EVM.X402, c.X402Shard = map[string]evm.X402Token{}, map[string]int{}
+		}
+		c.EVM.X402[sym] = evm.X402Token{Name: x.Name, Version: x.Version, MaxWindowSeconds: x.MaxWindowSeconds, PerPaymentLimit: lim}
+		c.X402Shard[sym] = x.Shard
+	}
+	if len(c.EVM.X402) > 0 {
+		if _, err := evm.NewVerifier(c.EVM); err != nil {
+			return nil, fmt.Errorf("custody: config: %w", err)
+		}
 	}
 	return hot, nil
 }

@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
+	"os"
 	"sync"
 	"testing"
 
@@ -205,4 +207,56 @@ func TestEIP3009RuleRefusalLeavesNoClaim(t *testing.T) {
 func TestEIP3009ForOtherKindsNothingChanged(t *testing.T) {
 	h := x402Harness(t, nil)
 	h.mustSign(h.withdrawal("w1", addrUser, 100, 0, "alice"))
+}
+
+// The x402 block of the zone config: parsed into the verifier's config, and a bad one refuses to start.
+func TestX402ConfigParsesAndRefusesBadEntries(t *testing.T) {
+	good, _ := os.ReadFile("config.example.json")
+	build := func(x402 any) error {
+		var m map[string]any
+		if err := json.Unmarshal(good, &m); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range m["chains"].(map[string]any) {
+			if e, ok := c.(map[string]any)["evm"].(map[string]any); ok {
+				e["x402"] = x402
+			}
+		}
+		b, _ := json.Marshal(m)
+		_, err := ParseConfig(b)
+		return err
+	}
+	// The example has a token; find its symbol.
+	var f File
+	if err := json.Unmarshal(good, &f); err != nil {
+		t.Fatal(err)
+	}
+	sym := ""
+	for _, c := range f.Chains {
+		if c.EVM == nil {
+			continue
+		}
+		for s := range c.EVM.Tokens {
+			sym = s
+		}
+	}
+	if sym == "" {
+		t.Skip("the example config has no token")
+	}
+	ok := map[string]any{sym: map[string]any{"name": "USDC", "version": "2", "max_window_seconds": 600, "per_payment_limit": "500000"}}
+	if err := build(ok); err != nil {
+		t.Fatalf("a good x402 block was refused: %v", err)
+	}
+	for name, bad := range map[string]any{
+		"unknown token":    map[string]any{"NOPE": ok[sym]},
+		"no limit":         map[string]any{sym: map[string]any{"name": "USDC", "version": "2", "max_window_seconds": 600, "per_payment_limit": "0"}},
+		"no window":        map[string]any{sym: map[string]any{"name": "USDC", "version": "2", "max_window_seconds": 0, "per_payment_limit": "5"}},
+		"no domain name":   map[string]any{sym: map[string]any{"name": "", "version": "2", "max_window_seconds": 600, "per_payment_limit": "5"}},
+		"a decimal sign":   map[string]any{sym: map[string]any{"name": "USDC", "version": "2", "max_window_seconds": 600, "per_payment_limit": "-5"}},
+		"an unknown field": map[string]any{sym: map[string]any{"name": "USDC", "version": "2", "max_window_seconds": 600, "per_payment_limit": "5", "shard": 1}},
+	} {
+		if err := build(bad); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
 }
