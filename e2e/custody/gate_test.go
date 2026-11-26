@@ -76,12 +76,12 @@ func TestGatePaymentSignedByMPCOnALocalBaseSepolia(t *testing.T) {
 	credential := func(id string, amount string, validFor int64) gatecred.Credential {
 		return gatecred.Credential{V: 1, KID: k1.KID, CredentialID: id, ObligationID: "obl-" + id[:8], Audience: gateDemoAudience, WalletID: gateDemoWallet,
 			Chain: fmt.Sprintf("eip155:%d", evmtest.BaseSepoliaChainID), Asset: strings.ToLower(s.usdt.Hex()), Payee: strings.ToLower(payee.Hex()),
-			Amount: amount, IssuedAt: int64(now) - 5, ExpiresAt: int64(now) + validFor, PolicyVersion: "policy-7", DecisionReason: "demo: within budget"}
+			Amount: amount, IssuedAt: int64(now) - 30, ExpiresAt: int64(now) + validFor, PolicyVersion: "policy-7", DecisionReason: "demo: within budget"}
 	}
 	payload := func(amount int64, validBefore uint64) json.RawMessage {
 		var nonce [32]byte
 		_, _ = rand.Read(nonce[:])
-		p, _, err := s.cfg.EVM.NewPayload3009("USDT", payer, payee, big.NewInt(amount), now-60, validBefore, nonce)
+		p, _, err := s.cfg.EVM.NewPayload3009("USDT", payer, payee, big.NewInt(amount), now-30, validBefore, nonce) // validAfter = issued_at: the window lies inside the credential's (check 11)
 		if err != nil {
 			t.Fatal(err)
 		}
