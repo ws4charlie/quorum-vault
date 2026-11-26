@@ -340,7 +340,11 @@ func (s *system) mustSend(key *ecdsa.PrivateKey, to *common.Address, value *big.
 		s.t.Fatal(err)
 	}
 	tip := big.NewInt(2e9)
-	tx := types.NewTx(&types.DynamicFeeTx{ChainID: big.NewInt(11155111), Nonce: nonce, GasTipCap: tip,
+	chainID := big.NewInt(11155111)
+	if s.o.gate {
+		chainID = big.NewInt(evmtest.BaseSepoliaChainID)
+	}
+	tx := types.NewTx(&types.DynamicFeeTx{ChainID: chainID, Nonce: nonce, GasTipCap: tip,
 		GasFeeCap: new(big.Int).Add(new(big.Int).Mul(h.BaseFee, big.NewInt(2)), tip), Gas: gas * 12 / 10, To: to, Value: value, Data: data})
 	signed, err := types.SignTx(tx, types.LatestSignerForChainID(tx.ChainId()), key)
 	if err != nil {
