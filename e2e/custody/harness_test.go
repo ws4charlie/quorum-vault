@@ -951,7 +951,11 @@ func (s *system) startWorker(failpoint string) {
 func (s *system) startCore() {
 	port := freePort(s.t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	s.core = s.spawn("qv-core", nil, append([]string{"-config", s.cfgPath, "-dsn", s.bizDSN, "-addr", addr, "-task-queue", s.queue}, pkitest.CoreArgs()...)...)
+	args := []string{"-config", s.cfgPath, "-dsn", s.bizDSN, "-addr", addr, "-task-queue", s.queue}
+	if s.o.gate { // as the qv-business chart does with agentgate.enabled: AgentGate's certificate joins the core's service allow-list
+		args = append(args, "-service-allow", "business/guardian,business/worker,business/agentgate")
+	}
+	s.core = s.spawn("qv-core", nil, append(args, pkitest.CoreArgs()...)...)
 	s.apiURL = "https://" + addr
 	s.waitFor(30*time.Second, "qv-core listening", func() bool {
 		resp, err := pkitest.PeopleClient().Get(s.apiURL + "/v2/reconcile")
