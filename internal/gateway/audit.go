@@ -39,6 +39,9 @@ type auditRecord struct {
 	// lagUntil is the not_after (unix seconds) up to which a refusal about approvals is only a retry, because an approval names an approver this
 	// zone does not count yet (Decider.lagRetry); 0: not so. A batch takes the earliest not_after of its lagging members.
 	lagUntil int64
+	// gate is the Gate credential scope of the decision: its facts (credential_id, obligation_id, policy_version, decision_reason, wallet, payment,
+	// code and field, checker) go into the record of an accept and of a refusal alike.
+	gate *PaymentScope
 }
 
 type intentFacts struct {
@@ -68,6 +71,9 @@ func (r auditRecord) event(typ string) (domain.AuditEvent, error) {
 	}
 	if r.reason != "" {
 		p["reason"] = r.reason
+	}
+	if r.gate != nil && len(r.gate.facts) > 0 {
+		p["gate"] = r.gate.facts
 	}
 	b, err := json.Marshal(p)
 	if err != nil {

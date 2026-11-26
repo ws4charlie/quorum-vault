@@ -115,6 +115,8 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// The Gate credential rule is in every decider (gateway.NewDecider); this loop prunes its replay records (docs/gate-credential.md).
+	go gateway.RunGatePruner(ctx, guard, time.Hour, log)
 
 	// The routing of 2-of-3 signatures: the gateway's own health checks of the parties and the operators' signed preferred pair (mpc_route).
 	var router *mpcsigner.Router

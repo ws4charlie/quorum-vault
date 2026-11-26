@@ -14,13 +14,13 @@ The zone reads the typed data itself, recomputes the EIP-712 digest and signs on
 | Payee, amount and token equal the intent's; value within `per_payment_limit` | same |
 | `validBefore - validAfter` within `max_window_seconds`; `validBefore` in the future and at most `max_window_seconds` ahead of the zone's clock | same; `internal/gateway/decider.go` |
 | The EIP-3009 nonce is a claim of the replay guard: the same nonce is never signed twice for the same token and payer, in the gateway's guard and in each cosigner's | `internal/gateway/decider.go` (claims) |
-| A payment rule is installed and allows it | `Decider.SetPaymentRule` |
+| The wallet is Gate-governed and the authorization carries a Gate credential that passes every check (window inside the credential's, replay record, fast lane) | `internal/gateway/gaterule.go` |
 
 The signature is the 32-byte digest signed by the hot key, returned as `r`, `s` (big-endian, `s` in the lower half of the curve order) and `v` = 27 or 28, as USDC's `ecrecover` requires (`evm.SignatureRSV`).
 
-## Where GATE-CONNECT plugs in (GC2)
+## The Gate credential
 
-The zone decodes the payment into `TxInfo.Payment` (`chain` as `eip155:<id>`, `asset` as the token address, `payee`, `amount`, `validAfter`, `validBefore`, `nonce`, `payer`). The credential check implements `gateway.PaymentRule` and is installed with `Options.PaymentRule` (qv-gateway) and `Cosigner.SetPaymentRule` (qv-cosigner). It runs inside the replay guard's transaction, so a used credential id and the token nonce commit together. **No production code installs a rule today, so every authorization is refused with `policy_payment_rule`**; tests install their own rule in test code.
+The zone decodes the payment into `TxInfo.Payment` (`chain` as `eip155:<id>`, `asset` as the token address, `payee`, `amount`, `validAfter`, `validBefore`, `nonce`, `payer`) and checks the job's Gate credential against it, inside the replay guard's transaction, so the used credential id and the token nonce commit together ([spec](../gate-credential.md)). The rule is part of every decider; an authorization from a wallet that is not Gate-governed is refused with `wallet_not_gate_governed`. Which wallets are Gate-governed, and their limits, is the operator-signed [Gate setting](gate-setting.md).
 
 ## The USDC on Base Sepolia (chain 84532)
 
@@ -78,7 +78,7 @@ Reconcile adds a check `x402_liability` (the hold on the account equals the open
 
 | Sign | Meaning | Action |
 |:---|:---|:---|
-| `policy_payment_rule` refusals | No credential rule installed, or the rule refused | Expected until GC2 lands |
+| `wallet_not_gate_governed`, `credential_missing` or another credential code | The wallet is not in this checker's Gate setting, or the credential failed a check | [Gate setting](gate-setting.md), the job's reason and the `gate` field of the audit event |
 | `tx_mismatch` on a new authorization | The core's and the zone's `x402` blocks differ, or the token's domain is not the configured one | Compare both configs with the token's `name()`, `version()` and `DOMAIN_SEPARATOR()` |
 | `x402_liability` fails | The open rows and the holds differ, or the reader cannot read events | Look at `x402_authorizations` and `ledger_holds`; check the node's `eth_getLogs` range limit (the reader asks 2000 blocks at a time) |
 | `hot` fails after a payment | Paid on chain, not booked, and not explained | Check the worker log for the x402 pass; an authorization released as expired and then used is a real loss of the books' view: find the transaction and book it by hand |

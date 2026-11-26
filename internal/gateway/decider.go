@@ -19,6 +19,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
+	"github.com/ws4charlie/quorum-vault/internal/gatecred"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
 
@@ -44,22 +45,28 @@ type Decider struct {
 	guard  *Guard
 	mode   Mode
 	now    func() time.Time
-	// payments is the rule every payment authorization (kind eip3009) must pass, on top of the zone's own checks. Nil means no rule exists in this
-	// process, and then every authorization is refused: a build never signs one without the credential rule (docs/evm.md, "x402 authorizations").
+	// payments is the rule every payment from a Gate-governed wallet (a withdrawal, an eip3009 authorization) must pass, on top of the zone's own
+	// checks: the Gate credential rule (gaterule.go), installed by NewDecider. Never nil.
 	payments PaymentRule
 }
 
-// PaymentRule judges a payment authorization the zone decoded from the payload it is about to sign (TxInfo.Payment): the seam for the payment
-// credential (GC2). It runs inside the replay guard's transaction, so a rule that records what it consumed (a used credential id) commits or rolls
-// back with the claim of the authorization. It returns a refusal with reject(...) (ReasonPaymentRule), or nil to allow. Every comparison must be
-// against p, never against anything beside the payload.
+// PaymentRule is the rule of payments from Gate-governed wallets (gaterule.go): Scope finds, before approvals are judged, whether the job pays from such
+// a wallet; CheckPayment judges a payment the zone decoded from the payload it is about to sign (withdrawal: transferPayment; eip3009: TxInfo.Payment)
+// inside the replay guard's transaction, so what it records (a used credential id) commits or rolls back with the claim. It returns a refusal with
+// reject(...), or nil to allow. Every comparison must be against p, never against anything beside the payload. Every decider has one: NewDecider
+// installs the Gate credential rule; SetPaymentRule exists for tests.
 type PaymentRule interface {
-	CheckPayment(ctx context.Context, gt *GuardTx, job signjob.Job, i signjob.Intent, p PaymentFacts) error
+	Scope(ctx context.Context, cc *ChainConfig, kv *KeysetView, job signjob.Job, i signjob.Intent, info TxInfo) (*PaymentScope, error)
+	CheckPayment(ctx context.Context, gt *GuardTx, job signjob.Job, i signjob.Intent, p PaymentFacts, s *PaymentScope) error
 }
 
-// SetPaymentRule installs the rule for payment authorizations. Without one, the decider refuses them all. A zone has one rule, installed at start-up;
-// there is no flag or setting that removes it.
-func (d *Decider) SetPaymentRule(r PaymentRule) { d.payments = r }
+// SetPaymentRule replaces the payment rule (tests). nil puts back the Gate credential rule: no decider is ever without one.
+func (d *Decider) SetPaymentRule(r PaymentRule) {
+	if r == nil {
+		r = NewGateRule(d.cfg, d.guard, d.mode, d.now)
+	}
+	d.payments = r
+}
 
 // NewDecider builds a Decider. now may be nil (time.Now).
 func NewDecider(cfg *Config, codecs map[string]ChainCodec, guard *Guard, mode Mode, now func() time.Time) *Decider {
@@ -67,7 +74,9 @@ func NewDecider(cfg *Config, codecs map[string]ChainCodec, guard *Guard, mode Mo
 		now = time.Now
 	}
 	bindFeeCaps(cfg, codecs, guard)
-	return &Decider{cfg: cfg, codecs: codecs, guard: guard, mode: mode, now: now}
+	d := &Decider{cfg: cfg, codecs: codecs, guard: guard, mode: mode, now: now}
+	d.payments = NewGateRule(cfg, guard, mode, now)
+	return d
 }
 
 // NewCodecs builds the per-chain codecs of a config, through NewCodec.
@@ -145,6 +154,11 @@ func (d *Decider) DecideKey(ctx context.Context, job signjob.Job, key SignerKey)
 				return nil, lag
 			}
 			arec.reason = rj
+			if g := arec.gate; g != nil && len(g.facts) > 0 && g.facts["code"] == nil {
+				// A refusal by the zone's own rules (destination, caps, rates, expiry...) of a Gate payment: the gate facts name its code too.
+				code, _, _ := strings.Cut(rj, ": ")
+				g.fact("code", code)
+			}
 			d.noteDrainRefusal(job, rj)
 			if aerr := d.guard.auditAlone(ctx, *arec, EventSignRefused); aerr != nil {
 				return nil, aerr
@@ -230,12 +244,30 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 	if !ok {
 		return nil, reject(ReasonTx, "amount %q", intent.Amount)
 	}
+	// 0 of the Gate credential checks: which Gate-governed wallet, if any, the job pays from (by its partition's shard and by the sender the codec
+	// decoded), and whether a credential may ride on this kind at all.
+	scope, err := d.payments.Scope(ctx, cc, kv, job, intent, info)
+	if err != nil {
+		return nil, err
+	}
+	arec.gate = scope
+	if err := gateKindRule(intent, scope); err != nil {
+		return nil, err
+	}
+	gated := intent.Kind == "withdrawal" && scope.Governed() // a payment of a Gate-governed wallet: Gate's approval is the approval
 
 	// 3. Approvals, from the effective approver set only: the config's approvers with the signed changes of this zone's own log applied.
 	hash := intent.Hash()
 	approvers := set.validApprovers(hash[:], job.Approvals)
-	if set.lagging(job.Approvals) {
+	if set.lagging(job.Approvals) && !gated {
 		arec.lagUntil = intent.NotAfter
+	}
+	if gated {
+		// Approvals are ignored, not counted towards or against anything: the credential is the permission, the fast lane its bound.
+		if len(job.Approvals) > 0 {
+			scope.fact("approvals_ignored", len(job.Approvals))
+		}
+		approvers = nil
 	}
 	valid := len(approvers)
 	arec.intent = &intentFacts{ID: intent.ID, Kind: intent.Kind, Asset: intent.Asset, Amount: amount.String(), Sender: info.Sender,
@@ -247,7 +279,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 	if err := d.checkRequester(set, intent, approvers); err != nil {
 		return nil, err
 	}
-	if intent.Kind == "withdrawal" && valid == 0 {
+	if intent.Kind == "withdrawal" && valid == 0 && !gated {
 		return nil, reject(ReasonApprovals, "no valid approval from a configured, enabled approver")
 	}
 
@@ -300,7 +332,7 @@ func (d *Decider) decide(ctx context.Context, job signjob.Job, key SignerKey, ar
 				genState, genRef = e.State, strconv.Itoa(int(info.Gen))
 			}
 		}
-		if err := d.policy(ctx, gt, job, cc, intent, codec, info, amount, valid, known, genState == "compromised", now); err != nil {
+		if err := d.policy(ctx, gt, job, cc, intent, codec, info, amount, valid, known, genState == "compromised", now, scope); err != nil {
 			return err
 		}
 
@@ -424,6 +456,24 @@ func parseIntent(job signjob.Job) (signjob.Intent, error) {
 	return i, nil
 }
 
+// gateKindRule is check 0 and the place of a credential: a credential comes only on a payment (withdrawal, eip3009) of a Gate-governed wallet, and an
+// EIP-3009 authorization is signed only for one. A payment of a Gate-governed wallet without a credential is refused later, by the rule
+// (credential_missing), after the zone decoded the payment.
+func gateKindRule(i signjob.Intent, s *PaymentScope) error {
+	payment := i.Kind == "withdrawal" || i.Kind == evm.KindEIP3009
+	switch {
+	case i.Credential != "" && !payment:
+		return reject(ReasonIntent, "a %s intent carries a Gate credential: a credential is only for a payment (withdrawal or eip3009)", i.Kind)
+	case !s.Governed() && i.Credential != "":
+		s.fact("code", string(gatecred.WalletNotGateGoverned))
+		return gateReject(gatecred.WalletNotGateGoverned, "", "a credential for partition %q, whose wallet is not Gate-governed in this zone", i.PartitionID)
+	case !s.Governed() && i.Kind == evm.KindEIP3009:
+		s.fact("code", string(gatecred.WalletNotGateGoverned))
+		return gateReject(gatecred.WalletNotGateGoverned, "", "an EIP-3009 authorization is signed only for a Gate-governed wallet; partition %q is not one", i.PartitionID)
+	}
+	return nil
+}
+
 // checkRequesterField is the shape rule of requested_by: a withdrawal (alone or as a batch member) names the person who asked for it; every other
 // kind is started by the system or by an operator's own approval and carries none, so a requester there is a sign of a confused or forged intent.
 // An intent written before v2 has no requester: it is refused here with that reason, and its approvals (over the v1 hash) would not verify anyway.
@@ -455,7 +505,7 @@ func (d *Decider) checkRequester(set *ApproverSet, i signjob.Intent, approvers [
 }
 
 func (d *Decider) policy(ctx context.Context, gt *GuardTx, job signjob.Job, cc *ChainConfig, i signjob.Intent, codec ChainCodec,
-	info TxInfo, amount *big.Int, valid int, known, compromised bool, now time.Time) error {
+	info TxInfo, amount *big.Int, valid int, known, compromised bool, now time.Time, scope *PaymentScope) error {
 	switch i.Kind {
 	case "withdrawal":
 		if !known { // a known intent may be replaced after it expired
@@ -481,7 +531,7 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, job signjob.Job, cc *
 		if amount.Cmp(p.PerTxCap) > 0 {
 			return reject(ReasonPerTxCap, "amount %s exceeds the per-transaction cap %s", amount, p.PerTxCap)
 		}
-		if need := p.RequiredApprovals(amount); valid < need {
+		if need := p.RequiredApprovals(amount); valid < need && !scope.Governed() {
 			return reject(ReasonTier, "amount %s needs %d distinct approvals, have %d", amount, need, valid)
 		}
 		if !known {
@@ -498,6 +548,17 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, job signjob.Job, cc *
 			}
 			if total := new(big.Int).Add(sum, amount); total.Cmp(p.DailyCap) > 0 {
 				return reject(ReasonDailyCap, "%s already withdrawn in 24h plus %s exceeds the cap %s", sum, amount, p.DailyCap)
+			}
+		}
+		if scope.Governed() {
+			// A payment of a Gate-governed wallet: the credential checks against the transfer as the zone reads it from the payload. Every check
+			// above still holds (the zone's own limits are defence in depth); only the approval tiers do not apply.
+			pf, err := transferPayment(cc, job.Payload)
+			if err != nil {
+				return gateReject(gatecred.PayloadInvalid, "", "%v", err)
+			}
+			if err := d.payments.CheckPayment(ctx, gt, job, i, pf, scope); err != nil {
+				return err
 			}
 		}
 	case "sweep":
@@ -604,9 +665,6 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, job signjob.Job, cc *
 		// config bounds (token, domain, payer, payee, amount, limit, window length); the replay guard holds the token nonce as a claim. What is left
 		// is the clock and the rule that says who may order it. Approvals are ignored: whoever may order a payment is the rule's business, and with
 		// no rule installed nothing is signed.
-		if d.payments == nil {
-			return reject(ReasonPaymentRule, "this zone has no payment credential rule: payment authorizations are not signed")
-		}
 		if info.Payment == nil {
 			return reject(ReasonTx, "no payment decoded from the payload")
 		}
@@ -626,7 +684,7 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, job signjob.Job, cc *
 				return reject(ReasonPaymentWindow, "validBefore %d is more than %d s ahead of now %d", info.Payment.ValidBefore, maxWindow, t)
 			}
 		}
-		if err := d.payments.CheckPayment(ctx, gt, job, i, *info.Payment); err != nil {
+		if err := d.payments.CheckPayment(ctx, gt, job, i, *info.Payment, scope); err != nil {
 			return err
 		}
 	case "cpfp":

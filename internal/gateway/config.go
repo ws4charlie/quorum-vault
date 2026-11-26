@@ -52,6 +52,8 @@ type File struct {
 	// Operators is the root of trust of signed approver changes (approvers.go): the operator keys and how many must sign. Absent: approvers change
 	// only by editing this file.
 	Operators *OperatorsFile `json:"operators,omitempty"`
+	// Gate holds the bootstrap key set of Gate credentials (gate.go); the rest of the Gate setting is operator-signed. Absent: no bootstrap keys.
+	Gate *GateFile `json:"gate,omitempty"`
 }
 
 // SignerFile locates a partition's key: in an HSM token (backend "hsm", the default) or in the cb-mpc service
@@ -356,6 +358,8 @@ type Config struct {
 	RouteFile *MPCRouteFile
 	// Operators is nil when the config has no operators section: signed approver changes are off and Approvers is the whole set.
 	Operators *OperatorConfig
+	// GateBootstrap is the bootstrap key set of Gate credentials (config section "gate"); empty without one.
+	GateBootstrap []GateKey
 }
 
 // Approver is a configured approver key.
@@ -531,6 +535,12 @@ func (f File) build() (*Config, error) {
 	if f.Operators != nil {
 		var err error
 		if c.Operators, err = f.Operators.build(keys); err != nil {
+			return nil, err
+		}
+	}
+	if f.Gate != nil {
+		var err error
+		if c.GateBootstrap, err = f.Gate.build(); err != nil {
 			return nil, err
 		}
 	}
