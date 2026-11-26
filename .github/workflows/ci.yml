@@ -406,7 +406,7 @@ jobs:
     permissions:
       contents: read
       packages: read
-    timeout-minutes: 120
+    timeout-minutes: 15
     env:
       CGO_ENABLED: "1"
       CC: clang-20
@@ -425,11 +425,8 @@ jobs:
         with:
           postgres: "true"
           infra: "true"
-      - name: make test-e2e-evm-gate, 20 runs (TEMPORARY, GC5 stability evidence; reverted before review)
-        run: ci/run-in-image.sh scripts/e2e-repeat.sh engine 20 TestGatePaymentSignedByMPCOnALocalBaseSepolia data/e2e-repeat/gate -- make test-e2e-evm-gate
-      - name: logs of runs that did not pass
-        if: failure()
-        run: for f in data/e2e-repeat/gate/run-*.log; do echo "== $f"; tail -150 "$f"; done; cat data/e2e-repeat/gate/runs.tsv
+      - name: make test-e2e-evm-gate
+        run: ci/run-in-image.sh make test-e2e-evm-gate
 
   e2e-evm-drill:
     runs-on: ubuntu-24.04
