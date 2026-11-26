@@ -80,6 +80,10 @@ type Intent struct {
 	// exists, the core's actor name). It is part of what approvers sign, so the signing zone can refuse an approval by the requester itself.
 	// Required on a withdrawal and on a batch member; empty on every other kind (see docs/signing-zone.md).
 	RequestedBy string
+	// Credential is a Gate credential (docs/gate-credential.md), the JSON text exactly as AgentGate sent it: the permission for one payment from a
+	// Gate-governed wallet. It is NOT part of Canonical or Hash (no approver signs it; it carries its own Ed25519 signature), and empty on every other
+	// intent, which keeps their bytes unchanged. The signing zone parses and checks it against the payment it decodes from the payload.
+	Credential string `json:"Credential,omitempty"`
 }
 
 // intentDomain is the version of the signed statement. v2 added RequestedBy; a v1 approval does not verify under v2, so it never counts.

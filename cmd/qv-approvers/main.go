@@ -5,6 +5,9 @@
 //	                   [-signed-at UNIX] [-out F]       (on the operator's machine; no database)
 //	qv-approvers sign  -operator NAME -key FILE -join F [-out F]    add this operator's signature to a change file another operator wrote
 //	qv-approvers apply -config C -guard-dsn ... F...    join the signature files of one change and apply it to every guard database
+//	qv-approvers gate-sign  -operator NAME -key FILE (-setting F -version N [-signed-at UNIX] | -join F) [-out F]
+//	qv-approvers gate-apply -config C -guard-dsn ... F...    the Gate setting (internal/gateway/gate.go), signed and applied the same way
+//	qv-approvers gate-show  -config C -guard-dsn ...
 //
 // An approver is the person whose signature releases money; operators are a different, small key set in the zone config's "operators" section. A change
 // needs min_operators distinct operators. It goes into the guard database of the gateway and of every cosigner, each of which checks the signatures
@@ -37,13 +40,15 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: qv-approvers show|sign|apply (see the runbook docs/runbooks/approvers.md)")
+		return fmt.Errorf("usage: qv-approvers show|sign|apply|gate-show|gate-sign|gate-apply (see docs/runbooks/approvers.md and docs/runbooks/gate-setting.md)")
 	}
 	switch args[0] {
 	case "sign":
 		return sign(args[1:])
-	case "show", "apply":
+	case "show", "apply", "gate-show", "gate-apply":
 		return withGuards(args[0], args[1:])
+	case "gate-sign":
+		return gateSign(args[1:])
 	}
 	return fmt.Errorf("unknown command %q", args[0])
 }
@@ -172,7 +177,7 @@ func withGuards(cmd string, args []string) error {
 		return err
 	}
 	if cfg.Operators == nil {
-		return fmt.Errorf("the config has no operators section: signed approver changes are off")
+		return fmt.Errorf("the config has no operators section: signed approver changes and the gate setting are off")
 	}
 	ctx := context.Background()
 	var stores []store
@@ -191,6 +196,12 @@ func withGuards(cmd string, args []string) error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		stores = append(stores, store{name, guard})
+	}
+	switch cmd {
+	case "gate-apply":
+		return gateApply(ctx, cfg, stores, fs.Args())
+	case "gate-show":
+		return gateShow(ctx, cfg, stores)
 	}
 	if cmd == "apply" {
 		var parts []gateway.ApproverChange

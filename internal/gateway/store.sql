@@ -211,3 +211,48 @@ CREATE OR REPLACE TRIGGER keyset_changes_no_update_delete
 CREATE OR REPLACE TRIGGER keyset_changes_no_truncate
     BEFORE TRUNCATE ON keyset_changes
     FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
+
+-- Signed versions of the Gate setting (see gate.go): which wallets pay only with a Gate credential, the Gate keys, the audience, the clock limits and
+-- the fast-lane limits. Every row carries the signatures of configured operators over (version, signed_at, setting); the zone checks them again every
+-- time it reads the log, so a row written by anyone else is ignored. The gateway and every cosigner keep their own copy. Append-only; version is not
+-- unique on purpose, so a forged row cannot take a version number from a real change.
+CREATE TABLE IF NOT EXISTS gate_setting_changes (
+    id         bigserial PRIMARY KEY,
+    version    bigint NOT NULL CHECK (version >= 1),
+    setting    jsonb  NOT NULL,
+    signed_at  bigint NOT NULL,
+    signatures jsonb  NOT NULL,
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE TRIGGER gate_setting_changes_no_update_delete
+    BEFORE UPDATE OR DELETE ON gate_setting_changes
+    FOR EACH ROW EXECUTE FUNCTION audit_log_append_only();
+
+CREATE OR REPLACE TRIGGER gate_setting_changes_no_truncate
+    BEFORE TRUNCATE ON gate_setting_changes
+    FOR EACH STATEMENT EXECUTE FUNCTION audit_log_append_only();
+
+-- The Gate credentials this checker accepted (see gaterule.go): one row per credential_id, written in the guard transaction that reserves the payment, so
+-- it commits or rolls back with the claim. A second use of the id is refused (replayed); the same payload again (a retry of the same digest) writes
+-- nothing. Only accepted credentials are written: a refusal is in the audit log, so a forged credential cannot burn a real credential_id. The rows are
+-- also the fast-lane counts (amount per wallet and asset over the last hour and day, at signing time). Pruned when keep_until has passed (expires_at +
+-- skew + 1 day, and never sooner than a day after signing).
+CREATE TABLE IF NOT EXISTS gate_credentials_used (
+    credential_id  text PRIMARY KEY,
+    payload_digest bytea NOT NULL,
+    intent_id      text NOT NULL,
+    wallet_id      text NOT NULL,
+    chain          text NOT NULL,          -- CAIP-2, as in the credential
+    asset          text NOT NULL,          -- "native" or the token address, as in the credential
+    asset_symbol   text NOT NULL,          -- the zone's name of the asset (the fast-lane limits are per symbol)
+    payee          text NOT NULL,
+    amount         numeric(78,0) NOT NULL,
+    decision       text NOT NULL,          -- 'accepted'
+    checker        text NOT NULL,          -- qv-gateway or qv-cosigner
+    expires_at     bigint NOT NULL,        -- the credential's, unix seconds
+    signed_at      timestamptz NOT NULL,
+    keep_until     timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS gate_credentials_used_lane ON gate_credentials_used (wallet_id, asset_symbol, signed_at);
+CREATE INDEX IF NOT EXISTS gate_credentials_used_keep ON gate_credentials_used (keep_until);

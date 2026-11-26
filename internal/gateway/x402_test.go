@@ -27,7 +27,15 @@ type testRule struct {
 	allow bool
 }
 
-func (r *testRule) CheckPayment(_ context.Context, _ *GuardTx, _ signjob.Job, _ signjob.Intent, p PaymentFacts) error {
+// Scope treats every authorization as one of a Gate-governed wallet, and nothing else.
+func (r *testRule) Scope(_ context.Context, _ *ChainConfig, _ *KeysetView, _ signjob.Job, i signjob.Intent, _ TxInfo) (*PaymentScope, error) {
+	if i.Kind == evm.KindEIP3009 {
+		return &PaymentScope{WalletID: "00000000-0000-4000-8000-000000000001"}, nil
+	}
+	return &PaymentScope{}, nil
+}
+
+func (r *testRule) CheckPayment(_ context.Context, _ *GuardTx, _ signjob.Job, _ signjob.Intent, p PaymentFacts, _ *PaymentScope) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.seen = append(r.seen, p)
@@ -90,22 +98,27 @@ func (h *harness) x402Job(id string, s x402Spec) signjob.Job {
 	return signjob.Job{ID: id, PartitionID: testPartition, KeyRef: "m/0", Chain: testChain, Intent: mustJSON(in), Digest: digest[:], Payload: payload}
 }
 
-// A build without the credential rule refuses every authorization, whatever else is right: the production state until GC2's rule is installed.
-func TestEIP3009RefusedWithoutAPaymentRule(t *testing.T) {
+// Without a Gate setting no wallet is Gate-governed, so every authorization is refused (check 0), whatever else is right. Every decider has the Gate
+// credential rule: NewDecider installs it, and SetPaymentRule(nil) puts it back.
+func TestEIP3009RefusedWithoutAGateGovernedWallet(t *testing.T) {
 	h := x402Harness(t, nil)
 	j := h.x402Job("a1", x402Spec{nonce: 1})
-	h.mustReject(j, ReasonPaymentRule)
+	h.mustReject(j, "wallet_not_gate_governed")
 	// Not even with approvals attached: they are ignored for this kind.
 	j2 := h.x402Job("a2", x402Spec{nonce: 2})
 	j2.Approvals = h.approvals(x402Intent(t, j2), "alice", "bob")
-	h.mustReject(j2, ReasonPaymentRule)
+	h.mustReject(j2, "wallet_not_gate_governed")
 	if n := h.signer.calls.Load(); n != 0 {
 		t.Fatalf("the signer was called %d times", n)
 	}
-	// A plain decider (what qv-gateway and qv-cosigner build today) has no rule either.
 	d := NewDecider(h.cfg, h.gw.codecs, h.guard, ModeGateway, h.clock)
-	if d.payments != nil {
-		t.Fatal("a new decider has a payment rule")
+	if _, ok := d.payments.(*GateRule); !ok {
+		t.Fatalf("a new decider's payment rule is %T, want the Gate credential rule", d.payments)
+	}
+	d.SetPaymentRule(&testRule{})
+	d.SetPaymentRule(nil)
+	if _, ok := d.payments.(*GateRule); !ok {
+		t.Fatalf("SetPaymentRule(nil) left %T, want the Gate credential rule", d.payments)
 	}
 }
 

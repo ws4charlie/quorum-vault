@@ -4,7 +4,7 @@
 
 AgentGate decides whether an AI agent may make a payment. QuorumVault holds the keys that make it. The Gate credential is the one document that joins them: a short-lived, signed permission for exactly one payment. The signing zone signs a payment from a Gate-governed wallet only when it carries a credential that verifies. This page is the contract; AgentGate and QuorumVault implement their sides from it and from the shared [test vectors](#test-vectors), and neither imports the other's code.
 
-Status: the verifier package and the vectors are done. The zone checks, the signing API and the EIP-3009 kind are written here and built in later tasks, marked below.
+Status: the verifier package, the vectors, the EIP-3009 kind and the zone checks (0 to 13, in the gateway and every cosigner) are done. The signing API is done for `evm_eip3009`; `evm_transfer` is kept for a later version.
 
 ## The credential
 
@@ -44,7 +44,7 @@ The parser is strict. It refuses a field that appears twice, an unknown field, a
 
 ## Keys and rotation
 
-Gate signs with an Ed25519 key that exists only for this purpose. Vault holds public keys only. Whoever can add a key can mint credentials for every Gate-governed wallet, so the key set has the same authority as the approver registry and is kept the same way: it is part of the Gate-governed-wallet setting family, **signed by a quorum of zone operators, versioned, and enforced by the gateway and every cosigner**, each from its own verified log. Nothing the business side can write holds a key. An entry is a `kid`, its 32-byte public key (base64url, no padding), a not-before time and an optional not-after time; a checker builds the usable set at verification time from its own clock. The configuration file holds only the **bootstrap set**, used before any signed record exists, as the approver registry's bootstrap approvers are: a signed change may retire a bootstrap key without a restart, and a retired `kid` and key are never used again. A node refuses to start with an invalid audience, no key at all, a bad `kid` or a wrong key length. *Implemented in the zone-enforcement task.*
+Gate signs with an Ed25519 key that exists only for this purpose. Vault holds public keys only. Whoever can add a key can mint credentials for every Gate-governed wallet, so the key set has the same authority as the approver registry and is kept the same way: it is part of the Gate-governed-wallet setting family, **signed by a quorum of zone operators, versioned, and enforced by the gateway and every cosigner**, each from its own verified log. Nothing the business side can write holds a key. An entry is a `kid`, its 32-byte public key (base64url, no padding), a not-before time and an optional not-after time; a checker builds the usable set at verification time from its own clock. The configuration file holds only the **bootstrap set**, used before any signed record exists, as the approver registry's bootstrap approvers are: a signed change may retire a bootstrap key without a restart, and a retired `kid` and key are never used again. A node refuses to start with a bootstrap set that is empty, has a bad `kid` or a wrong key length; a signed version with an invalid audience or no key at all is refused.
 
 - **Several keys are active at once.** To rotate: a signed change adds the new key; Gate starts signing with it; later a second signed change retires the old one (or sets its not-after), no sooner than the old key's last credential's expiry (the maximum lifetime plus the skew).
 - **An unknown `kid` is refused** as `kid_unknown`, and so is a key outside its not-before to not-after time. Vault never tries the other keys, so a credential cannot choose which key checks it. A credential that names one key but was signed by another fails as `signature_invalid`.
@@ -71,7 +71,9 @@ Every checker in the zone runs these in order and stops at the first failure. Ea
 | 12 | `credential_id` was not used before at this checker; the record is written in the same transaction as the decision | `replayed` | |
 | 13 | The payment is within the wallet's fast-lane limits | `fast_lane_cap` | |
 
-Checks 1 to 11 are pure and are implemented and tested in this task; checks 0, 12 and 13 need the zone's state and are built in the zone-enforcement task. The zone trusts nothing beside the payload: step 10 compares with what the zone itself decoded, never with a request field.
+Checks 1 to 11 are pure (the verifier package); checks 0, 12 and 13 use each checker's own state. The zone trusts nothing beside the payload: step 10 compares with what the zone itself decoded, never with a request field.
+
+**Refusal reason.** A refused job's reason is `<code>: <detail>`, or `<code>: field <field>: <detail>` when the table names a field, with the codes above unchanged. In a two-party signature the gateway's own refusal reaches the job this way; a refusal by a cosigner after the gateway accepted reaches it as `signer_refused` with the cosigner's reason inside.
 
 **Clock.** Each checker uses its own clock. The skew allowance is 30 seconds by default and configurable up to 5 minutes; it widens both ends of the window.
 
@@ -91,9 +93,9 @@ One credential pays one payment. A second payload under the same `credential_id`
 
 ## Gate-governed wallets and the fast lane
 
-A **Gate-governed wallet** is marked in a signed setting of the signing zone: a quorum of zone operators signs it, it is versioned, and the gateway and every cosigner enforce it. A Gate-governed wallet pays nothing without a verified credential, by any path. Other wallets keep today's rules. **Internal moves** (sweeps, refills, drains, cold moves, consolidations, rebalances) need no credential.
+A **Gate-governed wallet** is marked in a signed setting of the signing zone: a quorum of zone operators signs it, it is versioned, and the gateway and every cosigner enforce it. A Gate-governed wallet pays nothing without a verified credential, by any path. The setting names each wallet by its `wallet_id` and a hot partition; the zone governs that partition's whole hot shard, every asset and every key generation of it, so neither another asset nor a replaced key is a way around the credential. A batch is never signed for it. Other wallets keep today's rules. **Internal moves** (sweeps, refills, drains, cold moves, consolidations, rebalances) need no credential.
 
-With a valid credential, a payment from a Gate-governed wallet needs no human approval (Gate's approval is the approval), if it is within all three limits of the same signed setting, kept per wallet and asset in that asset's minor units:
+With a valid credential, a payment from a Gate-governed wallet needs no human approval (Gate's approval is the approval; approvals sent with it are ignored), and the zone's own withdrawal rules (destinations, caps, rates) still apply, if it is within all three limits of the same signed setting, kept per wallet and asset in that asset's minor units:
 
 | Limit | Meaning |
 |:---|:---|
@@ -146,7 +148,7 @@ Gate calls Vault; Vault never calls Gate. The core serves this one call and deci
 
 ## Replay records and audit
 
-Each checker records every `credential_id` it accepts, in its own guard database, with the decision, and a second use is refused (the first use wins, atomically). A record is kept until `expires_at` + skew + 1 day; pruning removes nothing that could still verify, and the extra day is for troubleshooting. The business core keeps its own table, which serves the API's idempotency and is not the rule. At first use a checker records the `credential_id` with a digest of the payload; any later use of that `credential_id` is `replayed`, whatever the payload, once the payment check has passed (a payload that decodes to another payment is `payment_mismatch` first). The zone never returns a stored result for a repeat: only the signing API's layer does, for an identical request.
+Each checker records every `credential_id` it accepts, in its own guard database, in the same transaction that reserves the payment, and a second use is refused (the first use wins, atomically). A record is kept until `expires_at` + skew + 1 day; pruning removes nothing that could still verify, and the extra day is for troubleshooting. The business core keeps its own table, which serves the API's idempotency and is not the rule. At first use a checker records the `credential_id` with a digest of the payload; any later use of that `credential_id` is `replayed`, whatever the payload, once the payment check has passed (a payload that decodes to another payment is `payment_mismatch` first). Only accepted credentials are recorded, so a forged credential cannot use up a real `credential_id`. The same payload again is a retry of the same signing, not a second use: the gateway returns the signature it stored, and a cosigner allows the same digest again; neither writes a new record or counts it again. Anything else under a used `credential_id` is `replayed`.
 
 Every accept and every refusal is written to the checker's audit trail in the same transaction as the decision: `credential_id`, `obligation_id`, `policy_version`, `decision_reason`, `wallet_id`, the payment, the error code and field, and which checker. A credential that did not parse is recorded by size and hash only, since its text is not trusted.
 

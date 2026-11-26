@@ -222,7 +222,9 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 			Amount: r.Amount, ExpiresAt: &exp, Metadata: map[string]any{"x402": r.ID, "payee": payee, "nonce": a.Nonce}}); err != nil {
 			return err
 		}
-		ib, err := json.Marshal(intentWithCredential{Intent: s.x402Intent(a), Credential: string(r.Credential)})
+		in := s.x402Intent(a)
+		in.Credential = string(r.Credential)
+		ib, err := json.Marshal(in)
 		if err != nil {
 			return err
 		}
@@ -230,14 +232,6 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 		return EnqueueUnsigned(ctx, tx, jobID, part, u, ib, nil)
 	})
 	return a, created, err
-}
-
-// intentWithCredential is the intent of a job that carries a Gate credential: the credential's text beside the intent's fields, under the key the
-// zone reads (signjob.Intent.Credential, added by the zone-enforcement task). It is not part of Intent.Canonical: no approver signs it. Omitted when
-// empty, so a job without a credential has the bytes it always had.
-type intentWithCredential struct {
-	signjob.Intent
-	Credential string `json:"Credential,omitempty"`
 }
 
 // isHotPartitionOf reports whether id is one of this chain's hot shards of asset.
