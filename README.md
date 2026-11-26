@@ -51,9 +51,30 @@ Two rules carry the design:
 | [EVM](docs/evm.md) · [Bitcoin](docs/bitcoin.md) · [Solana](docs/solana.md) | What is special about each chain |
 | [Bitcoin sends](docs/bitcoin-sending.md) | How a Bitcoin send gets confirmed: fee room, replacement, cancel, child and batches |
 | [Identity](docs/identity.md) | Who may call the API, and how a login is checked |
+| [Gate credential](docs/gate-credential.md) | Payments that AgentGate approved: the credential, the checks and the signing API |
 | [Audit trail](docs/audit.md) | A record of every decision that cannot be quietly changed |
 | [Testing](docs/testing.md) | How it is tested, including crashes and attacks |
 | [Limits](docs/limits.md) | What it cannot do yet |
+
+## Payments approved by AgentGate
+
+AgentGate decides whether an AI agent may pay; QuorumVault holds the money and signs. For a hot wallet that operators mark as Gate-governed, Vault signs a payment only when it carries a short-lived credential that AgentGate signed for exactly that payment. AgentGate calls one route, `POST /v2/gate/signatures`; Vault never calls AgentGate. Today the route signs x402 permits (EIP-3009 `transferWithAuthorization`) on Base Sepolia.
+
+The gateway and every cosigner check each credential before any key signs:
+
+- AgentGate's key signed it, and it names this deployment and this wallet.
+- It is still valid, and its lifetime is short.
+- Its chain, token, payee and amount equal what the signer decodes from the bytes it is about to sign.
+- Its `credential_id` has not been used before.
+- The payment is within the wallet's per-payment, per-hour and per-day limits.
+
+The wallet list, AgentGate's keys and the limits are a setting that two zone operators sign. The contract for both sides is the [spec](docs/gate-credential.md) and its [test vectors](testdata/gate-credential/vectors.json).
+
+The demo runs it end to end with the two-party MPC signer on a local chain (after the setup under "Try it"):
+
+```bash
+make test-e2e-evm-gate
+```
 
 ## Try it
 
