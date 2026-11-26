@@ -93,6 +93,27 @@ var (
 	reGateAudience = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
+// GateGoverned reports whether a partition is on the hot shard of a Gate-governed wallet of gate.wallets (any asset of that shard), as the zone
+// governs it. False without a gate section.
+func (c *Config) GateGoverned(part string) bool {
+	if c.Gate == nil {
+		return false
+	}
+	k, err := partition.Parse(part)
+	if err != nil {
+		return false
+	}
+	for _, w := range c.Gate.Wallets {
+		if w.Partition == part {
+			return true
+		}
+		if wk, err := partition.Parse(w.Partition); err == nil && wk.Tier == partition.TierHot && k.Tier == partition.TierHot && wk.ShardID() == k.ShardID() {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Config) buildGate(f *GateFile) error {
 	if f == nil {
 		return nil

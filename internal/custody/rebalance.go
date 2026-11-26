@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -192,6 +193,20 @@ func (s *Service) PlanRebalances(ctx context.Context, log *slog.Logger) ([]Rebal
 								continue
 							}
 						}
+						// Money of a Gate-governed wallet stays under Gate: it is rebalanced only to another Gate-governed wallet (the zone refuses
+						// anything else, policy_gate_rebalance).
+						if c.GateGoverned(sh.part) && !c.GateGoverned(d.part) {
+							continue
+						}
+						// The zone refused a rebalance from this shard as policy_gate_rebalance in the last hour: the core's gate.wallets and the
+						// zone's signed gate setting differ. Back off instead of planning the same refusal at every pass.
+						if refused, err := gateRebalanceRefused(ctx, tx, sh.part); err != nil {
+							return err
+						} else if refused {
+							log.Error("ALERT gate: the zone refused a rebalance from this shard as policy_gate_rebalance in the last hour; the core's gate.wallets and the zone's signed gate setting differ (docs/runbooks/gate-setting.md). No rebalance from it is planned until they agree",
+								"source", sh.part, "destination", d.part)
+							continue
+						}
 						cands = append(cands, sh)
 					}
 				}
@@ -244,6 +259,17 @@ func (s *Service) PlanRebalances(ctx context.Context, log *slog.Logger) ([]Rebal
 		created = append(created, made...)
 	}
 	return created, nil
+}
+
+// GateRebalanceBackoff is how long the planner leaves a source alone after the zone refused a rebalance from it as policy_gate_rebalance.
+const GateRebalanceBackoff = time.Hour
+
+// gateRebalanceRefused reports whether the zone refused a rebalance from the partition as policy_gate_rebalance within GateRebalanceBackoff.
+func gateRebalanceRefused(ctx context.Context, tx pgx.Tx, part string) (bool, error) {
+	var refused bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM rebalance_moves WHERE partition_id=$1 AND status='failed'
+		AND failure_reason LIKE '%policy_gate_rebalance%' AND updated_at > now() - $2::interval)`, part, GateRebalanceBackoff.String()).Scan(&refused)
+	return refused, err
 }
 
 // sourceHasGas reports whether the source shard can pay the gas of a move of asset. A native move pays its gas out of what it

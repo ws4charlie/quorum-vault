@@ -29,7 +29,7 @@ Each hot key also has a state (new, active, draining, retired). The zone learns 
 
 ## Payments that AgentGate approves
 
-Some hot wallets pay only what AgentGate approved. For such a wallet, every payment needs a short-lived credential that Gate signed for exactly that payment, and approvers cannot replace it. Which wallets these are, which Gate keys count, and how much may go out per payment, per hour and per day is a setting that several zone operators sign. The gateway and every cosigner each check the credential against the transaction they are about to sign, record it so it is used once, and count it against the limits ([Gate credential](gate-credential.md), [runbook](runbooks/gate-setting.md)).
+Some hot wallets pay only what AgentGate approved. For such a wallet, every payment needs a short-lived credential that Gate signed for exactly that payment, and approvers cannot replace it. Which wallets these are, which Gate keys count, and how much may go out per payment, per hour and per day is a setting that several zone operators sign. The gateway and every cosigner each check the credential against the transaction they are about to sign, record it so it is used once, and count it against the limits. Money in such a wallet can be rebalanced only to another wallet of the same kind ([Gate credential](gate-credential.md), [runbook](runbooks/gate-setting.md)).
 
 ## Two cosigners that do not trust each other
 

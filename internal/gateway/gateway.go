@@ -52,6 +52,7 @@ const (
 	ReasonCPFP            = "policy_cpfp"              // 4 a cpfp child that does not spend the change of a send this zone signed, or whose package is over the fee caps
 	ReasonPaymentRule     = "policy_payment_rule"      // 4 a payment authorization (eip3009) with no credential rule in this zone, or one the rule refused
 	ReasonPaymentWindow   = "policy_payment_window"    // 4 an authorization that is already over, or valid far beyond the zone's own window
+	ReasonGateRebalance   = "policy_gate_rebalance"    // 4 a rebalance from a Gate-governed wallet to a wallet that is not Gate-governed
 	ReasonSignerRefused   = "signer_refused"           // 6 the signer's other party (cb-mpc party B) refused; nothing was signed
 )
 

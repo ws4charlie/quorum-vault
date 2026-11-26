@@ -28,7 +28,8 @@ import (
 //
 // A job pays from a Gate-governed wallet when its partition is the wallet's hot shard (any asset of it) or its sender, as the zone decoded it, is an
 // address of that shard (any generation). For such a wallet the payment kinds (withdrawal: an EVM native or token transfer; eip3009) need a
-// credential that passes checks 1 to 13; approvals are ignored. Every other kind is internal and unchanged, except that it may not carry a credential.
+// credential that passes checks 1 to 13; approvals are ignored. Every other kind is internal and unchanged, except that it may not carry a credential, and
+// a rebalance from such a wallet pays only another Gate-governed wallet (policy_gate_rebalance).
 // A credential for a wallet that is not Gate-governed, and an EIP-3009 authorization from one, are refused (check 0).
 //
 // A refusal's reason is "<code>: <detail>", or "<code>: field <field>: <detail>" when the spec names a field: the codes of the spec unchanged, so the
@@ -42,6 +43,16 @@ type PaymentScope struct {
 	setting *GateSetting
 	wallet  *GateWallet
 	facts   map[string]any
+	cc      *ChainConfig // the chain and keyset view the scope was found with (for the destination of a rebalance)
+	kv      *KeysetView
+}
+
+// destinationWallet returns the Gate-governed wallet whose hot shard holds addr on the scope's chain, or nil.
+func (s *PaymentScope) destinationWallet(addr string) *GateWallet {
+	if s == nil || s.setting == nil || addr == "" {
+		return nil
+	}
+	return s.setting.walletFor(s.cc, s.kv, "", addr)
 }
 
 // Governed reports whether the job pays from a Gate-governed wallet.
@@ -109,7 +120,7 @@ func (r *GateRule) Scope(ctx context.Context, cc *ChainConfig, kv *KeysetView, j
 	if err != nil {
 		return nil, err
 	}
-	sc := &PaymentScope{setting: s}
+	sc := &PaymentScope{setting: s, cc: cc, kv: kv}
 	if w := s.walletFor(cc, kv, i.PartitionID, info.Sender); w != nil {
 		sc.WalletID, sc.wallet = w.WalletID, w
 	}

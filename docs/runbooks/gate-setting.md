@@ -58,4 +58,5 @@ Each checker keeps the credentials it accepted in `gate_credentials_used` (its o
 | jobs refused `credential_missing` | a payment from a Gate-governed wallet without a credential (approvals do not replace it) | send it through the signing API with a credential, or remove the wallet from the setting |
 | `kid_unknown` at a cosigner only | the cosigner is on an older version | run `gate-apply` again for it |
 | `fast_lane_cap` | above a per-payment, hourly or daily limit | wait, or sign a new version with other limits |
+| `policy_gate_rebalance` | a rebalance from a Gate-governed wallet to a wallet that is not Gate-governed in this checker's setting | none needed if expected; the core plans none from a Gate wallet to a non-Gate one, and after such a refusal (its `gate.wallets` and the signed setting differ) plans none from that shard for an hour, with an `ALERT gate` log line: make the two equal |
 | `wallet_not_gate_governed` | a credential, or an EIP-3009 authorization, for a wallet that is not in this checker's setting | check the version on every checker and the partition named |

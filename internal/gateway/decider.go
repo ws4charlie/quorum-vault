@@ -626,6 +626,15 @@ func (d *Decider) policy(ctx context.Context, gt *GuardTx, job signjob.Job, cc *
 		if !codec.OwnsSender(info.Sender) {
 			return reject(ReasonCancelTarget, "%s is not a hot address of this gateway", info.Sender)
 		}
+		if scope.Governed() {
+			// Money of a Gate-governed wallet stays under Gate: a rebalance from it pays only another Gate-governed wallet (its hot shard, read from
+			// the destination the transaction pays), never a shard whose payments need only human approvals.
+			to := scope.destinationWallet(info.Destination)
+			if to == nil || to.WalletID == scope.WalletID {
+				return reject(ReasonGateRebalance, "%s pays from Gate-governed wallet %s: a rebalance from it may pay only another Gate-governed wallet, not %s",
+					info.Sender, scope.WalletID, info.Destination)
+			}
+		}
 		if !known {
 			n, err := gt.CountSince(ctx, "rebalance", now.Add(-time.Hour))
 			if err != nil {

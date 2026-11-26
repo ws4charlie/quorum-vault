@@ -386,7 +386,7 @@ func TestGateFourNegatives(t *testing.T) {
 // ---- the proof ----
 
 // For a Gate-governed wallet, every kind the decider accepts on an EVM chain, with every human approval and no credential: the internal kinds are
-// signed as today, every payment kind is refused. Same in cosigner mode. Then the same internal kinds carrying a credential are refused (a credential
+// signed as today (but a rebalance to a shard that is not Gate-governed, GC2b), every payment kind is refused. Same in cosigner mode. Then the same internal kinds carrying a credential are refused (a credential
 // rides only on a payment), and a credential-less payment of the other partition of the same address is refused too (the wallet is the shard).
 func TestNoPathSignsAGateGovernedPaymentWithoutACredential(t *testing.T) {
 	z := newGateZone(t, 84532)
@@ -398,34 +398,35 @@ func TestNoPathSignsAGateGovernedPaymentWithoutACredential(t *testing.T) {
 		name    string
 		job     func(id string, cred string) signjob.Job
 		payment bool
+		refused string // an internal kind the gate rule still refuses (a rebalance to a wallet that is not Gate-governed, GC2b)
 	}
 	cases := []tc{
-		{"withdrawal native", func(id, cred string) signjob.Job { return z.native(id, payee, big.NewInt(1000), cred, all...) }, true},
-		{"withdrawal token", func(id, cred string) signjob.Job { return z.token(id, payee, big.NewInt(1000), cred, all...) }, true},
+		{"withdrawal native", func(id, cred string) signjob.Job { return z.native(id, payee, big.NewInt(1000), cred, all...) }, true, ""},
+		{"withdrawal token", func(id, cred string) signjob.Job { return z.token(id, payee, big.NewInt(1000), cred, all...) }, true, ""},
 		{"withdrawal native, other partition of the same address", func(id, cred string) signjob.Job {
 			in := signjob.Intent{Kind: "withdrawal", RequestedBy: "req", ID: "w-" + id, PartitionID: testColdPartition, Asset: "ETH", To: payee.Hex(), Amount: "1000", Credential: cred}
 			return z.job(id, in, z.ethTx(payee, 1000, z.nextNonce()), all...)
-		}, true},
+		}, true, ""},
 		{"eip3009", func(id, cred string) signjob.Job {
 			now := z.clock().Unix()
 			j := z.authorization(id, payee, big.NewInt(1000), now-5, now+300, cred)
 			j.Approvals = z.approvals(x402Intent(t, j), all...)
 			return j
-		}, true},
+		}, true, ""},
 		{"sweep", func(id, cred string) signjob.Job {
 			sweep.nonce = z.nextNonce()
 			return z.job(id, signjob.Intent{Kind: "sweep", ID: "s-" + id, Asset: "ETH", From: from.Hex(), To: addrDest.Hex(), Amount: "5", Credential: cred}, sweep, all...)
-		}, false},
+		}, false, ""},
 		{"cancel", func(id, cred string) signjob.Job {
 			return z.job(id, signjob.Intent{Kind: "cancel", ID: "c-" + id, Asset: "ETH", To: z.hot.Hex(), Amount: "0", Credential: cred}, z.cancelTx(z.nextNonce()), all...)
-		}, false},
+		}, false, ""},
 		{"to-cold", func(id, cred string) signjob.Job {
 			return z.job(id, signjob.Intent{Kind: "to-cold", ID: "tc-" + id, PartitionID: testColdPartition, Asset: "ETH", To: addrCold.Hex(), Amount: "10", Credential: cred}, z.ethTx(addrCold, 10, z.nextNonce()), all...)
-		}, false},
+		}, false, ""},
 		{"rebalance", func(id, cred string) signjob.Job {
 			return z.job(id, signjob.Intent{Kind: "rebalance", ID: "rb-" + id, PartitionID: testColdPartition, Asset: "ETH", To: addrShard2.Hex(), Amount: "10", Credential: cred},
 				z.ethTx(addrShard2, 10, z.nextNonce()), all...)
-		}, false},
+		}, false, ReasonGateRebalance},
 	}
 	for i, c := range cases {
 		j := c.job(fmt.Sprintf("p%d", i), "")
@@ -434,8 +435,8 @@ func TestNoPathSignsAGateGovernedPaymentWithoutACredential(t *testing.T) {
 			want(t, c.name+" (gateway)", gw, string(gatecred.CredentialMissing), "")
 			want(t, c.name+" (cosigner)", co, string(gatecred.CredentialMissing), "")
 		} else {
-			want(t, c.name+" (gateway)", gw, "", "")
-			want(t, c.name+" (cosigner)", co, "", "")
+			want(t, c.name+" (gateway)", gw, c.refused, "")
+			want(t, c.name+" (cosigner)", co, c.refused, "")
 		}
 	}
 	// A credential on an internal kind is refused: it is a permission for a payment only.
@@ -454,8 +455,8 @@ func TestNoPathSignsAGateGovernedPaymentWithoutACredential(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("%d payment intents were signed without a credential", n)
 	}
-	if got := z.signer.calls.Load(); got != 4 {
-		t.Fatalf("the signer was called %d times, want 4 (the internal kinds)", got)
+	if got := z.signer.calls.Load(); got != 3 {
+		t.Fatalf("the signer was called %d times, want 3 (sweep, cancel, to-cold)", got)
 	}
 }
 
@@ -841,4 +842,41 @@ func TestGateFactsOnTheZonesOwnRefusals(t *testing.T) {
 	if g["credential_id"] != parsed.CredentialID || g["code"] != ReasonDestination || g["wallet_id"] != z.wallet || g["payment"] == nil {
 		t.Fatalf("gate facts %v", g)
 	}
+}
+
+// ---- GC2b: a rebalance out of a Gate-governed wallet pays only another Gate-governed wallet ----
+
+func TestGateRebalanceOnlyToAnotherGateWallet(t *testing.T) {
+	shard2 := GateWalletFile{WalletID: "22222222-3333-4444-8555-666666666666", Partition: testShard2}
+	rebalance := func(z *gateZone, id string, amount int64) signjob.Job {
+		return z.job(id, signjob.Intent{Kind: "rebalance", ID: "rb-" + id, PartitionID: testColdPartition, Asset: "ETH", To: addrShard2.Hex(), Amount: fmt.Sprint(amount)},
+			z.ethTx(addrShard2, amount, z.nextNonce()), "alice", "bob")
+	}
+	both := func(z *gateZone, what string, j signjob.Job, code string) {
+		t.Helper()
+		want(t, what+" (gateway)", z.gate(j), code, "")
+		want(t, what+" (cosigner)", z.cosign(j), code, "")
+	}
+
+	// Governed source, destination not governed: refused, approvals or not.
+	z := newGateZone(t, 84532)
+	z.govern()
+	both(z, "governed to not governed", rebalance(z, "a1", 10), ReasonGateRebalance)
+	// Governed to governed: signed.
+	f := z.settingFile()
+	f.Wallets = append(f.Wallets, shard2)
+	z.apply(f)
+	both(z, "governed to governed", rebalance(z, "a2", 10), "")
+	// To cold from a governed wallet: unchanged.
+	both(z, "to-cold from governed", z.job("a3", signjob.Intent{Kind: "to-cold", ID: "tc-a3", PartitionID: testColdPartition, Asset: "ETH", To: addrCold.Hex(), Amount: "10"},
+		z.ethTx(addrCold, 10, z.nextNonce())), "")
+
+	// Source not governed, destination governed: unchanged.
+	z2 := newGateZone(t, 84532)
+	z2.apply(GateSettingFile{Audience: gatecredtest.VectorsAudience, Keys: []GateKeyFile{{KID: z2.keys[0].KID, PublicKey: b64(z2.keys[0].Pub)}},
+		Wallets: []GateWalletFile{shard2}})
+	both(z2, "not governed to governed", rebalance(z2, "b1", 10), "")
+	// And with no Gate setting at all: unchanged.
+	z3 := newGateZone(t, 84532)
+	both(z3, "no gate setting", rebalance(z3, "c1", 10), "")
 }
