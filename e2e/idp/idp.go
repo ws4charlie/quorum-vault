@@ -54,7 +54,7 @@ type cachedTok struct {
 func Init() error {
 	os.Setenv("QV_ENV", "test")
 	os.Setenv("QV_OIDC_AUDIENCE", audience)
-	os.Setenv("QV_OIDC_SERVICE_CLIENTS", "qv-guardian")
+	os.Setenv("QV_OIDC_SERVICE_CLIENTS", "qv-guardian,agentgate") // agentgate: the signing API for AgentGate (e2e/custody gate_test.go)
 	if u := strings.TrimRight(os.Getenv("QV_E2E_KEYCLOAK_URL"), "/"); u != "" {
 		kc = u
 		os.Setenv("QV_OIDC_ISSUER", u+"/realms/"+realm)
@@ -118,6 +118,15 @@ func ServiceBearer(client string) string {
 		panic(fmt.Sprintf("idp: service token for %s: %v", client, err))
 	}
 	return "Bearer " + t
+}
+
+// GateBearer returns a client-credentials token of AgentGate's client (azp agentgate) with its only role, gate. The core accepts it on the signing API
+// only together with AgentGate's client certificate (pkitest.ServiceClient("agentgate")). Test issuer only: the dev realm has no agentgate client.
+func GateBearer() string {
+	if issuer == nil {
+		panic("idp: GateBearer needs the test issuer (QV_E2E_KEYCLOAK_URL unset): the dev realm has no agentgate client")
+	}
+	return "Bearer " + issuer.Token(authtest.Spec{Sub: "service-account-agentgate", Client: "agentgate", Service: true, Roles: []string{"gate"}})
 }
 
 // SetHeaders turns an X-Actor entry of hdr into the bearer token of that person, so a test names who acts.

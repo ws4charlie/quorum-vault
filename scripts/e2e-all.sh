@@ -49,6 +49,7 @@ e2e-sol-cold-moves-crash|psi|150|3|make test-e2e-sol-cold-moves-crash
 e2e-sol-nonces|psi|90|3|make test-e2e-sol-nonces
 e2e-evm-identity|paik|100|3|make test-e2e-evm-identity
 e2e-x402|pa|45|3|make test-e2e-x402
+e2e-evm-gate|pai|120|3|make test-e2e-evm-gate
 e2e-tee-sim|pai|300|3|make test-e2e-tee-sim
 e2e-load-smoke|pai|60|3|make load-smoke
 e2e-approval-web|paik|90|3|make test-e2e-approval-web
