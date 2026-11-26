@@ -51,9 +51,34 @@
 | [EVM](docs/zh/evm.md) · [Bitcoin](docs/zh/bitcoin.md) · [Solana](docs/zh/solana.md) | 每条链各自的特殊之处 |
 | [Bitcoin 发送](docs/zh/bitcoin-sending.md) | 一笔 Bitcoin 交易怎么上链：加价余量、替换、取消、子交易和批量 |
 | [身份](docs/zh/identity.md) | 谁能调用 API，登录怎么证明 |
+| [Gate 凭证](docs/zh/gate-credential.md) | AgentGate 批准的付款：凭证、检查和签名接口 |
 | [审计记录](docs/zh/audit.md) | 记下每个决定，事后没法悄悄改 |
 | [测试](docs/zh/testing.md) | 怎么测，包括崩溃和攻击 |
 | [局限](docs/zh/limits.md) | 目前还做不到的事 |
+
+## AgentGate 批准的付款
+
+AgentGate 决定 AI 代理能不能付钱；QuorumVault 保管钱并签名。运维人员把某个热钱包标为受 Gate 管控后，Vault 只给带凭证的付款签名：凭证由 AgentGate 签发，只对这一笔付款有效，几分钟后过期。AgentGate 只调用一个接口 `POST /v2/gate/signatures`；Vault 从不调用 AgentGate。目前这个接口只签 Base Sepolia 上的 x402 许可（EIP-3009 `transferWithAuthorization`）。
+
+在任何密钥签名之前，网关和每个协签程序都会检查凭证：
+
+- 是 AgentGate 的密钥签的，写的是本部署和这个钱包。
+- 还在有效期内，而且有效期很短。
+- 链、代币、收款方和金额，与签名方从将要签的字节里解出来的完全一致。
+- 它的 `credential_id` 没用过。
+- 金额在这个钱包的单笔、每小时和每天限额以内。
+
+钱包清单、AgentGate 的公钥和限额是一份设置，要两名签名区运维人员签字。两侧共同遵守的约定是[规范](docs/zh/gate-credential.md)和它的[测试向量](testdata/gate-credential/vectors.json)。
+
+演示在本地链上用两方 MPC 签名方把整条路跑一遍。先完成“试一试”里的准备，再启动 Temporal 和 Redpanda，然后运行：
+
+```bash
+make infra-up
+```
+
+```bash
+make test-e2e-evm-gate
+```
 
 ## 试一试
 

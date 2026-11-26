@@ -50,6 +50,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"github.com/ws4charlie/quorum-vault/e2e/phasetime"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
+	"github.com/ws4charlie/quorum-vault/internal/chain/evm/evmtest"
 	"github.com/ws4charlie/quorum-vault/internal/custody"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
@@ -184,6 +185,10 @@ type opts struct {
 	// keysets gives the signing zone an operators section (three operators, two must sign: s.ops) so qv-keysets can change keyset states, and the business
 	// config short drain timings (drain_test.go).
 	keysets bool
+	// gate is the GATE-CONNECT demo (gate_test.go): the node takes chain id 84532 (Base Sepolia) for the test, USDT is the EIP-3009 test token, the
+	// business config and the zone sign x402 authorizations of USDT on shard 0, which is a Gate-governed wallet (gateDemoWallet), and the zone has two
+	// operators (op1, op2) to sign its gate setting. The test signs and applies that setting itself (gate_test.go).
+	gate bool
 }
 
 // routeOpts are the health rules of the mpc_route section (zero: the gateway's defaults).
@@ -283,9 +288,11 @@ type system struct {
 	cf                        custody.File // the files as written, so a test can change one and restart
 	gf                        gateway.File
 	cosPath                   string
-	metricsPath               string // the gateway's MPC route metrics file (mpc mode with opts.route)
-	cosGuardDSN               string // B's cosigner's replay guard
-	cosCGuardDSN              string // C's cosigner's own replay guard
+	metricsPath               string         // the gateway's MPC route metrics file (mpc mode with opts.route)
+	cosGuardDSN               string         // B's cosigner's replay guard
+	cosCGuardDSN              string         // C's cosigner's own replay guard
+	base                      *evmtest.Node  // opts.gate: the node as Base Sepolia (its facilitator account submits authorizations)
+	x402                      *evmtest.Token // opts.gate: the EIP-3009 token, also s.usdt
 	chainName                 string
 	queue                     string
 
@@ -333,7 +340,11 @@ func (s *system) mustSend(key *ecdsa.PrivateKey, to *common.Address, value *big.
 		s.t.Fatal(err)
 	}
 	tip := big.NewInt(2e9)
-	tx := types.NewTx(&types.DynamicFeeTx{ChainID: big.NewInt(11155111), Nonce: nonce, GasTipCap: tip,
+	chainID := big.NewInt(11155111)
+	if s.o.gate {
+		chainID = big.NewInt(evmtest.BaseSepoliaChainID)
+	}
+	tx := types.NewTx(&types.DynamicFeeTx{ChainID: chainID, Nonce: nonce, GasTipCap: tip,
 		GasFeeCap: new(big.Int).Add(new(big.Int).Mul(h.BaseFee, big.NewInt(2)), tip), Gas: gas * 12 / 10, To: to, Value: value, Data: data})
 	signed, err := types.SignTx(tx, types.LatestSignerForChainID(tx.ChainId()), key)
 	if err != nil {
@@ -415,6 +426,10 @@ func newSystem(t *testing.T, o opts) *system {
 	t.Cleanup(s.rc.Close)
 	_ = s.rc.CallContext(s.ctx, nil, "evm_setAutomine", true)
 	s.ec = ethclient.NewClient(s.rc)
+	if o.gate { // the lane's node stands in for Base Sepolia; its chain id goes back to 11155111 when the test ends, after every process has stopped
+		t.Setenv("QV_ANVIL_RPC", s.rpcURL)
+		s.base = evmtest.Anvil(t, evmtest.BaseSepoliaChainID)
+	}
 
 	if mpcMode() { // the two parties take about a second to boot: they start now, while the databases and the chain are set up, and are waited for below
 		s.mpc = mpcstack.Start3(t, filepath.Join(dir, "mpc"), mpcBin, mpcstack.Opts{Proxy: o.mpcProxy, TEE: teeOptsFor(o)})
@@ -450,7 +465,12 @@ func newSystem(t *testing.T, o opts) *system {
 		adminAddr = s.cold.addr
 	}
 	s.factory = s.mustSend(s.deployer, nil, new(big.Int), evm.FactoryDeployData(common.Address{}, adminAddr, crypto.PubkeyToAddress(s.guardian.PublicKey))).ContractAddress
-	s.usdt = s.mustSend(s.deployer, nil, new(big.Int), readBin(t, "UsdtLike.bin")).ContractAddress
+	if o.gate {
+		s.x402 = s.base.DeployToken(t, "USDC") // name "USDC", version "2", 6 decimals: the EIP-712 domain of Circle's USDC
+		s.usdt = s.x402.Address
+	} else {
+		s.usdt = s.mustSend(s.deployer, nil, new(big.Int), readBin(t, "UsdtLike.bin")).ContractAddress
+	}
 
 	s.tm.Phase("chain")
 	// Hot shards: HSM keys that never leave the token, or (mpc mode) one 2-of-3 keyset per shard whose shares live in
@@ -565,11 +585,23 @@ func newSystem(t *testing.T, o opts) *system {
 		cf.Cold.PlanInterval = "1s"
 		cf.Cold.Drain = custody.DrainFile{Window: sd(20 * time.Second), RetryAfter: sd(4 * time.Second)}
 	}
+	if o.gate {
+		cf.Chain.ChainID = evmtest.BaseSepoliaChainID
+		cf.Chain.X402 = map[string]custody.X402File{"USDT": {Name: "USDC", Version: "2", MaxWindowSeconds: 600, PerPaymentLimit: "500000"}}
+	}
 	s.cf = cf
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
 	writeJSON(t, s.cfgPath, cf)
 	if s.cfg, err = custody.LoadConfig(s.cfgPath); err != nil {
 		t.Fatal(err)
+	}
+	if o.gate { // the Gate-governed wallet is USDT's shard 0, named by its partition id, which the loaded config knows
+		cf.Gate = &custody.GateFile{Audience: gateDemoAudience, Wallets: map[string]custody.GateWalletFile{gateDemoWallet: {Partition: s.cfg.PartitionKey("USDT", 0).String()}}}
+		s.cf = cf
+		writeJSON(t, s.cfgPath, cf)
+		if s.cfg, err = custody.LoadConfig(s.cfgPath); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Signing-zone config: separate file, separate trust.
@@ -598,6 +630,12 @@ func newSystem(t *testing.T, o opts) *system {
 					Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}, {MinAmount: "2000000000", Approvals: 2}}},
 			},
 			SweepsPerHour: 100000, WithdrawalsPerHour: 100000, CancelsPerHour: 1000, ToColdPerHour: 1000, RebalancePerHour: 1000}},
+	}
+	if o.gate {
+		e := gf.Chains[s.chainName].EVM
+		e.ChainID = evmtest.BaseSepoliaChainID
+		e.X402 = map[string]gateway.X402File{"USDT": {Name: "USDC", Version: "2", MaxWindowSeconds: 600, PerPaymentLimit: "500000"}}
+		gf.Operators = s.newOperators()
 	}
 	if len(o.gwETHDest) > 0 {
 		a := gf.Chains[s.chainName].Assets["ETH"]
@@ -913,7 +951,11 @@ func (s *system) startWorker(failpoint string) {
 func (s *system) startCore() {
 	port := freePort(s.t)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	s.core = s.spawn("qv-core", nil, append([]string{"-config", s.cfgPath, "-dsn", s.bizDSN, "-addr", addr, "-task-queue", s.queue}, pkitest.CoreArgs()...)...)
+	args := []string{"-config", s.cfgPath, "-dsn", s.bizDSN, "-addr", addr, "-task-queue", s.queue}
+	if s.o.gate { // as the qv-business chart does with agentgate.enabled: AgentGate's certificate joins the core's service allow-list
+		args = append(args, "-service-allow", "business/guardian,business/worker,business/agentgate")
+	}
+	s.core = s.spawn("qv-core", nil, append(args, pkitest.CoreArgs()...)...)
 	s.apiURL = "https://" + addr
 	s.waitFor(30*time.Second, "qv-core listening", func() bool {
 		resp, err := pkitest.PeopleClient().Get(s.apiURL + "/v2/reconcile")
