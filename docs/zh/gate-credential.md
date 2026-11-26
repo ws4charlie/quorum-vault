@@ -4,7 +4,7 @@
 
 AgentGate 决定 AI 智能体能不能付款，QuorumVault 持有能付款的密钥。Gate 授权凭证是把两者连起来的唯一文件：一份短寿命、带签名、只对一笔付款有效的许可。签名区只有在凭证验证通过时，才会签 Gate 管控钱包的付款。本页是合同：AgentGate 和 QuorumVault 各自按本页和共享的[测试向量](#测试向量)实现自己这一侧，互不引用对方的代码。
 
-状态：验证包、测试向量、EIP-3009 类型和签名区的检查（第 0 到 13 项，网关和每个协签程序都执行）已完成。签名接口在此写明，由后续任务实现，下文已标注。
+状态：验证包、测试向量、EIP-3009 类型和签名区的检查（第 0 到 13 项，网关和每个协签程序都执行）已完成。签名接口已支持 `evm_eip3009`；`evm_transfer` 留给后续版本。
 
 ## 凭证
 
@@ -107,21 +107,44 @@ Vault 解析将要签名的载荷，从字节里得到付款 `{chain, asset, pay
 
 ## 签名接口
 
-*由后续任务实现；形态在此固定。* 调用方向是 Gate 调 Vault；Vault 从不调 Gate。调用方是 AgentGate 服务，用它自己的客户端证书认证，角色只允许这一个调用。
+调用方向是 Gate 调 Vault；Vault 从不调 Gate。核心只提供这一个调用，自己不做决定：凭证放在签名任务里送到签名区，每个检查方按上面的检查，对照自己解析出的内容核对。
 
-**请求。** 一个 JSON 对象：`wallet_id`；`kind`，取 `evm_transfer` 或 `evm_eip3009`；`payload`，要签的内容（`evm_transfer` 是未签名交易，`evm_eip3009` 是 EIP-712 类型化数据；具体编码随接口一起确定）；`credential`，即上述凭证对象。
+**调用方。** AgentGate 服务，同时出示两样证明：它的客户端证书，名字是 `spiffe://quorumvault/business/agentgate`，由 Vault 的业务区证书机构签发；以及 Vault 身份提供方签发的客户端凭据令牌，带角色 `gate`。这个角色只允许这一个调用。持有这个角色、或出示这张证书的调用方，在其他所有接口上都被拒绝，记为 `client_not_authorized`；这个接口也以同样方式拒绝其他所有调用方。
 
-**响应。** 成功返回 200，带 `credential_id`、`wallet_id`、`kind` 和签名。拒绝时返回错误对象，含 `code`（取自上表）、有则带 `field`，以及一条消息；绝不返回签名。
+**请求。** `POST /v2/gate/signatures`，一个 JSON 对象。出现其他成员即被拒绝。
+
+| 成员 | 取值 |
+|:---|:---|
+| `wallet_id` | 付款的 Gate 管控钱包。小写 UUID 文本 |
+| `kind` | `evm_eip3009`。`evm_transfer` 留给后续版本，现在记为 `request_invalid` 拒绝 |
+| `payload` | `evm_eip3009` 时：授权的 EIP-712 类型化数据（见下） |
+| `credential` | 凭证，作为 JSON 对象（不是字符串） |
+
+**`evm_eip3009` 的载荷。** `eth_signTypedData_v4` 形式的类型化数据：一个对象，恰好含 `types`、`primaryType`、`domain`、`message`。
+
+| 成员 | 取值 |
+|:---|:---|
+| `types` | 恰好两项。`EIP712Domain`：`name` string、`version` string、`chainId` uint256、`verifyingContract` address。`TransferWithAuthorization`：`from` address、`to` address、`value` uint256、`validAfter` uint256、`validBefore` uint256、`nonce` bytes32。都按这个顺序 |
+| `primaryType` | `TransferWithAuthorization` |
+| `domain` | 代币合约的 `name` 和 `version`（Base Sepolia 上的 USDC：`USDC`、`2`），`chainId` 是 JSON 数字，`verifyingContract` 是代币地址 |
+| `message` | 每个值都是字符串。`from`、`to`：`0x` 地址，全小写或校验和正确。`value`、`validAfter`、`validBefore`：不带前导零的十进制。`nonce`：`0x` 加 64 位十六进制 |
+
+`from` 必须是付款钱包的地址，代币必须是这个钱包的资产。`validAfter` 早于 `validBefore`，`validBefore` 在未来、且离 Vault 时钟不超过该代币的最长窗口，并且窗口落在凭证的有效期内（第 11 项检查）。Vault 签的是它按这些值重新构造的类型化数据，而不是收到的字节。被拒绝的授权，其 EIP-3009 `nonce` 仍记在 Vault，所以重新尝试时，除了新凭证，还要换一个新的 nonce。
+
+**响应。** 成功返回 200，带 `credential_id`、`wallet_id`、`kind` 和 `signature`：`r`、`s`、`v` 连在一起，65 字节，`0x` 十六进制，`s` 取低值，`v` 为 27 或 28。这正是 `transferWithAuthorization` 和 x402 接受的形式。拒绝时返回一个对象，含 `code`、有则带 `field`，以及 `message`；绝不返回签名。
 
 | 状态码 | 错误码 |
 |:---|:---|
 | 400 | `request_invalid`、`credential_missing`、`credential_malformed` |
+| 401 | `client_not_authorized`：没有有效令牌 |
 | 403 | `client_not_authorized`、`wallet_not_gate_governed`、`kid_unknown`、`signature_invalid`、`audience_mismatch`、`wallet_mismatch`、`ttl_too_long`、`not_yet_valid`、`expired`、`payment_mismatch`、`authorization_window`、`fast_lane_cap` |
 | 409 | `replayed` |
-| 422 | `payload_invalid`（签名区无法把载荷解析成这个类型的付款） |
-| 503 | 重试可能成功的拒绝，例如某个检查方连不上 |
+| 422 | `payload_invalid`（载荷无法解析成这个钱包、这个类型的付款） |
+| 503 | `retry_later`：还没有任何决定（签名区在等待时间内没有答复、资金还没空出来、某个存储连不上）。`signing_failed`：签名区的签名程序出错，或签名区以本表没有列出的理由拒绝 |
 
-**按 `credential_id` 幂等。** 同一个请求再来一次（`wallet_id`、`kind`、`payload` 和凭证都相同）返回已保存的结果，绝不会第二次签名。同一个 `credential_id` 配不同的载荷，记为 `replayed` 拒绝。只保存成功的结果。如果签名已经产生、但答复在保存前丢了，重试会被检查方拒绝；这时 Gate 要用新的 `credential_id` 重新生成一份凭证。
+**核心检查什么。** 只做代价小、且只会拒绝的检查：请求的形态；钱包在核心自己的配置里是 Gate 管控钱包；凭证能解析，指向本部署和这个钱包，新请求的凭证还没过期；载荷按上面的规则能解析；单笔限额和付款分片的可用资金。签名区的拒绝原样带回签名区的错误码和字段。
+
+**按 `credential_id` 幂等。** 同一个请求再来一次（`wallet_id`、`kind`、`payload` 和凭证都相同；JSON 的排版不影响）返回已保存的答复，或者等待同一个签名任务：绝不会产生第二个任务。同一个 `credential_id` 配不同的请求，记为 `replayed` 拒绝。成功的答复，以及每一个来自决定的拒绝（4xx 和 `signing_failed`），都会保存，重复请求时原样返回；Gate 要再试，就生成一份新凭证，用新的 `credential_id`。`retry_later` 不保存：同一个请求可以再发，继续同一个任务。如果签名已经产生、但答复丢了，重试同一个请求会拿到它：核心从任务中读出签名，不会第二次签名。
 
 ## 重放记录与审计
 

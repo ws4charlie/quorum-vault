@@ -58,6 +58,12 @@ var (
 	ErrX402Conflict      = errors.New("custody: x402 request id reused with a different request")
 	// ErrX402InsufficientFunds: the paying shard's free balance (what freeHot says, open authorizations included) is below the amount.
 	ErrX402InsufficientFunds = errors.New("custody: x402: insufficient free funds on the paying shard")
+	// ErrX402Amount: the amount is not in (0, the token's per-payment limit].
+	ErrX402Amount = errors.New("custody: x402: amount out of bounds")
+	// ErrX402Window: the window is empty, too long, already over, or ends too far ahead of now.
+	ErrX402Window = errors.New("custody: x402: window out of bounds")
+	// ErrX402Payee: the payee is not an address.
+	ErrX402Payee = errors.New("custody: x402: bad payee")
 )
 
 // X402Authorization is a row of x402_authorizations.
@@ -100,11 +106,18 @@ func scanX402(row pgx.Row) (X402Authorization, error) {
 type X402Request struct {
 	ID          string
 	Asset       string
+	// Partition is the hot shard that pays (a hot partition of Asset on this chain). Empty: the token's configured x402 shard.
+	Partition string
+	// Credential is the Gate credential's text exactly as Gate sent it (docs/gate-credential.md). It travels to the zone in the job's intent and is
+	// not part of what approvers sign. Empty for a caller that has none: a zone that needs one refuses.
+	Credential []byte
 	Payee       string
 	Amount      *big.Int
 	ValidAfter  uint64
 	ValidBefore uint64
 	Nonce       [32]byte
+	// KeepNonce signs Nonce as given, all-zero included (the signing API: the nonce is the caller's). Without it a zero Nonce is drawn at random.
+	KeepNonce bool
 }
 
 func (r X402Request) bodyHash(payee string) []byte {
@@ -131,10 +144,10 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 	}
 	payee, err := NormalizeAddress(r.Payee)
 	if err != nil {
-		return a, false, fmt.Errorf("custody: x402 payee: %w", err)
+		return a, false, fmt.Errorf("%w: %v", ErrX402Payee, err)
 	}
 	if r.Amount == nil || r.Amount.Sign() <= 0 || r.Amount.Cmp(x.PerPaymentLimit) > 0 {
-		return a, false, fmt.Errorf("custody: x402 amount %v must be in (0, %s]", r.Amount, x.PerPaymentLimit)
+		return a, false, fmt.Errorf("%w: %v must be in (0, %s]", ErrX402Amount, r.Amount, x.PerPaymentLimit)
 	}
 	body := r.bodyHash(payee)
 	// An id that exists is answered first, whatever the clock says now: a retry after validBefore gets the stored row, another request under the id is a
@@ -144,15 +157,21 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 	}
 	now := uint64(s.Now().Unix())
 	if r.ValidBefore <= now || r.ValidBefore <= r.ValidAfter || r.ValidBefore-r.ValidAfter > x.MaxWindowSeconds || r.ValidBefore > now+x.MaxWindowSeconds {
-		return a, false, fmt.Errorf("custody: x402 window (%d, %d) is not within %d s of now %d", r.ValidAfter, r.ValidBefore, x.MaxWindowSeconds, now)
+		return a, false, fmt.Errorf("%w: (%d, %d) is not within %d s of now %d", ErrX402Window, r.ValidAfter, r.ValidBefore, x.MaxWindowSeconds, now)
 	}
 	nonce := r.Nonce
-	if nonce == ([32]byte{}) {
+	if nonce == ([32]byte{}) && !r.KeepNonce {
 		if _, err := rand.Read(nonce[:]); err != nil {
 			return a, false, err
 		}
 	}
 	part := c.PartitionKey(r.Asset, c.X402Shard[r.Asset]).String()
+	if r.Partition != "" {
+		if !c.isHotPartitionOf(r.Partition, r.Asset) {
+			return a, false, fmt.Errorf("custody: x402: %q is not a hot shard of %s on this chain", r.Partition, r.Asset)
+		}
+		part = r.Partition
+	}
 	// The payer is the address of the shard's active key generation, as for every other payment, never the configured address.
 	payerAddr, _, err := s.ShardAddressOf(part)
 	if err != nil {
@@ -203,7 +222,9 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 			Amount: r.Amount, ExpiresAt: &exp, Metadata: map[string]any{"x402": r.ID, "payee": payee, "nonce": a.Nonce}}); err != nil {
 			return err
 		}
-		ib, err := json.Marshal(s.x402Intent(a))
+		in := s.x402Intent(a)
+		in.Credential = string(r.Credential)
+		ib, err := json.Marshal(in)
 		if err != nil {
 			return err
 		}
@@ -211,6 +232,16 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 		return EnqueueUnsigned(ctx, tx, jobID, part, u, ib, nil)
 	})
 	return a, created, err
+}
+
+// isHotPartitionOf reports whether id is one of this chain's hot shards of asset.
+func (c *Config) isHotPartitionOf(id, asset string) bool {
+	for i := range c.HotShards {
+		if c.PartitionKey(asset, i).String() == id {
+			return true
+		}
+	}
+	return false
 }
 
 // x402Existing returns the row of id when there is one: the same request gives the row, another request under the id is ErrX402Conflict.
@@ -492,7 +523,7 @@ func (s *Service) x402Pending(ctx context.Context, q booksQ, rr any, h uint64, a
 	return "", nil
 }
 
-// RunX402 is the worker's loop: SettleX402 every interval until ctx ends. A failed pass is logged and tried again; the pass repeats harmlessly.
+// RunX402 is the worker's loop: SettleX402 (and PruneGateRequests) every interval until ctx ends. A failed pass is logged and tried again; the pass repeats harmlessly.
 func (s *Service) RunX402(ctx context.Context, interval time.Duration, log *slog.Logger) {
 	if len(s.Cfg.EVM.X402) == 0 {
 		return
@@ -504,6 +535,12 @@ func (s *Service) RunX402(ctx context.Context, interval time.Duration, log *slog
 			log.Error("x402 settle pass failed", "error", err.Error())
 		} else if res != (X402Settled{}) {
 			log.Info("x402 authorizations settled", "used", res.Used, "expired", res.Expired, "refused", res.Refused)
+		}
+		// The signing API's request rows (gate.go) are pruned in the same pass: the API serves only x402 authorizations.
+		if n, err := s.PruneGateRequests(ctx); err != nil {
+			log.Error("gate request pruning failed", "error", err.Error())
+		} else if n > 0 {
+			log.Info("gate requests pruned", "rows", n)
 		}
 		select {
 		case <-ctx.Done():

@@ -24,3 +24,7 @@ The core API is the one door into QuorumVault. People and services ask it for th
 4. Starts a [workflow](workflows.md) and answers at once; the caller reads the status later.
 
 An approval sent here is only passed along: the [signing zone](signing-zone.md) checks it itself.
+
+## AgentGate
+
+One caller is a service of another product: AgentGate, which decides whether an AI agent may make a payment. It may ask for one thing only, the signature of a payment from a Gate-governed wallet, and it brings a short-lived [credential](gate-credential.md) it issued for exactly that payment. It shows its own certificate and token, and every other request is refused to it. The core checks only the request's form and answers a repeat with the first answer; the signing zone checks the credential.

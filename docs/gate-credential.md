@@ -4,7 +4,7 @@
 
 AgentGate decides whether an AI agent may make a payment. QuorumVault holds the keys that make it. The Gate credential is the one document that joins them: a short-lived, signed permission for exactly one payment. The signing zone signs a payment from a Gate-governed wallet only when it carries a credential that verifies. This page is the contract; AgentGate and QuorumVault implement their sides from it and from the shared [test vectors](#test-vectors), and neither imports the other's code.
 
-Status: the verifier package, the vectors, the EIP-3009 kind and the zone checks (0 to 13, in the gateway and every cosigner) are done. The signing API is written here and built in a later task, marked below.
+Status: the verifier package, the vectors, the EIP-3009 kind and the zone checks (0 to 13, in the gateway and every cosigner) are done. The signing API is done for `evm_eip3009`; `evm_transfer` is kept for a later version.
 
 ## The credential
 
@@ -107,21 +107,44 @@ Above any limit the payment is refused as `fast_lane_cap`; there is no fallback 
 
 ## The signing API
 
-*Implemented in a later task; the shape is fixed here.* Gate calls Vault; Vault never calls Gate. The caller is the AgentGate service, authenticated by its own client certificate with a role that allows this one call.
+Gate calls Vault; Vault never calls Gate. The core serves this one call and decides nothing: the credential travels to the signing zone inside the sign job, and every checker runs the checks above against what it decodes.
 
-**Request.** One JSON object: `wallet_id`; `kind`, either `evm_transfer` or `evm_eip3009`; `payload`, the thing to sign (for `evm_transfer` the unsigned transaction, for `evm_eip3009` the EIP-712 typed data; the exact encodings are fixed with the API); and `credential`, the credential object as above.
+**Caller.** The AgentGate service, with two proofs at once: its client certificate, named `spiffe://quorumvault/business/agentgate` and issued by Vault's business certificate authority, and a client-credentials token from Vault's identity provider that carries the role `gate`. The role allows this one call. A caller that holds it or shows that certificate is refused on every other route as `client_not_authorized`, and this route refuses every other caller the same way.
 
-**Response.** On success, 200 with `credential_id`, `wallet_id`, `kind`, and the signature. On refusal, an error object with `code` (from the table), `field` when there is one, and a message; never a signature.
+**Request.** `POST /v2/gate/signatures` with one JSON object. Any other member is refused.
+
+| Member | Value |
+|:---|:---|
+| `wallet_id` | The Gate-governed wallet that pays. Lower-case UUID text |
+| `kind` | `evm_eip3009`. `evm_transfer` is kept for a later version and is refused as `request_invalid` |
+| `payload` | For `evm_eip3009`: the EIP-712 typed data of the authorization (below) |
+| `credential` | The credential, as a JSON object (not a string) |
+
+**Payload of `evm_eip3009`.** The typed data in the form of `eth_signTypedData_v4`: an object with exactly `types`, `primaryType`, `domain` and `message`.
+
+| Member | Value |
+|:---|:---|
+| `types` | Exactly two entries. `EIP712Domain`: `name` string, `version` string, `chainId` uint256, `verifyingContract` address. `TransferWithAuthorization`: `from` address, `to` address, `value` uint256, `validAfter` uint256, `validBefore` uint256, `nonce` bytes32. Each in this order |
+| `primaryType` | `TransferWithAuthorization` |
+| `domain` | The token contract's `name` and `version` (USDC on Base Sepolia: `USDC`, `2`), `chainId` as a JSON number, `verifyingContract` the token address |
+| `message` | Every value a string. `from` and `to`: `0x` addresses, all lower case or with a correct checksum. `value`, `validAfter`, `validBefore`: decimal without leading zeros. `nonce`: `0x` and 64 hex digits |
+
+`from` must be the paying wallet's address and the token must be the wallet's asset. `validAfter` is before `validBefore`, `validBefore` is in the future and at most the token's maximum window ahead of Vault's clock, and the window lies inside the credential's (check 11). Vault signs the typed data it rebuilds from these values, never the bytes it received. A refused authorization keeps its EIP-3009 `nonce` at Vault, so a new attempt needs a new nonce as well as a new credential.
+
+**Response.** On success, 200 with `credential_id`, `wallet_id`, `kind` and `signature`: `r`, `s` and `v` joined, 65 bytes as `0x` hex, `s` low and `v` 27 or 28. That is the form `transferWithAuthorization` and x402 take. On refusal, an object with `code`, `field` when there is one, and `message`; never a signature.
 
 | Status | Codes |
 |:---|:---|
 | 400 | `request_invalid`, `credential_missing`, `credential_malformed` |
+| 401 | `client_not_authorized`: no valid token |
 | 403 | `client_not_authorized`, `wallet_not_gate_governed`, `kid_unknown`, `signature_invalid`, `audience_mismatch`, `wallet_mismatch`, `ttl_too_long`, `not_yet_valid`, `expired`, `payment_mismatch`, `authorization_window`, `fast_lane_cap` |
 | 409 | `replayed` |
-| 422 | `payload_invalid` (the zone cannot decode the payload into a payment of this kind) |
-| 503 | a refusal that may succeed on retry, such as a checker being unreachable |
+| 422 | `payload_invalid` (the payload does not decode into a payment of this kind from this wallet) |
+| 503 | `retry_later`: nothing was decided yet (the zone has not answered within the wait, the funds are not free yet, a store could not be reached). `signing_failed`: the zone's signer failed, or the zone refused for a reason this table does not name |
 
-**Idempotency by `credential_id`.** The same request again (same `wallet_id`, `kind`, `payload` and credential) returns the stored result and never signs a second time. The same `credential_id` with a different payload is refused as `replayed`. Only successes are stored. If a signature was made but its answer was lost before it was stored, the retry is refused by the checkers; Gate then mints a new credential with a new `credential_id`.
+**What the core checks.** Only what is cheap and can only refuse: the request's shape; that the wallet is Gate-governed in the core's own configuration; that the credential parses, names this deployment and this wallet, and, for a new request, has not expired; that the payload decodes as above; the per-payment limit and the free funds of the paying shard. A zone refusal comes back with the zone's code and field.
+
+**Idempotency by `credential_id`.** The same request again (same `wallet_id`, `kind`, `payload` and credential; the layout of the JSON does not matter) returns the stored answer, or waits for the same signing job: never a second job. The same `credential_id` with a different request is refused as `replayed`. A success and every refusal that comes from a decision (4xx and `signing_failed`) is stored and returned unchanged to a repeat; Gate mints a new credential, with a new `credential_id`, to try again. `retry_later` is not stored: the same request may be sent again and continues the same job. If a signature was made but its answer was lost, the retry of the same request returns it: the core reads it from the job, and nothing is signed a second time.
 
 ## Replay records and audit
 

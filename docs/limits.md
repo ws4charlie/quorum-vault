@@ -57,6 +57,7 @@ This page lists what QuorumVault cannot do yet, so you don't have to find out th
 - **Solana is narrower.** Only the classic token program is credited, a very large customer base would need a different scan, and a cold ceremony that signs on a recent blockhash must finish within its short life.
 - **A cold address is pinned by configuration, not by a signed setting.** Switching to a new cold key is a reviewed deployment of the zone and the core with a restart; until both are changed, hot-to-cold moves are refused and tried again. A Bitcoin cold-to-cold move has no change output, so it is not fee-bumped, and an address with many outputs takes several rounds. On Solana, a payment that reaches the old address after its last step needs a new cold setup of that address before it can be moved ([runbook](runbooks/cold-key-replacement.md)).
 - **One refill per cold address at a time** on EVM and Bitcoin (on Solana, one per asset), and hot funding on Solana is booked by an operator call, not found by the scan.
+- **AgentGate can only ask for x402 permits.** Its signing API does not yet sign ordinary transfers, and the core cannot compare its list of Gate-governed wallets with the zone's signed one: the operator keeps the two equal ([runbook](runbooks/agentgate-client.md)).
 
 **Audit**
 - **The write-once store used in tests has no independent compliance assessment.** It proves our code against the storage interface, not a regulatory claim; production is meant to use AWS S3 Object Lock ([spike note](spikes/audit-worm.md)).

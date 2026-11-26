@@ -50,6 +50,12 @@ oidc:
   stepupAcr: aal3
   caSecret: ""                   # Secret holding the CA bundle of a private IdP (key `ca.crt`); empty for a public one
 serviceAllow: "business/guardian,business/worker"   # QV_CORE_SERVICE_ALLOW
+# AgentGate (docs/gate-credential.md, "The signing API"): on, its certificate name business/agentgate joins the core's service allow-list. It calls from outside
+# the cluster through the passthrough ingress (its client certificate must reach the core), with a client-credentials token of a client listed in
+# oidc.serviceClients that carries the role `gate`. The gate section of the custody config (the Secret above) says which wallets it may pay from.
+# Runbook: docs/runbooks/agentgate-client.md.
+agentgate:
+  enabled: false
 
 # --- Certificates: Secrets made by cert-manager (task D5), each with tls.crt, tls.key, ca.crt. Referenced by name. ---
 tls:

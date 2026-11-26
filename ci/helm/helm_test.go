@@ -368,3 +368,27 @@ func TestConfigMapsAreImmutableAndHashed(t *testing.T) {
 		}
 	}
 }
+
+// AgentGate's certificate name joins the core's service allow-list only when the chart says so.
+func TestAgentGateJoinsTheAllowListOnlyWhenOn(t *testing.T) {
+	allow := func(objs []Obj) string {
+		for _, o := range objs {
+			if o.Kind == "ConfigMap" && strings.Contains(o.Metadata.Name, "-core-env-") {
+				m := regexp.MustCompile(`QV_CORE_SERVICE_ALLOW: "?([^"\n]*)"?`).FindStringSubmatch(o.Raw)
+				if m != nil {
+					return m[1]
+				}
+			}
+		}
+		t.Fatal("no QV_CORE_SERVICE_ALLOW in the core's ConfigMap")
+		return ""
+	}
+	for _, vf := range valuesFiles {
+		if a := allow(render(t, vf.file)); strings.Contains(a, "agentgate") {
+			t.Errorf("%s: off by default, but the allow-list is %q", vf.file, a)
+		}
+		if a := allow(render(t, vf.file, "--set", "agentgate.enabled=true")); !strings.HasSuffix(a, ",business/agentgate") {
+			t.Errorf("%s: on, but the allow-list is %q", vf.file, a)
+		}
+	}
+}
