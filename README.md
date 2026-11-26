@@ -70,7 +70,11 @@ The gateway and every cosigner check each credential before any key signs:
 
 The wallet list, AgentGate's keys and the limits are a setting that two zone operators sign. The contract for both sides is the [spec](docs/gate-credential.md) and its [test vectors](testdata/gate-credential/vectors.json).
 
-The demo runs it end to end with the two-party MPC signer on a local chain (after the setup under "Try it"):
+The demo runs it end to end with the two-party MPC signer on a local chain. After the setup under "Try it", start Temporal and Redpanda, then run it:
+
+```bash
+make infra-up
+```
 
 ```bash
 make test-e2e-evm-gate

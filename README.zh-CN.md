@@ -70,7 +70,11 @@ AgentGate 决定 AI 代理能不能付钱；QuorumVault 保管钱并签名。运
 
 钱包清单、AgentGate 的公钥和限额是一份设置，要两名签名区运维人员签字。两侧共同遵守的约定是[规范](docs/zh/gate-credential.md)和它的[测试向量](testdata/gate-credential/vectors.json)。
 
-演示在本地链上用两方 MPC 签名方把整条路跑一遍（先完成“试一试”里的准备）：
+演示在本地链上用两方 MPC 签名方把整条路跑一遍。先完成“试一试”里的准备，再启动 Temporal 和 Redpanda，然后运行：
+
+```bash
+make infra-up
+```
 
 ```bash
 make test-e2e-evm-gate
