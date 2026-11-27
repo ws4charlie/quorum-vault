@@ -69,10 +69,8 @@ func TestMain(m *testing.M) {
 	}
 	build := func(workdir, out, pkg string) string {
 		p := filepath.Join(dir, out)
-		cmd := exec.Command("go", "build", "-o", p, pkg)
-		cmd.Dir = workdir
-		if o, err := cmd.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "build %s failed: %v\n%s\n", out, err, o)
+		if err := mpcstack.GoBuild(workdir, p, pkg, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "build %s failed: %v\n", out, err)
 			os.Exit(1)
 		}
 		return p

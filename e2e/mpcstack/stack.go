@@ -62,12 +62,7 @@ func Build(dir string) (Binaries, error) {
 	root := RepoRoot()
 	build := func(workdir, out, pkg string) (string, error) {
 		p := filepath.Join(dir, out)
-		cmd := exec.Command("go", "build", "-o", p, pkg)
-		cmd.Dir = workdir
-		if o, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("build %s: %v\n%s", out, err, o)
-		}
-		return p, nil
+		return p, GoBuild(workdir, p, pkg, "")
 	}
 	var b Binaries
 	var err error
@@ -81,12 +76,7 @@ func Build(dir string) (Binaries, error) {
 // BuildPartyAdmin compiles the operator tool qv-party-admin (mpc-party/cmd/qv-party-admin) into dir.
 func BuildPartyAdmin(dir string) (string, error) {
 	p := filepath.Join(dir, "qv-party-admin")
-	cmd := exec.Command("go", "build", "-o", p, "./cmd/qv-party-admin")
-	cmd.Dir = filepath.Join(RepoRoot(), "mpc-party")
-	if o, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("build qv-party-admin: %v\n%s", err, o)
-	}
-	return p, nil
+	return p, GoBuild(filepath.Join(RepoRoot(), "mpc-party"), p, "./cmd/qv-party-admin", "")
 }
 
 // RepoRoot is the root of the repository this package is in.

@@ -72,13 +72,12 @@ func TestMain(m *testing.M) {
 				break
 			}
 			// The worker has the crash-test failpoints (QV_FAILPOINT), which exist only in binaries built with -tags devauth.
-			args := []string{"build", "-o", filepath.Join(dir, b)}
-			if b == "qv-worker" {
-				args = append(args, "-tags", "devauth")
+			tags := ""
+			if b == "qv-worker" { // only a worker built with -tags devauth has the crash-test failpoints (QV_FAILPOINT)
+				tags = "devauth"
 			}
-			out, err := exec.Command("go", append(args, "github.com/ws4charlie/quorum-vault/cmd/"+b)...).CombinedOutput()
-			if err != nil {
-				buildErr = fmt.Errorf("build %s: %v\n%s", b, err, out)
+			if err := mpcstack.GoBuild(".", filepath.Join(dir, b), "github.com/ws4charlie/quorum-vault/cmd/"+b, tags); err != nil {
+				buildErr = err
 			}
 		}
 		fmt.Printf("qv-timing-main package=e2e/sol build=%.1f\n", time.Since(built).Seconds())

@@ -124,13 +124,12 @@ func TestMain(m *testing.M) {
 		}
 		for _, b := range []string{"qv-gateway", "qv-relay", "qv-worker", "qv-core", "qv-cold", "qv-guardian", "qv-keysets", "qv-rekey", "qv-approval-web", "qv-approvers"} {
 			// The worker is built with -tags devauth: only then does it have the crash-test failpoints (QV_FAILPOINT).
-			args := []string{"build", "-o", filepath.Join(dir, b)}
-			if b == "qv-worker" {
-				args = append(args, "-tags", "devauth")
+			tags := ""
+			if b == "qv-worker" { // only a worker built with -tags devauth has the crash-test failpoints (QV_FAILPOINT)
+				tags = "devauth"
 			}
-			out, err := exec.Command("go", append(args, "github.com/ws4charlie/quorum-vault/cmd/"+b)...).CombinedOutput()
-			if err != nil {
-				buildErr = fmt.Errorf("build %s: %v\n%s", b, err, out)
+			if err := mpcstack.GoBuild(".", filepath.Join(dir, b), "github.com/ws4charlie/quorum-vault/cmd/"+b, tags); err != nil {
+				buildErr = err
 				break
 			}
 		}

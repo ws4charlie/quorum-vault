@@ -30,7 +30,7 @@ start_anvil() {
   return 1
 }
 
-compose_up() { # compose_up <profile flags...> -- <services...>: the Solana validator image is pulled (built once by the `image` job), not built here
+compose_up() { # compose_up <profile flags...> -- <services...>: the Solana validator image is pulled (built once by the `changes` job), not built here
   local flags=()
   while [ "$1" != "--" ]; do flags+=("$1"); shift; done
   shift

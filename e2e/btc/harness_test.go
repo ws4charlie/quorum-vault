@@ -131,13 +131,12 @@ func TestMain(m *testing.M) {
 			if buildErr != nil {
 				break
 			}
-			args := []string{"build", "-o", filepath.Join(dir, b)}
+			tags := ""
 			if b == "qv-worker" { // only a worker built with -tags devauth has the crash-test failpoints (QV_FAILPOINT)
-				args = append(args, "-tags", "devauth")
+				tags = "devauth"
 			}
-			out, err := exec.Command("go", append(args, "github.com/ws4charlie/quorum-vault/cmd/"+b)...).CombinedOutput()
-			if err != nil {
-				buildErr = fmt.Errorf("build %s: %v\n%s", b, err, out)
+			if err := mpcstack.GoBuild(".", filepath.Join(dir, b), "github.com/ws4charlie/quorum-vault/cmd/"+b, tags); err != nil {
+				buildErr = err
 			}
 		}
 		fmt.Printf("qv-timing-main package=e2e/btc build=%.1f\n", time.Since(built).Seconds()) // compiling the binaries the tests start

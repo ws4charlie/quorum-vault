@@ -1,0 +1,51 @@
+# Which Go code each job of .github/workflows/ci.yml compiles and tests. ci/jobselect reads it to decide, for a pull request, which jobs a change can
+# affect (CONTRIBUTING.md, "Which jobs run"). The human's rule: "never skip a job a change can affect; running too much is fine, missing a run is not."
+#
+#   module <dir>              a Go module whose packages the jobs build (the graph comes from `go list` of each, under every build tag CI uses)
+#   mains-exclude <dir/>      main packages under <dir/> are not in @mains: allowed only for a tree of ci/job-rules (its readers are found by the rules)
+#   nobuild <job>             the job does not need the `build` job (its prebuilt binaries); `build` is skipped only when no other job runs
+#   always <job>              the job runs on every change that is not all on ci/skip-allowlist (`test`: root tests read other modules' files by path)
+#   job <id> <root>...        a job and the packages it TESTS: <module>:<pattern> (go list pattern relative to the module), or @mains (every main package of
+#                             the modules, except mains-exclude: the binaries an end-to-end test builds and starts with `go build`)
+#
+# A job is affected by a .go file when the file's package is in the job's closure (its roots, their test imports, and everything they import), and by a
+# _test.go file only when its package is one of the job's roots. Non-Go files: ci/skip-allowlist (none), ci/job-rules (the jobs that read that tree), else all.
+# Every job of ci.yml but `changes` and `image` must be here, with the condition that names its own id (ci/jobselect check fails otherwise).
+module .
+module mpc-party
+module mpc-party/api
+mains-exclude ci/kind/
+mains-exclude loadtest/
+nobuild test
+nobuild mpc-party-core
+nobuild mpc-party-2
+nobuild mpc-party-3
+nobuild checks
+always test
+
+# the required check: go vet and go test -short of every package of the root module
+job test .:./...
+
+# the mpc-party module (cgo, cb-mpc) and its API module; its e2e shards build mpc-party's own binaries (mpc-party/e2e)
+job mpc-party-core mpc-party:./... mpc-party/api:./...
+job mpc-party-2    mpc-party:./... mpc-party/api:./...
+job mpc-party-3    mpc-party:./... mpc-party/api:./...
+# the promtool rules (monitoring/, and the alert test of mpc-party/internal/server), the audit-head archive (internal/auditchain)
+job checks .:./monitoring/... .:./internal/auditchain/... mpc-party:./internal/server
+
+job e2e-btc-1 .:./e2e/btc/... @mains
+job e2e-btc-2 .:./e2e/btc/... @mains
+job e2e-btc-3 .:./e2e/btc/... @mains
+job e2e-btc-4 .:./e2e/btc/... @mains
+job e2e-btc-5 .:./e2e/btc/... @mains
+
+job e2e-sol-1 .:./e2e/sol/... @mains
+job e2e-sol-2 .:./e2e/sol/... @mains
+job e2e-sol-3 .:./e2e/sol/... @mains
+job e2e-sol-4 .:./e2e/sol/... .:./e2e/solsign/... @mains
+
+# e2e/custody (and its load-test generator), x402 in three packages, the MPC signing path
+job e2e-evm-1 .:./e2e/custody/... .:./loadtest/cmd/qv-load @mains
+job e2e-evm-2 .:./e2e/custody/... .:./loadtest/cmd/qv-load @mains
+job e2e-evm-3 .:./e2e/custody/... .:./loadtest/cmd/qv-load .:./internal/gateway .:./internal/custody .:./internal/hsmsigner @mains
+job e2e-evm-4 .:./e2e/custody/... .:./loadtest/cmd/qv-load .:./e2e/mpcsign/... .:./e2e/partyadmin/... @mains
