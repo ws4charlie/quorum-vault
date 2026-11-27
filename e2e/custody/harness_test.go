@@ -587,6 +587,7 @@ func newSystem(t *testing.T, o opts) *system {
 	}
 	if o.gate {
 		cf.Chain.ChainID = evmtest.BaseSepoliaChainID
+		cf.Chain.L1Fee = "none" // anvil keeps the chain id but never reports an OP-stack l1Fee (docs/limits.md)
 		cf.Chain.X402 = map[string]custody.X402File{"USDT": {Name: "USDC", Version: "2", MaxWindowSeconds: 600, PerPaymentLimit: "500000"}}
 	}
 	s.cf = cf

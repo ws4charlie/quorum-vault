@@ -92,7 +92,7 @@ var _ ReceiptReader = (*EVMReader)(nil)
 
 // Receipt reads the receipt of a transaction: its block, whether it succeeded and what it paid in gas. found is false while the node has none.
 func (r *EVMReader) Receipt(ctx context.Context, txHash string) (Receipt, bool, error) {
-	rc, fee, err := evm.ReadReceipt(ctx, r.ec.Client(), common.HexToHash(txHash)) // the fee includes an OP-stack chain's L1 data fee
+	rc, fee, err := evm.ReadReceipt(ctx, r.ec.Client(), common.HexToHash(txHash), r.cfg.EVM.L1FeeModeOf()) // the fee includes an OP-stack chain's L1 data fee
 	if errors.Is(err, ethereum.NotFound) {
 		return Receipt{}, false, nil
 	}

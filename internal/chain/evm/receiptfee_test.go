@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -55,7 +57,7 @@ func TestParseReceiptBooksTheL1Fee(t *testing.T) {
 	if string(m["l1Fee"]) != baseSepoliaL1FeeHex {
 		t.Fatalf("fixture l1Fee = %s", m["l1Fee"])
 	}
-	r, fee, err := ParseReceipt(encode(t, m))
+	r, fee, err := ParseReceipt(encode(t, m), L1FeeRequired)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,17 +76,28 @@ func TestParseReceiptWithoutL1FeeIsGasTimesPrice(t *testing.T) {
 		if l1 != "" {
 			m["l1Fee"] = json.RawMessage(l1)
 		}
-		_, fee, err := ParseReceipt(encode(t, m))
+		_, fee, err := ParseReceipt(encode(t, m), L1FeeNone)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if fee == nil || fee.Cmp(big.NewInt(baseSepoliaGasOnly)) != 0 {
 			t.Fatalf("l1Fee %q: fee = %v, want %d", l1, fee, baseSepoliaGasOnly)
 		}
+		// on an OP-stack chain the same receipt is an error, never a fee of 0
+		if _, fee, err := ParseReceipt(encode(t, m), L1FeeRequired); err == nil {
+			t.Fatalf("l1Fee %q with mode required: fee %v, want an error", l1, fee)
+		}
+	}
+	// mode none still books an l1Fee the node reports (the chain charged it)
+	if _, fee, err := ParseReceipt(encode(t, baseSepoliaReceipt(t)), L1FeeNone); err != nil || fee.Cmp(big.NewInt(baseSepoliaPaid)) != 0 {
+		t.Fatalf("mode none with l1Fee: %v, %v; want %d", fee, err, baseSepoliaPaid)
+	}
+	if _, _, err := ParseReceipt(encode(t, baseSepoliaReceipt(t)), ""); err == nil {
+		t.Fatal("an unresolved mode must be refused")
 	}
 	m := baseSepoliaReceipt(t)
 	delete(m, "effectiveGasPrice")
-	if _, fee, err := ParseReceipt(encode(t, m)); err != nil || fee != nil {
+	if _, fee, err := ParseReceipt(encode(t, m), L1FeeRequired); err != nil || fee != nil {
 		t.Fatalf("no effectiveGasPrice: fee %v, err %v; want nil, nil", fee, err)
 	}
 }
@@ -93,7 +106,7 @@ func TestParseReceiptRefusesAMalformedL1Fee(t *testing.T) {
 	for _, l1 := range []string{`"0xzz"`, `"da15ed12c"`, `"0x"`, `""`, `"0x0da15ed12c"`, `"-0x1"`, `58541920556`, `true`, `{}`} {
 		m := baseSepoliaReceipt(t)
 		m["l1Fee"] = json.RawMessage(l1)
-		if _, fee, err := ParseReceipt(encode(t, m)); err == nil {
+		if _, fee, err := ParseReceipt(encode(t, m), L1FeeRequired); err == nil {
 			t.Errorf("l1Fee %s: fee %v, want an error (never 0)", l1, fee)
 		}
 	}
@@ -131,7 +144,7 @@ func receiptNode(t *testing.T, hash string, receipt []byte) *ethclient.Client {
 
 func TestReadReceiptNotFound(t *testing.T) {
 	ec := receiptNode(t, baseSepoliaTx, encode(t, baseSepoliaReceipt(t)))
-	if _, _, err := ReadReceipt(context.Background(), ec.Client(), common.HexToHash("0x01")); !errors.Is(err, ethereum.NotFound) {
+	if _, _, err := ReadReceipt(context.Background(), ec.Client(), common.HexToHash("0x01"), L1FeeRequired); !errors.Is(err, ethereum.NotFound) {
 		t.Fatalf("err = %v, want ethereum.NotFound", err)
 	}
 }
@@ -139,7 +152,7 @@ func TestReadReceiptNotFound(t *testing.T) {
 // The adapter's two fee readers book what the Base Sepolia sender paid, l1Fee included.
 func TestAdapterFeesIncludeTheL1Fee(t *testing.T) {
 	ctx := context.Background()
-	a := &Adapter{ec: receiptNode(t, baseSepoliaTx, encode(t, baseSepoliaReceipt(t)))}
+	a := &Adapter{cfg: Config{ChainID: 84532}, ec: receiptNode(t, baseSepoliaTx, encode(t, baseSepoliaReceipt(t)))}
 	fee, err := a.TxFee(ctx, baseSepoliaTx)
 	if err != nil || fee.Cmp(big.NewInt(baseSepoliaPaid)) != 0 {
 		t.Fatalf("TxFee = %v, %v; want %d", fee, err, baseSepoliaPaid)
@@ -147,12 +160,87 @@ func TestAdapterFeesIncludeTheL1Fee(t *testing.T) {
 	// a reverted refill paid its fee too (and RefillTxState returns before it needs the safe head)
 	m := baseSepoliaReceipt(t)
 	m["status"] = json.RawMessage(`"0x0"`)
-	a = &Adapter{ec: receiptNode(t, baseSepoliaTx, encode(t, m))}
+	a = &Adapter{cfg: Config{ChainID: 84532}, ec: receiptNode(t, baseSepoliaTx, encode(t, m))}
 	st, fee, err := a.RefillTxState(ctx, baseSepoliaTx)
 	if err != nil || st != RefillReverted || fee == nil || fee.Cmp(big.NewInt(baseSepoliaPaid)) != 0 {
 		t.Fatalf("RefillTxState = %s, %v, %v; want reverted, %d", st, fee, err, baseSepoliaPaid)
 	}
 	if st, fee, err := a.RefillTxState(ctx, "0x01"); err != nil || st != RefillPending || fee != nil {
 		t.Fatalf("no receipt: %s, %v, %v; want pending", st, fee, err)
+	}
+}
+
+func TestL1FeeModeDefaultsAndConfig(t *testing.T) {
+	for id, want := range map[uint64]L1FeeMode{8453: L1FeeRequired, 84532: L1FeeRequired, 10: L1FeeRequired, 11155420: L1FeeRequired, 1: L1FeeNone, 11155111: L1FeeNone} {
+		if got := (Config{ChainID: id}).L1FeeModeOf(); got != want {
+			t.Errorf("chain %d: %q, want %q", id, got, want)
+		}
+	}
+	if got := (Config{ChainID: 84532, L1Fee: L1FeeNone}).L1FeeModeOf(); got != L1FeeNone {
+		t.Errorf("explicit none on 84532: %q", got)
+	}
+	for _, s := range []string{"", "required", "none"} {
+		if _, err := ParseL1FeeMode(s); err != nil {
+			t.Errorf("%q: %v", s, err)
+		}
+	}
+	for _, s := range []string{"Required", "yes", "0"} {
+		if _, err := ParseL1FeeMode(s); err == nil {
+			t.Errorf("%q: want an error", s)
+		}
+	}
+	c := Config{Chain: "base", ChainID: 84532, MaxTxFeeWei: big.NewInt(1), Factory: common.HexToAddress("0xf1"), SweepDestination: common.HexToAddress("0xd1"), L1Fee: "maybe"}
+	if err := c.validate(); err == nil {
+		t.Error("validate accepted l1 fee mode \"maybe\"")
+	}
+}
+
+// A Base receipt without l1Fee is refused through the adapter too: never booked as gas alone.
+func TestAdapterRefusesAMissingL1FeeOnBase(t *testing.T) {
+	m := baseSepoliaReceipt(t)
+	delete(m, "l1Fee")
+	a := &Adapter{cfg: Config{ChainID: 84532}, ec: receiptNode(t, baseSepoliaTx, encode(t, m))}
+	if fee, err := a.TxFee(context.Background(), baseSepoliaTx); err == nil {
+		t.Fatalf("TxFee = %v, want an error", fee)
+	}
+	a.cfg.L1Fee = L1FeeNone // a node that charges none (anvil with --network ethereum)
+	if fee, err := a.TxFee(context.Background(), baseSepoliaTx); err != nil || fee.Cmp(big.NewInt(baseSepoliaGasOnly)) != 0 {
+		t.Fatalf("TxFee with none = %v, %v", fee, err)
+	}
+}
+
+// The fee a transaction paid is computed in one place (ParseReceipt): a second gasUsed × effectiveGasPrice elsewhere would miss the OP-stack
+// l1Fee again. No non-test file under internal/ or cmd/ other than receiptfee.go reads a receipt's effective gas price or multiplies its gas used.
+func TestPaidFeeIsComputedOnlyInReceiptFee(t *testing.T) {
+	root, err := filepath.Abs("../../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := filepath.Join(root, "internal/chain/evm/receiptfee.go")
+	formula := regexp.MustCompile(`EffectiveGasPrice|effectiveGasPrice|SetUint64\([^)]*\.GasUsed\)`)
+	scanned := 0
+	for _, dir := range []string{"internal", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") || p == own {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			scanned++
+			for i, line := range strings.Split(string(b), "\n") {
+				if formula.MatchString(line) {
+					t.Errorf("%s:%d computes a paid fee outside receiptfee.go (use evm.ReadReceipt): %s", strings.TrimPrefix(p, root+"/"), i+1, strings.TrimSpace(line))
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if scanned < 100 {
+		t.Fatalf("scanned only %d files: wrong root %s?", scanned, root)
 	}
 }

@@ -89,7 +89,7 @@ func (a *Adapter) isForwarder(ctx context.Context, addr common.Address) (bool, e
 }
 
 func (a *Adapter) receipt(ctx context.Context, txHash string) (*types.Receipt, *big.Int, error) {
-	r, fee, err := ReadReceipt(ctx, a.ec.Client(), common.HexToHash(txHash))
+	r, fee, err := ReadReceipt(ctx, a.ec.Client(), common.HexToHash(txHash), a.cfg.L1FeeModeOf())
 	if errors.Is(err, ethereum.NotFound) {
 		return nil, nil, fmt.Errorf("evm: %s has no receipt yet", txHash)
 	}

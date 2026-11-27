@@ -73,7 +73,7 @@ const (
 
 // RefillTxState reads a transaction's receipt. The fee is set once there is a receipt.
 func (a *Adapter) RefillTxState(ctx context.Context, txHash string) (RefillState, *big.Int, error) {
-	r, fee, err := ReadReceipt(ctx, a.ec.Client(), common.HexToHash(txHash))
+	r, fee, err := ReadReceipt(ctx, a.ec.Client(), common.HexToHash(txHash), a.cfg.L1FeeModeOf())
 	if errors.Is(err, ethereum.NotFound) {
 		return RefillPending, nil, nil
 	}
