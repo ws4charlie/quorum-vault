@@ -687,3 +687,30 @@ func TestGateReusedNonceIsAStoredRefusal(t *testing.T) {
 		t.Fatalf("%d jobs", n)
 	}
 }
+
+// GCF2 r2: the reused nonce is judged before the free funds: with the shard's funds all promised, the same payload under a new credential is still the
+// stored 409 nonce_reused, not retry_later (which would never end).
+func TestGateReusedNonceOnAFullShardIsStillNonceReused(t *testing.T) {
+	g := gateWorld(t)
+	payload := g.typed(t, 500_000, 40)
+	for i, id := range []string{"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a40", "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a41"} {
+		p := payload
+		if i == 1 {
+			p = g.typed(t, 500_000, 41)
+		}
+		if w := g.post(g.body(t, g.cred(id, 500_000, nil), p)); w.Code != 503 || code(t, w) != "retry_later" {
+			t.Fatalf("placing %s: %d %s", id, w.Code, w.Body)
+		}
+	}
+	b := g.body(t, g.cred("0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a42", 500_000, nil), payload)
+	first := g.post(b)
+	if first.Code != 409 || code(t, first) != "nonce_reused" {
+		t.Fatalf("reused nonce on a full shard: %d %s", first.Code, first.Body)
+	}
+	if w := g.post(b); w.Code != first.Code || w.Body.String() != first.Body.String() {
+		t.Fatalf("repeat: %d %s", w.Code, w.Body)
+	}
+	if n := g.jobs(t); n != 2 {
+		t.Fatalf("%d jobs", n)
+	}
+}

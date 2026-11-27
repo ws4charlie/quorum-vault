@@ -205,6 +205,16 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 			a = ex
 			return err
 		}
+		// A nonce this payer already used is final whatever the funds say, so it is judged first: behind the funds check a full shard would answer
+		// "not now" to a request that can never be accepted. The unique key below stays the backstop (a payer shared across partitions).
+		var used bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM x402_authorizations WHERE chain=$1 AND asset=$2 AND payer=$3 AND nonce=$4)`,
+			c.Chain, r.Asset, payer.Hex(), fmt.Sprintf("0x%x", nonce)).Scan(&used); err != nil {
+			return err
+		}
+		if used {
+			return fmt.Errorf("%w: 0x%x", ErrX402NonceReused, nonce)
+		}
 		free, err := s.freeHot(ctx, tx, part)
 		if err != nil {
 			return err
@@ -246,7 +256,7 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 				return ex, false, xerr
 			}
 		case "x402_authorizations_chain_asset_payer_nonce_key":
-			return X402Authorization{}, false, fmt.Errorf("%w: %x", ErrX402NonceReused, nonce)
+			return X402Authorization{}, false, fmt.Errorf("%w: 0x%x", ErrX402NonceReused, nonce)
 		}
 	}
 	return a, created, err
