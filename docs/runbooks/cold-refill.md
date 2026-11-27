@@ -6,6 +6,10 @@ come back only through an offline ceremony that several people complete. Nothing
 > **What SoftHSM changes.** A hardware HSM enforces "M of N operators" itself, with cards. SoftHSM cannot, so `qv-cold` enforces it
 > **in software**, with operator signatures. Every output of the tool says so. Treat it as a stand-in: the procedure below is the one a
 > hardware HSM would follow, with the cards replacing the signature files.
+>
+> **Production is a real HSM.** With `QV_ENV` unset (production) `qv-cold` refuses a SoftHSM module and a PIN in an environment variable,
+> before any key is used. SoftHSM, and the PIN in an environment variable, work only with `QV_ENV=dev` or `test` (a test or a drill), and the tool
+> prints a warning.
 
 ## Roles
 
@@ -17,12 +21,12 @@ come back only through an offline ceremony that several people complete. Nothing
 
 ## Before the first ceremony (once)
 
-1. On the offline machine: `scripts/setup-softhsm.sh` creates the `qv-cold` token; `qv-cold keygen` creates the cold key and prints its address and public key.
+1. On the offline machine: initialise the `qv-cold` token on the hardware HSM (a drill with `QV_ENV=dev`: `scripts/setup-softhsm.sh` creates it in SoftHSM); `qv-cold keygen` creates the cold key and prints its address and public key.
    The **cold address** goes into the **signing zone's** `cold_addresses` (gateway and cosigner) and the business config.
 2. Each operator makes a key on their own machine: `qv-cold operator-key -key operator.key` prints the public key; they hand over the public key, never the file.
 3. Write the offline config (`internal/coldsign.Config`): chain and chain id, pool, operators and `threshold`, the **pinned hot addresses** (`destinations`),
    per asset the per-ceremony cap (`max_amount`) and token address, `max_fee_wei`, the HSM token/PIN variable/key id, `record_dir`.
-   The PIN is in an environment variable, never in the file.
+   The PIN is never in the config. In production it is in a file (mode 0400) named by `QV_HSM_PIN_FILE`; only a `QV_ENV=dev` drill reads it from the variable `pin_env` names.
 4. Fund the cold address as the treasury process says, then **book** it online: `POST /v2/cold/fundings` (`{"id","asset","shard","amount"}`). Outside funding that is not booked
    makes `Reconcile` fail its `cold` check, on purpose.
 
