@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -165,13 +166,27 @@ type GateSetting struct {
 	Skew    time.Duration
 	MaxTTL  time.Duration
 	Wallets []GateWallet
-	// Ignored counts the rows of the log that did not verify (signatures, order, content) and were skipped.
+	// Ignored counts the rows of the log that did not verify (operator signatures, order) and were skipped. None of them is operator-signed.
 	Ignored int
+	// UnreadableKeys counts the keys of the version in force that a stored, operator-signed version names but that no longer pass the key
+	// format check (GCF1: the base64url rule became byte-exact). Such a key verifies nothing; the rest of its version (wallets, retirements, limits)
+	// stays in force. Fewer keys can only refuse more.
+	UnreadableKeys int
+	// Broken is set when a stored version that carries valid operator signatures cannot be applied by this build for any other reason. The
+	// version's wallets might no longer be Gate-governed if it were skipped, so the setting fails closed: EffectiveGate returns ErrGateSettingBroken,
+	// every decision of the zone is an outage (nothing signs), and no new version applies, until the build that accepted it is back.
+	Broken error
 
 	retiredKIDs map[string]bool
 	retiredKeys map[string]bool // public keys, as strings
 	applied     map[int64][]byte
+	// unreadable are the keys of the version in force counted by UnreadableKeys, with the public key the old, lenient decoding gave when it gives
+	// one: never used to verify, only so that retiring their kid still retires their public key for good.
+	unreadable []GateKey
 }
+
+// ErrGateSettingBroken: a stored, operator-signed gate setting version cannot be applied (GateSetting.Broken). Nothing signs until it is fixed.
+var ErrGateSettingBroken = errors.New("gateway: gate setting broken: a stored, operator-signed version cannot be applied; nothing signs")
 
 // KeysAt is the key set of a verification at t: the keys usable at that moment, by kid.
 func (s *GateSetting) KeysAt(t time.Time) map[string]ed25519.PublicKey {
@@ -196,7 +211,7 @@ func (s *GateSetting) Wallet(id string) *GateWallet {
 
 func (s *GateSetting) clone() *GateSetting {
 	c := *s
-	c.Keys, c.Wallets = slices.Clone(s.Keys), slices.Clone(s.Wallets)
+	c.Keys, c.Wallets, c.unreadable = slices.Clone(s.Keys), slices.Clone(s.Wallets), slices.Clone(s.unreadable)
 	c.retiredKIDs, c.retiredKeys, c.applied = cloneSet(s.retiredKIDs), cloneSet(s.retiredKeys), map[int64][]byte{}
 	for k, v := range s.applied {
 		c.applied[k] = v
@@ -275,7 +290,7 @@ func (s *GateSetting) apply(cfg *Config, c GateChange, strict bool) error {
 	// The complete retired set of this version first: what earlier versions retired, and the public key of every key known so far (bootstrap or
 	// earlier version) whose kid this version retires. Every candidate key is then checked against it by public key, so a key retired now cannot come
 	// back in the same version under a new kid, and one retired before never comes back under any kid.
-	for _, k := range append(slices.Clone(s.Keys), cfg.GateBootstrap...) {
+	for _, k := range append(append(slices.Clone(s.Keys), s.unreadable...), cfg.GateBootstrap...) {
 		if next.retiredKIDs[k.KID] {
 			next.retiredKeys[string(k.Public)] = true
 		}
@@ -292,8 +307,20 @@ func (s *GateSetting) apply(cfg *Config, c GateChange, strict bool) error {
 		order = append(order, k.KID)
 	}
 	seen := map[string]bool{}
+	next.unreadable, next.UnreadableKeys = nil, 0
 	for _, kf := range f.Keys {
 		k, err := kf.build()
+		if err != nil && !strict && reKID.MatchString(kf.KID) {
+			// Reading back a version this zone accepted when it was applied: the key no longer passes the format check, so it verifies nothing,
+			// but the version is not dropped (that would drop its wallets: fail-open). Checked again here for a retired public key.
+			uk := GateKey{KID: kf.KID}
+			if pub, lerr := base64.RawURLEncoding.DecodeString(kf.PublicKey); lerr == nil && len(pub) == ed25519.PublicKeySize {
+				uk.Public = pub
+			}
+			next.unreadable = append(next.unreadable, uk)
+			next.UnreadableKeys++
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -409,8 +436,9 @@ func (c *Config) gateWalletFits(w GateWallet) error {
 }
 
 // foldGate is the effective setting: the bootstrap keys with every row of the log that verifies applied in version order. A row is ignored (and
-// counted) when its signatures do not satisfy the operators of the config, its version is not higher than the last one applied, or its content does not
-// hold.
+// counted) when its signatures do not satisfy the operators of the config or its version is not higher than the last one applied: nothing an
+// operator signed. A row that does carry valid operator signatures but whose content this build refuses is never skipped, since skipping it could
+// drop a Gate-governed wallet: an unreadable key is left out (UnreadableKeys), anything else sets Broken and stops the fold.
 func (c *Config) foldGate(rows []GateChange) *GateSetting {
 	s := c.StaticGate()
 	for _, r := range rows {
@@ -419,7 +447,8 @@ func (c *Config) foldGate(rows []GateChange) *GateSetting {
 			continue
 		}
 		if err := s.apply(c, r, false); err != nil {
-			s.Ignored++
+			s.Broken = fmt.Errorf("version %d: %w", r.Version, err)
+			return s
 		}
 	}
 	return s
@@ -463,7 +492,15 @@ func (g *Guard) EffectiveGate(ctx context.Context, cfg *Config) (*GateSetting, e
 	}
 	s := cfg.foldGate(rows)
 	if s.Ignored > 0 && g.gateIgnored.Swap(int64(s.Ignored)) != int64(s.Ignored) {
-		slog.Error("ALERT gate setting: rows of the gate_setting_changes table do not carry valid operator signatures (or do not fit) and are ignored", "rows", s.Ignored)
+		slog.Error("ALERT gate setting: rows of the gate_setting_changes table do not carry valid operator signatures (or are out of order) and are ignored", "rows", s.Ignored)
+	}
+	if s.UnreadableKeys > 0 && g.gateUnreadable.Swap(int64(s.UnreadableKeys)) != int64(s.UnreadableKeys) {
+		slog.Error("ALERT gate setting: keys of the version in force fail the key format check and verify nothing; sign a new version with them in canonical base64url",
+			"version", s.Version, "keys", s.UnreadableKeys)
+	}
+	if s.Broken != nil {
+		slog.Error("ALERT gate setting broken: nothing signs", "err", s.Broken)
+		return nil, fmt.Errorf("%w: %v", ErrGateSettingBroken, s.Broken)
 	}
 	return s, nil
 }
@@ -496,6 +533,9 @@ func (g *Guard) ApplyGateChange(ctx context.Context, cfg *Config, c GateChange, 
 		return err
 	}
 	cur := cfg.foldGate(rows)
+	if cur.Broken != nil {
+		return refuse(fmt.Errorf("%w: %v", ErrGateSettingBroken, cur.Broken))
+	}
 	if msg, done := cur.applied[c.Version]; done && bytes.Equal(msg, GateChangeMessage(c)) {
 		return nil // already applied
 	}

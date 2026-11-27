@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -853,5 +855,93 @@ func TestGateKeyFileRefusesBytesOutsideAlphabet(t *testing.T) {
 		if _, err := (GateKeyFile{KID: k.KID, PublicKey: s}).build(); err == nil {
 			t.Errorf("public_key %q accepted", s)
 		}
+	}
+}
+
+// storeGateRow writes a signed version straight into a guard database, as an older build that accepted it would have: ApplyGateChange of this
+// build would refuse it.
+func (z *gateZone) storeGateRow(g *Guard, c GateChange) {
+	z.t.Helper()
+	setting, _ := json.Marshal(c.Setting)
+	sigs, _ := json.Marshal(c.Signatures)
+	if _, err := g.pool.Exec(context.Background(), `INSERT INTO gate_setting_changes (version, setting, signed_at, signatures) VALUES ($1, $2, $3, $4)`,
+		c.Version, setting, c.SignedAt, sigs); err != nil {
+		z.t.Fatal(err)
+	}
+}
+
+// GCF1-fix1: a stored, operator-signed version whose key no longer passes the byte-exact base64url check (an escaped "\n" an older build
+// skipped) is not dropped. Its wallet stays Gate-governed at the gateway and at the cosigner: a withdrawal without a credential is refused even
+// with every approval. Only the bad key is left out, and retiring its kid still retires its public key for good.
+func TestGateStoredVersionWithUnreadableKeyKeepsWallet(t *testing.T) {
+	z := newGateZone(t, 84532)
+	k1, k2 := gatecredtest.TestKey(1), gatecredtest.TestKey(2)
+	f := z.settingFile()
+	f.Keys = []GateKeyFile{{KID: k1.KID, PublicKey: b64(k1.Pub)}, {KID: k2.KID, PublicKey: b64(k2.Pub) + "\n"}}
+	z.version++
+	c := z.signed(f, z.version)
+	for _, g := range []*Guard{z.guard, z.cosGuard} {
+		if err := g.ApplyGateChange(context.Background(), z.cfg, c, z.clock(), "test"); err == nil {
+			t.Fatal("a new version with a key ending in \\n was applied")
+		}
+		z.storeGateRow(g, c)
+		s, err := g.EffectiveGate(context.Background(), z.cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.Version != 1 || s.Wallet(z.wallet) == nil || s.UnreadableKeys != 1 || len(s.Keys) != 1 || s.Keys[0].KID != k1.KID {
+			t.Fatalf("effective setting: %s, unreadable %d", s.Describe(), s.UnreadableKeys)
+		}
+	}
+	payee := common.HexToAddress(gatecredtest.VectorsPayee)
+	wei := big.NewInt(7_000_000)
+	j := z.native("u1", payee, wei, "", "alice", "bob", "carol")
+	want(t, "no credential (gateway)", z.gate(j), string(gatecred.CredentialMissing), "")
+	want(t, "no credential (cosigner)", z.cosign(j), string(gatecred.CredentialMissing), "")
+	z.keys = []gatecredtest.Key{k2}
+	j = z.native("u2", payee, wei, z.cred(gatecred.NativeAsset, payee.Hex(), wei, nil))
+	want(t, "unreadable key (gateway)", z.gate(j), string(gatecred.KIDUnknown), "kid")
+	want(t, "unreadable key (cosigner)", z.cosign(j), string(gatecred.KIDUnknown), "kid")
+	z.keys = []gatecredtest.Key{k1}
+	j = z.native("u3", payee, wei, z.cred(gatecred.NativeAsset, payee.Hex(), wei, nil))
+	want(t, "readable key (cosigner)", z.cosign(j), "", "")
+	want(t, "readable key (gateway)", z.gate(j), "", "")
+	// Retire the unreadable kid; its public key never comes back, under any kid.
+	f2 := z.settingFile()
+	f2.Keys, f2.Retired = []GateKeyFile{{KID: k1.KID, PublicKey: b64(k1.Pub)}}, []string{k2.KID}
+	z.apply(f2)
+	f3 := f2
+	f3.Retired = nil
+	f3.Keys = append(slices.Clone(f2.Keys), GateKeyFile{KID: "k2-again", PublicKey: b64(k2.Pub)})
+	if err := z.guard.ApplyGateChange(context.Background(), z.cfg, z.signed(f3, z.version+1), z.clock(), "test"); err == nil {
+		t.Fatal("the retired unreadable key came back under another kid")
+	}
+}
+
+// GCF1-fix1: a stored, operator-signed version this build cannot apply for any other reason fails closed: nothing signs at the gateway or the
+// cosigner (not even a payment the setting would not govern), and no new version applies over it.
+func TestGateStoredVersionThatCannotApplyFailsClosed(t *testing.T) {
+	z := newGateZone(t, 84532)
+	f := z.settingFile()
+	f.Wallets[0].WalletID = strings.ToUpper(f.Wallets[0].WalletID) // refused by apply, as a rule tightened after it was stored would be
+	z.version++
+	c := z.signed(f, z.version)
+	for _, g := range []*Guard{z.guard, z.cosGuard} {
+		z.storeGateRow(g, c)
+		if _, err := g.EffectiveGate(context.Background(), z.cfg); !errors.Is(err, ErrGateSettingBroken) {
+			t.Fatalf("EffectiveGate: %v, want ErrGateSettingBroken", err)
+		}
+		if err := g.ApplyGateChange(context.Background(), z.cfg, z.signed(z.settingFile(), z.version+1), z.clock(), "test"); !errors.Is(err, ErrGateSettingBroken) {
+			t.Fatalf("ApplyGateChange over a broken setting: %v", err)
+		}
+	}
+	payee := common.HexToAddress(gatecredtest.VectorsPayee)
+	j := z.native("b1", payee, big.NewInt(7_000_000), "", "alice", "bob", "carol")
+	if _, err := z.cos.DecideKey(context.Background(), j, SignerKey{ECDSA: z.signer.PublicKey()}); !errors.Is(err, ErrGateSettingBroken) {
+		t.Fatalf("cosigner: %v, want ErrGateSettingBroken", err)
+	}
+	z.put(j)
+	if d, ok, err := z.gw.RunOnce(context.Background()); err == nil && ok && (d.Outcome == OutcomeSigned || d.Outcome == OutcomeReplayed) {
+		t.Fatalf("gateway signed over a broken gate setting: %+v", d)
 	}
 }

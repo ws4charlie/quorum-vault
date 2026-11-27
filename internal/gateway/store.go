@@ -35,6 +35,8 @@ type Guard struct {
 	keysetIgnored atomic.Int64
 	// gateIgnored is the same for the gate setting log (gate.go).
 	gateIgnored atomic.Int64
+	// gateUnreadable is the number of unreadable keys last reported for the gate setting (gate.go), so the alert is logged on change.
+	gateUnreadable atomic.Int64
 	// drainRefused counts the drains this process refused (keysets.go).
 	drainRefused atomic.Int64
 	// drainMetrics counts them by mode, chain and reason for qv_drain_refusals_total (drainmetrics.go).
