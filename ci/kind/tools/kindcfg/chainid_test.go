@@ -10,14 +10,14 @@ import (
 )
 
 // The lane's EVM chain id is decided in one place, ci/kind/lib.sh (default 84532, Base Sepolia): the anvil manifest takes it from there (install.sh fills it in), and no
-// file of the lane carries a chain id of its own.
+// file of the lane carries a chain id of its own. anvil runs with Ethereum fee rules (--network ethereum): on a Base chain id it would charge an L1 fee no receipt shows.
 func TestKindChainIDDecidedInLibOnly(t *testing.T) {
 	root, err := filepath.Abs("../../../..")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// lib.sh, sourced as the lane's scripts do, with nothing set by the caller: the default
-	cmd := exec.Command("bash", "-c", `. ci/kind/lib.sh >/dev/null && printf %s "$QV_KIND_CHAIN_ID" && sed "s/@QV_KIND_CHAIN_ID@/$QV_KIND_CHAIN_ID/g" ci/kind/deps/chains.yaml | grep -c -- "--chain-id $QV_KIND_CHAIN_ID\""`)
+	cmd := exec.Command("bash", "-c", `. ci/kind/lib.sh >/dev/null && printf %s "$QV_KIND_CHAIN_ID" && sed "s/@QV_KIND_CHAIN_ID@/$QV_KIND_CHAIN_ID/g" ci/kind/deps/chains.yaml | grep -c -- "--chain-id $QV_KIND_CHAIN_ID --network ethereum\""`)
 	cmd.Dir = root
 	cmd.Env = withoutEnv("QV_KIND_CHAIN_ID")
 	out, err := cmd.CombinedOutput()
@@ -25,7 +25,7 @@ func TestKindChainIDDecidedInLibOnly(t *testing.T) {
 		t.Fatalf("sourcing lib.sh and rendering chains.yaml: %v\n%s", err, out)
 	}
 	if got := strings.TrimSpace(string(out)); got != "845321" { // the id, then one anvil line with it in the rendered manifest
-		t.Fatalf("lib.sh default and rendered anvil: got %q, want id 84532 and one --chain-id 84532 line", got)
+		t.Fatalf("lib.sh default and rendered anvil: got %q, want id 84532 and one '--chain-id 84532 --network ethereum' line (anvil hides Base's L1 fee, docs/limits.md)", got)
 	}
 	// no other copy of a chain id in the lane's files
 	literal := regexp.MustCompile(`11155111|84532|--chain-id [0-9]|chain_id"?: ?[0-9]|ChainID: big\.NewInt\([0-9]`)

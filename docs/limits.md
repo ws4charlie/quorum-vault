@@ -12,6 +12,7 @@ This page lists what QuorumVault cannot do yet, so you don't have to find out th
 - **The first image release has not been made.** Images are built and checked, not published.
 - **Restore is drilled on one machine,** not across sites.
 - **x402 permits and Gate payments have run only on a local node of chain 84532.** The two-party MPC signer signs them in CI; nothing has run on the public Base Sepolia ([runbook](runbooks/x402-hot-wallet.md)).
+- **Local chains do not simulate Base's L1 data fee.** Base also charges each transaction an L1 data fee; the local nodes either do not charge it or hide it, so the kind lane runs its chain 84532 with Ethereum fee rules. Only unit tests on recorded Base receipts check that custody books that fee.
 
 **Simulated parts**
 - **CloudHSM support is untested on hardware.** The party's sealing module has a profile for AWS CloudHSM, proven against its documentation and a test double. Nobody has run it on a real cluster; the first run follows [a checklist](runbooks/cloudhsm-sealer.md).
