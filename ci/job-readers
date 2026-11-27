@@ -34,3 +34,6 @@ mpc-party/internal/server/store.go	1	-	validID refuses ".." as a name; nothing i
 mpc-party/internal/testenv/promtool.go	5	docker-compose.yml,monitoring/*	RepoRoot: the pinned Prometheus image and the rule files
 e2e/mpcstack/prebuilt.go	3	-	PrebuiltKey: RepoRoot() and a "../" prefix test turn a package path into a key; nothing is read (the copy reads only QV_E2E_PREBUILT)
 e2e/mpcstack/prebuilt_test.go	7	ci/e2e-prebuild.sh	reads ci/e2e-prebuild.sh (its build list must cover the harnesses); the other lines are package paths turned into keys
+ci/kind/tools/kindcfg/chainid_test.go	1	ci/kind/*,loadtest/kind/*	sources ci/kind/lib.sh, renders ci/kind/deps/chains.yaml, and walks ci/kind and loadtest/kind for a second chain id
+internal/chain/evm/receiptfee_test.go	1	internal/*.go,cmd/*.go	walks every non-test .go file under internal/ and cmd/ (the paid fee is computed only in receiptfee.go)
+internal/custody/evmreader_fee_test.go	1	internal/chain/evm/testdata/*	a real Base Sepolia receipt
