@@ -12,6 +12,7 @@ WORK="$KDIR/.work/$QV_KIND_NAME"            # generated, gitignored: CAs, passwo
 NS_BIZ=qv; NS_SIGN=qv-signing; NS_B=qv-party-b; NS_C=qv-party-c
 NS_PTEST=qv-ptest                           # the namespace the policy chart labels (policy.sh); not part of ALL_NS
 ALL_NS="$NS_BIZ $NS_SIGN $NS_B $NS_C"
+export QV_KIND_CHAIN_ID="${QV_KIND_CHAIN_ID:-84532}" # the lane's EVM chain id (anvil, kindcfg, kindwd, the load target), decided only here; 84532 = Base Sepolia (Gate x402, USDC EIP-3009)
 export KUBECONFIG="${QV_KIND_KUBECONFIG:-$WORK/kubeconfig}"
 mkdir -p "$WORK"
 k()  { kubectl --context "$CTX" "$@"; }
