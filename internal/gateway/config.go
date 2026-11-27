@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
@@ -892,8 +894,8 @@ func (a ApproverFile) webauthnKey() (*webauthn.Key, error) {
 		return nil, errors.New("a webauthn approver needs rp_id and origins")
 	}
 	for _, o := range a.Origins {
-		if !strings.HasPrefix(o, "https://") && !strings.HasPrefix(o, "http://localhost") {
-			return nil, fmt.Errorf("origin %q must be https (or http://localhost for tests)", o)
+		if err := checkOrigin(o, auth.EnvironmentFromEnv()); err != nil {
+			return nil, err
 		}
 	}
 	k := &webauthn.Key{Alg: a.Alg, CredentialID: cred, RPID: a.RPID, Origins: a.Origins}
@@ -913,4 +915,28 @@ func (a ApproverFile) webauthnKey() (*webauthn.Key, error) {
 		return nil, fmt.Errorf("alg %q is neither ES256 nor EdDSA", a.Alg)
 	}
 	return k, nil
+}
+
+// checkOrigin enforces the WebAuthn origin rule: an origin is exactly scheme://host[:port], with no path, query, fragment or
+// userinfo. https is always allowed. http is allowed only for the loopback hosts localhost, 127.0.0.1 and [::1] (exact host, so
+// http://localhost.evil.example is refused), and only when QV_ENV is dev or test: production (QV_ENV unset or anything else) refuses it.
+func checkOrigin(o string, env auth.Environment) error {
+	u, err := url.Parse(o)
+	if err != nil || u.Host == "" || u.Opaque != "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery ||
+		u.Fragment != "" || strings.Contains(o, "#") || u.Hostname() == "" || o != u.Scheme+"://"+u.Host {
+		return fmt.Errorf("origin %q must be exactly scheme://host[:port] (no path, query, fragment or userinfo)", o)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+			if env == auth.Production {
+				return fmt.Errorf("origin %q: http is refused in production (QV_ENV unset or not dev/test); use https", o)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("origin %q must be https, or http on exactly localhost, 127.0.0.1 or [::1] when QV_ENV is dev or test", o)
 }

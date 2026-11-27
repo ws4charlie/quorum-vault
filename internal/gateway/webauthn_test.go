@@ -3,6 +3,7 @@ package gateway
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
@@ -225,5 +226,67 @@ func TestConfigWebAuthnApprovers(t *testing.T) {
 		if err := parse(extra); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// TestConfigWebAuthnOrigins: an origin is exactly scheme://host[:port]; http only on an exact loopback host and only when QV_ENV is
+// dev or test. On 0b9b109 a prefix check let http://localhost.evil.example through and accepted http in production.
+func TestConfigWebAuthnOrigins(t *testing.T) {
+	raw, err := os.ReadFile("config.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := webauthntest.New(t, webauthn.ES256, waRP, waOrigin)
+	parse := func(origin string) error {
+		var m map[string]any
+		json.Unmarshal(raw, &m)
+		m["approvers"].(map[string]any)["x"] = map[string]any{"scheme": "webauthn", "alg": a.Alg, "public_key": a.PublicKeyHex(),
+			"credential_id": a.CredentialIDString(), "rp_id": waRP, "origins": []string{origin}, "enabled": true, "identity": "alice"}
+		b, _ := json.Marshal(m)
+		_, err := ParseConfig(b)
+		return err
+	}
+	cases := []struct {
+		origin    string
+		dev, prod bool // accepted with QV_ENV=dev / with QV_ENV unset (production)
+	}{
+		{"https://a.example", true, true},
+		{"https://a.example:8443", true, true},
+		{"http://localhost:8080", true, false},
+		{"http://localhost", true, false},
+		{"http://127.0.0.1:8080", true, false},
+		{"http://[::1]:8080", true, false},
+		{"http://localhost.evil.example", false, false},
+		{"http://localhost.evil.example:8080", false, false},
+		{"http://localhostevil.example", false, false},
+		{"http://a.example", false, false},
+		{"https://a.example/path", false, false},
+		{"https://a.example/", false, false},
+		{"https://a.example?x=1", false, false},
+		{"https://a.example#f", false, false},
+		{"https://user@a.example", false, false},
+		{"http://localhost/", false, false},
+		{"ftp://a.example", false, false},
+		{"a.example", false, false},
+		{"https://", false, false},
+	}
+	for _, env := range []string{"dev", "test", "", "production", "Dev-typo"} {
+		t.Run("QV_ENV="+env, func(t *testing.T) {
+			t.Setenv("QV_ENV", env)
+			loose := env == "dev" || env == "test"
+			for _, c := range cases {
+				want := c.prod
+				if loose {
+					want = c.dev
+				}
+				err := parse(c.origin)
+				if got := err == nil; got != want {
+					t.Errorf("origin %q: accepted=%v, want %v (err %v)", c.origin, got, want, err)
+				}
+				if err != nil && !strings.Contains(err.Error(), "origin") {
+					t.Errorf("origin %q: error does not name the origin rule: %v", c.origin, err)
+				}
+			}
+		})
 	}
 }
