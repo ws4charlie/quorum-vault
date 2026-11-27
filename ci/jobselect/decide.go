@@ -17,6 +17,7 @@ type world struct {
 	g          *graph
 	rules      []rule
 	exceptions []*exception
+	readers    []*reader
 	allow      allowlist
 	tracked    []string
 	modules    map[string]bool // every directory with a tracked go.mod
@@ -46,6 +47,12 @@ func load(root string) (*world, error) {
 		return nil, err
 	}
 	if w.exceptions, err = parseExceptions(b, w.cfg); err != nil {
+		return nil, err
+	}
+	if b, err = readFile(root, "ci/job-readers"); err != nil {
+		return nil, err
+	}
+	if w.readers, err = parseReaders(b); err != nil {
 		return nil, err
 	}
 	if b, err = readFile(root, "ci/skip-allowlist"); err != nil {
@@ -145,13 +152,45 @@ func (w *world) ruleOf(p string) *rule {
 	return nil
 }
 
-// decide is the rule for one changed file. Order matters: the first step that applies decides.
+// decide is the rule for one changed file, widened by the reviewed readers of ci/job-readers whose paths match it.
 func (w *world) decide(c change) decision {
+	d := w.decideFile(c)
+	if d.all || len(d.jobs) == 0 && d.why == skipWhy {
+		return d
+	}
+	for _, r := range w.readers {
+		hit := false
+		for _, g := range r.globs {
+			if globStar(g, c.path) {
+				hit = true
+			}
+		}
+		if !hit {
+			continue
+		}
+		pk := w.g.byDir[path.Dir(r.file)]
+		if pk == nil {
+			return all("ci/job-readers: " + r.file + " is not in a package")
+		}
+		if strings.HasSuffix(r.file, "_test.go") {
+			d.jobs.add(w.jobsTesting(pk))
+		} else {
+			d.jobs.add(w.jobsCompiling(pk))
+		}
+		d.why += "; read by path by " + r.file + " (ci/job-readers)"
+	}
+	return d
+}
+
+const skipWhy = "on ci/skip-allowlist: no job reads it"
+
+// decideFile is the rule for one changed file by itself. Order matters: the first step that applies decides.
+func (w *world) decideFile(c change) decision {
 	p := c.path
 	base := path.Base(p)
 	// 1. a file no job reads (ci/skip-allowlist, decided by ci/classify.sh with its extension and module checks)
 	if w.classify(c) {
-		return decision{jobs: set{}, why: "on ci/skip-allowlist: no job reads it"}
+		return decision{jobs: set{}, why: skipWhy}
 	}
 	// 2. what every job depends on: modules, the workflows and actions, the CI machinery (this selector, the image, the scripts the jobs run)
 	switch {

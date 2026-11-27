@@ -55,8 +55,8 @@ func TestMain(m *testing.M) {
 			buildErr = err
 		} else {
 			binGW = filepath.Join(dir, "qv-gateway")
-			if out, err := exec.Command("go", "build", "-o", binGW, "github.com/ws4charlie/quorum-vault/cmd/qv-gateway").CombinedOutput(); err != nil {
-				buildErr = fmt.Errorf("build qv-gateway: %v\n%s", err, out)
+			if err := mpcstack.GoBuild(".", binGW, "github.com/ws4charlie/quorum-vault/cmd/qv-gateway", ""); err != nil {
+				buildErr = err
 			}
 		}
 	}

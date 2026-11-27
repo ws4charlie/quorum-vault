@@ -12,7 +12,7 @@ import (
 // of them runs everything anyway (decide, step 2: ci/ outside a rule tree).
 func isMachinery(p string) bool {
 	return strings.HasPrefix(p, "ci/jobselect/") || p == "ci/jobs" || strings.HasPrefix(p, "ci/job-rules") || strings.HasPrefix(p, "ci/changes") ||
-		p == "ci/classify.sh" || strings.HasPrefix(p, "ci/skip-") || p == "ci/final.sh" || p == "ci/e2e-split-check.sh" ||
+		p == "ci/classify.sh" || strings.HasPrefix(p, "ci/skip-") || p == "ci/final.sh" || p == "ci/e2e-groups-check.sh" || p == "ci/job-readers" ||
 		strings.HasPrefix(p, "ci/tracked-files")
 }
 

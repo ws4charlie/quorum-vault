@@ -135,20 +135,23 @@ test-custody:
 #   make test-e2e-evm TEST=TestMPCRefreshDuringLiveWithdrawals
 #   make test-e2e-evm TEST='TestMPCRefresh|TestHappyPath'
 # and, to run only some crash boundaries of TestCrashAtEveryBoundary: QV_CRASH_BOUNDARIES=withdrawal.after_broadcast.
+# The go test of the end-to-end groups. CI sets QV_GOTEST=ci/gotest.sh: it runs the test binaries the `build` job compiled once (same flags, same package
+# directory); anything it does not recognise runs `go test` itself. Locally it is plain go test.
+QV_GOTEST ?= go test
 E2E_EVM_ENV := QV_CUSTODY_SIGNER=mpc QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1
 test-e2e-evm:
-	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 40m -v $(if $(TEST),-run '$(TEST)') ./e2e/custody/...
+	$(E2E_EVM_ENV) $(QV_GOTEST) -count=1 -p 1 -timeout 40m -v $(if $(TEST),-run '$(TEST)') ./e2e/custody/...
 
 # The heavy tests, which pull-request CI leaves to the nightly run: every crash boundary, a component killed at each custody
 # boundary, the freeze test, and the link tests (kill mid-session, partition).
 E2E_EVM_FAILURE := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestRebalanceCrashAtEveryBoundary|TestRefillCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCRouteOneFailedSignatureDoesNotMoveIt
 test-e2e-evm-failure:
-	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 40m -v -run '$(E2E_EVM_FAILURE)' ./e2e/custody/...
+	$(E2E_EVM_ENV) $(QV_GOTEST) -count=1 -p 1 -timeout 40m -v -run '$(E2E_EVM_FAILURE)' ./e2e/custody/...
 
 # The signing latency with delay added between the two parties (20 ms, 100 ms, 1 s per frame): a measurement of a real duration (about
 # 2 minutes) that asserts little, so it is not part of test-e2e-evm. The nightly workflow runs it.
 test-e2e-evm-latency:
-	$(E2E_EVM_ENV) QV_E2E_LATENCY=1 go test -count=1 -p 1 -timeout 20m -v -run 'TestMPCWithdrawalLatencyWithSlowLink' ./e2e/custody/...
+	$(E2E_EVM_ENV) QV_E2E_LATENCY=1 $(QV_GOTEST) -count=1 -p 1 -timeout 20m -v -run 'TestMPCWithdrawalLatencyWithSlowLink' ./e2e/custody/...
 
 # Pull-request CI: everything except the failure tests, in three groups that run in parallel jobs (each on its own runner with its
 # own anvil, Temporal, Redpanda and Postgres). Together with test-e2e-evm-failure they cover test-e2e-evm.
@@ -159,32 +162,24 @@ E2E_EVM_FLOWS := TestSmallDepositHeldAtHighFeeThenSwept|TestTwoApproversAndIniti
 E2E_EVM_TX_FAILURES := TestRevertedWithdrawalVoidsAndRecordsFee|TestDroppedTransactionIsReplacedAndPaidOnce|TestConsumedNonceParksWithOneAlert|TestRestartedWorkflowAfterMinedReplacementSettlesOnce|TestStuckTransactionIsReplacedOnce|TestReconcileCleanWhileAWithdrawalIsReplaced|TestReconcileCleanWhileAWithdrawalIsCancelled|TestReconcileCleanWhileAWithdrawalReverts|TestMinedCancelBooksItsGas
 E2E_EVM_RECOVERY := TestGatewayAndRelayRestart|TestMPCRefreshDuringLiveWithdrawals|TestMPCOnePartyDownWithdrawalsContinue|TestMPCRestartOfAWhileCIsDown|TestMPCRoutePreferredPairIsSignedAuditedAndHotSwitchable|TestMPCRouteFollowsHealthWithHysteresis|TestCrashAtEveryBoundary|TestReconcileCleanAtEveryStageOfASweep|TestReconcileCleanAtEveryStageOfAColdMove|TestWorkerRestartDuringWithdrawalSettlesOnce|TestWorkerStopTimeoutFinishesOrAbandons
 test-e2e-evm-flows:
-	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' ./e2e/custody/...
-# CI runs the slowest groups as two jobs each (shards), split by top-level test name: shard 1 runs the names listed (anchored), shard 2 runs the group's own
-# selector minus those names, so together they are exactly the group (no test can be lost by construction; ci/e2e-split-check.sh checks it on every run).
-# The original target stays for local runs. Balanced by the CI times of 2026-11-27 (run 45927731742).
-E2E_EVM_FLOWS_1 := TestFiftyCustomersConcurrent|TestReconcileCleanAtEveryStageOfARebalance|TestRekeyFullReplacementDrivenByTheTool|TestReconcileCleanAtEveryStageOfAWithdrawal|TestRefillNotConfirmingAlertsOnceAndIsNeverRetried|TestMeasureClosedLoop|TestReconcileCleanAtEveryStageOfARefill
-test-e2e-evm-flows-1:
-	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '^($(E2E_EVM_FLOWS_1))$$' ./e2e/custody/...
-test-e2e-evm-flows-2:
-	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' -skip '^($(E2E_EVM_FLOWS_1))$$' ./e2e/custody/...
+	$(E2E_EVM_ENV) $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' ./e2e/custody/...
 # The drain of a shard and the emergency drill (a hot key may be stolen, with a withdrawal and a sweep in flight): their own group, so a stall in the
 # emergency path ends at this group's own time limit and not inside the flows. 12 minutes is about three times a quiet run.
 # QV_DRILL_COUNT=30 QV_DRILL_TIMEOUT=90m repeats the three tests (a soak of the race); QV_DRILL_RUN=TestEmergencyDrillStolenHotKey repeats one.
 E2E_EVM_DRILL := TestDrainMovesAShardToItsSuccessor|TestDrainCrashBetweenBroadcastAndConfirmAndBetweenAssets|TestEmergencyDrillStolenHotKey
 test-e2e-evm-drill:
-	$(E2E_EVM_ENV) go test -count=$(or $(QV_DRILL_COUNT),1) -p 1 -timeout $(or $(QV_DRILL_TIMEOUT),12m) -v -run '$(or $(QV_DRILL_RUN),$(E2E_EVM_DRILL))' ./e2e/custody/...
+	$(E2E_EVM_ENV) $(QV_GOTEST) -count=$(or $(QV_DRILL_COUNT),1) -p 1 -timeout $(or $(QV_DRILL_TIMEOUT),12m) -v -run '$(or $(QV_DRILL_RUN),$(E2E_EVM_DRILL))' ./e2e/custody/...
 # x402 on a local Base Sepolia (docs/evm.md, "x402 authorizations"): a token with EIP-3009 on an anvil node of chain id 84532 takes the signatures of the
 # signing zone (software key) and of an HSM key, and the core's liability accounting is read through the real reader. The tests set the chain id of the node
 # at QV_ANVIL_RPC (a CI lane's own anvil) to 84532 themselves; `make base-up` starts a separate dev node of 84532 on 18546.
 # TestGateAPIThroughTheZoneOnALocalBaseSepolia is AgentGate's signing API (core) through the real gateway and its credential rule.
 test-e2e-x402:
-	QV_REQUIRE_CHAIN=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 -timeout 15m -v -run 'TestEIP3009SignedByTheZoneIsAcceptedByTheToken|TestGateCredentialPaymentsLandOnAnvil|TestX402LiabilityOnALocalBaseSepolia|TestHSMSignedEIP712DigestIsAcceptedByTheToken|TestGateAPIThroughTheZoneOnALocalBaseSepolia' ./internal/gateway ./internal/custody ./internal/hsmsigner
+	QV_REQUIRE_CHAIN=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 $(QV_GOTEST) -count=1 -p 1 -timeout 15m -v -run 'TestEIP3009SignedByTheZoneIsAcceptedByTheToken|TestGateCredentialPaymentsLandOnAnvil|TestX402LiabilityOnALocalBaseSepolia|TestHSMSignedEIP712DigestIsAcceptedByTheToken|TestGateAPIThroughTheZoneOnALocalBaseSepolia' ./internal/gateway ./internal/custody ./internal/hsmsigner
 # The GATE-CONNECT demo (docs/gate-credential.md, README "Payments approved by AgentGate"): AgentGate's request through qv-core's signing API (its client
 # certificate and token), the gateway and both cosigners checking the credential, the two-party MPC signature, the token on the lane's anvil as chain 84532
 # paying it, the x402 liability booked; then the repeat, the refusals and an expiry. Needs what test-e2e-evm-flows needs.
 test-e2e-evm-gate:
-	$(E2E_EVM_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 15m -v -run 'TestGatePaymentSignedByMPCOnALocalBaseSepolia' ./e2e/custody/...
+	$(E2E_EVM_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 15m -v -run 'TestGatePaymentSignedByMPCOnALocalBaseSepolia' ./e2e/custody/...
 base-up:
 	docker compose --profile x402 up -d --wait anvil-base-sepolia
 base-down:
@@ -192,12 +187,12 @@ base-down:
 # Real identity provider: a two-approver withdrawal with tokens from the dev Keycloak (docker compose profile identity; `make keycloak-up` first).
 test-e2e-evm-identity:
 	./scripts/keycloak-env.sh
-	$(E2E_EVM_ENV) QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-https://127.0.0.1:$(or $(QV_KEYCLOAK_PORT),8180)} go test -count=1 -p 1 -timeout 25m -v -run 'TestOIDCWithRealKeycloak' ./e2e/custody/...
+	$(E2E_EVM_ENV) QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-https://127.0.0.1:$(or $(QV_KEYCLOAK_PORT),8180)} $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestOIDCWithRealKeycloak' ./e2e/custody/...
 # The approval page in a headless Chromium with a virtual passkey (SIMULATED), against the dev Keycloak (`make keycloak-up`) and the real core and gateway.
 # Chromium: QV_E2E_CHROME_URL (a running one, as CI has it), QV_E2E_CHROME, or Google Chrome / Chromium on this machine. Signs with the HSM, not mpc-party.
 test-e2e-approval-web:
 	./scripts/keycloak-env.sh
-	QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-https://127.0.0.1:$(or $(QV_KEYCLOAK_PORT),8180)} go test -count=1 -p 1 -timeout 25m -v -run 'TestApprovalPageInARealBrowser|TestApproverCLIWithASoftwareKey|TestApproverCLILoopbackLoginWithKeycloak' ./e2e/custody/...
+	QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 QV_E2E_KEYCLOAK_URL=$${QV_E2E_KEYCLOAK_URL:-https://127.0.0.1:$(or $(QV_KEYCLOAK_PORT),8180)} $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestApprovalPageInARealBrowser|TestApproverCLIWithASoftwareKey|TestApproverCLILoopbackLoginWithKeycloak' ./e2e/custody/...
 keycloak-up:
 	./scripts/keycloak-env.sh
 	docker compose --profile identity up -d --wait keycloak
@@ -208,12 +203,12 @@ keycloak-down:
 # QV_CUSTODY_TEE=sim (for example: make test-e2e-evm TEST=TestMPCRefreshDuringLiveWithdrawals with that variable set).
 E2E_TEE_SIM := TestTEESim
 test-e2e-tee-sim:
-	$(E2E_EVM_ENV) QV_CUSTODY_TEE=sim go test -count=1 -p 1 -timeout 40m -v -run '$(E2E_TEE_SIM)' ./e2e/custody/...
+	$(E2E_EVM_ENV) QV_CUSTODY_TEE=sim $(QV_GOTEST) -count=1 -p 1 -timeout 40m -v -run '$(E2E_TEE_SIM)' ./e2e/custody/...
 test-e2e-evm-tx-failures:
-	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_TX_FAILURES)' ./e2e/custody/...
+	$(E2E_EVM_ENV) $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_TX_FAILURES)' ./e2e/custody/...
 # recovery keeps one crash boundary on pull requests: the worker dies right after the broadcast.
 test-e2e-evm-recovery:
-	$(E2E_EVM_ENV) QV_CRASH_BOUNDARIES=withdrawal.after_broadcast go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_RECOVERY)' ./e2e/custody/...
+	$(E2E_EVM_ENV) QV_CRASH_BOUNDARIES=withdrawal.after_broadcast $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_RECOVERY)' ./e2e/custody/...
 
 # ---- Bitcoin cell (P7). All Bitcoin e2e runs on real mpc-party: HSM mode has no HD derivation. Jobs are named e2e-btc-<group>.
 # Needs `make btc-up infra-up softhsm mpc-build`, Postgres, and bitcoind regtest on QV_BTC_RPC (default http://127.0.0.1:18443).
@@ -234,135 +229,111 @@ sol-down:
 E2E_SOL_ENV := QV_REQUIRE_SOL=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1
 E2E_SOL_DEPOSITS := TestSOL|TestSPL|TestMany|TestRent|TestDerived|TestWrongNetwork|TestReconcile
 test-e2e-sol-deposits:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_SOL_DEPOSITS)' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_SOL_DEPOSITS)' ./e2e/sol/...
 
 # Signing zone for Solana (P8-4): qv-gateway, mpc-party A, B and C (2-of-3 Ed25519 hot shard, 2-party HD deposit keys), the cosigners of B and C, Postgres
 # and the validator; every signed transaction lands on it. Needs `make sol-up softhsm mpc-build`.
 test-e2e-sol-signing:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v ./e2e/solsign/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v ./e2e/solsign/...
 
 # Solana withdrawals on durable nonces (P8-5): the hot shard on 2-of-3 mpc-party, gateway, cosigners, qv-core and qv-worker, the validator. Needs `make sol-up infra-up softhsm mpc-build`.
 # Two groups: the flows (settle, fail, refuse, fee raise, park, queue), and the faults (zone attacks, operator pool and cancel, one party down, crash at every boundary).
 test-e2e-sol-withdrawals:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestWdFlows' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestWdFlows' ./e2e/sol/...
 
 test-e2e-sol-wd-faults:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestWdFaults|TestWdCrash' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestWdFaults|TestWdCrash' ./e2e/sol/...
 
 # Solana sweeps (P8-6): deposit addresses to the hot shard, batched, on durable nonces. Flows (SOL and token, batch, close, stuck, failed), and the faults (zone
 # attacks, one party down, crash at every boundary). Needs `make sol-up infra-up softhsm mpc-build`.
 test-e2e-sol-sweeps:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestSwFlows' ./e2e/sol/...
-# CI shards (see test-e2e-evm-flows-1): shard 1 the names listed, shard 2 the rest of the group.
-E2E_SOL_SWEEPS_1 := TestSwFlowsHotKeyReplacementDrivenByTheTool|TestSwFlows|TestSwFlowsDepositKeyGenerations
-test-e2e-sol-sweeps-1:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '^($(E2E_SOL_SWEEPS_1))$$' ./e2e/sol/...
-test-e2e-sol-sweeps-2:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestSwFlows' -skip '^($(E2E_SOL_SWEEPS_1))$$' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestSwFlows' ./e2e/sol/...
 
 test-e2e-sol-sweep-faults:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestSwFaults|TestSwCrash' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestSwFaults|TestSwCrash' ./e2e/sol/...
 
 # Solana cold tier (P8-7): moves to cold and rebalance between the shards of a pool, the refill ceremony (the cold key is an Ed25519 key in the qv-cold SoftHSM
 # token, qv-cold a separate process, only files crossing) with its attacks, a refill that cannot mine and is closed by an operator; and the crash tests at every
 # boundary of a refill, a move to cold and a rebalance. Needs `make sol-up infra-up softhsm mpc-build`.
 E2E_SOL_COLD := TestColdMovesAndRebalance|TestColdRefillCeremony|TestColdRefillParked|TestColdRefillRequestExpires|TestColdRefillIsSentAgainUntilItLands|TestColdRefillsOfTwoAssetsRunInParallel|TestColdKeyReplacementSOL
 test-e2e-sol-cold:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_SOL_COLD)' ./e2e/sol/...
-# CI shards (see test-e2e-evm-flows-1).
-E2E_SOL_COLD_1 := TestColdRefillParked|TestColdRefillRequestExpires|TestColdRefillsOfTwoAssetsRunInParallel
-test-e2e-sol-cold-1:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '^($(E2E_SOL_COLD_1))$$' ./e2e/sol/...
-test-e2e-sol-cold-2:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_SOL_COLD)' -skip '^($(E2E_SOL_COLD_1))$$' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_SOL_COLD)' ./e2e/sol/...
 
 test-e2e-sol-cold-crash:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestColdRefillCrash' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestColdRefillCrash' ./e2e/sol/...
 
 test-e2e-sol-cold-moves-crash:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestColdCrash' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestColdCrash' ./e2e/sol/...
 
 # Retiring and closing nonce accounts to get the rent back: the hot pool through the signing zone, the cold pool in an offline ceremony. Needs `make sol-up infra-up softhsm mpc-build`.
 test-e2e-sol-nonces:
-	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestNonceRetireAndClose|TestColdNonceRetireAndClose' ./e2e/sol/...
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestNonceRetireAndClose|TestColdNonceRetireAndClose' ./e2e/sol/...
 
 E2E_BTC_ENV := QV_REQUIRE_BTC=1 QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1
 E2E_BTC_DEPOSITS := TestXpub|TestDeposit|TestTwoOutputs|TestRescan|TestShallowReorg|TestDeepReorg|TestBelowMinimum|TestCoinbase|TestWrongNetwork|TestTwoInputTransactionsSign
 E2E_BTC_WITHDRAWALS := TestWithdrawal|TestTwoInputWithdrawal|TestExactAmount|TestManyConcurrent|TestRefusedByTheGateway|TestReorgRemoves
 test-e2e-btc-deposits:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_DEPOSITS)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_DEPOSITS)' ./e2e/btc/...
 
 # Withdrawals on real mpc-party: qv-gateway, party B's cosigner, the workflows, bitcoind regtest with -txindex.
 test-e2e-btc-withdrawals:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_WITHDRAWALS)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_WITHDRAWALS)' ./e2e/btc/...
 
 # Sweeps: credited deposits move into the hot shard and become spendable, on real mpc-party (deposit-branch keys), gateway, cosigner and regtest; and the
 # recovery of sweeps: bump, cancel, release, an outside spend, every crash boundary.
 E2E_BTC_SWEEPS := TestSweep|TestRecoverySweep|TestRekey
 test-e2e-btc-sweeps:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_SWEEPS)' ./e2e/btc/...
-# CI shards (see test-e2e-evm-flows-1).
-E2E_BTC_SWEEPS_1 := TestRekeyDepositKeyReplacementDrivenByTheTool|TestRecoverySweepCrashAtEveryBoundary|TestRekeyCompromisedGenerationFreesACoinClaimedByARefusedWithdrawal
-test-e2e-btc-sweeps-1:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '^($(E2E_BTC_SWEEPS_1))$$' ./e2e/btc/...
-test-e2e-btc-sweeps-2:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_SWEEPS)' -skip '^($(E2E_BTC_SWEEPS_1))$$' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_SWEEPS)' ./e2e/btc/...
 
 # Recovery: fee bumps, cancel, an outside spend, every crash boundary, a killed gateway, a node restarted with an empty mempool. The last one
 # restarts the compose bitcoind (`docker compose --profile btc restart bitcoind`), so it needs the node from `make btc-up`.
 E2E_BTC_RECOVERY := TestRecovery
 test-e2e-btc-recovery:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_RECOVERY)' -skip 'TestRecoverySweep' ./e2e/btc/...
-# CI shards (see test-e2e-evm-flows-1).
-E2E_BTC_RECOVERY_1 := TestRecoveryCrashAtEveryBoundary|TestRecoveryBumpsToExactlyTheFeeCapFromTheLeastChangeThenAlerts|TestRecoveryFeeRefusedAboveTheCapAlertsOnceAndRetriesWhenTheMinimumFalls|TestRecoveryFeeRefusedConsolidationStopsAtItsCeilingAndRetries|TestRecoveryCancelRefusedAboveTheCapAlertsOnceAndGoesThroughWhenTheMinimumFalls
-test-e2e-btc-recovery-1:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 30m -v -run '^($(E2E_BTC_RECOVERY_1))$$' ./e2e/btc/...
-test-e2e-btc-recovery-2:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_RECOVERY)' -skip 'TestRecoverySweep|^($(E2E_BTC_RECOVERY_1))$$' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_RECOVERY)' -skip 'TestRecoverySweep' ./e2e/btc/...
 
 # Signed fee-cap changes end to end: qv-fee-caps sign, apply, show and metrics against real databases, a stuck send raised past its old cap, the window while the
 # core and the zone differ, refused changes, a revoked approver.
 E2E_BTC_FEECAPS := TestFeeCaps
 test-e2e-btc-feecaps:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_FEECAPS)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_FEECAPS)' ./e2e/btc/...
 
 # Reconciliation against the chain (scantxoutset) and hot-to-cold moves: bands, rounds under max_inputs, the attacks, crash boundaries, the cancel.
 E2E_BTC_COLD := TestCold|TestReconcile
 test-e2e-btc-cold:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_COLD)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_COLD)' ./e2e/btc/...
 
 # Refills on Bitcoin: the cold key in the qv-cold SoftHSM token, qv-cold as a separate process, only files crossing. Needs `make setup` for the token.
 E2E_BTC_REFILL_STUCK := TestRefill(Stuck|Offline|Signed|TheLost)
 E2E_BTC_REFILL := TestRefill
 test-e2e-btc-refill:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL)' -skip '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL)' -skip '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
 
 # Stuck refills: the fee-bumped second ceremony, both ways round, the lost signed file, the fee attacks through real files. Its own group so that each CI job
 # stays well under ten minutes (the two together take about six on a laptop).
 test-e2e-btc-refill-stuck:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_REFILL_STUCK)' ./e2e/btc/...
 
 # Consolidation of a hot shard's small outputs: the smallest merged and the largest left free, the conditions that hold it back, one at a time, a withdrawal
 # alongside, the cancel, every crash boundary, Reconcile in flight, the attacks through real files.
 E2E_BTC_CONSOLIDATE := TestConsolidate
 test-e2e-btc-consolidate:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_CONSOLIDATE)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_CONSOLIDATE)' ./e2e/btc/...
 
 # Batches of withdrawals (several in one transaction), batching on: sealing by count and by age, first in first out, max_in_flight, the prefix under max_inputs, the
 # core's second look at every destination, the zone's own ceiling. The second group is the failures: a bumped batch (to the cap, an earlier attempt confirming), the
 # cancel of one withdrawal and of a whole batch at each moment, the survivors paid once, a crash at every boundary.
 E2E_BTC_BATCHING_RECOVERY := TestBatchRecovery
 test-e2e-btc-batching:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestBatch' -skip '$(E2E_BTC_BATCHING_RECOVERY)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run 'TestBatch' -skip '$(E2E_BTC_BATCHING_RECOVERY)' ./e2e/btc/...
 
 test-e2e-btc-batching-recovery:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_BATCHING_RECOVERY)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_BATCHING_RECOVERY)' ./e2e/btc/...
 
 # CPFP: a send that RBF cannot raise any more is pulled in by a child that spends its change back to the shard: a withdrawal and a batch, the books and
 # Reconcile, a cancel after a child, a crash between the child's signature and its broadcast, and every hostile child refused by the real zone.
 E2E_BTC_CPFP := TestCPFP
 test-e2e-btc-cpfp:
-	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_CPFP)' ./e2e/btc/...
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh $(QV_GOTEST) -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_CPFP)' ./e2e/btc/...
 
 # cb-mpc signing path end to end (needs the C++ build once: `make mpc-build`; Postgres; anvil on 127.0.0.1:18545 with chain
 # id 11155111 for the mining test: docker run -d --name qv-anvil-p5b3 -p 127.0.0.1:18545:8545 ghcr.io/foundry-rs/foundry:v1.8.5 "anvil --host 0.0.0.0 --chain-id 11155111").
@@ -374,7 +345,7 @@ mpc-build:
 # the Kafka ones need Redpanda (`make infra-up`; QV_KAFKA_BROKERS if it is not on 19092) and Postgres (`make db-up`).
 .PHONY: test-archive
 test-archive:
-	QV_REQUIRE_DB=1 QV_REQUIRE_INFRA=1 QV_REQUIRE_WORM=1 go test -count=1 -p 1 -timeout 15m -v ./internal/auditchain/...
+	QV_REQUIRE_DB=1 QV_REQUIRE_INFRA=1 QV_REQUIRE_WORM=1 $(QV_GOTEST) -count=1 -p 1 -timeout 15m -v ./internal/auditchain/...
 
 # One named e2e test N times, with the pass count (scripts/e2e-repeat.sh; CONTRIBUTING.md: every new e2e test runs 20 times before review):
 #   make e2e-repeat GROUP=mpc-signing TEST=TestLocalRefusalsAndDisagreement N=20
@@ -383,12 +354,12 @@ e2e-repeat:
 	scripts/e2e-repeat.sh -n $(or $(N),20) '$(GROUP)' '$(TEST)'
 
 test-mpc:
-	QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=$${QV_ANVIL_RPC:-http://127.0.0.1:18545} go test -count=1 -p 1 -timeout 20m -v ./e2e/mpcsign/... ./e2e/partyadmin/...
+	QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=$${QV_ANVIL_RPC:-http://127.0.0.1:18545} $(QV_GOTEST) -count=1 -p 1 -timeout 20m -v ./e2e/mpcsign/... ./e2e/partyadmin/...
 
 # Soak: 50 signatures per second for 10 minutes through the whole path, with RSS and thread counts of every process.
 # QV_MPC_SOAK_MINUTES and QV_MPC_SOAK_RATE change the length and the rate.
 test-mpc-soak:
-	QV_MPC_SOAK=1 QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=$${QV_ANVIL_RPC:-http://127.0.0.1:18545} go test -count=1 -p 1 -timeout 40m -v -run TestSoakWholePath ./e2e/mpcsign/...
+	QV_MPC_SOAK=1 QV_MPC_E2E=1 QV_REQUIRE_DB=1 QV_ANVIL_RPC=$${QV_ANVIL_RPC:-http://127.0.0.1:18545} $(QV_GOTEST) -count=1 -p 1 -timeout 40m -v -run TestSoakWholePath ./e2e/mpcsign/...
 
 # Every CI test group at the same time, each lane with its own Postgres, anvil, bitcoind and SoftHSM tokens (scripts/e2e-all.sh; needs `make softhsm mpc-build`).
 #   make test-e2e-all                        all groups
@@ -436,7 +407,7 @@ load-local:
 	QV_LOAD_SCENARIO=$(abspath $(SCENARIO)) $(if $(OUT),QV_LOAD_OUT=$(abspath $(OUT))) $(if $(OUT),,QV_LOAD_OUT=$(abspath data/load)/$(shell date +%Y%m%d-%H%M%S)) $(if $(SHARDS),QV_LOAD_SHARDS=$(SHARDS)) $(if $(WORKERS),QV_LOAD_WORKERS=$(WORKERS)) \
 	  $(if $(CORES),QV_LOAD_CORES=$(CORES)) $(if $(DELAY_MS),QV_LOAD_LINK_DELAY_MS=$(DELAY_MS)) $(if $(RATE_SCALE),QV_LOAD_RATE_SCALE=$(RATE_SCALE)) \
 	  $(if $(SEED),QV_LOAD_SEED=$(SEED)) $(if $(LABEL),QV_LOAD_LABEL='$(LABEL)') $(if $(wildcard data/load/targets),QV_LOAD_TARGETS_DIR=$(abspath data/load/targets)) \
-	  $(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 90m -v -run 'TestLoadLocal$$' ./e2e/custody/
+	  $(E2E_EVM_ENV) $(QV_GOTEST) -count=1 -p 1 -timeout 90m -v -run 'TestLoadLocal$$' ./e2e/custody/
 
 # The smoke scenario: a handful of operations, correctness only.
 load-smoke:

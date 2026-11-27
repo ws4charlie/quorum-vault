@@ -88,7 +88,7 @@ func thisRepo(t *testing.T) string {
 
 const scratchJobs = `module .
 mains-exclude tools/
-noimage test
+nobuild test
 job test .:./...
 job e2e-y .:./e2e/y/... @mains
 job e2e-z .:./e2e/z/... @mains
@@ -100,22 +100,22 @@ on: pull_request
 jobs:
   changes:
     runs-on: x
-  image:
+  build:
     needs: changes
-    if: ${{ !(contains(needs.changes.outputs.skip_jobs, ',image,')) }}
+    if: ${{ !(contains(needs.changes.outputs.skip_jobs, ',build,')) }}
   test:
     needs: changes
     if: ${{ contains(needs.changes.outputs.skip_jobs, ',test,') }}
   e2e-y:
-    needs: [changes, image]
+    needs: [changes, build]
     if: ${{ !contains(needs.changes.outputs.skip_jobs, ',e2e-y,') }}
   e2e-z:
-    needs: [changes, image]
+    needs: [changes, build]
     if: ${{ !contains(needs.changes.outputs.skip_jobs, ',e2e-z,') }}
     steps:
       - run: make tool-target
   lib-only:
-    needs: [changes, image]
+    needs: [changes, build]
     if: ${{ !contains(needs.changes.outputs.skip_jobs, ',lib-only,') }}
 `
 
@@ -148,6 +148,7 @@ func scratch(t *testing.T, exceptions string, extra map[string]string) string {
 		"ci/jobs":                    scratchJobs,
 		"ci/job-rules":               "tools/*\ndata/*\n",
 		"ci/job-rules-exceptions":    exceptions,
+		"ci/job-readers":             "",
 	}
 	for k, v := range extra {
 		files[k] = v
@@ -246,12 +247,12 @@ func TestDecisionsInAScratchRepository(t *testing.T) {
 			}
 		}
 	}
-	// the image is skipped only when no job that needs it runs
-	if out := selectJobs(root, []byte(rec('M', "internal/onlytest/x.go"))); !strings.Contains(out, " image") {
-		t.Errorf("only test runs: the image job should be skipped too: %q", out)
+	// the build job is skipped only when no job that needs it runs
+	if out := selectJobs(root, []byte(rec('M', "internal/onlytest/x.go"))); !strings.Contains(out, " build") {
+		t.Errorf("only test runs: the build job should be skipped too: %q", out)
 	}
-	if out := selectJobs(root, []byte(rec('M', "lib/l.go"))); strings.Contains(out, "image") {
-		t.Errorf("lib-only runs: the image job must not be skipped: %q", out)
+	if out := selectJobs(root, []byte(rec('M', "lib/l.go"))); strings.Contains(out, "build") {
+		t.Errorf("lib-only runs: the build job must not be skipped: %q", out)
 	}
 	// more than maxFiles
 	var many strings.Builder
@@ -261,6 +262,45 @@ func TestDecisionsInAScratchRepository(t *testing.T) {
 	if out := selectJobs(root, []byte(many.String())); !strings.HasPrefix(out, "all ") {
 		t.Errorf("%d files: want all, got %q", maxFiles+1, out)
 	}
+}
+
+func TestAlwaysJobsAndPathReaders(t *testing.T) {
+	// `always test`: a change test's packages do not compile (a rule tree no Go package reads) still runs test
+	root := scratch(t, okExceptions, map[string]string{"ci/jobs": strings.Replace(scratchJobs, "nobuild test\n", "nobuild test\nalways test\n", 1)})
+	w, err := load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runOf(t, w, selectJobs(root, []byte(rec('M', "tools/data.yaml")))); names(got) != "e2e-z test" {
+		t.Errorf("always: got %s", names(got))
+	}
+	// a reviewed reader by path: a file matching its globs adds the reader's jobs (here a test of lib reads data/ by a relative path)
+	extra := map[string]string{
+		"lib/r_test.go":  "package lib\n\nimport \"os\"\n\nvar _, _ = os.ReadFile(\"../data/x.json\")\n",
+		"ci/job-readers": "lib/r_test.go\t1\tdata/*\treads data\n",
+	}
+	root = scratch(t, okExceptions, extra)
+	w, _ = load(root)
+	if got := runOf(t, w, selectJobs(root, []byte(rec('M', "data/x.json")))); names(got) != "e2e-y lib-only test" {
+		t.Errorf("a reader by path adds its jobs: got %s", names(got))
+	}
+	// an unlisted reader by path, or a wrong count, fails check
+	for desc, readers := range map[string]string{"unlisted": "", "wrong count": "lib/r_test.go\t2\tdata/*\tx\n"} {
+		extra["ci/job-readers"] = readers
+		root = scratch(t, okExceptions, extra)
+		if p := check(root); !hasProblem(p, "lib/r_test.go") {
+			t.Errorf("%s reader: check must name lib/r_test.go: %v", desc, p)
+		}
+	}
+}
+
+func hasProblem(ps []string, sub string) bool {
+	for _, p := range ps {
+		if strings.Contains(p, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestReadersThatAreNotReviewedRunEverything(t *testing.T) {
@@ -392,8 +432,7 @@ func TestMappingOfThisRepository(t *testing.T) {
 	}
 	pre := func(p string) func(string) bool { return func(j string) bool { return strings.HasPrefix(j, p) } }
 	btc, sol, mpcParty := pick(pre("e2e-btc-")), pick(pre("e2e-sol-")), pick(pre("mpc-party-"))
-	custody := pick(func(j string) bool { return strings.HasPrefix(j, "e2e-evm-") || j == "e2e-tee-sim" })
-	solNoSign := pick(func(j string) bool { return sol[j] && j != "e2e-sol-signing" })
+	custody := pick(pre("e2e-evm-"))
 	e2e := pick(pre("e2e-"))
 	union := func(ss ...set) set {
 		u := set{}
@@ -433,25 +472,26 @@ func TestMappingOfThisRepository(t *testing.T) {
 		{path: "docs/architecture.md", exact: set{}},
 		{path: "deploy/helm/qv-business/values.yaml", exact: set{}},
 		// the e2e tests of one chain: that chain's jobs and test
-		{path: firstFile("e2e/btc", ".go", true), exact: union(btc, one("test"))},
-		{path: firstFile("e2e/sol", ".go", true), exact: union(solNoSign, one("test"))},
-		{path: firstFile("e2e/solsign", ".go", true), exact: union(one("e2e-sol-signing"), one("test"))},
-		{path: firstFile("e2e/custody", ".go", true), exact: union(custody, one("test"))},
-		{path: firstFile("e2e/mpcsign", ".go", true), exact: union(one("mpc-signing"), one("test"))},
+		// (checks: monitoring/metrics_test.go reads every .go file of the repository, ci/job-readers)
+		{path: firstFile("e2e/btc", ".go", true), exact: union(btc, one("test"), one("checks"))},
+		{path: firstFile("e2e/sol", ".go", true), exact: union(sol, one("test"), one("checks"))},
+		{path: firstFile("e2e/solsign", ".go", true), exact: union(one("e2e-sol-4"), one("test"), one("checks"))},
+		{path: firstFile("e2e/custody", ".go", true), exact: union(custody, one("test"), one("checks"))},
+		{path: firstFile("e2e/mpcsign", ".go", true), exact: union(one("e2e-evm-4"), one("test"), one("checks"))},
 		// code every binary links: every job of the root module's binaries, none of the mpc-party module's own jobs
-		{path: firstFile("internal/custody", ".go", false), must: union(e2e, one("test"), one("mpc-signing")), mustNot: mpcParty},
+		{path: firstFile("internal/custody", ".go", false), must: union(e2e, one("test")), mustNot: mpcParty},
 		{path: firstFile("internal/chain/btc", ".go", false), must: union(btc, sol, custody, one("test")), mustNot: mpcParty},
-		// the mpc-party module: its jobs and every e2e job (they build mpc-party), not the root module's test job
-		{path: firstFile("mpc-party/internal/server", ".go", false), must: union(mpcParty, e2e, one("misc-checks"), one("mpc-signing")), mustNot: one("test")},
+		// the mpc-party module: its jobs and every e2e job (they build mpc-party), and test (internal/gatecred's test walks mpc-party/)
+		{path: firstFile("mpc-party/internal/server", ".go", false), must: union(mpcParty, e2e, one("checks"), one("test"))},
 		// trees of ci/job-rules: no e2e group
 		{path: "ci/kind/kind.yaml", exact: one("test")},
 		{path: "ci/kind/charts.sh", exact: one("test")},
-		{path: "ci/kind/tools/mkbucket/main.go", exact: one("test")},
+		{path: "ci/kind/tools/mkbucket/main.go", exact: union(one("test"), one("checks"))},
 		{path: "deploy/helm/qv-certs/catalog.json", exact: one("test")},
 		{path: "deploy/helm/qv-monitoring/values.yaml", exact: one("test")},
-		{path: "loadtest/scenarios/smoke.json", must: union(one("e2e-evm-misc"), one("test")), mustNot: union(btc, sol, mpcParty, one("mpc-signing"))},
+		{path: "loadtest/scenarios/smoke.json", must: union(one("e2e-evm-4"), one("test")), mustNot: union(btc, sol, mpcParty)},
 		{path: "loadtest/README.md", must: one("test"), mustNot: union(btc, sol, mpcParty)},
-		{path: "monitoring/worker.rules.yml", must: union(one("misc-checks"), one("test")), mustNot: union(btc, sol, custody)},
+		{path: "monitoring/worker.rules.yml", must: union(one("checks"), one("test")), mustNot: union(btc, sol, custody)},
 		// anything not modelled: every job
 		{path: "newdir/x.txt", all: true},
 		{path: "go.mod", all: true},

@@ -32,6 +32,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/ws4charlie/quorum-vault/e2e/idp"
+	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"github.com/ws4charlie/quorum-vault/internal/pki"
 	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 )
@@ -81,8 +82,8 @@ func TestLoadLocal(t *testing.T) {
 
 	// the generator, built into a gitignored path
 	bin := filepath.Join(s.dir, "qv-load")
-	if b, err := exec.Command("go", "build", "-o", bin, "github.com/ws4charlie/quorum-vault/loadtest/cmd/qv-load").CombinedOutput(); err != nil {
-		t.Fatalf("build qv-load: %v\n%s", err, b)
+	if err := mpcstack.GoBuild(".", bin, "github.com/ws4charlie/quorum-vault/loadtest/cmd/qv-load", ""); err != nil {
+		t.Fatalf("build qv-load: %v", err)
 	}
 
 	// the identity provider the generator asks for tokens: the e2e test issuer behind a loopback address (a cluster has its Keycloak instead)

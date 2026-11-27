@@ -160,7 +160,7 @@ git ls-files -z | while IFS= read -r -d '' f; do
   case "$f" in ci/changes.sh|ci/changes_test.sh|ci/classify.sh|ci/skip-allowlist|ci/skip-guard.sh|ci/skip-guard_test.sh|ci/skip-guard-exceptions|ci/skip-module-exceptions|ci/tracked-files.sh|ci/tracked-files_test.sh|ci/tracked-files-exceptions|ci/final.sh) skip=1 ;; esac
   # the job selector names allowlisted paths as rules and as test cases; it opens no documentation or chart file (it reads only code files, never one on
   # the allowlist: ci/jobselect/scan.go readersOf, check.go)
-  case "$f" in ci/jobselect/*|ci/jobs|ci/job-rules|ci/job-rules-exceptions|ci/e2e-split-check.sh) skip=1 ;; esac
+  case "$f" in ci/jobselect/*|ci/jobs|ci/job-rules|ci/job-rules-exceptions|ci/job-readers|ci/e2e-groups-check.sh) skip=1 ;; esac
   for p in "${pats[@]}"; do
     # shellcheck disable=SC2254
     case "$f" in $p) skip=1 ;; esac

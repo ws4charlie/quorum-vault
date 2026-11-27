@@ -29,7 +29,7 @@ func check(root string) []string {
 		ids[id] = true
 	}
 	want := w.cfg.allJobs()
-	want["changes"], want["image"] = true, true
+	want["changes"], want["build"] = true, true
 	for id := range ids {
 		if !want[id] {
 			add("ci.yml has a job %q that ci/jobs does not list (add it, with the packages it tests)", id)
@@ -62,12 +62,15 @@ func check(root string) []string {
 		if !needs["changes"] {
 			add("ci.yml job %s does not need `changes`", j.id)
 		}
-		if !w.cfg.noImage[j.id] && !needs["image"] {
-			add("ci.yml job %s does not need `image` (ci/jobs: only noimage jobs may run without it)", j.id)
+		if !w.cfg.noBuild[j.id] && !needs["build"] {
+			add("ci.yml job %s does not need `build` (ci/jobs: only nobuild jobs may run without its prebuilt binaries)", j.id)
+		}
+		if !w.cfg.noBuild[j.id] && !strings.Contains(blk, "needs.build.result == 'success'") {
+			add("ci.yml job %s must run only after `build` succeeded (needs.build.result == 'success' in its condition)", j.id)
 		}
 	}
-	if !strings.Contains(blocks["image"], "contains(needs.changes.outputs.skip_jobs, ',image,')") {
-		add("ci.yml job image: its condition must name ',image,' (skipped only when no job that needs it runs)")
+	if !strings.Contains(blocks["build"], "contains(needs.changes.outputs.skip_jobs, ',build,')") {
+		add("ci.yml job build: its condition must name ',build,' (skipped only when no job that needs it runs)")
 	}
 
 	// 2. every tree excluded from @mains is a tree of ci/job-rules (its readers, including a `go build` by path, are found there)
@@ -187,6 +190,36 @@ func check(root string) []string {
 		}
 	}
 
+	// 8. every Go file that reads by a path relative to ".." or to the repository root is a reviewed line of ci/job-readers, with that many lines: the
+	// search for tree names (ci/job-rules) cannot see where such a path leads (a root test that walks "..", reads mpc-party sources, ...)
+	seenR := map[string]int{}
+	for _, f := range w.tracked {
+		if !strings.HasSuffix(f, ".go") || w.allow.match(f) || isMachinery(f) {
+			continue
+		}
+		b, _ := readFile(root, f)
+		for _, line := range strings.Split(string(b), "\n") {
+			if !commentOnly(f, line) && relReader.MatchString(codeOf(f, line)) {
+				seenR[f]++
+			}
+		}
+	}
+	listed := map[string]*reader{}
+	for _, r := range w.readers {
+		if listed[r.file] != nil {
+			add("ci/job-readers line %d: %s is listed twice", r.line, r.file)
+		}
+		listed[r.file] = r
+		if seenR[r.file] != r.count {
+			add("ci/job-readers line %d: %s is reviewed for %d line(s) that read by a relative path, found %d: review it again", r.line, r.file, r.count, seenR[r.file])
+		}
+	}
+	for f, n := range seenR {
+		if listed[f] == nil {
+			add("%s reads by a path relative to \"..\" or the repository root (%d line(s)) and is not in ci/job-readers: list it with the paths it reads", f, n)
+		}
+	}
+
 	// 7. CI never runs go generate (//go:generate lines are not readers)
 	for _, f := range []string{".github/workflows/ci.yml", "Makefile"} {
 		b, _ := readFile(root, f)
@@ -199,6 +232,9 @@ func check(root string) []string {
 }
 
 // workflowJobs splits ci.yml into its jobs (two-space indented keys under `jobs:`), each with its text.
+// relReader: a line that builds a path from ".." or from the repository root.
+var relReader = regexp.MustCompile(`"\.\.(/|")|[Rr]epoRoot\(\)|runtime\.Caller\(`)
+
 func workflowJobs(y string) map[string]string {
 	out := map[string]string{}
 	in := false

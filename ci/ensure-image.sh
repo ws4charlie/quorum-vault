@@ -5,7 +5,7 @@
 # so the validator is built once per change of its Dockerfile and the Solana job pulls it instead of building it (apt-get and a download that
 # once ran past the infra wait).
 #
-#   ci/ensure-image.sh publish [solana]   the `image` job: if the tag is not in the registry, build it and push it (when QV_CI_PUSH=1: same-repository
+#   ci/ensure-image.sh publish [solana]   the `changes` job: if the tag is not in the registry, build it and push it (when QV_CI_PUSH=1: same-repository
 #                                pull requests and pushes; a fork's token cannot push). Nothing to do when the tag exists.
 #   ci/ensure-image.sh use [solana]       a job that needs the image: pull it; if it is not there (a fork pull request that changes an input, or a
 #                                developer's machine), build it here from the same Dockerfile and keep it local. Never pushes.

@@ -1,0 +1,36 @@
+# Go files that read by a path relative to ".." or to the repository root (ci/jobselect check finds every such line: '".."', '"../', RepoRoot(),
+# runtime.Caller). A search for tree names cannot see where such a path leads, so each is reviewed here with the paths it reads (globs, * crosses /, or -
+# when the line reads no repository file). A changed file matching a glob adds the jobs of the reader: a _test.go file adds the jobs that test its package,
+# any other file the jobs that compile it. Tab-separated: <file>	<number of such lines>	<globs, comma-separated, or ->	<reason>
+cmd/qv-approval-web/main_test.go	1	web/approval/*	checks the page's files
+e2e/btc/harness_test.go	1	docker-compose.yml	runs docker compose from the repository root (the bitcoind cookie)
+e2e/btc/refill_stuck_test.go	1	docker-compose.yml	restarts the compose bitcoind from the repository root
+e2e/custody/approvalweb_test.go	1	web/approval/*	serves the approval page's files
+e2e/custody/harness_test.go	2	internal/chain/evm/testdata/*	the token's bytecode and ABI
+e2e/custody/load_test.go	1	-	the load run's output directory (data/load, written, not read)
+e2e/custody/tee_test.go	1	deploy/images/*	runs deploy/images/measure-release.py
+e2e/mpcsign/stack_test.go	3	mpc-party/*,cmd/*	builds mpc-party, qv-cosigner and qv-gateway (also in the package graph: @mains)
+e2e/mpcstack/stack.go	5	mpc-party/*,cmd/*	RepoRoot: builds mpc-party, qv-cosigner, qv-party-admin (also in the package graph: @mains)
+e2e/mpcstack/tee.go	1	mpc-party/*,cmd/*	builds the simulation binaries (also in the package graph: @mains)
+internal/auditchain/archive_s3_test.go	1	docker-compose.yml	the SeaweedFS image digest
+internal/auditchain/archive_test.go	2	-	"../core" and "../x" are refused sources in the test data, not paths read
+internal/chain/evm/evmtest/evmtest.go	2	internal/chain/evm/testdata/*	the token's bytecode and ABI, next to the package
+internal/custody/custody_test.go	1	internal/gateway/config.example.json	the zone's example configuration
+internal/gatecred/gatecred_test.go	1	testdata/gate-credential/*,mpc-party/*	the shared test vectors; it also walks every .go file under mpc-party/ (no file there may name gatecredtest)
+internal/gateway/gate_test.go	1	testdata/gate-credential/*	the shared test vectors
+internal/hsm/hsmtest/hsmtest.go	4	-	RepoRoot: the generated .env (not tracked)
+internal/mpcsigner/mpcsigner_test.go	2	*.go,go.mod	go list -deps -test of the whole root module, and go.mod
+internal/pki/catalog_chart_test.go	2	deploy/helm/qv-certs/*,deploy/postgres/*	the chart's certificate catalog, the business pg_ident.conf
+internal/pki/services_test.go	2	cmd/*	reads every service's main.go and builds qv-relay
+loadtest/gen/gen_test.go	1	loadtest/scenarios/*	checks every scenario file
+monitoring/metrics_test.go	1	*.go	walks every .go file of the repository (the metric names the rules use must be emitted somewhere)
+monitoring/rules_test.go	1	docker-compose.yml	the pinned Prometheus image
+mpc-party/e2e/e2e_test.go	1	mpc-party/*	builds ./cmd/mpc-party from the module root
+mpc-party/internal/attest/broker/buildtag_test.go	2	mpc-party/*	go list and go build of ./cmd/qv-attest-broker
+mpc-party/internal/attest/kmsrelease/production_test.go	1	mpc-party/*	go list -deps of ./cmd/mpc-party
+mpc-party/internal/cbmpc/cbmpc_test.go	3	mpc-party/cbmpc.pin	the pin, and the build stamp and checkout of cb-mpc (mpc-party/.deps, not tracked)
+mpc-party/internal/server/admin_internal_test.go	1	-	"../escape" is a refused name in the test, not a path read
+mpc-party/internal/server/store.go	1	-	validID refuses ".." as a name; nothing is read
+mpc-party/internal/testenv/promtool.go	5	docker-compose.yml,monitoring/*	RepoRoot: the pinned Prometheus image and the rule files
+e2e/mpcstack/prebuilt.go	3	-	PrebuiltKey: RepoRoot() and a "../" prefix test turn a package path into a key; nothing is read (the copy reads only QV_E2E_PREBUILT)
+e2e/mpcstack/prebuilt_test.go	7	ci/e2e-prebuild.sh	reads ci/e2e-prebuild.sh (its build list must cover the harnesses); the other lines are package paths turned into keys

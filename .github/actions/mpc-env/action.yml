@@ -24,8 +24,11 @@ inputs:
     description: "'true' starts the dev Keycloak on 8180 with the realm in deploy/keycloak (the identity job)"
     default: "false"
   go-cache:
-    description: "the family of jobs that share a Go build cache (they compile the same packages): custody, btc, sol or mpc. Another name restores the newest cache of any family."
-    default: "e2e"
+    description: "the family of jobs that share a Go build cache: build (the e2e jobs restore what the build job compiled), mpc, checks. Another name restores the newest cache of any family."
+    default: "build"
+  go-cache-save:
+    description: "'true': this job saves its family's cache on pushes to main (one job per family)"
+    default: "false"
 runs:
   using: composite
   steps:
@@ -43,13 +46,12 @@ runs:
       run: |
         echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || echo "no login: pulling anonymously"
         ci/ensure-image.sh use
-    # Go modules and the build cache, in the directory ci/run-in-image.sh mounts: restored from the newest run of main for this family of jobs (keyed on the
-    # dependencies and the commit), and saved only by pushes to main (actions/cache saves at the end of a successful job). A key on go.sum alone was written
-    # once and never again, so every job compiled every package changed since (one to two minutes a job). Pull requests only restore: their caches would
-    # crowd main's out of the repository's 10 GB.
-    - name: Restore the Go module and build cache, and save it at the end (pushes to main)
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'team/quorum-vault/ci-speed-2' }}  # TEMP (measurement): remove the head_ref clause
-      uses: actions/cache@v4
+    # Go modules and the build cache, in the directory ci/run-in-image.sh mounts: restored from the newest run of main for this family (keyed on the
+    # dependencies and the commit). Saved only by pushes to main, and only by the job that asks (go-cache-save): several jobs of a family would race to
+    # write the same key, and a pull request's caches would crowd main's out of the repository's 10 GB.
+    - name: Restore the Go module and build cache
+      if: ${{ !(inputs.go-cache-save == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+      uses: actions/cache/restore@v4
       with:
         path: ~/.cache/qv-go
         key: qv-go-${{ inputs.go-cache }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum', 'mpc-party/go.sum') }}-${{ github.sha }}
@@ -57,9 +59,9 @@ runs:
           qv-go-${{ inputs.go-cache }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum', 'mpc-party/go.sum') }}-
           qv-go-${{ inputs.go-cache }}-${{ runner.os }}-${{ runner.arch }}-
           qv-go-
-    - name: Restore the Go module and build cache
-      if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'team/quorum-vault/ci-speed-2') }}  # TEMP (measurement)
-      uses: actions/cache/restore@v4
+    - name: Restore the Go module and build cache, and save it at the end (pushes to main)
+      if: ${{ inputs.go-cache-save == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      uses: actions/cache@v4
       with:
         path: ~/.cache/qv-go
         key: qv-go-${{ inputs.go-cache }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum', 'mpc-party/go.sum') }}-${{ github.sha }}

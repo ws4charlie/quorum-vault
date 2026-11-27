@@ -16,7 +16,8 @@ import (
 type config struct {
 	modules      []string
 	mainsExclude []string
-	noImage      set
+	noBuild      set
+	always       set
 	jobs         []jobSpec
 }
 
@@ -48,7 +49,7 @@ func (c *config) allJobs() set {
 var jobID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 func parseJobs(b []byte) (*config, error) {
-	c := &config{noImage: set{}}
+	c := &config{noBuild: set{}, always: set{}}
 	seen := set{}
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	n := 0
@@ -71,11 +72,15 @@ func parseJobs(b []byte) (*config, error) {
 				return nil, bad("mains-exclude <dir/>")
 			}
 			c.mainsExclude = append(c.mainsExclude, f[1])
-		case "noimage":
+		case "nobuild", "always":
 			if len(f) != 2 {
-				return nil, bad("noimage <job>")
+				return nil, bad(f[0] + " <job>")
 			}
-			c.noImage[f[1]] = true
+			if f[0] == "nobuild" {
+				c.noBuild[f[1]] = true
+			} else {
+				c.always[f[1]] = true
+			}
 		case "job":
 			if len(f) < 3 || !jobID.MatchString(f[1]) {
 				return nil, bad("job <id> <root>...")
@@ -105,9 +110,11 @@ func parseJobs(b []byte) (*config, error) {
 	if len(c.modules) == 0 || len(c.jobs) == 0 {
 		return nil, fmt.Errorf("ci/jobs: no module or no job")
 	}
-	for j := range c.noImage {
-		if !seen[j] {
-			return nil, fmt.Errorf("ci/jobs: noimage %s: no such job", j)
+	for _, s := range []set{c.noBuild, c.always} {
+		for j := range s {
+			if !seen[j] {
+				return nil, fmt.Errorf("ci/jobs: nobuild/always %s: no such job", j)
+			}
 		}
 	}
 	for _, j := range c.jobs {
@@ -257,4 +264,37 @@ func classifySkip(root string, c change) bool {
 
 func readFile(root, rel string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+}
+
+// reader is a reviewed Go file that reads files by a path relative to ".." or to the repository root (ci/job-readers): a search for tree names cannot see
+// what such a path reaches, so the file is listed with what it reads. <file><TAB><number of lines><TAB><paths it reads: comma-separated globs (* crosses
+// /), or -><TAB><reason>. A changed file matching one of the globs adds the jobs of the reader (a _test.go file: the jobs that test its package).
+type reader struct {
+	file  string
+	count int
+	globs []string
+	line  int
+}
+
+func parseReaders(b []byte) ([]*reader, error) {
+	var rs []*reader
+	for n, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) != 4 || f[3] == "" || f[2] == "" {
+			return nil, fmt.Errorf("ci/job-readers line %d: want <file> <count> <globs|-> <reason>, tab-separated", n+1)
+		}
+		cnt, err := strconv.Atoi(f[1])
+		if err != nil || cnt < 1 {
+			return nil, fmt.Errorf("ci/job-readers line %d: bad count %q", n+1, f[1])
+		}
+		r := &reader{file: f[0], count: cnt, line: n + 1}
+		if f[2] != "-" {
+			r.globs = strings.Split(f[2], ",")
+		}
+		rs = append(rs, r)
+	}
+	return rs, nil
 }

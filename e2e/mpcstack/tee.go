@@ -71,16 +71,11 @@ func BuildTeeSim(dir string) (Binaries, error) {
 	root := RepoRoot()
 	build := func(workdir, out, pkg string, tags bool) (string, error) {
 		p := filepath.Join(dir, out)
-		args := []string{"build", "-o", p}
+		t := ""
 		if tags {
-			args = append(args, "-tags", "teesim")
+			t = "teesim"
 		}
-		cmd := exec.Command("go", append(args, pkg)...)
-		cmd.Dir = workdir
-		if o, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("build %s: %v\n%s", out, err, o)
-		}
-		return p, nil
+		return p, GoBuild(workdir, p, pkg, t)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Binaries{}, err

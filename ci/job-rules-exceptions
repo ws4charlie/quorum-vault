@@ -11,8 +11,9 @@ deploy/helm/	ci/kind/signing.sh	2	deploy/helm/qv-	-	same: the kind lane
 deploy/helm/	ci/kind/smoke/upgrade.sh	1	chart=deploy/helm/qv-business	-	same: the kind lane
 deploy/helm/	ci/kind/teesim.sh	2	deploy/helm/qv-	-	same: the kind lane
 deploy/helm/	deploy/cloud/aws/values/render_test.py	1	repo / "deploy/helm"	-	renders the charts with helm template; run only by deploy/cloud/aws/check.sh in .github/workflows/terraform.yml
-loadtest/	Makefile	1	SCENARIO ?= loadtest/scenarios/smoke.json	e2e-evm-misc	the default scenario of load-local, which load-smoke (the e2e-evm-misc job) calls
+loadtest/	Makefile	1	SCENARIO ?= loadtest/scenarios/smoke.json	e2e-evm-4	the default scenario of load-local, which load-smoke (the e2e-evm-4 job) calls
 loadtest/	Makefile	1	KIND_SCENARIO := loadtest/scenarios/evm-kind.json	-	used only by the recipe of load-kind, which no ci.yml job calls
-monitoring/	ci/promtool-tests.sh	2	monitoring	misc-checks	promtool and the Go rule tests; run by the misc-checks job (ci.yml)
+monitoring/	ci/promtool-tests.sh	2	monitoring	checks	promtool and the Go rule tests; run by the checks job (ci.yml, through ci/run-groups.sh)
 monitoring/	docker-compose.yml	2	profiles: ["monitoring"]	-	the compose profile's name, not a path
 monitoring/	docker-compose.yml	1	./monitoring:/etc/prometheus:ro	-	the dev Prometheus (profile monitoring, make monitoring-up); ci/infra.sh never starts it (it names its services; the profile is not one of them)
+loadtest/	ci/e2e-prebuild.sh	1	./loadtest/cmd/qv-load	e2e-evm-1,e2e-evm-2,e2e-evm-3,e2e-evm-4	the build job compiles the load generator for the e2e/custody jobs (they start it); its Go package is in their graph too
