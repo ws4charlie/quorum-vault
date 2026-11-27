@@ -258,7 +258,8 @@ func gen(args []string) error {
 	wf := custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: "5m", SignTimeout: "30s", StuckAfter: "3m", HotWait: "5m", MaxReplacements: 3}
 	cfEVM := custody.File{Entity: entity,
 		Chain: custody.ChainFile{Name: evmChain, ChainID: chainID, RPCURL: "http://anvil:8545", Confirmations: 0, Factory: *factory, SweepDestination: k.Address, HotShards: []string{k.Address},
-			MaxTxFeeWei: "100000000000000000", Assets: map[string]custody.AssetFile{"ETH": {Decimals: 18, MinDeposit: "0", PriceWei: "1"}}},
+			MaxTxFeeWei: "100000000000000000", Assets: map[string]custody.AssetFile{"ETH": {Decimals: 18, MinDeposit: "0", PriceWei: "1"}},
+			L1Fee: "none"}, // the lane's anvil runs Ethereum fee rules (--network ethereum, ci/kind/deps/chains.yaml): no OP-stack l1Fee in its receipts
 		Sweep:      custody.SweepFile{K: 20, MinSweepWei: "1000000000000000", PlanInterval: "5s"},
 		Withdrawal: wf, Scan: custody.ScanFile{Interval: "2s", StartHeight: *height}}
 	cfEVM.Withdrawal.Tiers = tiers("ETH")

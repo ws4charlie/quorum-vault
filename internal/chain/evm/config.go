@@ -55,6 +55,8 @@ type Config struct {
 	// MaxTxFeeWei caps gas x max_fee_per_gas of every transaction. Required: the
 	// hot wallet pays it and it is not part of the intent.
 	MaxTxFeeWei *big.Int
+	// L1Fee says whether the chain's receipts carry an OP-stack L1 data fee (receiptfee.go). Empty: DefaultL1FeeMode(ChainID).
+	L1Fee L1FeeMode
 }
 
 // ErrUnknownAsset is returned for an asset that is neither native nor configured.
@@ -83,6 +85,8 @@ func (c Config) validate() error {
 		return errors.New("evm: config: MaxTxFeeWei is required and must be > 0")
 	case c.ChainID == 0:
 		return errors.New("evm: config: chain id must be > 0")
+	case c.L1Fee != "" && c.L1Fee != L1FeeRequired && c.L1Fee != L1FeeNone:
+		return fmt.Errorf("evm: config: l1 fee mode %q is not %q or %q", c.L1Fee, L1FeeRequired, L1FeeNone)
 	case c.Factory == (common.Address{}):
 		return errors.New("evm: config: factory address is required")
 	case c.SweepDestination == (common.Address{}):

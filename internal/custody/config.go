@@ -149,6 +149,10 @@ type ChainFile struct {
 	MaxTxFeeWei      string               `json:"max_tx_fee_wei"`
 	StuckAfterBlocks uint64               `json:"stuck_after_blocks"`
 	Assets           map[string]AssetFile `json:"assets"`
+	// L1Fee is "required" (an OP-stack chain: every receipt must carry l1Fee, which is booked) or "none". Default by chain id: required for Base
+	// and OP mainnet and their Sepolias (evm.DefaultL1FeeMode), none otherwise. A local node that keeps such a chain id but does not report the
+	// fee (anvil) sets "none".
+	L1Fee string `json:"l1_fee,omitempty"`
 }
 
 // AssetFile is one asset. Address is empty for the native asset.
@@ -812,10 +816,14 @@ func (c *Config) buildEVM(cf ChainFile) (map[string]common.Address, error) {
 			hot[c.PartitionKey(sym, i).String()] = a
 		}
 	}
+	l1Fee, err := evm.ParseL1FeeMode(cf.L1Fee)
+	if err != nil {
+		return nil, fmt.Errorf("custody: config: %w", err)
+	}
 	c.EVM = evm.Config{
 		Chain: cf.Name, ChainID: cf.ChainID, RPCURL: cf.RPCURL, Confirmations: cf.Confirmations,
 		Factory: common.HexToAddress(cf.Factory), SweepDestination: dest, HotAddresses: hot,
-		Assets: evmAssets, NativeAsset: c.Native, MaxTxFeeWei: fee, StuckAfterBlocks: cf.StuckAfterBlocks,
+		Assets: evmAssets, NativeAsset: c.Native, MaxTxFeeWei: fee, StuckAfterBlocks: cf.StuckAfterBlocks, L1Fee: l1Fee,
 	}
 	for sym, x := range cf.X402 {
 		lim, err := amount("x402 "+sym+" per_payment_limit", x.PerPaymentLimit)

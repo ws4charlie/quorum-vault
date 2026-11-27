@@ -57,6 +57,7 @@ func TestGateAPIThroughTheZoneOnALocalBaseSepolia(t *testing.T) {
 	payer := crypto.PubkeyToAddress(key.PublicKey)
 	cfg := testConfig(t)
 	cfg.EVM.ChainID, cfg.EVM.RPCURL, cfg.EVM.Confirmations = evmtest.BaseSepoliaChainID, node.URL, 0
+	cfg.EVM.L1Fee = evm.L1FeeNone // anvil keeps the chain id but never reports an OP-stack l1Fee (docs/limits.md)
 	cfg.HotShards[0] = payer
 	for _, sym := range cfg.AssetList {
 		cfg.EVM.HotAddresses[cfg.PartitionKey(sym, 0).String()] = payer
