@@ -160,6 +160,14 @@ E2E_EVM_TX_FAILURES := TestRevertedWithdrawalVoidsAndRecordsFee|TestDroppedTrans
 E2E_EVM_RECOVERY := TestGatewayAndRelayRestart|TestMPCRefreshDuringLiveWithdrawals|TestMPCOnePartyDownWithdrawalsContinue|TestMPCRestartOfAWhileCIsDown|TestMPCRoutePreferredPairIsSignedAuditedAndHotSwitchable|TestMPCRouteFollowsHealthWithHysteresis|TestCrashAtEveryBoundary|TestReconcileCleanAtEveryStageOfASweep|TestReconcileCleanAtEveryStageOfAColdMove|TestWorkerRestartDuringWithdrawalSettlesOnce|TestWorkerStopTimeoutFinishesOrAbandons
 test-e2e-evm-flows:
 	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' ./e2e/custody/...
+# CI runs the slowest groups as two jobs each (shards), split by top-level test name: shard 1 runs the names listed (anchored), shard 2 runs the group's own
+# selector minus those names, so together they are exactly the group (no test can be lost by construction; ci/e2e-split-check.sh checks it on every run).
+# The original target stays for local runs. Balanced by the CI times of 2026-11-27 (run 45927731742).
+E2E_EVM_FLOWS_1 := TestFiftyCustomersConcurrent|TestReconcileCleanAtEveryStageOfARebalance|TestRekeyFullReplacementDrivenByTheTool|TestReconcileCleanAtEveryStageOfAWithdrawal|TestRefillNotConfirmingAlertsOnceAndIsNeverRetried|TestMeasureClosedLoop|TestReconcileCleanAtEveryStageOfARefill
+test-e2e-evm-flows-1:
+	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '^($(E2E_EVM_FLOWS_1))$$' ./e2e/custody/...
+test-e2e-evm-flows-2:
+	$(E2E_EVM_ENV) go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_EVM_FLOWS)' -skip '^($(E2E_EVM_FLOWS_1))$$' ./e2e/custody/...
 # The drain of a shard and the emergency drill (a hot key may be stolen, with a withdrawal and a sweep in flight): their own group, so a stall in the
 # emergency path ends at this group's own time limit and not inside the flows. 12 minutes is about three times a quiet run.
 # QV_DRILL_COUNT=30 QV_DRILL_TIMEOUT=90m repeats the three tests (a soak of the race); QV_DRILL_RUN=TestEmergencyDrillStolenHotKey repeats one.
@@ -245,6 +253,12 @@ test-e2e-sol-wd-faults:
 # attacks, one party down, crash at every boundary). Needs `make sol-up infra-up softhsm mpc-build`.
 test-e2e-sol-sweeps:
 	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestSwFlows' ./e2e/sol/...
+# CI shards (see test-e2e-evm-flows-1): shard 1 the names listed, shard 2 the rest of the group.
+E2E_SOL_SWEEPS_1 := TestSwFlowsHotKeyReplacementDrivenByTheTool|TestSwFlows|TestSwFlowsDepositKeyGenerations
+test-e2e-sol-sweeps-1:
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '^($(E2E_SOL_SWEEPS_1))$$' ./e2e/sol/...
+test-e2e-sol-sweeps-2:
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestSwFlows' -skip '^($(E2E_SOL_SWEEPS_1))$$' ./e2e/sol/...
 
 test-e2e-sol-sweep-faults:
 	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestSwFaults|TestSwCrash' ./e2e/sol/...
@@ -255,6 +269,12 @@ test-e2e-sol-sweep-faults:
 E2E_SOL_COLD := TestColdMovesAndRebalance|TestColdRefillCeremony|TestColdRefillParked|TestColdRefillRequestExpires|TestColdRefillIsSentAgainUntilItLands|TestColdRefillsOfTwoAssetsRunInParallel|TestColdKeyReplacementSOL
 test-e2e-sol-cold:
 	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_SOL_COLD)' ./e2e/sol/...
+# CI shards (see test-e2e-evm-flows-1).
+E2E_SOL_COLD_1 := TestColdRefillParked|TestColdRefillRequestExpires|TestColdRefillsOfTwoAssetsRunInParallel
+test-e2e-sol-cold-1:
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '^($(E2E_SOL_COLD_1))$$' ./e2e/sol/...
+test-e2e-sol-cold-2:
+	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_SOL_COLD)' -skip '^($(E2E_SOL_COLD_1))$$' ./e2e/sol/...
 
 test-e2e-sol-cold-crash:
 	$(E2E_SOL_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run 'TestColdRefillCrash' ./e2e/sol/...
@@ -281,12 +301,24 @@ test-e2e-btc-withdrawals:
 E2E_BTC_SWEEPS := TestSweep|TestRecoverySweep|TestRekey
 test-e2e-btc-sweeps:
 	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_SWEEPS)' ./e2e/btc/...
+# CI shards (see test-e2e-evm-flows-1).
+E2E_BTC_SWEEPS_1 := TestRekeyDepositKeyReplacementDrivenByTheTool|TestRecoverySweepCrashAtEveryBoundary|TestRekeyCompromisedGenerationFreesACoinClaimedByARefusedWithdrawal
+test-e2e-btc-sweeps-1:
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '^($(E2E_BTC_SWEEPS_1))$$' ./e2e/btc/...
+test-e2e-btc-sweeps-2:
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 25m -v -run '$(E2E_BTC_SWEEPS)' -skip '^($(E2E_BTC_SWEEPS_1))$$' ./e2e/btc/...
 
 # Recovery: fee bumps, cancel, an outside spend, every crash boundary, a killed gateway, a node restarted with an empty mempool. The last one
 # restarts the compose bitcoind (`docker compose --profile btc restart bitcoind`), so it needs the node from `make btc-up`.
 E2E_BTC_RECOVERY := TestRecovery
 test-e2e-btc-recovery:
 	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_RECOVERY)' -skip 'TestRecoverySweep' ./e2e/btc/...
+# CI shards (see test-e2e-evm-flows-1).
+E2E_BTC_RECOVERY_1 := TestRecoveryCrashAtEveryBoundary|TestRecoveryBumpsToExactlyTheFeeCapFromTheLeastChangeThenAlerts|TestRecoveryFeeRefusedAboveTheCapAlertsOnceAndRetriesWhenTheMinimumFalls|TestRecoveryFeeRefusedConsolidationStopsAtItsCeilingAndRetries|TestRecoveryCancelRefusedAboveTheCapAlertsOnceAndGoesThroughWhenTheMinimumFalls
+test-e2e-btc-recovery-1:
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 30m -v -run '^($(E2E_BTC_RECOVERY_1))$$' ./e2e/btc/...
+test-e2e-btc-recovery-2:
+	$(E2E_BTC_ENV) scripts/fail-on-skip.sh go test -count=1 -p 1 -timeout 30m -v -run '$(E2E_BTC_RECOVERY)' -skip 'TestRecoverySweep|^($(E2E_BTC_RECOVERY_1))$$' ./e2e/btc/...
 
 # Signed fee-cap changes end to end: qv-fee-caps sign, apply, show and metrics against real databases, a stuck send raised past its old cap, the window while the
 # core and the zone differ, refused changes, a revoked approver.

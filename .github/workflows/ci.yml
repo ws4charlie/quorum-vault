@@ -17,13 +17,17 @@ concurrency:
 jobs:
   # Which jobs run. Never skipped, never needs anything. The human's rule, which every line below serves: "Make sure that changing related code can never
   # accidentally skip a CI job that should run. Better to run too much than to miss a run."
-  # The heavy jobs (`image` and everything that needs it, and the steps of `test`) are skipped only for a pull request whose EVERY changed file is on the
-  # allowlist ci/skip-allowlist (documentation, three Helm charts and their test trees: files no job reads, with the evidence in CONTRIBUTING.md). A file on
-  # no list, a rename, a mode change, a symlink, a push, a manual or merge-queue run, an error of the classifier, a change to the classifier, its list or
-  # this file: everything runs. Only the exact output `true` skips; an empty or missing output (the job failed, timed out or was cancelled) runs everything.
-  # ci/changes_test.sh (the table of cases) and ci/skip-guard.sh (fails when a job starts reading an allowlisted path) run here on every run.
-  # To force a full run on a pull request: a commit message with [ci full] (CONTRIBUTING.md).
-  # A new job: without `needs: image` and an `if:` it always runs (the safe default); see CONTRIBUTING.md to add the condition.
+  # Two decisions, both for pull requests only:
+  #   skip       every heavy job (`image` and everything that needs it, and the steps of `test`) is skipped when EVERY changed file is on the allowlist
+  #              ci/skip-allowlist (documentation, three Helm charts and their test trees: files no job reads, with the evidence in CONTRIBUTING.md).
+  #   skip_jobs  otherwise, the jobs that no changed file can affect (",job,job,"): ci/jobselect works it out from the Go package graph (`go list` of
+  #              every module, every build tag CI uses) and ci/jobs (the packages each job tests); a non-Go file affects only the readers of its tree
+  #              (ci/job-rules), anything else every job. Each job below is skipped only by its own id in this list.
+  # A file on no list, a rename, a mode change, a symlink, a push, a manual or merge-queue run, an error of the classifier or the selector, a change to
+  # either, to their lists or to this file: everything runs. Only the exact output `true` or a clean list skips; an empty or missing output (the job
+  # failed, timed out or was cancelled) runs everything. The tests of both and their guards (ci/skip-guard.sh, `jobselect check`, the split check) run
+  # here on every run. To force a full run on a pull request: a commit message with [ci full] (CONTRIBUTING.md).
+  # A new job: ci/jobselect check fails until it is in ci/jobs with the condition naming its own id (CONTRIBUTING.md, "Which jobs run").
   changes:
     name: changes
     runs-on: ubuntu-24.04
@@ -32,12 +36,28 @@ jobs:
       # Published by the LAST step only, which runs only when every earlier step succeeded (a failed guard or test leaves these empty) and then checks again
       # (ci/final.sh). Everything but the exact value `true` means: run everything.
       skip: ${{ steps.final.outputs.skip }}
+      skip_jobs: ${{ steps.final.outputs.skip_jobs }}
       text: ${{ steps.final.outputs.text }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Go for the job selector: standard library only, and `go list` runs offline (GOPROXY=off), so no module cache is needed.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
       # The guards run FIRST and are plain steps: if one fails, the job fails and nothing below publishes a skip.
+      - name: Tests of the job selector
+        id: t_select
+        run: go test -count=1 ./ci/jobselect
+      - name: The job selector's guard (ci/jobs, ci/job-rules and ci.yml agree)
+        id: select_guard
+        run: go run ./ci/jobselect check
+      # The slowest groups run as two shards each: together exactly the group (Makefile test-e2e-<group>-1 and -2).
+      - name: The shards of the split groups add up to the groups
+        id: split
+        run: ci/e2e-split-check.sh
       - name: Tests of the classifier
         id: t_changes
         run: ci/changes_test.sh
@@ -70,8 +90,9 @@ jobs:
         env:
           QV_CLASSIFY_OUTCOME: ${{ steps.classify.outcome }}
           QV_CLASSIFY_SKIP: ${{ steps.classify.outputs.skip }}
+          QV_CLASSIFY_SKIP_JOBS: ${{ steps.classify.outputs.skip_jobs }}
           QV_CLASSIFY_TEXT: ${{ steps.classify.outputs.text }}
-          QV_GUARD_OUTCOMES: ${{ steps.t_changes.outcome }} ${{ steps.t_guard.outcome }} ${{ steps.guard.outcome }} ${{ steps.t_files.outcome }} ${{ steps.files.outcome }}
+          QV_GUARD_OUTCOMES: ${{ steps.t_select.outcome }} ${{ steps.select_guard.outcome }} ${{ steps.split.outcome }} ${{ steps.t_changes.outcome }} ${{ steps.t_guard.outcome }} ${{ steps.guard.outcome }} ${{ steps.t_files.outcome }} ${{ steps.files.outcome }}
         run: ci/final.sh
 
   # The CI image (ci/qv-ci.Dockerfile): clang-20, cb-mpc, SoftHSM2 and Go, tagged by a hash of its inputs (ci/image-tag.sh). Almost always the tag
@@ -79,7 +100,8 @@ jobs:
   # Fork pull requests cannot push: their jobs pull the tag if main has it, else build it themselves (ci/ensure-image.sh use).
   image:
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}   # a skipped `image` skips every job that needs it
+    # a skipped `image` skips every job that needs it: only when everything is skipped, or no job that needs the image runs
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',image,'))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -110,7 +132,7 @@ jobs:
         run: ci/ensure-image.sh publish solana
 
   # `test` is the check branch protection requires, so it always ends (a job skipped by its own `if:` may leave a required check pending): on a skipped
-  # run its first step says so and the other steps do not run. It needs `changes` only for the answer; `!cancelled()` runs it even if `changes` failed.
+  # run (everything skipped, or `test` in skip_jobs) its first step says so and the other steps do not run. It needs `changes` only for the answer; `!cancelled()` runs it even if `changes` failed.
   test:
     needs: changes
     if: ${{ !cancelled() }}
@@ -124,41 +146,63 @@ jobs:
       QV_REQUIRE_HSM: "1"
     steps:
       - name: "Skipped: nothing here reads the changed files"
-        if: ${{ needs.changes.result == 'success' && needs.changes.outputs.skip == 'true' }}
+        if: ${{ (needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
         env:
           TEXT: ${{ needs.changes.outputs.text }}
         run: |
           echo "::notice title=test skipped::$TEXT"
           echo "### test: $TEXT" >> "$GITHUB_STEP_SUMMARY"
-          echo "The tests did NOT run: every changed file is on ci/skip-allowlist (CONTRIBUTING.md). Add [ci full] to a commit message to run everything."
+          echo "The tests did NOT run: no changed file is read by this job (ci/skip-allowlist, ci/jobselect; CONTRIBUTING.md). Add [ci full] to a commit message to run everything."
       - uses: actions/checkout@v4
-        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
       - uses: actions/setup-go@v5
-        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
         with:
           go-version-file: go.mod
+          cache: false
+      # The module and build caches: restored from the newest run of main (keyed on go.sum and the commit), saved only by pushes to main, so the build cache
+      # follows the code (one keyed on go.sum alone was written once and then compiled every changed package again in every job).
+      - name: Restore the Go module and build cache
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: qv-gotest-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            qv-gotest-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-
+            qv-gotest-${{ runner.os }}-${{ runner.arch }}-
       - name: Install SoftHSM2
-        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
         run: sudo apt-get update && sudo apt-get install -y softhsm2
       # one private CA per trust zone, fresh for this job, and the two Postgres servers (TLS, client certificates) that read them
       - name: Make the TLS certificates and start Postgres
-        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
         run: |
           scripts/pki.sh
           ci/infra.sh start --postgres
           ci/infra.sh wait
       - name: Set up tokens
-        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
         run: |
           ./scripts/dev-env.sh
           ./scripts/setup-softhsm.sh
       - run: go vet ./...
-        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
       # -p 1: test binaries share the SoftHSM token files; a process that
       # C_Initialize's while another writes a token object can miss that
       # token for its whole lifetime (seen as "token not found").
       - run: go test -short -count=1 -p 1 ./...
-        if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
+      - name: Save the Go module and build cache (pushes to main only)
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: qv-gotest-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
 
   # cb-mpc wrapper (C++ via cgo). Separate Go module in mpc-party/: the jobs above never see C++.
   # The tests that were one `go test -race ./...` of one job run as five jobs, so the pull request waits for the slowest, not for the sum
@@ -172,7 +216,8 @@ jobs:
   mpc-party-core:
     name: mpc-party / core
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',mpc-party-core,')) }}
     permissions:
       contents: read
       packages: read
@@ -186,6 +231,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: mpc
           anvil: "false"
       # Pure-Go API module (generated gRPC code): no cgo, no cb-mpc, no go-ethereum.
       - name: mpc-party/api vet, build, test
@@ -204,32 +250,64 @@ jobs:
         run: |
           ci/run-in-image.sh bash -c 'cd mpc-party && go test -race -count=1 -timeout 25m -tags teesim ./internal/attest/... ./cmd/qv-attest-broker/... && go test -race -count=1 -timeout 25m -tags teesim -run "TestAttested|TestMigration" ./internal/server && go test -race -count=1 -timeout 25m -tags teesim -run TestAttested ./e2e'
 
-  # The Prometheus rules of monitoring/: promtool check rules, check config, the rule unit tests, and the Go test that evaluates an alert on real
-  # counters. promtool is pinned in the CI image; ci/promtool-tests.sh fails on a skipped test, so a broken rule or a missing promtool is red.
-  monitoring-rules:
-    name: monitoring / rules
+  # Three small groups in one job (each alone took one to three minutes, a third of it set-up): the mpc-party restore drill and short fuzz run, the
+  # Prometheus rules of monitoring/ (promtool check rules, check config, the rule unit tests, the Go test that evaluates an alert on real counters; promtool
+  # is pinned in the CI image and ci/promtool-tests.sh fails on a skipped test), and the audit-head archive against a real store in compliance mode
+  # (SeaweedFS, started by the tests themselves from the digest in docker-compose.yml, through the Docker socket ci/run-in-image.sh passes) and a real Kafka
+  # (Redpanda from ci/infra.sh). Each step keeps the environment and the time limit its job had; a failed step does not stop the next ones.
+  misc-checks:
+    name: misc-checks (mpc-party drill and fuzz, promtool rules, audit archive)
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',misc-checks,')) }}
     permissions:
       contents: read
       packages: read
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CGO_ENABLED: "1"
       CC: clang-20
       CXX: clang++-20
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
+        id: env
         with:
+          postgres: "true"
+          infra: "true"
           anvil: "false"
+          go-cache: mpc
       - name: promtool checks and rule tests
+        timeout-minutes: 25
         run: ci/run-in-image.sh ci/promtool-tests.sh
+      # Destroys party B in a local stack, restores it from its backup, signs. About 10 s.
+      - name: Restore drill
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          QV_REQUIRE_HSM: "1"
+        run: ci/run-in-image.sh mpc-party/scripts/restore-drill.sh
+      - name: Fuzz entry points (short)
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          QV_REQUIRE_HSM: "1"
+        run: ci/run-in-image.sh bash -c 'cd mpc-party && go test -run "^\$" -fuzz FuzzEntryPoints -fuzztime 30s ./internal/cbmpc'
+      - name: make test-archive
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          QV_REQUIRE_DB: "1"
+        run: ci/run-in-image.sh make test-archive
 
   mpc-party-e2e-1:
     name: mpc-party / e2e-1
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',mpc-party-e2e-1,')) }}
     permissions:
       contents: read
       packages: read
@@ -243,6 +321,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: mpc
           anvil: "false"
       - name: go test -race, e2e shard 1
         run: ci/run-in-image.sh bash -c 'cd mpc-party && scripts/e2e-shard.sh run 1'
@@ -250,7 +329,8 @@ jobs:
   mpc-party-e2e-2:
     name: mpc-party / e2e-2
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',mpc-party-e2e-2,')) }}
     permissions:
       contents: read
       packages: read
@@ -264,6 +344,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: mpc
           anvil: "false"
       - name: go test -race, e2e shard 2
         run: ci/run-in-image.sh bash -c 'cd mpc-party && scripts/e2e-shard.sh run 2'
@@ -271,7 +352,8 @@ jobs:
   mpc-party-e2e-3:
     name: mpc-party / e2e-3
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',mpc-party-e2e-3,')) }}
     permissions:
       contents: read
       packages: read
@@ -285,33 +367,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: mpc
           anvil: "false"
       - name: go test -race, e2e shard 3
         run: ci/run-in-image.sh bash -c 'cd mpc-party && scripts/e2e-shard.sh run 3'
-
-  mpc-party-drill:
-    name: mpc-party / drill and fuzz
-    runs-on: ubuntu-24.04
-    needs: image
-    permissions:
-      contents: read
-      packages: read
-    timeout-minutes: 15
-    env:
-      CGO_ENABLED: "1"
-      CC: clang-20
-      CXX: clang++-20
-      QV_REQUIRE_HSM: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/mpc-env
-        with:
-          anvil: "false"
-      # Destroys party B in a local stack, restores it from its backup, signs. About 10 s.
-      - name: Restore drill
-        run: ci/run-in-image.sh mpc-party/scripts/restore-drill.sh
-      - name: Fuzz entry points (short)
-        run: ci/run-in-image.sh bash -c 'cd mpc-party && go test -run "^\$" -fuzz FuzzEntryPoints -fuzztime 30s ./internal/cbmpc'
 
   # The two-party MPC signer and the custody system on it, in parallel jobs (each with its own runner, Postgres, anvil, and for
   # the custody ones Temporal and Redpanda), so a pull request waits for the slowest group, not for the sum. The heavy tests
@@ -320,7 +379,8 @@ jobs:
 
   mpc-signing:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',mpc-signing,')) }}
     permissions:
       contents: read
       packages: read
@@ -339,41 +399,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: mpc
           postgres: "true"
           infra: "false"
       - name: make test-mpc
         run: ci/run-in-image.sh make test-mpc
 
-  # The audit-head archive against a real store in compliance mode (SeaweedFS, started by the tests themselves from the digest in
-  # docker-compose.yml, which needs the Docker socket ci/run-in-image.sh passes) and a real Kafka (Redpanda from ci/infra.sh).
-  audit-archive:
+  # Split in two jobs by test name (Makefile test-e2e-evm-flows-1 and -2; ci/e2e-split-check.sh proves they add up to the whole group).
+  e2e-evm-flows-1:
     runs-on: ubuntu-24.04
-    needs: image
-    permissions:
-      contents: read
-      packages: read
-    timeout-minutes: 15
-    env:
-      CGO_ENABLED: "1"
-      CC: clang-20
-      CXX: clang++-20
-      QV_PKI_DIR: ${{ github.workspace }}/data/pki
-      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
-      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
-      QV_REQUIRE_DB: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/mpc-env
-        with:
-          postgres: "true"
-          infra: "true"
-          anvil: "false"
-      - name: make test-archive
-        run: ci/run-in-image.sh make test-archive
-
-  e2e-evm-flows:
-    runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-flows-1,')) }}
     permissions:
       contents: read
       packages: read
@@ -394,15 +430,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: custody
           postgres: "true"
           infra: "true"
-      - name: make test-e2e-evm-flows
-        run: ci/run-in-image.sh make test-e2e-evm-flows
+      - name: make test-e2e-evm-flows-1
+        run: ci/run-in-image.sh make test-e2e-evm-flows-1
 
-  # The GATE-CONNECT demo: AgentGate's signing API through the real zone with the two-party MPC signer, on the lane's anvil as Base Sepolia (84532).
-  e2e-evm-gate:
+  e2e-evm-flows-2:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-flows-2,')) }}
     permissions:
       contents: read
       packages: read
@@ -423,14 +460,92 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: custody
           postgres: "true"
           infra: "true"
+      - name: make test-e2e-evm-flows-2
+        run: ci/run-in-image.sh make test-e2e-evm-flows-2
+
+  # The small groups of e2e/custody and x402 in one job (each alone took about three minutes, two of them set-up and compiling the same packages). Each step
+  # keeps the environment and the time limit its job had; a failed step does not stop the next ones.
+  #   x402        on a local Base Sepolia: the EIP-3009 signing kind against a token on the lane's anvil (the tests set its chain id to 84532 and set it
+  #               back), the HSM, and the core's liability accounting through the real chain reader (docs/evm.md, "x402 authorizations")
+  #   identity    a two-approver withdrawal with tokens from the dev Keycloak
+  #   gate        the GATE-CONNECT demo: AgentGate's signing API through the real zone with the two-party MPC signer, on the lane's anvil as Base Sepolia
+  #   approval    the approval page (web/approval) in a real browser with a virtual passkey (SIMULATED: no hardware, no person). The browser is the
+  #               headless-shell image of the chromedp project, pinned by digest (Chromium 159, as of 2026-11-19), on the host network next to the job; the
+  #               tests drive it over its DevTools port (QV_E2E_CHROME_URL), so the CI image needs no browser. It ignores certificate errors only because
+  #               the dev Keycloak and the core use the test authority's certificates.
+  #   load smoke  the load test's smoke scenario (loadtest/README.md): a handful of operations through the real stack, correctness checks only
+  e2e-evm-misc:
+    name: e2e-evm-misc (x402, identity, gate, approval page, load smoke)
+    runs-on: ubuntu-24.04
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-misc,')) }}
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_ANVIL_RPC: http://127.0.0.1:18545
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the headless browser (pinned image)
+        run: |
+          docker run -d --name chrome --network host chromedp/headless-shell@sha256:381353d3530ab9d579d2fe8b9c0f4519c995617f5a71daf6bb649e2d12005bd9 --ignore-certificate-errors
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:9222/json/version && exit 0; sleep 1; done
+          docker logs chrome; exit 1
+      - uses: ./.github/actions/mpc-env
+        id: env
+        with:
+          postgres: "true"
+          infra: "true"
+          keycloak: "true"
+          go-cache: custody
+      - name: make test-e2e-x402
+        timeout-minutes: 15
+        run: ci/run-in-image.sh make test-e2e-x402
+      - name: make test-e2e-evm-identity
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          QV_E2E_TIMEOUT_SCALE: "3"
+          QV_E2E_KEYCLOAK_URL: https://127.0.0.1:8180
+        run: ci/run-in-image.sh make test-e2e-evm-identity
       - name: make test-e2e-evm-gate
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          QV_E2E_TIMEOUT_SCALE: "3"
         run: ci/run-in-image.sh make test-e2e-evm-gate
+      - name: make test-e2e-approval-web
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
+        timeout-minutes: 20
+        env:
+          QV_REQUIRE_BROWSER: "1"
+          QV_E2E_TIMEOUT_SCALE: "3"
+          QV_E2E_KEYCLOAK_URL: https://127.0.0.1:8180
+          QV_E2E_CHROME_URL: http://127.0.0.1:9222
+        run: ci/run-in-image.sh make test-e2e-approval-web
+      - name: make load-smoke
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          QV_E2E_TIMEOUT_SCALE: "3"
+        run: ci/run-in-image.sh make load-smoke
 
   e2e-evm-drill:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-drill,')) }}
     permissions:
       contents: read
       packages: read
@@ -451,44 +566,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: custody
           postgres: "true"
           infra: "true"
       - name: make test-e2e-evm-drill
         run: ci/run-in-image.sh make test-e2e-evm-drill
 
-  # The load test's smoke scenario (loadtest/README.md): a handful of operations through the real stack, correctness checks only. No timing is judged.
-  e2e-load-smoke:
-    runs-on: ubuntu-24.04
-    needs: image
-    permissions:
-      contents: read
-      packages: read
-    timeout-minutes: 15
-    env:
-      CGO_ENABLED: "1"
-      CC: clang-20
-      CXX: clang++-20
-      QV_PKI_DIR: ${{ github.workspace }}/data/pki
-      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
-      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
-      QV_REQUIRE_DB: "1"
-      QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
-      QV_E2E_TIMEOUT_SCALE: "3"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/mpc-env
-        with:
-          postgres: "true"
-          infra: "true"
-      - name: make load-smoke
-        run: ci/run-in-image.sh make load-smoke
-
   # The simulated enclave run mode (SIMULATED: mock attester, test CA, SoftHSM brokers): three parties on the attested sealer with sealed TLS keys, one
   # broker each, through the real gateway; wrong binary or config, debug evidence, a revoked entry, a rolled-back data directory, a broker that is down.
   e2e-tee-sim:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-tee-sim,')) }}
     permissions:
       contents: read
       packages: read
@@ -508,112 +597,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: custody
           postgres: "true"
           infra: "true"
       - name: make test-e2e-tee-sim
         run: ci/run-in-image.sh make test-e2e-tee-sim
 
-  # x402 on a local Base Sepolia: the EIP-3009 signing kind against a token on the lane's anvil (its chain id is set to 84532 by the tests), the HSM, and the
-  # core's liability accounting through the real chain reader (docs/evm.md, "x402 authorizations").
-  e2e-x402:
-    runs-on: ubuntu-24.04
-    needs: image
-    permissions:
-      contents: read
-      packages: read
-    timeout-minutes: 15
-    env:
-      CGO_ENABLED: "1"
-      CC: clang-20
-      CXX: clang++-20
-      QV_PKI_DIR: ${{ github.workspace }}/data/pki
-      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
-      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
-      QV_REQUIRE_DB: "1"
-      QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/mpc-env
-        with:
-          postgres: "true"
-      - name: make test-e2e-x402
-        run: ci/run-in-image.sh make test-e2e-x402
-
-  e2e-evm-identity:
-    runs-on: ubuntu-24.04
-    needs: image
-    permissions:
-      contents: read
-      packages: read
-    timeout-minutes: 15
-    env:
-      CGO_ENABLED: "1"
-      CC: clang-20
-      CXX: clang++-20
-      QV_PKI_DIR: ${{ github.workspace }}/data/pki
-      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
-      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
-      QV_REQUIRE_DB: "1"
-      QV_REQUIRE_HSM: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
-      # A shared runner is slower than a laptop: every condition wait in the custody tests gets three times as long.
-      QV_E2E_TIMEOUT_SCALE: "3"
-      QV_E2E_KEYCLOAK_URL: https://127.0.0.1:8180
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/mpc-env
-        with:
-          postgres: "true"
-          infra: "true"
-          keycloak: "true"
-      - name: make test-e2e-evm-identity
-        run: ci/run-in-image.sh make test-e2e-evm-identity
-
-  # The approval page (web/approval) in a real browser with a virtual passkey (SIMULATED: no hardware, no person). The browser is the headless-shell image
-  # of the chromedp project, pinned by digest (Chromium 159, as of 2026-11-19), run on the host network next to the job; the tests drive it over its
-  # DevTools port (QV_E2E_CHROME_URL), so the CI image needs no browser. It ignores certificate errors only because the dev Keycloak and the core use the
-  # test authority's certificates.
-  e2e-approval-web:
-    runs-on: ubuntu-24.04
-    needs: image
-    permissions:
-      contents: read
-      packages: read
-    timeout-minutes: 20
-    env:
-      CGO_ENABLED: "1"
-      CC: clang-20
-      CXX: clang++-20
-      QV_PKI_DIR: ${{ github.workspace }}/data/pki
-      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
-      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
-      QV_REQUIRE_DB: "1"
-      QV_REQUIRE_HSM: "1"
-      QV_REQUIRE_BROWSER: "1"
-      QV_ANVIL_RPC: http://127.0.0.1:18545
-      # A shared runner is slower than a laptop: every condition wait in the custody tests gets three times as long.
-      QV_E2E_TIMEOUT_SCALE: "3"
-      QV_E2E_KEYCLOAK_URL: https://127.0.0.1:8180
-      QV_E2E_CHROME_URL: http://127.0.0.1:9222
-    steps:
-      - uses: actions/checkout@v4
-      - name: Start the headless browser (pinned image)
-        run: |
-          docker run -d --name chrome --network host chromedp/headless-shell@sha256:381353d3530ab9d579d2fe8b9c0f4519c995617f5a71daf6bb649e2d12005bd9 --ignore-certificate-errors
-          for i in $(seq 1 30); do curl -sf http://127.0.0.1:9222/json/version && exit 0; sleep 1; done
-          docker logs chrome; exit 1
-      - uses: ./.github/actions/mpc-env
-        with:
-          postgres: "true"
-          infra: "true"
-          keycloak: "true"
-      - name: make test-e2e-approval-web
-        run: ci/run-in-image.sh make test-e2e-approval-web
-
   e2e-evm-tx-failures:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-tx-failures,')) }}
     permissions:
       contents: read
       packages: read
@@ -634,6 +627,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: custody
           postgres: "true"
           infra: "true"
       - name: make test-e2e-evm-tx-failures
@@ -641,7 +635,8 @@ jobs:
 
   e2e-evm-recovery:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-recovery,')) }}
     permissions:
       contents: read
       packages: read
@@ -662,6 +657,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: custody
           postgres: "true"
           infra: "true"
       - name: make test-e2e-evm-recovery
@@ -670,7 +666,8 @@ jobs:
   # Bitcoin cell, deposits: bitcoind in regtest, real mpc-party. The cb-mpc build cache is shared through the mpc-env action.
   e2e-btc-deposits:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-deposits,')) }}
     permissions:
       contents: read
       packages: read
@@ -689,6 +686,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -699,7 +697,8 @@ jobs:
   # Solana cell, deposits: solana-test-validator (built from ci/solana), real mpc-party holding the Ed25519 HD keyset the deposit addresses come from.
   e2e-sol-deposits:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-deposits,')) }}
     permissions:
       contents: read
       packages: read
@@ -718,6 +717,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -729,7 +729,8 @@ jobs:
   # signed transactions land on the validator.
   e2e-sol-signing:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-signing,')) }}
     permissions:
       contents: read
       packages: read
@@ -748,6 +749,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
           postgres: "true"
           infra: "false"
           anvil: "false"
@@ -758,7 +760,8 @@ jobs:
   # Solana cell, withdrawals on durable nonces: 2-of-3 hot shard, gateway, cosigners, qv-core and qv-worker, validator.
   e2e-sol-withdrawals:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-withdrawals,')) }}
     permissions:
       contents: read
       packages: read
@@ -777,6 +780,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -787,7 +791,8 @@ jobs:
   # Solana cell, withdrawal faults: attacks on the nonce at the zone, operator pool and cancel, one party down, crash at every boundary.
   e2e-sol-wd-faults:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-wd-faults,')) }}
     permissions:
       contents: read
       packages: read
@@ -806,6 +811,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -814,9 +820,11 @@ jobs:
         run: ci/run-in-image.sh make test-e2e-sol-wd-faults
 
   # Solana cell, sweeps: batched deposit sweeps on durable nonces, SOL and token, ATA close, stuck and failed sweeps.
-  e2e-sol-sweeps:
+  # Split in two jobs by test name (Makefile test-e2e-sol-sweeps-1 and -2; ci/e2e-split-check.sh proves they add up to the whole group).
+  e2e-sol-sweeps-1:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-sweeps-1,')) }}
     permissions:
       contents: read
       packages: read
@@ -835,17 +843,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
           postgres: "true"
           infra: "true"
           anvil: "false"
           solana: "true"
-      - name: make test-e2e-sol-sweeps
-        run: ci/run-in-image.sh make test-e2e-sol-sweeps
+      - name: make test-e2e-sol-sweeps-1
+        run: ci/run-in-image.sh make test-e2e-sol-sweeps-1
 
-  # Solana cell, sweep faults: attacks on sweeps at the zone, one party down, crash at every sweep boundary.
-  e2e-sol-sweep-faults:
+  e2e-sol-sweeps-2:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-sweeps-2,')) }}
     permissions:
       contents: read
       packages: read
@@ -864,6 +873,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
+          postgres: "true"
+          infra: "true"
+          anvil: "false"
+          solana: "true"
+      - name: make test-e2e-sol-sweeps-2
+        run: ci/run-in-image.sh make test-e2e-sol-sweeps-2
+
+  # Solana cell, sweep faults: attacks on sweeps at the zone, one party down, crash at every sweep boundary.
+  e2e-sol-sweep-faults:
+    runs-on: ubuntu-24.04
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-sweep-faults,')) }}
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          go-cache: sol
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -873,9 +914,11 @@ jobs:
 
   # Solana cell, cold tier: moves to cold and rebalance, the refill ceremony on the offline signer (Ed25519 key in the qv-cold token) with its attacks, a refill that
   # cannot mine and is closed by an operator.
-  e2e-sol-cold:
+  # Split in two jobs by test name (Makefile test-e2e-sol-cold-1 and -2; ci/e2e-split-check.sh proves they add up to the whole group).
+  e2e-sol-cold-1:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-cold-1,')) }}
     permissions:
       contents: read
       packages: read
@@ -894,17 +937,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
           postgres: "true"
           infra: "true"
           anvil: "false"
           solana: "true"
-      - name: make test-e2e-sol-cold
-        run: ci/run-in-image.sh make test-e2e-sol-cold
+      - name: make test-e2e-sol-cold-1
+        run: ci/run-in-image.sh make test-e2e-sol-cold-1
 
-  # Solana cell, cold tier crash tests: every boundary of a refill (the cold key signs offline).
-  e2e-sol-cold-crash:
+  e2e-sol-cold-2:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-cold-2,')) }}
     permissions:
       contents: read
       packages: read
@@ -923,6 +967,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
+          postgres: "true"
+          infra: "true"
+          anvil: "false"
+          solana: "true"
+      - name: make test-e2e-sol-cold-2
+        run: ci/run-in-image.sh make test-e2e-sol-cold-2
+
+  # Solana cell, cold tier crash tests: every boundary of a refill (the cold key signs offline).
+  e2e-sol-cold-crash:
+    runs-on: ubuntu-24.04
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-cold-crash,')) }}
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          go-cache: sol
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -933,7 +1009,8 @@ jobs:
   # Solana cell, cold tier crash tests: every boundary of a move to cold and of a rebalance.
   e2e-sol-cold-moves-crash:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-cold-moves-crash,')) }}
     permissions:
       contents: read
       packages: read
@@ -952,6 +1029,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -962,7 +1040,8 @@ jobs:
   # Solana cell, nonce accounts: retiring and closing nonce accounts to get the rent back (hot pool through the signing zone, cold pool in an offline ceremony).
   e2e-sol-nonces:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-nonces,')) }}
     permissions:
       contents: read
       packages: read
@@ -981,6 +1060,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: sol
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -991,7 +1071,8 @@ jobs:
   # Bitcoin cell, withdrawals: the gateway, party B's cosigner and the workflows on real mpc-party, bitcoind in regtest with -txindex.
   e2e-btc-withdrawals:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-withdrawals,')) }}
     permissions:
       contents: read
       packages: read
@@ -1010,6 +1091,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -1018,9 +1100,11 @@ jobs:
         run: ci/run-in-image.sh make test-e2e-btc-withdrawals
 
   # Bitcoin cell, sweeps and their recovery: credited deposits are swept into the hot shard under deposit-branch keys (gateway, cosigner, workflows, real mpc-party).
-  e2e-btc-sweeps:
+  # Split in two jobs by test name (Makefile test-e2e-btc-sweeps-1 and -2; ci/e2e-split-check.sh proves they add up to the whole group).
+  e2e-btc-sweeps-1:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-sweeps-1,')) }}
     permissions:
       contents: read
       packages: read
@@ -1039,17 +1123,49 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
           bitcoind: "true"
-      - name: make test-e2e-btc-sweeps
-        run: ci/run-in-image.sh make test-e2e-btc-sweeps
+      - name: make test-e2e-btc-sweeps-1
+        run: ci/run-in-image.sh make test-e2e-btc-sweeps-1
+
+  e2e-btc-sweeps-2:
+    runs-on: ubuntu-24.04
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-sweeps-2,')) }}
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          go-cache: btc
+          postgres: "true"
+          infra: "true"
+          anvil: "false"
+          bitcoind: "true"
+      - name: make test-e2e-btc-sweeps-2
+        run: ci/run-in-image.sh make test-e2e-btc-sweeps-2
 
   # Bitcoin cell, reconciliation against the chain and hot-to-cold moves (bands, rounds under max_inputs, attacks, crash boundaries, cancel).
   e2e-btc-cold:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-cold,')) }}
     permissions:
       contents: read
       packages: read
@@ -1068,6 +1184,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -1078,7 +1195,8 @@ jobs:
   # Bitcoin cell, consolidation of a hot shard's small outputs.
   e2e-btc-consolidate:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-consolidate,')) }}
     permissions:
       contents: read
       packages: read
@@ -1097,6 +1215,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -1107,7 +1226,8 @@ jobs:
   # Bitcoin cell, batches of withdrawals (several in one transaction): sealing, first in first out, max_in_flight, the prefix under max_inputs, re-screening, the zone's ceiling.
   e2e-btc-batching:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-batching,')) }}
     permissions:
       contents: read
       packages: read
@@ -1126,6 +1246,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -1136,7 +1257,8 @@ jobs:
   # Bitcoin cell, batches under failure: a bumped batch, the cancel of one withdrawal and of a whole batch, survivors paid once, a crash at every boundary.
   e2e-btc-batching-recovery:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-batching-recovery,')) }}
     permissions:
       contents: read
       packages: read
@@ -1155,6 +1277,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -1165,7 +1288,8 @@ jobs:
   # Bitcoin cell, CPFP: a stuck send pulled in by a child that spends its change (a withdrawal and a batch), a cancel after a child, a crash between the child's signature and its broadcast, every hostile child refused.
   e2e-btc-cpfp:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-cpfp,')) }}
     permissions:
       contents: read
       packages: read
@@ -1184,6 +1308,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -1194,7 +1319,8 @@ jobs:
   # Bitcoin cell, refills from cold: the cold key in the qv-cold SoftHSM token, qv-cold as its own process, only files crossing.
   e2e-btc-refill:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-refill,')) }}
     permissions:
       contents: read
       packages: read
@@ -1213,6 +1339,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -1223,7 +1350,8 @@ jobs:
   # Bitcoin cell, stuck refills: the fee-bumped second ceremony, the lost signed file, the fee attacks, through real files with qv-cold as its own process.
   e2e-btc-refill-stuck:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-refill-stuck,')) }}
     permissions:
       contents: read
       packages: read
@@ -1242,6 +1370,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
@@ -1250,9 +1379,11 @@ jobs:
         run: ci/run-in-image.sh make test-e2e-btc-refill-stuck
 
   # Bitcoin cell, recovery: fee bumps, cancel, an outside spend, the crash boundaries, a killed gateway, a node restarted with an empty mempool.
-  e2e-btc-recovery:
+  # Split in two jobs by test name (Makefile test-e2e-btc-recovery-1 and -2; ci/e2e-split-check.sh proves they add up to the whole group).
+  e2e-btc-recovery-1:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-recovery-1,')) }}
     permissions:
       contents: read
       packages: read
@@ -1271,17 +1402,49 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"
           bitcoind: "true"
-      - name: make test-e2e-btc-recovery
-        run: ci/run-in-image.sh make test-e2e-btc-recovery
+      - name: make test-e2e-btc-recovery-1
+        run: ci/run-in-image.sh make test-e2e-btc-recovery-1
+
+  e2e-btc-recovery-2:
+    runs-on: ubuntu-24.04
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-recovery-2,')) }}
+    permissions:
+      contents: read
+      packages: read
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "1"
+      CC: clang-20
+      CXX: clang++-20
+      QV_PKI_DIR: ${{ github.workspace }}/data/pki
+      DATABASE_URL: postgres://qv@localhost:55432/quorumvault?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/business/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/business/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/business/admin/tls.key
+      QV_SIGNING_DB_URL: postgres://qv@localhost:55433/qv_signing?sslmode=verify-full&sslrootcert=${{ github.workspace }}/data/pki/signing/admin/ca.crt&sslcert=${{ github.workspace }}/data/pki/signing/admin/tls.crt&sslkey=${{ github.workspace }}/data/pki/signing/admin/tls.key
+      QV_REQUIRE_DB: "1"
+      QV_REQUIRE_HSM: "1"
+      QV_E2E_TIMEOUT_SCALE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/mpc-env
+        with:
+          go-cache: btc
+          postgres: "true"
+          infra: "true"
+          anvil: "false"
+          bitcoind: "true"
+      - name: make test-e2e-btc-recovery-2
+        run: ci/run-in-image.sh make test-e2e-btc-recovery-2
 
   # Bitcoin cell, signed fee-cap changes: qv-fee-caps against real databases, the gateway, a cosigner and the workflows.
   e2e-btc-feecaps:
     runs-on: ubuntu-24.04
-    needs: image
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-feecaps,')) }}
     permissions:
       contents: read
       packages: read
@@ -1300,6 +1463,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/mpc-env
         with:
+          go-cache: btc
           postgres: "true"
           infra: "true"
           anvil: "false"

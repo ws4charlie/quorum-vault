@@ -1,0 +1,13 @@
+# Trees whose files (other than .go, which follow the package graph) affect only the jobs that read them. One <dir>/* per line. A changed file that
+# matches no line here, is not on ci/skip-allowlist and is not a .go file of a package: every job runs.
+#
+# The jobs of a tree are NOT written here: ci/jobselect works them out on every run, so a new reader can only add jobs, never hide one:
+#   - every Go package inside the tree, or above it, adds the jobs that compile it (go:embed, testdata, a file it opens relative to itself);
+#   - every line elsewhere that names the tree (the path "ci/kind", the Go form "ci", "kind", the bare name of a top-level tree) is a reader: in a .go file
+#     it adds the jobs that compile that file (a _test.go file: the jobs that test its package); in any other file (script, Makefile, workflow, compose
+#     file) it must be a reviewed line of ci/job-rules-exceptions, which names the jobs that run it, or every job runs.
+# The skip-allowlisted trees (docs, the three charts, ci/helm), Markdown, and the CI machinery itself are not readers (no ci.yml job runs them).
+ci/kind/*
+deploy/helm/*
+loadtest/*
+monitoring/*

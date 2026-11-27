@@ -1,0 +1,18 @@
+# Reviewed readers of a tree of ci/job-rules that ci/jobselect cannot map to jobs by itself (a .go file maps by its package; a line of ci.yml by its job;
+# a recipe line of the Makefile by the ci.yml jobs that call its target; another workflow by none). Tab-separated:
+# <tree/>	<file>	<number of lines>	<text the lines contain, or *>	<jobs that run the file, comma-separated, or ->	<reason>
+# Exactly that many lines of the file must name the tree and contain the text: a new line, a changed one or a missing one makes the tree select every job
+# (and ci/jobselect check fails), so a new reader is always reviewed.
+ci/kind/	loadtest/kind/run.sh	1	ci/kind/smoke/wd-lib.sh	-	the kind load test sources the kind lane's helpers; run only by make load-kind (no ci.yml job calls it: a recipe line of load-kind maps to no job)
+deploy/helm/	ci/kind/charts.sh	1	deploy/helm/qv-business	-	the kind lane installs the charts; ci/kind scripts run only from make kind-* and kind.yml (the ci/kind tree has no ci.yml reader: jobselect readers)
+deploy/helm/	ci/kind/install.sh	1	deploy/helm/qv-certs	-	same: the kind lane
+deploy/helm/	ci/kind/parties.sh	1	deploy/helm/qv-party	-	same: the kind lane
+deploy/helm/	ci/kind/signing.sh	2	deploy/helm/qv-	-	same: the kind lane
+deploy/helm/	ci/kind/smoke/upgrade.sh	1	chart=deploy/helm/qv-business	-	same: the kind lane
+deploy/helm/	ci/kind/teesim.sh	2	deploy/helm/qv-	-	same: the kind lane
+deploy/helm/	deploy/cloud/aws/values/render_test.py	1	repo / "deploy/helm"	-	renders the charts with helm template; run only by deploy/cloud/aws/check.sh in .github/workflows/terraform.yml
+loadtest/	Makefile	1	SCENARIO ?= loadtest/scenarios/smoke.json	e2e-evm-misc	the default scenario of load-local, which load-smoke (the e2e-evm-misc job) calls
+loadtest/	Makefile	1	KIND_SCENARIO := loadtest/scenarios/evm-kind.json	-	used only by the recipe of load-kind, which no ci.yml job calls
+monitoring/	ci/promtool-tests.sh	2	monitoring	misc-checks	promtool and the Go rule tests; run by the misc-checks job (ci.yml)
+monitoring/	docker-compose.yml	2	profiles: ["monitoring"]	-	the compose profile's name, not a path
+monitoring/	docker-compose.yml	1	./monitoring:/etc/prometheus:ro	-	the dev Prometheus (profile monitoring, make monitoring-up); ci/infra.sh never starts it (it names its services; the profile is not one of them)

@@ -224,6 +224,47 @@ MSG="docs fix" pr pull_request "skip docs 1" "commit message without the token" 
 pr pull_request all "1001 doc files" 'for i in $(seq 1 1001); do echo x > docs/g$i.md; done'
 pr pull_request all "3000 doc files" 'for i in $(seq 1 3000); do echo x > docs/g$i.md; done'
 
+# changes.sh with the job selector (ci/jobselect): a change that is not all docs may still skip the jobs it cannot affect. A scratch Go module with three jobs.
+repo2="$tmp/repo2"; git init -q "$repo2"
+(
+  cd "$repo2" || exit 1
+  git config user.email t@example.invalid; git config user.name t; git config commit.gpgsign false
+  mkdir -p ci lib e2e/y cmd/app docs data
+  printf 'module example.test/s\n\ngo 1.21\n' > go.mod
+  printf 'package lib\n' > lib/l.go; printf 'package lib\n' > lib/l_test.go
+  printf 'package y\n\nimport "testing"\n\nfunc TestY(t *testing.T) {}\n' > e2e/y/y_test.go
+  printf 'package main\n\nfunc main() {}\n' > cmd/app/main.go
+  echo doc > docs/a.md; echo '{}' > data/x.json
+  cp "$here/classify.sh" "$here/skip-allowlist" "$here/skip-module-exceptions" ci/
+  printf 'module .\nnoimage test\njob test .:./...\njob e2e-y .:./e2e/y/... @mains\njob lib-only .:./lib/...\n' > ci/jobs
+  printf 'data/*\n' > ci/job-rules; : > ci/job-rules-exceptions
+  git add -A; git commit -qm base; git branch -M main
+)
+main2="$(git -C "$repo2" rev-parse HEAD)"
+pj() { # pj <want skip_jobs, or all> <description> <mutation>
+  local want="$1" desc="$2" mut="$3" out="$tmp/out" head got
+  git -C "$repo2" checkout -q -f main; git -C "$repo2" branch -D pr -q 2>/dev/null; git -C "$repo2" checkout -q -b pr
+  (cd "$repo2" && eval "$mut"); git -C "$repo2" add -A; git -C "$repo2" commit -q --allow-empty -m "${MSG:-change}"
+  head="$(git -C "$repo2" rev-parse HEAD)"; git -C "$repo2" checkout -q main; git -C "$repo2" merge -q --no-ff -m merge pr
+  : > "$out"; (cd "$repo2" && QV_EVENT_NAME=pull_request QV_PR_HEAD_SHA="$head" GITHUB_OUTPUT="$out" "$here/changes.sh" > "$tmp/log" 2>&1); local rc=$?
+  ok; got="$(sed -n 's/^skip_jobs=//p' "$out")"
+  if [ "$rc" != 0 ] || [ "$(sed -n 's/^skip=//p' "$out")" != false ]; then bad "changes.sh+jobselect: $desc: rc=$rc skip=$(sed -n 's/^skip=//p' "$out")"
+  elif [ "$want" = all ]; then [ -z "$got" ] || bad "changes.sh+jobselect: $desc: want every job, got skip_jobs='$got' ($(tail -3 "$tmp/log"))"
+  else [ "$got" = "$want" ] || bad "changes.sh+jobselect: $desc: want skip_jobs='$want', got '$got' ($(tail -3 "$tmp/log"))"; fi
+  git -C "$repo2" checkout -q -f main; git -C "$repo2" reset -q --hard "$main2"
+}
+pj ",e2e-y,"    "a test file of lib: test and lib-only run"        'echo "// x" >> lib/l_test.go'
+pj ",lib-only," "a test file of e2e/y: test and e2e-y run"         'echo "// x" >> e2e/y/y_test.go'
+pj ",lib-only," "a main package: every @mains job"                 'echo "// x" >> cmd/app/main.go'
+pj ",e2e-y,"    "docs and a lib test file"                        'echo x >> docs/a.md; echo "// x" >> lib/l_test.go'
+pj all          "an unknown path"                                 'echo x > newfile.txt'
+pj all          "a lib file and go.mod"                           'echo "// x" >> lib/l.go; echo "// x" >> go.mod'
+pj all          "the job table"                                   'echo "# x" >> ci/jobs'
+pj ",e2e-y,image,lib-only,test," "a rule tree no job reads: nothing runs" 'echo 1 > data/x.json'
+MSG="lib [ci full]" pj all "a commit message asks for a full run"  'echo "// x" >> lib/l_test.go'
+pj all          "every job is affected (nothing to skip)"         'echo "// x" >> lib/l_test.go; echo "// x" >> e2e/y/y_test.go'
+grep -q 'running only the jobs the change can affect; skipped' "$tmp/log" || true
+
 # errors of the lister and of the environment
 run_in() { # run_in <dir> [env...]: runs changes.sh there, with the env given; leaves the output file in $tmp/out
   local d="$1"; shift; : > "$tmp/out"
@@ -258,18 +299,22 @@ fin() { # fin <want true|false> <description> <classify outcome> <classify skip>
   ok; [ "$(sed -n 's/^skip=//p' "$tmp/fout")" = "$want" ] || bad "final.sh: $desc: want skip=$want, got '$(sed -n 's/^skip=//p' "$tmp/fout")'"
   [ "$(grep -c '^skip=' "$tmp/fout")" = 1 ] || bad "final.sh: $desc: skip must be written exactly once"
 }
-G="success success success success success"
+G="success success success success success success success success"
 fin true  "verdict skip and every guard green"            success true $G
-fin false "verdict skip, the guard failed (Greptile 1)"    success true success success failure success success
-fin false "verdict skip, the guard test failed"           success true success failure success success success
-fin false "verdict skip, the classifier test failed"      success true failure success success success success
-fin false "verdict skip, the tracked-files check failed"  success true success success success success failure
-fin false "verdict skip, the tracked-files test failed"   success true success success success failure success
-fin false "verdict skip, a guard was cancelled"           success true success cancelled success success success
-fin false "verdict skip, a guard was skipped"             success true success success success skipped success
-fin false "verdict skip, a guard timed out"               success true success success timed_out success success
-fin false "verdict skip, a guard outcome is empty"        success true success success "" success success
-fin false "verdict skip, only four guard outcomes"        success true success success success success
+fin false "verdict skip, the guard failed (Greptile 1)"    success true success success success success success failure success success
+fin false "verdict skip, the guard test failed"           success true success success success success failure success success success
+fin false "verdict skip, the classifier test failed"      success true success success success failure success success success success
+fin false "verdict skip, the tracked-files check failed"  success true success success success success success success success failure
+fin false "verdict skip, the tracked-files test failed"   success true success success success success success success failure success
+fin false "verdict skip, the selector test failed"        success true failure success success success success success success success
+fin false "verdict skip, the selector guard failed"       success true success failure success success success success success success
+fin false "verdict skip, the split check failed"          success true success success failure success success success success success
+fin false "verdict skip, a guard was cancelled"           success true success cancelled success success success success success success
+fin false "verdict skip, a guard was skipped"             success true success success success skipped success success success success
+fin false "verdict skip, a guard timed out"               success true success success timed_out success success success success success
+fin false "verdict skip, a guard outcome is empty"        success true success success "" success success success success success
+fin false "verdict skip, only seven guard outcomes"       success true success success success success success success success
+fin false "verdict skip, only five guard outcomes (the old set)" success true success success success success success
 fin false "verdict skip, only two guard outcomes"         success true success success
 fin false "verdict skip, no guard outcomes at all"        success true
 fin false "classifier step failed (continue-on-error)"    failure true $G
@@ -280,12 +325,36 @@ fin false "verdict empty, guards green"                   success "" $G
 fin false "verdict 'True' (not the exact token)"          success True $G
 fin false "verdict 'true ' (trailing space)"              success "true " $G
 fin false "verdict 'skip'"                                success skip $G
-fin true  "six green guards still skip"                   success true $G success
+fin true  "nine green guards still skip"                  success true $G success
+
+# skip_jobs: published only from a clean classify step with every guard green, and only as a list of job ids between commas; otherwise empty (run all)
+fj() { # fj <want skip_jobs> <description> <classify outcome> <classify skip> <classify skip_jobs> <guard outcomes...>
+  local want="$1" desc="$2" co="$3" cs="$4" sj="$5"; shift 5
+  : > "$tmp/fout"; QV_CLASSIFY_OUTCOME="$co" QV_CLASSIFY_SKIP="$cs" QV_CLASSIFY_SKIP_JOBS="$sj" QV_CLASSIFY_TEXT="t" QV_GUARD_OUTCOMES="$*" GITHUB_OUTPUT="$tmp/fout" "$here/final.sh" > /dev/null 2>&1
+  ok; [ "$(sed -n 's/^skip_jobs=//p' "$tmp/fout")" = "$want" ] || bad "final.sh: $desc: want skip_jobs='$want', got '$(sed -n 's/^skip_jobs=//p' "$tmp/fout")'"
+  [ "$(grep -c '^skip_jobs=' "$tmp/fout")" = 1 ] || bad "final.sh: $desc: skip_jobs must be written exactly once"
+  [ "$(sed -n 's/^skip=//p' "$tmp/fout")" = false ] || [ "$cs" = true ] || bad "final.sh: $desc: skip must stay false"
+}
+fj ",e2e-btc-cold,image,"  "a clean list, guards green"                  success false ",e2e-btc-cold,image," $G
+fj ",test,"               "one job"                                     success false ",test," $G
+fj ""  "a guard failed"                                                 success false ",e2e-btc-cold," success success failure success success success success success
+fj ""  "the selector guard failed"                                      success false ",e2e-btc-cold," success failure success success success success success success
+fj ""  "only five guard outcomes"                                       success false ",e2e-btc-cold," success success success success success
+fj ""  "the classify step failed"                                       failure false ",e2e-btc-cold," $G
+fj ""  "no list"                                                        success false "" $G
+fj ""  "no leading comma"                                               success false "e2e-btc-cold," $G
+fj ""  "no trailing comma"                                              success false ",e2e-btc-cold" $G
+fj ""  "spaces instead of commas"                                       success false " e2e-btc-cold " $G
+fj ""  "an empty item"                                                  success false ",," $G
+fj ""  "an upper-case id"                                               success false ",E2E," $G
+fj ""  "a quote in it"                                                  success false ",a',b," $G
+fj ""  "a newline in it"                                                success false $',a,\nskip=true,' $G
+fj ""  "skip=true wins: no list on an everything-skipped run"           success true ",a," $G
 
 # the workflow keeps its side of the bargain (a text check; the full run on a real pull request is the proof)
 wf="$here/../.github/workflows/ci.yml"
 chk() { ok; grep -qF -- "$1" "$wf" || bad "ci.yml: $2"; }
-chk "if: \${{ !cancelled() && !(needs.changes.result == 'success' && needs.changes.outputs.skip == 'true') }}" "the image job must run unless skip is exactly 'true' (and run when changes failed)"
+chk "if: \${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',image,'))) }}" "the image job must run unless skip is exactly 'true' or the list names it (and run when changes failed)"
 chk "if: \${{ !cancelled() }}" "the test job must run even when changes failed"
 chk "continue-on-error: true" "the classify step must not fail the job"
 chk "run: ci/changes.sh" "ci.yml does not run ci/changes.sh"
@@ -293,11 +362,17 @@ chk "run: ci/skip-guard.sh" "ci.yml does not run the guard"
 chk "run: ci/tracked-files.sh" "ci.yml does not run the tracked-files check"
 chk "run: ci/final.sh" "ci.yml does not publish the decision through ci/final.sh"
 chk "skip: \${{ steps.final.outputs.skip }}" "the job output must come from the final step only"
+chk "skip_jobs: \${{ steps.final.outputs.skip_jobs }}" "the job output skip_jobs must come from the final step only"
+chk "QV_CLASSIFY_SKIP_JOBS: \${{ steps.classify.outputs.skip_jobs }}" "the final step must receive the classify step's skip_jobs"
+ok; ! grep -qE "^      skip_jobs: .*steps.classify" "$wf" || bad "the job output skip_jobs must not come from the classify step"
 ok; grep -qF "steps.classify.outputs.skip }}" "$wf" && ! grep -qE "^      skip: .*steps.classify" "$wf" || bad "the job output skip must not come from the classify step"
 # order: the guards are steps before the classifier; the final step is last in the job
-ok; awk '/^  changes:/{c=1} /^  # The CI image/{c=0} c&&/^        id: /{ids=ids" "$2} END{exit !(ids==" t_changes t_guard guard t_files files classify final")}' "$wf" || bad "changes job: steps must be t_changes t_guard guard t_files files classify final, in this order"
-chk "steps.t_changes.outcome }} \${{ steps.t_guard.outcome }} \${{ steps.guard.outcome }} \${{ steps.t_files.outcome }} \${{ steps.files.outcome }}" "final step must receive the outcomes of every guard and test step"
-chk "needs.changes.result == 'success' && needs.changes.outputs.skip == 'true'" "test and image must refuse a skip when the changes job did not succeed"
+ok; awk '/^  changes:/{c=1} /^  # The CI image/{c=0} c&&/^        id: /{ids=ids" "$2} END{exit !(ids==" t_select select_guard split t_changes t_guard guard t_files files classify final")}' "$wf" || bad "changes job: steps must be t_select select_guard split t_changes t_guard guard t_files files classify final, in this order"
+chk "steps.t_select.outcome }} \${{ steps.select_guard.outcome }} \${{ steps.split.outcome }} \${{ steps.t_changes.outcome }} \${{ steps.t_guard.outcome }} \${{ steps.guard.outcome }} \${{ steps.t_files.outcome }} \${{ steps.files.outcome }}" "final step must receive the outcomes of every guard and test step"
+chk "needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))" "test must refuse a skip when the changes job did not succeed"
+# every heavy job: skipped only when the changes job succeeded and the list names it (its id: ci/jobselect check), and only after the image job succeeded
+ok; n_heavy="$(grep -c "^    needs: \[changes, image\]" "$wf")"; n_cond="$(grep -c "^    if: \${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',[a-z0-9-]*,')) }}" "$wf")"
+[ "$n_heavy" -gt 30 ] && [ "$n_heavy" = "$n_cond" ] || bad "ci.yml: every job that needs the image must have the standard condition ($n_heavy jobs, $n_cond conditions)"
 ok; ! grep -qE "skip *== *'false'|skip *!= *'false'" "$wf" || bad "ci.yml compares skip with 'false': only the exact value true may skip"
 n_steps="$(awk '/^  test:/{t=1} /^  # cb-mpc wrapper/{t=0} t&&/^      - /{n++} END{print n}' "$wf")"
 n_if="$(awk '/^  test:/{t=1} /^  # cb-mpc wrapper/{t=0} t&&/^        if: \$\{\{ .*needs.changes.outputs.skip/{c++} END{print c}' "$wf")"

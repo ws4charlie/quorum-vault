@@ -28,3 +28,45 @@ Run it locally (Linux or macOS with Docker; the image is built for your machine'
 ci/ensure-image.sh use
 ci/run-in-image.sh go vet ./...
 ```
+
+## Which jobs run on a pull request
+
+The human's rule: never skip a job a change can affect; running too much is fine, missing a run is not. The `changes` job decides, and every doubt,
+error or unknown path runs every job.
+
+1. Every changed file on `skip-allowlist` (documentation, three charts, `ci/helm`): every heavy job is skipped (`classify.sh`, `skip-guard.sh`).
+2. Otherwise `jobselect` (Go, standard library only) works out, file by file, the jobs a change can affect, and the others are skipped:
+
+| Changed file | Jobs |
+|---|---|
+| a `.go` file of a package | the jobs that compile the package (`go list` of every module, under every build tag CI uses: the packages a job tests, their test imports, every binary an e2e test builds, and all they import); a `_test.go` file: only the jobs that test its package |
+| a file under a tree of `job-rules` (`ci/kind`, `deploy/helm`, `loadtest`, `monitoring`) | the jobs that read the tree: its Go packages, every Go file elsewhere that names it, the ci.yml job or Makefile target that names it, and the reviewed lines of `job-rules-exceptions` |
+| anything else (`go.mod`, `.github/`, the rest of `ci/`, scripts, compose, migrations, a new directory, a mode change, a rename) | every job |
+
+| File | What it is |
+|---|---|
+| `jobs` | each job of ci.yml and the Go packages it tests (`job <id> <module>:<pattern>... [@mains]`) |
+| `job-rules`, `job-rules-exceptions` | the non-Go trees whose readers are found by a search, and the reviewed readers the search cannot map to jobs |
+| `jobselect/` | the selector: `select` (the decision), `explain <path>` (why), `readers` (the evidence for each tree), `why <job> <dir>` (the import chain), `check` (the guard) |
+| `e2e-split-check.sh` | the two shards of each split group run exactly the group's tests (`--list-ci`: every test CI runs through make) |
+
+`jobselect check` runs in the `changes` job and fails when ci.yml and `jobs` disagree: a job missing from either, a job whose condition does not name its
+own id, a heavy job that does not need `image`, a reader of a tree that is not reviewed, a build tag that is not modelled, an mpc-party file that reaches
+into the root module. A new job therefore goes into `jobs` with the packages it tests, and gets the condition
+
+```yaml
+    needs: [changes, image]
+    if: ${{ !cancelled() && needs.image.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',<id>,')) }}
+```
+
+```bash
+go run ./ci/jobselect explain internal/custody/service.go loadtest/scenarios/smoke.json
+```
+
+A commit message with `[ci full]` runs everything.
+
+## The Go build cache
+
+The e2e jobs restore `~/.cache/qv-go` (modules and build cache, mounted into the image) per family of jobs (`custody`, `btc`, `sol`, `mpc`: the input
+`go-cache` of `.github/actions/mpc-env`), and `test` restores its own. Keys hold `go.sum` and the commit; only pushes to `main` save, so a pull request
+starts from the newest `main` build of the same packages. Pull requests do not save: their caches would push `main`'s out of the repository's 10 GB.
