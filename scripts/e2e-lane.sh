@@ -53,6 +53,7 @@ _lane_vars() {
   p=$(lane_project)
   cat <<EOF
 COMPOSE_PROJECT_NAME=$p
+QV_ANVIL_BASE_PORT=$((b + 88))
 QV_ARCHIVE_PORT=$((b + 89))
 QV_PG_PORT=$((b + 90))
 QV_SIGNING_DB_PORT=$((b + 91))
