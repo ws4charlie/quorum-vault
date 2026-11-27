@@ -718,6 +718,125 @@
       }
     },
     {
+      "name": "signature_line_feed",
+      "description": "The valid signature with a line feed (written as \\n) at the end: refused, not skipped.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2b06\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"JICnlPCi4sFX_nZz27dkNutozAwR3CNrcApcUb1K2wq8PFHvWTqkld-Md3zRMUZOqzEcYPZurlBX36oDRxW5AA\\n\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed",
+        "field": "sig"
+      }
+    },
+    {
+      "name": "signature_carriage_return",
+      "description": "The valid signature with a carriage return (written as \\r) in the middle: refused, not skipped.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2b07\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"VOldkLiYzd8Dmne08uMxeyS3XAJ-YYgHdJSceWoEMaR\\rIVHHFwh64zQn1E60ytzrzVmjJvGptVC6WNluONc5HDQ\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed",
+        "field": "sig"
+      }
+    },
+    {
+      "name": "signature_one_padding_character",
+      "description": "The valid signature followed by one \"=\": padding is refused.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2b08\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"hde5EYHJJMNb_By8SiNSDpTCPrWAUBxtfl5CK22mdJ5B9zrVQPXcGFXow0rXR8ASSPUnjRIwa3i5xGHfIvmVCg=\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed",
+        "field": "sig"
+      }
+    },
+    {
+      "name": "signature_plus",
+      "description": "The valid signature with its first character replaced by \"+\" (standard base64 alphabet).",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2b09\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"+b44dLWI6Qq21mtCBOBTGV1Fl4aOXF0u1pfaU0nozL0Gl1YdFclYg2vAlKSvN685kvl7NHwp8RST80VvdTkdDw\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed",
+        "field": "sig"
+      }
+    },
+    {
+      "name": "signature_slash",
+      "description": "The valid signature with its first character replaced by \"/\" (standard base64 alphabet).",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2b0a\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"/rfZNyr79l9Xb08ArWKo3-7PTRkFDHvCZ_VIWvAxgLFF8CieyUsPIu8n0r3yVhTjmtejYYifB8mNV2XmHMyUAA\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed",
+        "field": "sig"
+      }
+    },
+    {
+      "name": "signature_space",
+      "description": "The valid signature with a space in the middle.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2b0b\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"X4FHeRgKeSyapIkFiVIDay5gg63D4UbN34aOd_0-79B Ii4K_TiQd2Wcfah12YrPYl6USYd5Zw3x3nDp_gdpbDQ\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed",
+        "field": "sig"
+      }
+    },
+    {
+      "name": "signature_too_long",
+      "description": "Signature of 65 bytes.",
+      "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2b0c\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":1,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}",
+      "payment": {
+        "wallet_id": "7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13",
+        "chain": "eip155:84532",
+        "asset": "native",
+        "payee": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        "amount": "1000000000000000"
+      },
+      "expect": {
+        "ok": false,
+        "code": "credential_malformed",
+        "field": "sig"
+      }
+    },
+    {
       "name": "version_2",
       "description": "v is 2, which this contract does not define.",
       "credential": "{\"amount\":\"1000000000000000\",\"asset\":\"native\",\"audience\":\"qv-test\",\"chain\":\"eip155:84532\",\"credential_id\":\"0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e2c01\",\"decision_reason\":\"within daily budget; tool call approved by rule r-7\",\"expires_at\":1790000590,\"issued_at\":1789999990,\"kid\":\"test-only-1\",\"obligation_id\":\"obl-2026-09-21-0001\",\"payee\":\"0x70997970c51812dc3a010c7d01b50e0d17dc79c8\",\"policy_version\":\"policy-v12\",\"v\":2,\"wallet_id\":\"7c1f0a52-3b8e-4d6a-9f21-5e0b7a4c8d13\",\"sig\":\"Yr19kGQ9yZYY-lG-GIBy61zHElwO0iYwoZvsAaZzPKTGGDFtrqVZjgj7oX2M4FilIZVfSWJ9QIDRpjwPYeDQDA\"}",

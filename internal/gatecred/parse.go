@@ -102,6 +102,28 @@ func escapesAreSound(raw []byte) bool {
 	return true
 }
 
+// DecodeBase64URL decodes s as base64url without padding into exactly n bytes.
+// Every byte of s must be in the alphabet A-Z a-z 0-9 - _ and s must have the
+// one length that encodes n bytes; the unused low bits of the last character
+// must be zero. The alphabet is checked here, before decoding, because the
+// standard decoder skips CR and LF even in strict mode: "sig\n" would decode.
+func DecodeBase64URL(s string, n int) ([]byte, bool) {
+	if len(s) != base64.RawURLEncoding.EncodedLen(n) {
+		return nil, false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return nil, false
+		}
+	}
+	b, err := base64.RawURLEncoding.Strict().DecodeString(s)
+	if err != nil || len(b) != n {
+		return nil, false
+	}
+	return b, true
+}
+
 // printable reports whether s is 1..max characters of printable ASCII (0x20-0x7e).
 func printable(s string, max int) bool {
 	if len(s) < 1 || len(s) > max {
@@ -261,8 +283,8 @@ func Parse(raw []byte) (*Credential, error) {
 	if err := c.checkFormats(); err != nil {
 		return nil, err
 	}
-	sig, err := base64.RawURLEncoding.Strict().DecodeString(sigText)
-	if err != nil || len(sig) != ed25519.SignatureSize {
+	sig, ok := DecodeBase64URL(sigText, ed25519.SignatureSize)
+	if !ok {
 		return nil, fail(CredentialMalformed, "sig", "must be 64 bytes in base64url without padding")
 	}
 	c.Sig = sig

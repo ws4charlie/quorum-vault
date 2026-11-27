@@ -375,3 +375,40 @@ func TestMinterNotInProductionBinaries(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A sig is accepted only when every byte is in the base64url alphabet. Go's strict decoder skips CR and LF, so before this check a valid
+// signature with "\n" appended parsed and verified (Greptile on PR 158).
+func TestSigRefusesBytesOutsideAlphabet(t *testing.T) {
+	k := gatecredtest.TestKey(1)
+	f := gatecredtest.FromCredential(gatecred.Credential{
+		V: 1, KID: k.KID, CredentialID: "11111111-2222-4333-8444-555555555555", ObligationID: "o",
+		Audience: "qv-test", WalletID: gatecredtest.VectorsWallet, Chain: "eip155:1", Asset: "native",
+		Payee: gatecredtest.VectorsPayee, Amount: "1", IssuedAt: 1, ExpiresAt: 2, PolicyVersion: "p", DecisionReason: "r",
+	})
+	sig := gatecredtest.Sign(k, f)
+	if _, err := gatecred.Parse(gatecredtest.WireWithSig(f, sig)); err != nil {
+		t.Fatalf("valid credential: %v", err)
+	}
+	for name, s := range map[string]string{
+		"line feed at end": sig + "\n", "line feed inside": sig[:43] + "\n" + sig[43:], "carriage return": sig[:43] + "\r" + sig[43:],
+		"CRLF": sig + "\r\n", "space": sig[:43] + " " + sig[43:], "tab": sig + "\t", "one =": sig + "=", "two =": sig + "==",
+		"plus": "+" + sig[1:], "slash": "/" + sig[1:], "63 bytes": base64.RawURLEncoding.EncodeToString(make([]byte, 63)),
+		"65 bytes": base64.RawURLEncoding.EncodeToString(make([]byte, 65)),
+	} {
+		_, err := gatecred.Parse(gatecredtest.WireWithSig(f, s))
+		var ge *gatecred.Error
+		if !errors.As(err, &ge) || ge.Code != gatecred.CredentialMalformed || ge.Field != "sig" {
+			t.Errorf("%s: want credential_malformed (sig), got %v", name, err)
+		}
+	}
+	// The unused low bits of the last character must be zero: one encoding per signature.
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	i := strings.IndexByte(alphabet, sig[len(sig)-1])
+	if i%16 != 0 {
+		t.Fatalf("last character %q has non-zero low bits", sig[len(sig)-1])
+	}
+	other := alphabet[i+1]
+	if _, ok := gatecred.DecodeBase64URL(sig[:len(sig)-1]+string(other), 64); ok {
+		t.Error("non-zero trailing bits accepted")
+	}
+}

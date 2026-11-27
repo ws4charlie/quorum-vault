@@ -842,3 +842,16 @@ func TestGateFactsOnTheZonesOwnRefusals(t *testing.T) {
 		t.Fatalf("gate facts %v", g)
 	}
 }
+
+// A Gate public key follows the credential's sig rule: every byte in the base64url alphabet, no padding, exact length.
+func TestGateKeyFileRefusesBytesOutsideAlphabet(t *testing.T) {
+	k := gatecredtest.TestKey(1)
+	if _, err := (GateKeyFile{KID: k.KID, PublicKey: b64(k.Pub)}).build(); err != nil {
+		t.Fatalf("valid key: %v", err)
+	}
+	for _, s := range []string{b64(k.Pub) + "\n", b64(k.Pub)[:20] + "\r" + b64(k.Pub)[20:], b64(k.Pub) + "=", " " + b64(k.Pub), b64(k.Pub[:31])} {
+		if _, err := (GateKeyFile{KID: k.KID, PublicKey: s}).build(); err == nil {
+			t.Errorf("public_key %q accepted", s)
+		}
+	}
+}

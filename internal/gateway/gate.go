@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -221,8 +220,8 @@ func (k GateKeyFile) build() (GateKey, error) {
 	if !reKID.MatchString(k.KID) {
 		return GateKey{}, fmt.Errorf("kid %q is not 1-64 characters of [A-Za-z0-9._-]", k.KID)
 	}
-	pub, err := base64.RawURLEncoding.DecodeString(k.PublicKey)
-	if err != nil || len(pub) != ed25519.PublicKeySize {
+	pub, ok := gatecred.DecodeBase64URL(k.PublicKey, ed25519.PublicKeySize)
+	if !ok {
 		return GateKey{}, fmt.Errorf("key %q: public_key must be %d bytes in base64url without padding", k.KID, ed25519.PublicKeySize)
 	}
 	if k.NotBefore < 0 || k.NotAfter < 0 || (k.NotAfter != 0 && k.NotAfter <= k.NotBefore) {

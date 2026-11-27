@@ -38,7 +38,7 @@ The parser is strict. It refuses a field that appears twice, an unknown field, a
 
 **What is signed.** The bytes `qv-gate-credential-v1`, a line feed, then the canonical form of the object without `sig`. The prefix separates these signatures from any other use of the key.
 
-**Envelope.** The credential sent is the object with one more member, `sig`: the Ed25519 signature (RFC 8032) of 64 bytes, in base64url without padding. Padding, other alphabets and other lengths are refused. The verifier does not trust the order or layout of the text it received: it parses, recomputes the canonical form, and verifies that. A reordered or re-spaced copy of a valid credential therefore verifies.
+**Envelope.** The credential sent is the object with one more member, `sig`: the Ed25519 signature (RFC 8032) of 64 bytes, in base64url without padding. Every byte of `sig` must be in `A-Z a-z 0-9 - _` and it must decode to exactly 64 bytes: padding, other alphabets, whitespace (line feed and carriage return included, which some decoders skip) and other lengths are refused as `credential_malformed` (field `sig`). Public keys follow the same rule at 32 bytes. The verifier does not trust the order or layout of the text it received: it parses, recomputes the canonical form, and verifies that. A reordered or re-spaced copy of a valid credential therefore verifies.
 
 **The signature covers `payee`, `amount`, `asset`, `chain`, `wallet_id`, `audience`, the times and the opaque fields.** Changing any of them after signing fails the signature.
 

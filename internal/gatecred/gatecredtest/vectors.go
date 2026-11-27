@@ -265,6 +265,19 @@ func Generate() ([]byte, error) {
 	pad := string(WireWithSig(good.with("credential_id", id("2b04")), Sign(k1, good.with("credential_id", id("2b04")))+"=="))
 	mal("signature_with_padding", "Signature in base64 with padding: refused, not tolerated.", pad, "sig")
 	mal("signature_wrong_length", "Signature of 63 bytes.", string(WireWithSig(good.with("credential_id", id("2b05")), base64.RawURLEncoding.EncodeToString(make([]byte, 63)))), "sig")
+	// A signature that is right except for its text: every byte must be in the base64url alphabet. Go's decoder (and others) skip CR
+	// and LF even in strict mode, so these would verify if the alphabet were not checked first.
+	sigText := func(name, desc, hexID string, edit func(string) string) {
+		f := good.with("credential_id", id(hexID))
+		mal(name, desc, string(WireWithSig(f, edit(Sign(k1, f)))), "sig")
+	}
+	sigText("signature_line_feed", "The valid signature with a line feed (written as \\n) at the end: refused, not skipped.", "2b06", func(s string) string { return s + "\n" })
+	sigText("signature_carriage_return", "The valid signature with a carriage return (written as \\r) in the middle: refused, not skipped.", "2b07", func(s string) string { return s[:43] + "\r" + s[43:] })
+	sigText("signature_one_padding_character", "The valid signature followed by one \"=\": padding is refused.", "2b08", func(s string) string { return s + "=" })
+	sigText("signature_plus", "The valid signature with its first character replaced by \"+\" (standard base64 alphabet).", "2b09", func(s string) string { return "+" + s[1:] })
+	sigText("signature_slash", "The valid signature with its first character replaced by \"/\" (standard base64 alphabet).", "2b0a", func(s string) string { return "/" + s[1:] })
+	sigText("signature_space", "The valid signature with a space in the middle.", "2b0b", func(s string) string { return s[:43] + " " + s[43:] })
+	mal("signature_too_long", "Signature of 65 bytes.", string(WireWithSig(good.with("credential_id", id("2b0c")), base64.RawURLEncoding.EncodeToString(make([]byte, 65)))), "sig")
 	malSigned("version_2", "v is 2, which this contract does not define.", good.with("credential_id", id("2c01"), "v", int64(2)), "v")
 	malSigned("amount_zero", "amount \"0\".", good.with("credential_id", id("2c02"), "amount", "0"), "amount")
 	malSigned("amount_leading_zero", "amount \"01000\".", good.with("credential_id", id("2c03"), "amount", "01000"), "amount")
