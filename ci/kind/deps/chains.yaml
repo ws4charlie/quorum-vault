@@ -1,4 +1,4 @@
-# The chains of the kind lane: anvil (EVM, chain id 11155111, as compose) and bitcoind in regtest. Both carry the label `app: chain-stub`, which the business chart's egress
+# The chains of the kind lane: anvil (EVM, chain id @QV_KIND_CHAIN_ID@: install.sh fills it in from ci/kind/lib.sh, which decides it) and bitcoind in regtest. Both carry the label `app: chain-stub`, which the business chart's egress
 # rule (values-kind: network.chain) names. bitcoind's RPC user and password are generated per cluster into the Secret chain-credentials (up.sh); the same pair is in the
 # custody config Secret. Solana is not in the kind lane (README: memory).
 apiVersion: v1
@@ -22,7 +22,9 @@ spec:
         - name: anvil
           image: ghcr.io/foundry-rs/foundry:v1.8.5
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-c", "exec anvil --host 0.0.0.0 --chain-id 11155111"]
+          # --network ethereum: anvil cannot simulate the OP-stack L1 data fee. On a Base chain id anvil v1.8.5 picks Base rules and charges a hidden fee that no receipt field
+          # shows, so custody could never book it and Reconcile would stay red. The chain id (the EIP-3009 domain) stays as lib.sh sets it; E1's unit tests on recorded Base receipts cover the fee.
+          command: ["/bin/sh", "-c", "exec anvil --host 0.0.0.0 --chain-id @QV_KIND_CHAIN_ID@ --network ethereum"]
           ports: [{ containerPort: 8545 }]
           readinessProbe: { exec: { command: ["cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"] }, periodSeconds: 2, failureThreshold: 60 }
           resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 384Mi } }

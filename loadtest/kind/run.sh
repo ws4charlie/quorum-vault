@@ -20,7 +20,7 @@ cat > "$WORK/load/target.json" <<JSON
 {"api": ["https://qv-core.qv.svc:8443"], "dial_addr": "127.0.0.1:$P_CORE", "ca_file": "$S/ca-business.crt", "tls_server_name": "qv-core.qv.svc",
  "token": {"kind": "keycloak", "url": "https://keycloak:8443", "dial_addr": "127.0.0.1:$P_KC", "ca_file": "$S/ca-business.crt", "tls_server_name": "keycloak", "secrets_dir": "$S"},
  "actors": {"initiator": "alice", "ops": "ops", "approvers": []},
- "evm": {"chain": "evm-kind", "rpc": "http://127.0.0.1:$P_ANVIL", "funder_key_file": "$WORK/load/funder.key", "chain_id": 11155111}}
+ "evm": {"chain": "evm-kind", "rpc": "http://127.0.0.1:$P_ANVIL", "funder_key_file": "$WORK/load/funder.key", "chain_id": $QV_KIND_CHAIN_ID}}
 JSON
 go run ./loadtest/cmd/qv-load run -scenario "$scen" -target "$WORK/load/target.json" -out "$out" \
   -meta "shape=kind: the real charts on one node, three parties and DKG by pods; the generator and the chain are outside the cluster" \

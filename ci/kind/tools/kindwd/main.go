@@ -444,6 +444,16 @@ func (e *env) reconcile() error {
 
 // ---- EVM ----
 
+// laneChainID reads QV_KIND_CHAIN_ID, which ci/kind/lib.sh sets (the one place the lane's chain id is decided). No default here: unset is an error.
+func laneChainID() (*big.Int, error) {
+	v := os.Getenv("QV_KIND_CHAIN_ID")
+	id, ok := new(big.Int).SetString(v, 10)
+	if v == "" || !ok || id.Sign() <= 0 {
+		return nil, fmt.Errorf("QV_KIND_CHAIN_ID=%q is not a chain id (ci/kind/lib.sh sets it; run kindwd through the lane's scripts)", v)
+	}
+	return id, nil
+}
+
 func (e *env) evmPay(to string, amt *big.Int) error {
 	rc, err := rpc.DialContext(e.ctx, e.rpcURL)
 	if err != nil {
@@ -466,8 +476,16 @@ func (e *env) evmPay(to string, amt *big.Int) error {
 	if err != nil {
 		return err
 	}
+	// the lane's chain id (QV_KIND_CHAIN_ID, set by ci/kind/lib.sh), and the node must be on it: a payment signed for another chain would be refused anyway, this says why
+	want, err := laneChainID()
+	if err != nil {
+		return err
+	}
+	if id, err := ec.ChainID(e.ctx); err != nil || id.Cmp(want) != 0 {
+		return fmt.Errorf("the node at %s is on chain %v, the lane's is %v (QV_KIND_CHAIN_ID): %v", e.rpcURL, id, want, err)
+	}
 	tip := big.NewInt(2e9)
-	tx := types.NewTx(&types.DynamicFeeTx{ChainID: big.NewInt(11155111), Nonce: 0, GasTipCap: tip, GasFeeCap: new(big.Int).Add(new(big.Int).Mul(h.BaseFee, big.NewInt(2)), tip), Gas: gas * 12 / 10, To: &dest, Value: amt})
+	tx := types.NewTx(&types.DynamicFeeTx{ChainID: want, Nonce: 0, GasTipCap: tip, GasFeeCap: new(big.Int).Add(new(big.Int).Mul(h.BaseFee, big.NewInt(2)), tip), Gas: gas * 12 / 10, To: &dest, Value: amt})
 	signed, err := types.SignTx(tx, types.LatestSignerForChainID(tx.ChainId()), k)
 	if err != nil {
 		return err
