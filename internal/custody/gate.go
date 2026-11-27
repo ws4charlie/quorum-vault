@@ -42,9 +42,13 @@ const (
 // Codes of the API beside the credential codes of gatecred. Both 503 codes are answers to a request that did not end in a signature for a reason
 // outside the spec's refusal table: retry_later is not stored (nothing was decided: the same request may be sent again and gets the same job's outcome);
 // signing_failed is stored (the zone's signer failed or refused for a reason the table does not name: Gate mints a new credential).
+//
+// nonce_reused (409) is stored: the payload's EIP-3009 nonce is already used by another authorization of the wallet, so this request can never be
+// accepted; Gate mints a new credential for a payload with a new nonce.
 const (
 	GateRetryLater    = "retry_later"
 	GateSigningFailed = "signing_failed"
+	GateNonceReused   = "nonce_reused"
 )
 
 // Statuses of a gate_requests row.
@@ -178,7 +182,7 @@ func GateStatus(code string) int {
 		gatecred.WalletMismatch, gatecred.TTLTooLong, gatecred.NotYetValid, gatecred.Expired, gatecred.PaymentMismatch, gatecred.AuthorizationWindow,
 		gatecred.FastLaneCap:
 		return 403
-	case gatecred.Replayed:
+	case gatecred.Replayed, gatecred.Code(GateNonceReused):
 		return 409
 	case gatecred.PayloadInvalid:
 		return 422
@@ -187,7 +191,11 @@ func GateStatus(code string) int {
 }
 
 func refusal(code gatecred.Code, field, format string, a ...any) (int, []byte) {
-	return gateBody(GateStatus(string(code)), GateRefusal{Code: string(code), Field: field, Message: fmt.Sprintf(format, a...)})
+	return gateBody(GateStatus(string(code)), gateRefusal(code, field, format, a...))
+}
+
+func gateRefusal(code gatecred.Code, field, format string, a ...any) GateRefusal {
+	return GateRefusal{Code: string(code), Field: field, Message: fmt.Sprintf(format, a...)}
 }
 
 func gateBody(status int, v any) (int, []byte) {
@@ -274,7 +282,8 @@ func canonicalJSON(raw []byte) ([]byte, error) {
 //
 // Order: what depends only on the request (shape, the credential parses, the body hash) comes first; then the row of the credential_id, so a request
 // already answered gets its stored answer (or waits on its job) whatever the configuration, the clock or the keysets say now. Only a new request runs
-// the checks that depend on the current state.
+// the checks that depend on the current state, and a refusal they decide is stored like any other decided answer: the same request gets it again even
+// after the state changes. Before any credential_id has a decided answer, the gate section must be configured: without it the answer is retry_later.
 func (s *Service) GateSign(ctx context.Context, r GateRequest, log *slog.Logger) (int, []byte) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -327,36 +336,39 @@ func (s *Service) GateSign(ctx context.Context, r GateRequest, log *slog.Logger)
 		return refusal(gatecred.Replayed, "credential_id", "credential %s was used with another request", cred.CredentialID)
 	case row.stored != nil:
 		return row.status, row.stored
-	case row.placed:
-		return s.gateWait(ctx, log, cred, r)
 	}
-	// 4. A new request (or one recorded but not placed): the checks against the current state.
+	// Without the gate section (it was removed and the core restarted) nothing is decided: a placed request's job may still end, and a new one may be
+	// served once the section is back. Not stored.
 	g := s.Cfg.Gate
-	var w GateWallet
-	ok := false
-	if g != nil {
-		w, ok = g.Wallets[r.WalletID]
+	if g == nil {
+		return refusal(GateRetryLater, "", "the signing API is not configured in this deployment; send the same request again later")
 	}
+	if row.placed {
+		return s.gateWait(ctx, log, g.Wait, cred, r)
+	}
+	// 4. A new request (or one recorded but not placed): the checks against the current state. A refusal here is decided and stored.
+	w, ok := g.Wallets[r.WalletID]
 	if !ok {
-		return refusal(gatecred.WalletNotGateGoverned, "", "wallet %s is not Gate-governed in this deployment", r.WalletID)
+		return s.gateRefuse(ctx, log, cred, r, hash, gateRefusal(gatecred.WalletNotGateGoverned, "", "wallet %s is not Gate-governed in this deployment", r.WalletID))
 	}
 	if cred.Audience != g.Audience {
-		return refusal(gatecred.AudienceMismatch, "audience", "credential is for %q", cred.Audience)
+		return s.gateRefuse(ctx, log, cred, r, hash, gateRefusal(gatecred.AudienceMismatch, "audience", "credential is for %q", cred.Audience))
 	}
 	if cred.WalletID != r.WalletID {
-		return refusal(gatecred.WalletMismatch, "wallet_id", "credential is for another wallet")
+		return s.gateRefuse(ctx, log, cred, r, hash, gateRefusal(gatecred.WalletMismatch, "wallet_id", "credential is for another wallet"))
 	}
 	// A new request with an expired credential is refused (the zone would too), so a request that comes back after its row was pruned cannot bring an
 	// old authorization back to life.
 	if !row.found && s.Now().Unix() >= cred.ExpiresAt+int64(g.Skew/time.Second) {
-		return refusal(gatecred.Expired, "expires_at", "the credential expired at %d", cred.ExpiresAt)
+		return s.gateRefuse(ctx, log, cred, r, hash, gateRefusal(gatecred.Expired, "expires_at", "the credential expired at %d", cred.ExpiresAt))
 	}
 	a, code, perr := s.gateDecode(w, r.Payload)
 	if perr != "" {
-		if code == GateRetryLater {
+		if code == GateRetryLater { // nothing decided: not stored
 			log.Warn("gate: the wallet's address could not be read", "credential_id", cred.CredentialID, "error", perr)
+			return refusal(GateRetryLater, "", "%s", perr)
 		}
-		return refusal(gatecred.Code(code), "", "%s", perr)
+		return s.gateRefuse(ctx, log, cred, r, hash, gateRefusal(gatecred.Code(code), "", "%s", perr))
 	}
 	// 5. One row per credential_id.
 	if err := s.gateInsert(ctx, r, cred, hash); err != nil {
@@ -384,12 +396,36 @@ func (s *Service) GateSign(ctx context.Context, r GateRequest, log *slog.Logger)
 		return s.gateFinish(ctx, log, cred, r, refusalOf(gatecred.PayloadInvalid, "", err))
 	case errors.Is(err, ErrX402Conflict):
 		return s.gateFinish(ctx, log, cred, r, refusalOf(gatecred.Replayed, "", err))
+	case errors.Is(err, ErrX402NonceReused):
+		return s.gateFinish(ctx, log, cred, r, refusalOf(gatecred.Code(GateNonceReused), "", err))
 	case err != nil:
 		// Nothing final happened (no funds free yet, the chain head could not be read, the database): the same request may come again.
 		log.Warn("gate request not placed; the caller may retry", "credential_id", cred.CredentialID, "error", err.Error())
 		return refusal(GateRetryLater, "", "%v", err)
 	}
-	return s.gateWait(ctx, log, cred, r)
+	return s.gateWait(ctx, log, g.Wait, cred, r)
+}
+
+// gateRefuse records the request and stores rf, a refusal decided against the current state, so the same request gets it again whatever the state
+// says later. If the row already holds an answer (another copy of the request got there first), that one is returned.
+func (s *Service) gateRefuse(ctx context.Context, log *slog.Logger, cred *gatecred.Credential, r GateRequest, hash []byte, rf GateRefusal) (int, []byte) {
+	if err := s.gateInsert(ctx, r, cred, hash); err != nil {
+		log.Error("gate request could not be recorded", "credential_id", cred.CredentialID, "error", err.Error())
+		return refusal(GateRetryLater, "", "the request could not be recorded; send it again")
+	}
+	row, err := s.gateLookup(ctx, cred.CredentialID, hash)
+	if err != nil {
+		return refusal(GateRetryLater, "", "the request could not be read; send it again")
+	}
+	switch {
+	case row.replayed:
+		return refusal(gatecred.Replayed, "credential_id", "credential %s was used with another request", cred.CredentialID)
+	case row.stored != nil:
+		return row.status, row.stored
+	}
+	// The refusal is stored even when an authorization of this id exists (a row pruned and asked again, or a copy placed a moment before the clock
+	// passed the expiry): the first stored answer is the only one, so that job's signature is never handed out (gateFinish returns the stored answer).
+	return s.gateFinish(ctx, log, cred, r, rf)
 }
 
 func refusalOf(code gatecred.Code, field string, err error) GateRefusal {
@@ -463,9 +499,9 @@ func (s *Service) gateInsert(ctx context.Context, r GateRequest, cred *gatecred.
 	return err
 }
 
-// gateWait waits for the zone's answer on the job, at most the configured wait, and stores a final one.
-func (s *Service) gateWait(ctx context.Context, log *slog.Logger, cred *gatecred.Credential, r GateRequest) (int, []byte) {
-	ctx, cancel := context.WithTimeout(ctx, s.Cfg.Gate.Wait)
+// gateWait waits for the zone's answer on the job, at most wait (the gate section's), and stores a final one.
+func (s *Service) gateWait(ctx context.Context, log *slog.Logger, wait time.Duration, cred *gatecred.Credential, r GateRequest) (int, []byte) {
+	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	jobID := "x402:" + cred.CredentialID
 	tick := time.NewTicker(200 * time.Millisecond)

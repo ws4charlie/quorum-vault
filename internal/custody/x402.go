@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
@@ -56,6 +57,9 @@ const (
 var (
 	ErrX402NotConfigured = errors.New("custody: x402 is not configured for this asset")
 	ErrX402Conflict      = errors.New("custody: x402 request id reused with a different request")
+	// ErrX402NonceReused: another authorization of the same payer and token already has this EIP-3009 nonce. It is final: the nonce is kept, so the
+	// same request can never be accepted; a new attempt needs a new nonce.
+	ErrX402NonceReused = errors.New("custody: x402: the EIP-3009 nonce is already used by another authorization of this payer")
 	// ErrX402InsufficientFunds: the paying shard's free balance (what freeHot says, open authorizations included) is below the amount.
 	ErrX402InsufficientFunds = errors.New("custody: x402: insufficient free funds on the paying shard")
 	// ErrX402Amount: the amount is not in (0, the token's per-payment limit].
@@ -211,7 +215,7 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 		if _, err := tx.Exec(ctx, `INSERT INTO x402_authorizations (id, chain, asset, partition_id, payer, payee, amount, valid_after, valid_before, nonce, body_hash, job_id, since_block, status)
 			VALUES ($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,$12,$13,'requested')`,
 			r.ID, c.Chain, r.Asset, part, payer.Hex(), payee, r.Amount.String(), int64(r.ValidAfter), int64(r.ValidBefore), fmt.Sprintf("0x%x", nonce), body, jobID, int64(since)); err != nil {
-			return err // another id with the same token nonce: the unique key says no
+			return err // mapped below: the same id made by a request that holds another lock, or another id with the same token nonce
 		}
 		created = true
 		if a, err = scanX402(tx.QueryRow(ctx, `SELECT `+x402Cols+` FROM x402_authorizations WHERE id=$1`, r.ID)); err != nil {
@@ -231,6 +235,20 @@ func (s *Service) RequestX402(ctx context.Context, r X402Request) (a X402Authori
 		u := chain.UnsignedTx{Chain: c.Chain, Digest: digest[:], Payload: payload, KeyRef: chain.KeyRef{PartitionID: part}}
 		return EnqueueUnsigned(ctx, tx, jobID, part, u, ib, nil)
 	})
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) && pe.Code == "23505" {
+		switch pe.ConstraintName {
+		case "x402_authorizations_pkey":
+			// The same id committed by a request on another shard (another partition lock) after this one looked: answer as if it had been there
+			// first, the same request gets the row and another is a conflict.
+			ex, found, xerr := s.x402Existing(ctx, s.Pool, r.ID, body)
+			if xerr != nil || found {
+				return ex, false, xerr
+			}
+		case "x402_authorizations_chain_asset_payer_nonce_key":
+			return X402Authorization{}, false, fmt.Errorf("%w: %x", ErrX402NonceReused, nonce)
+		}
+	}
 	return a, created, err
 }
 
