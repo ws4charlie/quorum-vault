@@ -269,6 +269,16 @@ func TestConfigWebAuthnOrigins(t *testing.T) {
 		{"ftp://a.example", false, false},
 		{"a.example", false, false},
 		{"https://", false, false},
+		{"HTTPS://a.example", false, false},
+		{"https://A.example", false, false},
+		{"https://a.example.", false, false},
+		{"https://a.example:443", false, false},
+		{"http://localhost:80", false, false},
+		{"https://a.example:", false, false},
+		{"http://[0:0:0:0:0:0:0:1]:8080", false, false},
+		{"https://a%2eexample", false, false},
+		{"https://bücher.example", false, false},
+		{"https://xn--bcher-kva.example", true, true},
 	}
 	for _, env := range []string{"dev", "test", "", "production", "Dev-typo"} {
 		t.Run("QV_ENV="+env, func(t *testing.T) {

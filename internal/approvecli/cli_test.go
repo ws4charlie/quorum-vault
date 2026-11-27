@@ -152,9 +152,38 @@ func TestEnrolPrintsEntryAndAttestationFacts(t *testing.T) {
 	if r := run(t, noUV, jwt("bob"), "", "enrol", "-origin", origin); r.code == 0 || !strings.Contains(r.err, "did not verify the user") || strings.Contains(r.out, "approver entry") {
 		t.Fatalf("no UV: %+v", r)
 	}
-	// An origin the zone would refuse is refused at once.
+	// An origin the zone would refuse is refused at once, by the zone's own rule (internal/weborigin).
 	if r := run(t, s, jwt("bob"), "", "enrol", "-origin", "http://evil.example"); r.code == 0 || !strings.Contains(r.err, "must be https") {
 		t.Fatalf("http origin: %+v", r)
+	}
+}
+
+// TestEnrolRefusesWhatTheZoneRefuses: enrol checks the origin with the zone's rule and the same QV_ENV switch. On 0b9b109 it used
+// strings.HasPrefix(origin, "http://localhost"), so it enrolled http://localhost.evil.example, http in production, and
+// non-canonical origins that the zone never matches.
+func TestEnrolRefusesWhatTheZoneRefuses(t *testing.T) {
+	s := ctaptest.New()
+	for _, env := range []string{"", "dev"} {
+		t.Setenv("QV_ENV", env)
+		refused := map[string]string{
+			"http://localhost.evil.example": "must be https",
+			"https://A.example":             `write "https://a.example"`,
+			"https://a.example:443":         `write "https://a.example"`,
+			"https://bücher.example":        "punycode",
+		}
+		if env == "" {
+			refused["http://localhost:8080"] = "refused in production"
+		}
+		for o, want := range refused {
+			if r := run(t, s, jwt("bob"), "", "enrol", "-origin", o); r.code == 0 || !strings.Contains(r.err, want) || strings.Contains(r.out, "approver entry") {
+				t.Errorf("QV_ENV=%q origin %q: want refused with %q, got %+v", env, o, want, r)
+			}
+		}
+	}
+	// In dev, the loopback http origin passes the origin check (and the enrolment goes on).
+	t.Setenv("QV_ENV", "dev")
+	if r := run(t, s, jwt("bob"), "", "enrol", "-origin", "http://localhost:8080"); r.code != 0 || !strings.Contains(r.out, "Credential made") {
+		t.Fatalf("dev loopback origin refused: %+v", r)
 	}
 }
 
