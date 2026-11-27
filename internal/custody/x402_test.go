@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -511,5 +513,98 @@ func TestX402FailedHeadReadRecordsNothing(t *testing.T) {
 	e.s.Reader = e.m // the node is back: the same request goes through
 	if a := e.request(t, "h1", 1000, 1); a.SinceBlock != 60 {
 		t.Fatalf("since_block %d", a.SinceBlock)
+	}
+}
+
+// GCF2 fix 1: freeHot is one snapshot. A payment that settles (x402Pay: the hold is posted and the row leaves the open set, in one transaction) never
+// shows its amount as free: on the old code the balance and the open authorizations were two reads, and a settlement between them counted the paid
+// amount twice as available.
+func TestX402FreeHotIsOneSnapshotWhilePaymentsSettle(t *testing.T) {
+	e := x402World(t)
+	ctx := context.Background()
+	part := e.s.Cfg.PartitionKey(x402Asset, 0).String()
+	const amount = 10_000
+	for i := 0; i < 30; i++ {
+		a := e.request(t, fmt.Sprintf("snap-%d", i), amount, byte(100+i))
+		want := int64(1_000_000 - amount*(i+1)) // the same before and after the payment settles
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		bad := make(chan string, 4)
+		for r := 0; r < 4; r++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					f, err := e.s.freeHot(ctx, e.s.Pool, part)
+					if err != nil {
+						bad <- err.Error()
+						return
+					}
+					if f.Int64() != want {
+						bad <- fmt.Sprintf("payment %d: free %s, want %d", i, f, want)
+						return
+					}
+				}
+			}()
+		}
+		time.Sleep(2 * time.Millisecond)
+		if booked, err := e.s.x402Pay(ctx, a.ID, UsedAuthorization{Nonce: a.Nonce, Block: 70, TxHash: "0xpay" + a.ID}); err != nil || !booked {
+			t.Fatalf("pay %s: %v %v", a.ID, booked, err)
+		}
+		time.Sleep(2 * time.Millisecond)
+		close(stop)
+		wg.Wait()
+		select {
+		case m := <-bad:
+			t.Fatal(m)
+		default:
+		}
+	}
+}
+
+// GCF2 fix 2: two requests with the same id on two shards at once (different partitions, so different locks, and different bodies) end with one row;
+// the other gets ErrX402Conflict, never the database's duplicate-key error.
+func TestX402SameIDAtOnceOnTwoShardsIsAConflict(t *testing.T) {
+	e := x402World(t)
+	ctx := context.Background()
+	if err := e.s.FundHotAsset(ctx, "seed-1", 1, x402Asset, big.NewInt(1_000_000)); err != nil {
+		t.Fatal(err)
+	}
+	parts := []string{e.s.Cfg.PartitionKey(x402Asset, 0).String(), e.s.Cfg.PartitionKey(x402Asset, 1).String()}
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("dup-%d", i)
+		errs := make([]error, 2)
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for k := 0; k < 2; k++ {
+			wg.Add(1)
+			go func(k int) {
+				defer wg.Done()
+				<-start
+				_, _, errs[k] = e.s.RequestX402(ctx, X402Request{ID: id, Asset: x402Asset, Partition: parts[k], Payee: "0x00000000000000000000000000000000000fac01",
+					Amount: big.NewInt(int64(100 + k)), ValidAfter: 990, ValidBefore: 1300, Nonce: [32]byte{30: byte(i), 31: byte(k + 1)}})
+			}(k)
+		}
+		close(start)
+		wg.Wait()
+		ok, conflict := 0, 0
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, ErrX402Conflict):
+				conflict++
+			default:
+				t.Fatalf("%s: %v", id, err)
+			}
+		}
+		if ok != 1 || conflict != 1 {
+			t.Fatalf("%s: %d created, %d conflicts", id, ok, conflict)
+		}
 	}
 }

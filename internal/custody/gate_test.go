@@ -608,3 +608,82 @@ func TestGateAuditFailureAnswersWithACode(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 }
+
+// GCF2 fix 3: a refusal decided against the current state (the wallet is not Gate-governed, another audience) is stored: the same request gets the
+// same answer after the state changes, and never a job.
+func TestGateStateRefusalIsStored(t *testing.T) {
+	g := gateWorld(t)
+	w0 := g.s.Cfg.Gate.Wallets
+	const id = "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a30"
+	b := g.body(t, g.cred(id, 100, nil), g.typed(t, 100, 30))
+	g.s.Cfg.Gate.Wallets = map[string]GateWallet{}
+	first := g.post(b)
+	if first.Code != 403 || code(t, first) != "wallet_not_gate_governed" {
+		t.Fatalf("first: %d %s", first.Code, first.Body)
+	}
+	g.s.Cfg.Gate.Wallets = w0
+	if w := g.post(b); w.Code != first.Code || w.Body.String() != first.Body.String() {
+		t.Fatalf("after the wallet was added: %d %s, want the stored %d %s", w.Code, w.Body, first.Code, first.Body)
+	}
+	const id2 = "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a31"
+	b2 := g.body(t, g.cred(id2, 100, nil), g.typed(t, 100, 31))
+	g.s.Cfg.Gate.Audience = "qv-other"
+	first = g.post(b2)
+	if first.Code != 403 || code(t, first) != "audience_mismatch" {
+		t.Fatalf("audience: %d %s", first.Code, first.Body)
+	}
+	g.s.Cfg.Gate.Audience = gateAudience
+	if w := g.post(b2); w.Code != first.Code || w.Body.String() != first.Body.String() {
+		t.Fatalf("after the audience was fixed: %d %s", w.Code, w.Body)
+	}
+	if n := g.jobs(t); n != 0 {
+		t.Fatalf("%d jobs", n)
+	}
+	var audits int
+	if err := g.s.Pool.QueryRow(context.Background(), `SELECT count(*) FROM outbox WHERE topic='qv.audit' AND payload->>'type'='gate.request'`).Scan(&audits); err != nil || audits != 2 {
+		t.Fatalf("audit events %d %v", audits, err)
+	}
+}
+
+// GCF2 fix 4: the gate section removed (a restart without it) while a request is placed: its retry answers 503 retry_later, never a panic; a stored
+// answer is still returned; with the section back the same request gets its signature.
+func TestGatePlacedRetryWithoutGateConfig(t *testing.T) {
+	g := gateWorld(t)
+	const id = "0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a32"
+	b := g.body(t, g.cred(id, 100, nil), g.typed(t, 100, 32))
+	if w := g.post(b); w.Code != 503 || code(t, w) != "retry_later" {
+		t.Fatalf("first: %d %s", w.Code, w.Body)
+	}
+	gc := g.s.Cfg.Gate
+	g.s.Cfg.Gate = nil
+	if w := g.post(b); w.Code != 503 || code(t, w) != "retry_later" {
+		t.Fatalf("without the gate section: %d %s", w.Code, w.Body)
+	}
+	g.s.Cfg.Gate = gc
+	g.zoneSigns(t, id)
+	sig := g.checkSigned(t, g.post(b), id)
+	g.s.Cfg.Gate = nil
+	if s2 := g.checkSigned(t, g.post(b), id); s2 != sig {
+		t.Fatalf("stored answer without the gate section: %s != %s", s2, sig)
+	}
+}
+
+// GCF2 fix 5: an EIP-3009 nonce already used by another credential is refused as nonce_reused (409) and stored: no job, and a repeat gets the same.
+func TestGateReusedNonceIsAStoredRefusal(t *testing.T) {
+	g := gateWorld(t)
+	payload := g.typed(t, 100, 33)
+	if w := g.post(g.body(t, g.cred("0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a33", 100, nil), payload)); w.Code != 503 || code(t, w) != "retry_later" {
+		t.Fatalf("first: %d %s", w.Code, w.Body)
+	}
+	b := g.body(t, g.cred("0b6c1d52-8a4f-4e17-b3d9-5f2a7c9e1a34", 100, nil), payload)
+	first := g.post(b)
+	if first.Code != 409 || code(t, first) != "nonce_reused" {
+		t.Fatalf("reused nonce: %d %s", first.Code, first.Body)
+	}
+	if w := g.post(b); w.Code != first.Code || w.Body.String() != first.Body.String() {
+		t.Fatalf("repeat: %d %s", w.Code, w.Body)
+	}
+	if n := g.jobs(t); n != 1 {
+		t.Fatalf("%d jobs", n)
+	}
+}
