@@ -58,6 +58,10 @@ func check(root string) []string {
 				add("ci.yml job %s is skipped by the decision of another job (%s): a copy-paste slip", j.id, n)
 			}
 		}
+		// an everything-skipped run (docs only) publishes skip=true and no list: the condition must honour both
+		if !w.cfg.always[j.id] && j.id != "test" && !strings.Contains(blk, "(needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',"+j.id+",'))") {
+			add("ci.yml job %s: its condition must skip on skip == 'true' too (a docs-only change publishes no list)", j.id)
+		}
 		needs := needsOf(blk)
 		if !needs["changes"] {
 			add("ci.yml job %s does not need `changes`", j.id)
@@ -69,8 +73,8 @@ func check(root string) []string {
 			add("ci.yml job %s must run only after `build` succeeded (needs.build.result == 'success' in its condition)", j.id)
 		}
 	}
-	if !strings.Contains(blocks["build"], "contains(needs.changes.outputs.skip_jobs, ',build,')") {
-		add("ci.yml job build: its condition must name ',build,' (skipped only when no job that needs it runs)")
+	if needs := needsOf(blocks["build"]); len(needs) > 0 || strings.Contains(blocks["build"], "\n    if:") {
+		add("ci.yml job build: it starts at once and always runs (no needs, no if): waiting for `changes` costs every run a minute on the critical path")
 	}
 
 	// 2. every tree excluded from @mains is a tree of ci/job-rules (its readers, including a `go build` by path, are found there)

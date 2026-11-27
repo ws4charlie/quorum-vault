@@ -206,11 +206,11 @@ jobs:
 
   # Compiles once what every e2e job used to compile for itself (one to two minutes each): the binaries the harnesses start and the test binaries of every
   # package a make target below runs (ci/e2e-prebuild.sh). The e2e jobs download them; e2e/mpcstack.GoBuild copies a prebuilt binary, ci/gotest.sh runs a
-  # prebuilt test binary with go test's flags (Makefile QV_GOTEST). Skipped only when no job that needs it runs.
+  # prebuilt test binary with go test's flags (Makefile QV_GOTEST). It starts at once, next to `changes` (waiting for the decision cost every run a minute
+  # on the critical path); it is never skipped, so a pull request that skips every e2e job still spends its two minutes. When the image's inputs changed it
+  # builds the image itself while `changes` pushes it (ci/ensure-image.sh use).
   build:
     runs-on: ubuntu-24.04
-    needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',build,'))) }}
     permissions:
       contents: read
       packages: read
@@ -268,7 +268,7 @@ jobs:
     name: mpc-party / core
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',mpc-party-core,')) }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',mpc-party-core,'))) }}
     permissions:
       contents: read
       packages: read
@@ -308,7 +308,7 @@ jobs:
     name: mpc-party / e2e-1, e2e-2, drill and fuzz
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',mpc-party-2,')) }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',mpc-party-2,'))) }}
     permissions:
       contents: read
       packages: read
@@ -337,7 +337,7 @@ jobs:
     name: mpc-party / e2e-3
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',mpc-party-3,')) }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',mpc-party-3,'))) }}
     permissions:
       contents: read
       packages: read
@@ -364,7 +364,7 @@ jobs:
     name: checks (monitoring rules, audit archive)
     runs-on: ubuntu-24.04
     needs: changes
-    if: ${{ !cancelled() && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',checks,')) }}
+    if: ${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',checks,'))) }}
     permissions:
       contents: read
       packages: read
@@ -399,7 +399,7 @@ jobs:
     name: e2e-btc-1 (recovery, deposits)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-1,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-btc-1,'))) }}
     permissions:
       contents: read
       packages: read
@@ -443,7 +443,7 @@ jobs:
     name: e2e-btc-2 (sweeps, withdrawals)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-2,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-btc-2,'))) }}
     permissions:
       contents: read
       packages: read
@@ -487,7 +487,7 @@ jobs:
     name: e2e-btc-3 (refill-stuck, refill, cold)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-3,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-btc-3,'))) }}
     permissions:
       contents: read
       packages: read
@@ -532,7 +532,7 @@ jobs:
     name: e2e-btc-4 (cpfp, consolidate, feecaps)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-4,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-btc-4,'))) }}
     permissions:
       contents: read
       packages: read
@@ -577,7 +577,7 @@ jobs:
     name: e2e-btc-5 (batching, batching-recovery)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-btc-5,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-btc-5,'))) }}
     permissions:
       contents: read
       packages: read
@@ -621,7 +621,7 @@ jobs:
     name: e2e-sol-1 (sweeps)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-1,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-sol-1,'))) }}
     permissions:
       contents: read
       packages: read
@@ -664,7 +664,7 @@ jobs:
     name: e2e-sol-2 (cold, cold-crash, deposits)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-2,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-sol-2,'))) }}
     permissions:
       contents: read
       packages: read
@@ -709,7 +709,7 @@ jobs:
     name: e2e-sol-3 (sweep-faults, cold-moves-crash)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-3,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-sol-3,'))) }}
     permissions:
       contents: read
       packages: read
@@ -753,7 +753,7 @@ jobs:
     name: e2e-sol-4 (wd-faults, withdrawals, signing, nonces)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-sol-4,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-sol-4,'))) }}
     permissions:
       contents: read
       packages: read
@@ -799,7 +799,7 @@ jobs:
     name: e2e-evm-1 (flows)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-1,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-evm-1,'))) }}
     permissions:
       contents: read
       packages: read
@@ -841,7 +841,7 @@ jobs:
     name: e2e-evm-2 (recovery, drill)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-2,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-evm-2,'))) }}
     permissions:
       contents: read
       packages: read
@@ -887,7 +887,7 @@ jobs:
     name: e2e-evm-3 (approval page, identity, tx-failures, gate, x402)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-3,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-evm-3,'))) }}
     permissions:
       contents: read
       packages: read
@@ -939,7 +939,7 @@ jobs:
     name: e2e-evm-4 (mpc-signing, tee-sim, load smoke)
     runs-on: ubuntu-24.04
     needs: [changes, build]
-    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',e2e-evm-4,')) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',e2e-evm-4,'))) }}
     permissions:
       contents: read
       packages: read

@@ -260,7 +260,7 @@ pj ",e2e-y,"    "docs and a lib test file"                        'echo x >> doc
 pj all          "an unknown path"                                 'echo x > newfile.txt'
 pj all          "a lib file and go.mod"                           'echo "// x" >> lib/l.go; echo "// x" >> go.mod'
 pj all          "the job table"                                   'echo "# x" >> ci/jobs'
-pj ",build,e2e-y,lib-only," "a rule tree no job reads: only test (always), no build" 'echo 1 > data/x.json'
+pj ",e2e-y,lib-only," "a rule tree no job reads: only test (always)" 'echo 1 > data/x.json'
 MSG="lib [ci full]" pj all "a commit message asks for a full run"  'echo "// x" >> lib/l_test.go'
 pj all          "every job is affected (nothing to skip)"         'echo "// x" >> lib/l_test.go; echo "// x" >> e2e/y/y_test.go'
 grep -q 'running only the jobs the change can affect; skipped' "$tmp/log" || true
@@ -354,7 +354,7 @@ fj ""  "skip=true wins: no list on an everything-skipped run"           success 
 # the workflow keeps its side of the bargain (a text check; the full run on a real pull request is the proof)
 wf="$here/../.github/workflows/ci.yml"
 chk() { ok; grep -qF -- "$1" "$wf" || bad "ci.yml: $2"; }
-chk "if: \${{ !cancelled() && !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',build,'))) }}" "the build job must run unless skip is exactly 'true' or the list names it (and run when changes failed)"
+ok; awk '/^  build:/{b=1;next} /^  [a-z0-9-]+:$/{b=0} b&&/^    (needs|if):/{f=1} END{exit f}' "$wf" || bad "ci.yml: the build job starts at once (no needs, no if)"
 chk "if: \${{ !cancelled() && needs.changes.result != 'success' }}" "test must fail when the changes job (its guards) failed"
 chk "if: \${{ !cancelled() }}" "the test job must run even when changes failed"
 chk "continue-on-error: true" "the classify step must not fail the job"
@@ -372,9 +372,9 @@ ok; awk '/^  changes:/{c=1} /^  # `test` is the check/{c=0} c&&/^        id: /{i
 chk "steps.t_select.outcome }} \${{ steps.select_guard.outcome }} \${{ steps.groups.outcome }} \${{ steps.t_changes.outcome }} \${{ steps.t_guard.outcome }} \${{ steps.guard.outcome }} \${{ steps.t_files.outcome }} \${{ steps.files.outcome }}" "final step must receive the outcomes of every guard and test step"
 chk "needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))" "test must refuse a skip when the changes job did not succeed"
 # every heavy job: skipped only when the changes job succeeded and the list names it (its id: ci/jobselect check), the e2e ones only after build succeeded
-ok; n_heavy="$(grep -c "^    needs: \[changes, build\]" "$wf")"; n_cond="$(grep -c "^    if: \${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',[a-z0-9-]*,')) }}" "$wf")"
+ok; n_heavy="$(grep -c "^    needs: \[changes, build\]" "$wf")"; n_cond="$(grep -c "^    if: \${{ !cancelled() && needs.build.result == 'success' && !(needs.changes.result == 'success' \&\& (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',[a-z0-9-]*,'))) }}" "$wf")"
 [ "$n_heavy" -ge 13 ] && [ "$n_heavy" = "$n_cond" ] || bad "ci.yml: every job that needs build must have the standard condition ($n_heavy jobs, $n_cond conditions)"
-ok; n_other="$(grep -c "^    if: \${{ !cancelled() && !(needs.changes.result == 'success' && contains(needs.changes.outputs.skip_jobs, ',[a-z0-9-]*,')) }}" "$wf")"
+ok; n_other="$(grep -c "^    if: \${{ !cancelled() && !(needs.changes.result == 'success' \&\& (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',[a-z0-9-]*,'))) }}" "$wf")"
 [ "$n_other" -ge 4 ] || bad "ci.yml: the mpc-party and checks jobs must have the standard condition ($n_other)"
 ok; ! grep -qE "skip *== *'false'|skip *!= *'false'" "$wf" || bad "ci.yml compares skip with 'false': only the exact value true may skip"
 n_steps="$(awk '/^  test:/{t=1} /^  # Compiles once/{t=0} t&&/^      - / && !/The changes job and its guards passed/{n++} END{print n}' "$wf")"

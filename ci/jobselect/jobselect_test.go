@@ -101,8 +101,7 @@ jobs:
   changes:
     runs-on: x
   build:
-    needs: changes
-    if: ${{ !(contains(needs.changes.outputs.skip_jobs, ',build,')) }}
+    runs-on: x
   test:
     needs: changes
     if: ${{ contains(needs.changes.outputs.skip_jobs, ',test,') }}
@@ -247,12 +246,11 @@ func TestDecisionsInAScratchRepository(t *testing.T) {
 			}
 		}
 	}
-	// the build job is skipped only when no job that needs it runs
-	if out := selectJobs(root, []byte(rec('M', "internal/onlytest/x.go"))); !strings.Contains(out, " build") {
-		t.Errorf("only test runs: the build job should be skipped too: %q", out)
-	}
-	if out := selectJobs(root, []byte(rec('M', "lib/l.go"))); strings.Contains(out, "build") {
-		t.Errorf("lib-only runs: the build job must not be skipped: %q", out)
+	// the build job is never in the list (it starts with `changes` and always runs)
+	for _, f := range []string{"internal/onlytest/x.go", "lib/l.go", "docs/a.md"} {
+		if out := selectJobs(root, []byte(rec('M', f))); strings.Contains(out, "build") {
+			t.Errorf("%s: the build job is never skipped: %q", f, out)
+		}
 	}
 	// more than maxFiles
 	var many strings.Builder

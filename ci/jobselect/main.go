@@ -133,22 +133,16 @@ func selectJobs(root string, raw []byte) (out string) {
 		}
 		fmt.Fprintf(logw, "%s: %s (%s)\n", c.path, strings.Join(sorted(d.jobs), " "), d.why)
 	}
-	// `always` jobs run on every change that reaches here (anything but all-allowlisted); the answer is the jobs NOT to run; the build job is skipped
-	// only when every job that needs it is
+	// `always` jobs run on every change that reaches here (anything but all-allowlisted); the answer is the jobs NOT to run (the build job starts with
+	// `changes` and is never skipped)
 	for j := range w.cfg.always {
 		run[j] = true
 	}
 	skip := set{}
-	build := false
 	for _, j := range w.cfg.jobs {
 		if !run[j.id] {
 			skip[j.id] = true
-		} else if !w.cfg.noBuild[j.id] {
-			build = true
 		}
-	}
-	if !build {
-		skip["build"] = true
 	}
 	fmt.Fprintf(logw, "run: %s\n", strings.Join(sorted(run), " "))
 	return strings.TrimSpace("skip " + strings.Join(sorted(skip), " "))
