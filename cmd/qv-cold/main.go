@@ -83,19 +83,11 @@ func run(args []string, out, errw io.Writer) error {
 
 	switch cmd {
 	case "keygen":
-		pin := os.Getenv(*pinEnv)
-		if pin == "" {
-			return fmt.Errorf("the token PIN is not in $%s", *pinEnv)
-		}
-		l, err := hsm.LoadLib(*lib)
+		l, tok, err := openColdToken(*lib, *token, *pinEnv, errw)
 		if err != nil {
 			return err
 		}
 		defer l.Close()
-		tok, err := l.OpenToken(*token, pin)
-		if err != nil {
-			return err
-		}
 		defer tok.Close()
 		id := make([]byte, 16)
 		rand.Read(id)
@@ -145,9 +137,9 @@ func run(args []string, out, errw io.Writer) error {
 
 	case "inspect", "sign":
 		if cb, err := os.ReadFile(*cfgPath); err == nil && coldsign.IsBTCConfig(cb) {
-			return runBTC(cmd, *cfgPath, *reqPath, approvals, out, write)
+			return runBTC(cmd, *cfgPath, *reqPath, approvals, out, errw, write)
 		} else if err == nil && coldsign.IsSOLConfig(cb) {
-			return runSOL(cmd, *cfgPath, *reqPath, approvals, out, write)
+			return runSOL(cmd, *cfgPath, *reqPath, approvals, out, errw, write)
 		}
 		cfg, err := coldsign.LoadConfig(*cfgPath)
 		if err != nil {
@@ -181,19 +173,11 @@ func run(args []string, out, errw io.Writer) error {
 			fmt.Fprintln(out, "CHECK      this signer would accept the request (the approvals are checked at signing)")
 			return nil
 		}
-		pin := os.Getenv(cfg.HSM.PinEnv)
-		if pin == "" {
-			return fmt.Errorf("the token PIN is not in $%s", cfg.HSM.PinEnv)
-		}
-		l, err := hsm.LoadLib(orDefault(cfg.HSM.Lib, hsm.DefaultLibPath()))
+		l, tok, err := openColdToken(orDefault(cfg.HSM.Lib, hsm.DefaultLibPath()), cfg.HSM.Token, cfg.HSM.PinEnv, errw)
 		if err != nil {
 			return err
 		}
 		defer l.Close()
-		tok, err := l.OpenToken(cfg.HSM.Token, pin)
-		if err != nil {
-			return err
-		}
 		defer tok.Close()
 		id, err := hex.DecodeString(cfg.HSM.KeyID)
 		if err != nil {
@@ -236,6 +220,62 @@ func run(args []string, out, errw io.Writer) error {
 	return fmt.Errorf("unknown command %q", cmd)
 }
 
+// openColdToken is the one way qv-cold reaches its key: it loads the PKCS#11 module and logs in to the token, with the production guard the
+// other binaries have (cmd/qv-gateway, cmd/qv-rekey). In production (QV_ENV unset, or anything but dev or test) a PIN in an environment
+// variable is refused (the PIN comes from the file named by QV_HSM_PIN_FILE) and a SoftHSM module is refused, both before any key is used.
+// In development and tests the PIN may come from pinEnv as before, and a SoftHSM module only prints one warning line on errw.
+func openColdToken(libPath, label, pinEnv string, errw io.Writer) (*hsm.Lib, *hsm.Token, error) {
+	production := productionEnv()
+	pinFile := os.Getenv(hsm.PINFileEnv)
+	var pin string
+	switch {
+	case production && pinEnv != "" && os.Getenv(pinEnv) != "":
+		return nil, nil, fmt.Errorf("the token PIN in $%s is refused in production (QV_ENV is not dev or test): an environment variable is visible in process listings, inherited by children and written to crash dumps; put the PIN in a file and set %s", pinEnv, hsm.PINFileEnv)
+	case pinFile != "" && pinEnv != "" && os.Getenv(pinEnv) != "":
+		return nil, nil, fmt.Errorf("both $%s and %s are set: use only one", pinEnv, hsm.PINFileEnv)
+	case pinFile != "":
+		p, err := hsm.ReadPIN("", pinFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		pin = p
+	case production:
+		return nil, nil, fmt.Errorf("no token PIN: in production set %s to a file that holds it (mode 0400)", hsm.PINFileEnv)
+	default:
+		if pin = os.Getenv(pinEnv); pin == "" {
+			return nil, nil, fmt.Errorf("the token PIN is not in $%s", pinEnv)
+		}
+	}
+	l, err := hsm.LoadLib(libPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if production {
+		if err := hsm.RefuseSoftHSM(l, true); err != nil {
+			l.Close()
+			return nil, nil, err
+		}
+	} else if soft, _, err := l.IsSoftHSM(); err == nil && soft {
+		fmt.Fprintln(errw, "WARNING: the PKCS#11 module is SoftHSM, a software HSM with its keys in files on this machine: for development and tests only (QV_ENV="+os.Getenv("QV_ENV")+")")
+	}
+	tok, err := l.OpenToken(label, pin)
+	if err != nil {
+		l.Close()
+		return nil, nil, err
+	}
+	return l, tok, nil
+}
+
+// productionEnv is the rule every binary uses (internal/auth.EnvironmentFromEnv, not imported here: it pulls in an HTTP client, and qv-cold has
+// none): QV_ENV unset, or anything but dev or test, is production, so a typo cannot loosen anything.
+func productionEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QV_ENV"))) {
+	case "dev", "test":
+		return false
+	}
+	return true
+}
+
 func orDefault(s, d string) string {
 	if s == "" {
 		return d
@@ -266,7 +306,7 @@ func (s tokenSigner) SignDigest(ctx context.Context, digest [32]byte) (*big.Int,
 }
 
 // runBTC is inspect and sign for a Bitcoin config: the same steps, the Bitcoin rules.
-func runBTC(cmd, cfgPath, reqPath string, approvals []string, out io.Writer, write func(any) error) error {
+func runBTC(cmd, cfgPath, reqPath string, approvals []string, out, errw io.Writer, write func(any) error) error {
 	cfg, err := coldsign.LoadBTCConfig(cfgPath)
 	if err != nil {
 		return err
@@ -298,19 +338,11 @@ func runBTC(cmd, cfgPath, reqPath string, approvals []string, out io.Writer, wri
 		fmt.Fprintln(out, "CHECK      this signer would accept the request (the approvals and the record of signed outpoints are checked at signing)")
 		return nil
 	}
-	pin := os.Getenv(cfg.HSM.PinEnv)
-	if pin == "" {
-		return fmt.Errorf("the token PIN is not in $%s", cfg.HSM.PinEnv)
-	}
-	l, err := hsm.LoadLib(orDefault(cfg.HSM.Lib, hsm.DefaultLibPath()))
+	l, tok, err := openColdToken(orDefault(cfg.HSM.Lib, hsm.DefaultLibPath()), cfg.HSM.Token, cfg.HSM.PinEnv, errw)
 	if err != nil {
 		return err
 	}
 	defer l.Close()
-	tok, err := l.OpenToken(cfg.HSM.Token, pin)
-	if err != nil {
-		return err
-	}
 	defer tok.Close()
 	id, err := hex.DecodeString(cfg.HSM.KeyID)
 	if err != nil {
@@ -349,7 +381,7 @@ func (s tokenSigner) SignMessage(ctx context.Context, msg []byte) ([]byte, error
 }
 
 // runSOL is inspect and sign for a Solana config.
-func runSOL(cmd, cfgPath, reqPath string, approvals []string, out io.Writer, write func(any) error) error {
+func runSOL(cmd, cfgPath, reqPath string, approvals []string, out, errw io.Writer, write func(any) error) error {
 	cfg, err := coldsign.LoadSOLConfig(cfgPath)
 	if err != nil {
 		return err
@@ -381,19 +413,11 @@ func runSOL(cmd, cfgPath, reqPath string, approvals []string, out io.Writer, wri
 		fmt.Fprintln(out, "CHECK      this signer would accept the request (the approvals and the record of signed nonce values are checked at signing)")
 		return nil
 	}
-	pin := os.Getenv(cfg.HSM.PinEnv)
-	if pin == "" {
-		return fmt.Errorf("the token PIN is not in $%s", cfg.HSM.PinEnv)
-	}
-	l, err := hsm.LoadLib(orDefault(cfg.HSM.Lib, hsm.DefaultLibPath()))
+	l, tok, err := openColdToken(orDefault(cfg.HSM.Lib, hsm.DefaultLibPath()), cfg.HSM.Token, cfg.HSM.PinEnv, errw)
 	if err != nil {
 		return err
 	}
 	defer l.Close()
-	tok, err := l.OpenToken(cfg.HSM.Token, pin)
-	if err != nil {
-		return err
-	}
 	defer tok.Close()
 	id, err := hex.DecodeString(cfg.HSM.KeyID)
 	if err != nil {

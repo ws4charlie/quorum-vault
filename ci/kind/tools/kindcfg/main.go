@@ -18,9 +18,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,11 +42,27 @@ import (
 )
 
 const (
-	chainID  = 11155111 // anvil's id in the lane (as compose)
 	evmChain = "evm-kind"
 	btcChain = "btc-kind"
 	entity   = "qv-us"
 )
+
+// chainID is the EVM chain id of the lane's anvil, from QV_KIND_CHAIN_ID (laneChainID).
+var chainID uint64
+
+// laneChainID reads QV_KIND_CHAIN_ID. ci/kind/lib.sh sets it, the one place the lane's chain id is decided; there is no default here, so a run that
+// did not source lib.sh fails instead of writing configs for another chain.
+func laneChainID() (uint64, error) {
+	v := os.Getenv("QV_KIND_CHAIN_ID")
+	if v == "" {
+		return 0, fmt.Errorf("QV_KIND_CHAIN_ID is not set (ci/kind/lib.sh sets it; run kindcfg through the lane's scripts or source lib.sh first)")
+	}
+	id, err := strconv.ParseUint(v, 10, 64)
+	if err != nil || id == 0 || id > math.MaxInt64 {
+		return 0, fmt.Errorf("QV_KIND_CHAIN_ID=%q is not a chain id", v)
+	}
+	return id, nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -52,6 +70,10 @@ func main() {
 		os.Exit(2)
 	}
 	var err error
+	if chainID, err = laneChainID(); err != nil {
+		fmt.Fprintln(os.Stderr, "kindcfg:", err)
+		os.Exit(1)
+	}
 	switch os.Args[1] {
 	case "chain":
 		err = chainCmd(os.Args[2:])
@@ -127,7 +149,7 @@ func send(ctx context.Context, ec *ethclient.Client, key *ecdsa.PrivateKey, to *
 		return nil, err
 	}
 	tip := big.NewInt(2e9)
-	tx := types.NewTx(&types.DynamicFeeTx{ChainID: big.NewInt(chainID), Nonce: nonce, GasTipCap: tip,
+	tx := types.NewTx(&types.DynamicFeeTx{ChainID: new(big.Int).SetUint64(chainID), Nonce: nonce, GasTipCap: tip,
 		GasFeeCap: new(big.Int).Add(new(big.Int).Mul(h.BaseFee, big.NewInt(2)), tip), Gas: gas * 12 / 10, To: to, Value: value, Data: data})
 	signed, err := types.SignTx(tx, types.LatestSignerForChainID(tx.ChainId()), key)
 	if err != nil {
@@ -236,7 +258,8 @@ func gen(args []string) error {
 	wf := custody.WithdrawalFile{ApprovalWindow: "10m", ApprovalTimeout: "5m", SignTimeout: "30s", StuckAfter: "3m", HotWait: "5m", MaxReplacements: 3}
 	cfEVM := custody.File{Entity: entity,
 		Chain: custody.ChainFile{Name: evmChain, ChainID: chainID, RPCURL: "http://anvil:8545", Confirmations: 0, Factory: *factory, SweepDestination: k.Address, HotShards: []string{k.Address},
-			MaxTxFeeWei: "100000000000000000", Assets: map[string]custody.AssetFile{"ETH": {Decimals: 18, MinDeposit: "0", PriceWei: "1"}}},
+			MaxTxFeeWei: "100000000000000000", Assets: map[string]custody.AssetFile{"ETH": {Decimals: 18, MinDeposit: "0", PriceWei: "1"}},
+			L1Fee: "none"}, // the lane's anvil runs Ethereum fee rules (--network ethereum, ci/kind/deps/chains.yaml): no OP-stack l1Fee in its receipts
 		Sweep:      custody.SweepFile{K: 20, MinSweepWei: "1000000000000000", PlanInterval: "5s"},
 		Withdrawal: wf, Scan: custody.ScanFile{Interval: "2s", StartHeight: *height}}
 	cfEVM.Withdrawal.Tiers = tiers("ETH")

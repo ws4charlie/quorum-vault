@@ -20,15 +20,16 @@ import (
 	"math/big"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/chain/btc"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/chain/sol"
 	"github.com/ws4charlie/quorum-vault/internal/webauthn"
+	"github.com/ws4charlie/quorum-vault/internal/weborigin"
 )
 
 // File is the on-disk signing-zone config (JSON). See config.example.json.
@@ -892,8 +893,8 @@ func (a ApproverFile) webauthnKey() (*webauthn.Key, error) {
 		return nil, errors.New("a webauthn approver needs rp_id and origins")
 	}
 	for _, o := range a.Origins {
-		if !strings.HasPrefix(o, "https://") && !strings.HasPrefix(o, "http://localhost") {
-			return nil, fmt.Errorf("origin %q must be https (or http://localhost for tests)", o)
+		if err := weborigin.Check(o, auth.EnvironmentFromEnv() != auth.Production); err != nil {
+			return nil, err
 		}
 	}
 	k := &webauthn.Key{Alg: a.Alg, CredentialID: cred, RPID: a.RPID, Origins: a.Origins}

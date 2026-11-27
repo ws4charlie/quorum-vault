@@ -156,7 +156,8 @@ phase_deps() {
   kn "$NS_BIZ" create configmap temporal-dynamicconfig --from-literal=dynamicconfig.yaml='{}' --dry-run=client -o yaml | k apply -f - >/dev/null
   kn "$NS_BIZ" create configmap keycloak-realm --from-file=quorumvault-realm.json=deploy/keycloak/quorumvault-realm.json --dry-run=client -o yaml | k apply -f - >/dev/null
   # the gate dials the frontend by the name `temporal`; its upstream and certificate names are the repository's
-  for f in redpanda temporal keycloak seaweedfs chains; do k apply -f "$KDIR/deps/$f.yaml" >/dev/null; done
+  for f in redpanda temporal keycloak seaweedfs; do k apply -f "$KDIR/deps/$f.yaml" >/dev/null; done
+  sed "s/@QV_KIND_CHAIN_ID@/$QV_KIND_CHAIN_ID/g" "$KDIR/deps/chains.yaml" | k apply -f - >/dev/null # anvil's chain id, from lib.sh
   log "waiting for the dependencies"
   for ns in $NS_BIZ; do
     kn "$ns" wait cluster.postgresql.cnpg.io --all --for=condition=Ready --timeout=300s >/dev/null
