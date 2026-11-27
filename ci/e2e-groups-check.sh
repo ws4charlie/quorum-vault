@@ -9,7 +9,7 @@
 #                                      `func TestX(t *testing.T)` filtered by the target's -run and -skip, as go test does)
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
-export GOFLAGS=-mod=readonly GOPROXY=off  # listing files needs no module download
+export GOFLAGS=-mod=readonly GOPROXY=off GOTOOLCHAIN=local  # listing files needs no module download
 wf=.github/workflows/ci.yml
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 bad=0

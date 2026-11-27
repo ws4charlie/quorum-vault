@@ -137,7 +137,7 @@ func goList(root, module, tags string) ([]listed, error) {
 	args = append(args, "./...")
 	cmd := exec.Command("go", args...)
 	cmd.Dir = filepath.Join(root, filepath.FromSlash(module))
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=1", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOWORK=off")
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=1", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOWORK=off", "GOTOOLCHAIN=local")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

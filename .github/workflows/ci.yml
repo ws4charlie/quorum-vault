@@ -62,10 +62,14 @@ jobs:
         env:
           QV_CI_PUSH: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '1' || '0' }}
         run: ci/ensure-image.sh publish solana
-      # Go for the job selector: standard library only, and `go list` runs offline (GOPROXY=off), so no module cache is needed.
+      # Go for the job selector: standard library only, and `go list` runs offline (GOPROXY=off), so no module cache is needed. The version is the
+      # highest `go` line of the repository's modules (mpc-party asks for a newer one than the root), as in the CI image: `go list` in every module.
+      - name: The Go version of the CI image
+        id: gover
+        run: echo "version=$(ci/image-tag.sh --go-version)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: ${{ steps.gover.outputs.version }}
           cache: false
       # The guards run FIRST and are plain steps: if one fails, the job fails and nothing below publishes a skip.
       - name: Tests of the job selector
@@ -139,10 +143,15 @@ jobs:
           echo "The tests did NOT run: no changed file is read by this job (ci/skip-allowlist, ci/jobselect; CONTRIBUTING.md). Add [ci full] to a commit message to run everything."
       - uses: actions/checkout@v4
         if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
+      # the highest `go` line of the repository's modules, as in the CI image (the jobselect tests run `go list` in mpc-party, which asks for a newer Go)
+      - name: The Go version of the CI image
+        id: gover
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
+        run: echo "version=$(ci/image-tag.sh --go-version)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v5
         if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
         with:
-          go-version-file: go.mod
+          go-version: ${{ steps.gover.outputs.version }}
           cache: false
       # The module and build caches: restored from the newest run of main (keyed on go.sum and the commit), saved only by pushes to main, so the build cache
       # follows the code (one keyed on go.sum alone was written once and then compiled every changed package again in every job).
