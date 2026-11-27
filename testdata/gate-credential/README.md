@@ -14,6 +14,7 @@ TEST ONLY. `vectors.json` is the shared test data of the Gate credential contrac
   - `then_expect_on_reuse`: results of presenting the same credential again after the first use, each with its own `payment` when it has one (another payload digest, or another amount). Needs a used-credential store: run the pure checks, and if they pass and the `credential_id` was used, the result is `replayed`. A pure verifier without a store skips it.
   - `substitute`: before use, replace the one occurrence of `find` in `credential` with the bytes `with_hex` (for input that is not valid UTF-8 and cannot be stored as text).
 - The opaque fields (`obligation_id`, `policy_version`, `decision_reason`) are UTF-8 kept byte for byte; check your encoder against the cases with non-ASCII text, a character above U+FFFF, U+2028, quote and backslash.
+- `sig` is checked byte by byte against the base64url alphabet before decoding: the `signature_*` cases hold a line feed, a carriage return, a space, `=`, `+`, `/` and wrong lengths, and each must be `credential_malformed` (field `sig`). Many base64 decoders skip CR and LF, so a verifier that only calls a strict decoder fails `signature_line_feed`.
 
 ## Use
 
