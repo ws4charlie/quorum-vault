@@ -138,13 +138,13 @@ Vault 解析将要签名的载荷，从字节里得到付款 `{chain, asset, pay
 | 400 | `request_invalid`、`credential_missing`、`credential_malformed` |
 | 401 | `client_not_authorized`：没有有效令牌 |
 | 403 | `client_not_authorized`、`wallet_not_gate_governed`、`kid_unknown`、`signature_invalid`、`audience_mismatch`、`wallet_mismatch`、`ttl_too_long`、`not_yet_valid`、`expired`、`payment_mismatch`、`authorization_window`、`fast_lane_cap` |
-| 409 | `replayed` |
+| 409 | `replayed`。`nonce_reused`：载荷里的 EIP-3009 `nonce` 已被这个钱包的另一笔授权使用；再试需要新的 nonce 和新的凭证 |
 | 422 | `payload_invalid`（载荷无法解析成这个钱包、这个类型的付款） |
-| 503 | `retry_later`：还没有任何决定（签名区在等待时间内没有答复、资金还没空出来、某个存储连不上）。`signing_failed`：签名区的签名程序出错，或签名区以本表没有列出的理由拒绝 |
+| 503 | `retry_later`：还没有任何决定（签名区在等待时间内没有答复、资金还没空出来、某个存储连不上、本部署没有 `gate` 配置段）。`signing_failed`：签名区的签名程序出错，或签名区以本表没有列出的理由拒绝 |
 
 **核心检查什么。** 只做代价小、且只会拒绝的检查：请求的形态；钱包在核心自己的配置里是 Gate 管控钱包；凭证能解析，指向本部署和这个钱包，新请求的凭证还没过期；载荷按上面的规则能解析；单笔限额和付款分片的可用资金。签名区的拒绝原样带回签名区的错误码和字段。
 
-**按 `credential_id` 幂等。** 同一个请求再来一次（`wallet_id`、`kind`、`payload` 和凭证都相同；JSON 的排版不影响）返回已保存的答复，或者等待同一个签名任务：绝不会产生第二个任务。同一个 `credential_id` 配不同的请求，记为 `replayed` 拒绝。成功的答复，以及每一个来自决定的拒绝（4xx 和 `signing_failed`），都会保存，重复请求时原样返回；Gate 要再试，就生成一份新凭证，用新的 `credential_id`。`retry_later` 不保存：同一个请求可以再发，继续同一个任务。如果签名已经产生、但答复丢了，重试同一个请求会拿到它：核心从任务中读出签名，不会第二次签名。
+**按 `credential_id` 幂等。** 同一个请求再来一次（`wallet_id`、`kind`、`payload` 和凭证都相同；JSON 的排版不影响）返回已保存的答复，或者等待同一个签名任务：绝不会产生第二个任务。同一个 `credential_id` 配不同的请求，记为 `replayed` 拒绝。成功的答复，以及每一个来自决定的拒绝（4xx 和 `signing_failed`），都会保存，重复请求时原样返回，包括核心按自己的状态做出的拒绝（例如 `wallet_not_gate_governed`）：状态变了以后，同一个请求仍得到同样的拒绝；Gate 要再试，就生成一份新凭证，用新的 `credential_id`。`retry_later` 不保存：同一个请求可以再发，继续同一个任务。如果签名已经产生、但答复丢了，重试同一个请求会拿到它：核心从任务中读出签名，不会第二次签名。
 
 ## 重放记录与审计
 

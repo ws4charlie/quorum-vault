@@ -250,42 +250,37 @@ func (s *Service) RequestWithdrawal(ctx context.Context, r WithdrawalRequest) (W
 
 // freeHot is what the ledger says shard partition can still pay out: the hot
 // balance (minus the posted ledger balance, which mirrors the chain) less
-// liquidity already reserved for withdrawals in flight.
+// liquidity already reserved for withdrawals in flight, cold moves and
+// rebalances not yet booked, and open x402 authorizations.
+//
+// It is one statement, so every part comes from one snapshot. A writer that
+// moves an amount from one part to another (x402Pay posts the hold and closes
+// the authorization; a withdrawal is booked and leaves the reserved set) does
+// it in one transaction, so a single snapshot sees it either wholly before or
+// wholly after. Separate reads could see the balance before and the open set
+// after, and count the same amount as free twice. The callers that reserve
+// still hold the partition lock, which orders reservations among themselves.
 func (s *Service) freeHot(ctx context.Context, q interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }, partitionID string) (*big.Int, error) {
-	var posted, reserved string
-	if err := q.QueryRow(ctx, `SELECT posted::text FROM ledger_accounts WHERE id=$1`, hotAcct(partitionID)).Scan(&posted); err != nil {
+	var free *string // NULL when the hot account does not exist
+	err := q.QueryRow(ctx, `SELECT (
+		-(SELECT posted FROM ledger_accounts WHERE id=$2)
+		-- An x402 authorization that is open (requested or signed) may be used on chain any moment: its amount is promised.
+		- (SELECT COALESCE(SUM(amount),0) FROM x402_authorizations WHERE partition_id=$1 AND status IN ('requested','signed'))
+		- (SELECT COALESCE(SUM(amount),0) FROM withdrawals WHERE partition_id=$1 AND hot_reserved AND status NOT IN ('confirmed','failed'))
+		-- A rebalance leaving this shard, or a cold move, that is planned or signing has not been booked yet (that happens at broadcast), so its
+		-- amount is set aside here; after the broadcast the hot balance already shows it.
+		- (SELECT COALESCE(SUM(amount),0) FROM rebalance_moves WHERE partition_id=$1 AND status IN ('planned','signing'))
+		- (SELECT COALESCE(SUM(amount),0) FROM cold_moves WHERE partition_id=$1 AND status IN ('planned','signing'))
+	)::text`, partitionID, hotAcct(partitionID)).Scan(&free)
+	if err != nil {
 		return nil, err
 	}
-	if err := q.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::text FROM withdrawals WHERE partition_id=$1 AND hot_reserved AND status NOT IN ('confirmed','failed')`,
-		partitionID).Scan(&reserved); err != nil {
-		return nil, err
+	if free == nil {
+		return nil, fmt.Errorf("custody: free hot of %s: %w", partitionID, pgx.ErrNoRows)
 	}
-	// A cold move that is planned or signing has not been booked yet (that happens at broadcast), so its amount is
-	// set aside here; after the broadcast the hot balance already shows it.
-	var moving string
-	if err := q.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::text FROM cold_moves WHERE partition_id=$1 AND status IN ('planned','signing')`,
-		partitionID).Scan(&moving); err != nil {
-		return nil, err
-	}
-	// The same for a rebalance leaving this shard.
-	var leaving string
-	if err := q.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::text FROM rebalance_moves WHERE partition_id=$1 AND status IN ('planned','signing')`,
-		partitionID).Scan(&leaving); err != nil {
-		return nil, err
-	}
-	// An x402 authorization that is open (requested or signed) may be used on chain any moment: its amount is promised.
-	var promised string
-	if err := q.QueryRow(ctx, `SELECT COALESCE(SUM(amount),0)::text FROM x402_authorizations WHERE partition_id=$1 AND status IN ('requested','signed')`,
-		partitionID).Scan(&promised); err != nil {
-		return nil, err
-	}
-	free := new(big.Int).Neg(parseBig(posted))
-	free.Sub(free, parseBig(promised))
-	free.Sub(free, parseBig(reserved))
-	free.Sub(free, parseBig(leaving))
-	return free.Sub(free, parseBig(moving)), nil
+	return parseBig(*free), nil
 }
 
 // pickShard returns the partition of the shard with the most free hot
