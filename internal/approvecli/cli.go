@@ -28,7 +28,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/ctap"
+	"github.com/ws4charlie/quorum-vault/internal/weborigin"
 )
 
 // Env is what the CLI runs on. Zero values are the production ones.
@@ -231,13 +233,10 @@ func (c *cli) where(needCred bool) (rpID, origin string, credID []byte, err erro
 	if origin == "" {
 		return "", "", nil, errors.New("give the origin (-origin, or -entry with an origin): it must be one the signing zone lists for you")
 	}
-	u, perr := url.Parse(origin)
-	if perr != nil || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.User != nil {
-		return "", "", nil, fmt.Errorf("origin %q must look like https://approve.example.com", origin)
+	if err := weborigin.Check(origin, auth.EnvironmentFromEnv() != auth.Production); err != nil { // the zone's own rule (internal/gateway config)
+		return "", "", nil, fmt.Errorf("%w: the zone refuses it", err)
 	}
-	if u.Scheme != "https" && !strings.HasPrefix(origin, "http://localhost") { // the zone's own rule (internal/gateway config)
-		return "", "", nil, fmt.Errorf("origin %q must be https (or http://localhost for tests): the zone refuses any other", origin)
-	}
+	u, _ := url.Parse(origin)
 	if rpID == "" {
 		rpID = u.Hostname()
 	}
