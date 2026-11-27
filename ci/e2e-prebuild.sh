@@ -9,6 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT="${1:?usage: ci/e2e-prebuild.sh <out dir>}"
 rm -rf "$OUT"; mkdir -p "$OUT/bin" "$OUT/test"
+OUT="$(cd "$OUT" && pwd)"   # absolute: the mpc-party builds run in mpc-party/ (a relative path once put their binaries in mpc-party/.ci-prebuilt)
 
 # 1. <module dir> <package> <tags> : every build a harness asks for (e2e/btc, e2e/sol, e2e/custody harness_test.go; e2e/mpcstack Build, BuildTeeSim,
 # BuildPartyAdmin; e2e/mpcsign and e2e/solsign stack_test.go; e2e/custody load_test.go)
@@ -60,4 +61,15 @@ for t in $(grep -oE 'make +[A-Za-z0-9_.-]+' .github/workflows/ci.yml | awk '{pri
     done
   done <<< "$cmds"
 done
-echo "prebuilt: $(ls "$OUT/bin" | wc -l) binaries, $(ls "$OUT/test" | grep -c '\.test$') test binaries"; cat "$OUT/test/manifest"
+# 3. fail here, loudly, rather than in every e2e job: every binary of the list and every test binary of the manifest exists and is executable
+missing=0; want=0
+while read -r mod pkg tags; do
+  [ -n "$mod" ] || continue
+  rel="${pkg#./}"; [ "$mod" = . ] || rel="$mod/$rel"; key="${rel//\//_}"; [ "$tags" = - ] || key="$key@${tags//,/+}"
+  want=$((want + 1)); [ -x "$OUT/bin/$key" ] && [ -s "$OUT/bin/$key" ] || { echo "MISSING binary $key" >&2; missing=1; }
+done <<< "$BUILDS"
+[ "$(ls "$OUT/bin" | wc -l | tr -d ' ')" = "$want" ] || { echo "the bin directory holds $(ls "$OUT/bin" | wc -l | tr -d ' ') files, the list $want" >&2; missing=1; }
+for d in $(cut -f2 "$OUT/test/manifest"); do [ -x "$OUT/test/${d//\//_}.test" ] || { echo "MISSING test binary $d" >&2; missing=1; }; done
+[ -s "$OUT/test/manifest" ] || { echo "empty manifest" >&2; missing=1; }
+[ "$missing" = 0 ] || { echo "e2e-prebuild: binaries are missing (above): the e2e jobs would fail one by one" >&2; exit 1; }
+echo "prebuilt: $want binaries, $(ls "$OUT/test" | grep -c '\.test$') test binaries"; cat "$OUT/test/manifest"
