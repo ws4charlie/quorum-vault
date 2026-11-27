@@ -17,18 +17,17 @@ import (
 // sweptTopic is keccak256("Swept(address,uint256)"), the Forwarder's event.
 var sweptTopic = crypto.Keccak256Hash([]byte("Swept(address,uint256)"))
 
-// TxFee is gas used x effective gas price of the mined transaction. A reverted
-// transaction paid its fee too, so the receipt status is not checked.
+// TxFee is the fee the mined transaction paid: gas used x effective gas price, plus the L1 data fee on an OP-stack chain (ParseReceipt). A
+// reverted transaction paid its fee too, so the receipt status is not checked.
 func (a *Adapter) TxFee(ctx context.Context, txHash string) (*big.Int, error) {
-	r, err := a.receipt(ctx, txHash)
+	_, fee, err := a.receipt(ctx, txHash)
 	if err != nil {
 		return nil, err
 	}
-	price := r.EffectiveGasPrice
-	if price == nil {
+	if fee == nil {
 		return nil, fmt.Errorf("evm: receipt of %s has no effective gas price", txHash)
 	}
-	return new(big.Int).Mul(new(big.Int).SetUint64(r.GasUsed), price), nil
+	return fee, nil
 }
 
 // MovedAssets reads the Forwarder Swept events of a successful transaction. An
@@ -38,7 +37,7 @@ func (a *Adapter) TxFee(ctx context.Context, txHash string) (*big.Int, error) {
 // transaction moved nothing. Entries come in log order; one address and asset
 // can appear twice if the transaction flushed it twice.
 func (a *Adapter) MovedAssets(ctx context.Context, txHash string) ([]chain.MovedAsset, error) {
-	r, err := a.receipt(ctx, txHash)
+	r, _, err := a.receipt(ctx, txHash)
 	if err != nil {
 		return nil, err
 	}
@@ -89,13 +88,13 @@ func (a *Adapter) isForwarder(ctx context.Context, addr common.Address) (bool, e
 	return n > 0, nil
 }
 
-func (a *Adapter) receipt(ctx context.Context, txHash string) (*types.Receipt, error) {
-	r, err := a.ec.TransactionReceipt(ctx, common.HexToHash(txHash))
+func (a *Adapter) receipt(ctx context.Context, txHash string) (*types.Receipt, *big.Int, error) {
+	r, fee, err := ReadReceipt(ctx, a.ec.Client(), common.HexToHash(txHash))
 	if errors.Is(err, ethereum.NotFound) {
-		return nil, fmt.Errorf("evm: %s has no receipt yet", txHash)
+		return nil, nil, fmt.Errorf("evm: %s has no receipt yet", txHash)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("evm: receipt %s: %w", txHash, err)
+		return nil, nil, fmt.Errorf("evm: receipt %s: %w", txHash, err)
 	}
-	return r, nil
+	return r, fee, nil
 }

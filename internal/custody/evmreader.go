@@ -14,6 +14,8 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"strings"
+
+	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 )
 
 // EVMReader is the Reader for an EVM node.
@@ -90,18 +92,14 @@ var _ ReceiptReader = (*EVMReader)(nil)
 
 // Receipt reads the receipt of a transaction: its block, whether it succeeded and what it paid in gas. found is false while the node has none.
 func (r *EVMReader) Receipt(ctx context.Context, txHash string) (Receipt, bool, error) {
-	rc, err := r.ec.TransactionReceipt(ctx, common.HexToHash(txHash))
+	rc, fee, err := evm.ReadReceipt(ctx, r.ec.Client(), common.HexToHash(txHash)) // the fee includes an OP-stack chain's L1 data fee
 	if errors.Is(err, ethereum.NotFound) {
 		return Receipt{}, false, nil
 	}
 	if err != nil {
 		return Receipt{}, false, fmt.Errorf("custody: receipt %s: %w", txHash, err)
 	}
-	out := Receipt{Block: rc.BlockNumber.Uint64(), Success: rc.Status == types.ReceiptStatusSuccessful}
-	if rc.EffectiveGasPrice != nil {
-		out.Fee = new(big.Int).Mul(new(big.Int).SetUint64(rc.GasUsed), rc.EffectiveGasPrice)
-	}
-	return out, true, nil
+	return Receipt{Block: rc.BlockNumber.Uint64(), Success: rc.Status == types.ReceiptStatusSuccessful, Fee: fee}, true, nil
 }
 
 // authorizationUsedTopic is keccak256("AuthorizationUsed(address,bytes32)"), the event of EIP-3009 tokens (Circle USDC among them).
