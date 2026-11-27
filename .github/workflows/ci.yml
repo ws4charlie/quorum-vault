@@ -196,7 +196,7 @@ jobs:
       - run: go test -short -count=1 -p 1 ./...
         if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) }}
       - name: Save the Go module and build cache (pushes to main only)
-        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: ${{ !(needs.changes.result == 'success' && (needs.changes.outputs.skip == 'true' || contains(needs.changes.outputs.skip_jobs, ',test,'))) && (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'team/quorum-vault/ci-speed-2') }}  # TEMP (measurement)
         uses: actions/cache/save@v4
         with:
           path: |

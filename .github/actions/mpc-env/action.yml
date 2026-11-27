@@ -48,7 +48,7 @@ runs:
     # once and never again, so every job compiled every package changed since (one to two minutes a job). Pull requests only restore: their caches would
     # crowd main's out of the repository's 10 GB.
     - name: Restore the Go module and build cache, and save it at the end (pushes to main)
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'team/quorum-vault/ci-speed-2' }}  # TEMP (measurement): remove the head_ref clause
       uses: actions/cache@v4
       with:
         path: ~/.cache/qv-go
@@ -58,7 +58,7 @@ runs:
           qv-go-${{ inputs.go-cache }}-${{ runner.os }}-${{ runner.arch }}-
           qv-go-
     - name: Restore the Go module and build cache
-      if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+      if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main' || github.head_ref == 'team/quorum-vault/ci-speed-2') }}  # TEMP (measurement)
       uses: actions/cache/restore@v4
       with:
         path: ~/.cache/qv-go
