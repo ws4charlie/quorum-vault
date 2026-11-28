@@ -12,7 +12,7 @@ make load-dash-up                              # optional: Prometheus and Grafan
 make load-local SCENARIO=loadtest/scenarios/evm-mixed.json OUT=data/load/mixed-1
 ```
 
-`make load-local` is `TestLoadLocal` in `e2e/custody/load_test.go`: it starts the stack of this checkout's lane (two-party MPC on SoftHSM, Temporal, Redpanda, Postgres, anvil), starts `qv-load run` against it, samples the processes and the database while it runs, and afterwards checks what only the database can show. Knobs: `SHARDS` (hot shards), `WORKERS`, `CORES` (copies of the stateless services), `DELAY_MS` (delay added to every frame between parties A and B, each way), `RATE_SCALE`, `SEED`, `LABEL`.
+`make load-local` is `TestLoadLocal` in `e2e/custody/load_test.go`: it starts the stack of this checkout's lane (two-party MPC on SoftHSM, Temporal, Redpanda, Postgres, anvil), starts `qv-load run` against it, samples the processes and the database while it runs, and afterwards checks what only the database can show. Knobs: `SHARDS` (hot shards), `WORKERS`, `CORES` (copies of the stateless services), `DELAY_MS` (delay added to every frame between parties A and B, each way), `RATE_SCALE`, `SEED`, `RUN_ID`, `LABEL`. Open-loop arrivals come from `SEED` and the run identifier (random by default), so `SEED` and `RUN_ID` together repeat a run's arrivals exactly.
 
 Output in `OUT`: `result.json` (the run), `ops.jsonl` (every operation), `stack.json` (what the stack did), `report.html` (the static page; `make load-report OUT=...` makes it again). The test fails when a correctness check fails; timing never fails it.
 

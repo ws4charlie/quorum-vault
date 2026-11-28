@@ -16,7 +16,7 @@ bad=0
 fail() { bad=1; echo "e2e-groups-check: $*"; }
 
 # not pull-request groups: run by nightly.yml or by people (reviewed)
-NOT_PR="test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-all"
+NOT_PR="test-e2e-evm test-e2e-evm-latency test-e2e-all"
 
 # tests <make target>: the top-level test names its go test command(s) run, sorted
 tests() {
