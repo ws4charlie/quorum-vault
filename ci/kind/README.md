@@ -43,7 +43,7 @@ Solana is **not** in the kind lane (the validator image is 778 MB and not needed
 | `certs` | rotation without restart: the core's certificate Secret is deleted, cert-manager issues a new one, and the same pod (same uid, no restart) serves it about a minute later, trusted by the authority; an expired certificate refuses start: the core's own pod template with a certificate that expired two days ago (made by `tools/kindcert` from the lane's authority) exits with the service's expiry message |
 | `teesim` | **simulated enclave**; run last because it replaces the three parties (new keys). A broker per party in its own namespace (chart `qv-attest-broker`), the parties in attested mode with sealed TLS keys and no HSM, the enrolment Jobs, signed allowlists made by the lane, a DKG through party A, and a restarted party that attests again. Not shown: a signature (the gateway's config would need the new pins), isolation (the evidence is a mock) |
 
-`smoke/run.sh --pending` lists what is not done. `withdraw` and `crash` drive the pods from the host through port-forwards (`tools/kindwd`); the person tokens come from the dev realm's test-only login (`qv-e2e`, as `e2e/idp`), passwords from the gitignored work dir.
+`smoke/run.sh --pending` lists what is not done. `withdraw` and `crash` drive the pods from the host through port-forwards (`tools/kindwd`); the person tokens come from the dev realm's test-only login (`qv-e2e`, as `e2e/idp`), passwords from the gitignored work dir. kind's qv-core runs `QV_ENV=dev` (`core.env: dev` in `deploy/helm/qv-business/values-kind.yaml`) because the smoke logs in with the dev realm's e2e clients, which a production core refuses; TLS stays on everywhere (`QV_ALLOW_PLAINTEXT` is not set).
 
 ## Trust bundles
 
