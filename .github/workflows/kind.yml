@@ -34,7 +34,8 @@ jobs:
           docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | grep kind || true
       - name: smoke
         shell: bash
-        run: /usr/bin/time -v make kind-smoke 2>&1 | tee /tmp/smoke.log | tail -80
+        # the whole output (a tail once hid the cause of a failed case); run.sh also prints every failed case's full output again at the end
+        run: QV_KIND_SMOKE_LOGS=/tmp/smoke-logs /usr/bin/time -v make kind-smoke 2>&1 | tee /tmp/smoke.log
       - name: memory and time (after smoke)
         if: always()
         run: |
@@ -47,6 +48,17 @@ jobs:
           kubectl get pods -A || true
           kubectl get events -A --sort-by=.lastTimestamp | tail -40 || true
           for t in "qv-signing deploy/qv-signing-core-gateway" "qv deploy/qv-business-worker" "qv deploy/qv-business-core"; do set -- $t; echo "== $2"; kubectl -n "$1" logs "$2" --tail=40 || true; done
+      - name: upload the up and smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-logs
+          path: |
+            /tmp/up.log
+            /tmp/smoke.log
+            /tmp/smoke-logs/
+          if-no-files-found: ignore
+          retention-days: 14
       - name: down
         if: always()
         run: make kind-down
