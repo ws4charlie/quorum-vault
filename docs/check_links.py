@@ -15,10 +15,16 @@ EXT = re.compile(r"\.(md|go|sh|py|ya?ml|json|tf|tpl|sql|toml|mod|env|txt|html|js
 PATH = re.compile(r"^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.@-]+)*/?$")
 # made by a build or a run, never committed: named in the docs, absent from a fresh checkout
 GENERATED = ("data/", "bin/", "mpc-party/.deps")
-# a page whose backtick paths are of another tree (a historical spike) opts out of the path check, and says why
+# a page whose backtick paths are of another tree (a historical spike) opts out of the path check with this comment followed by its reason in
+# parentheses; a marker without a reason is an error. Used by: docs/spikes/p5a-cbmpc.md only.
 NO_PATHS = "<!-- check_links: no-paths"
 
 tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.split()
+# directory names anywhere in the repository: `smoke/`, `modules/irsa/` start with one, so they are checked as paths too
+# such a path must be the tail of a tracked path (`modules/nitro-enclave` of deploy/cloud/aws/). Not paths: a catalog identity zone/service
+# (`business/gateway-link`, internal/pki), and a path of another repository written `<repo>:<path>` (`cb-mpc:src/cbmpc/api/schnorr2pc.cpp`).
+KNOWN = {d for t in tracked for d in t.split("/")[:-1]} - {"business", "signing"}
+TAILS = {"/".join(t.split("/")[i:j]) for t in tracked for i in range(len(t.split("/"))) for j in range(i + 1, len(t.split("/")) + 1)}
 files = sorted(ROOT.glob("*.md")) + sorted((ROOT / "docs").rglob("*.md"))
 files += sorted(ROOT / p for p in tracked if re.match(r"(deploy|ci)/(.*/)?README[^/]*\.md$", p))
 bad = []
@@ -68,16 +74,18 @@ for f in files:
             bad.append(f"{rel}: broken link {target}")
         elif frag and dest.suffix == ".md" and frag not in anchors(dest):
             bad.append(f"{rel}: broken anchor {t}")
+    if NO_PATHS in text and not re.search(re.escape(NO_PATHS) + r" \([^)]+\) -->", text):
+        bad.append(f"{rel}: a check_links no-paths marker without a reason")
     for m in CODE.finditer(text) if NO_PATHS not in text else ():
-        p = re.sub(r":\d+(-\d+)?(,\d+)*$", "", m.group(1).strip())  # file.go:12 -> file.go
+        p = re.sub(r"(:\d+(-\d+)?(,\d+)*|#L\d+(-L\d+)?)$", "", m.group(1).strip())  # file.go:12, file.go#L5 -> file.go
         if not PATH.match(p) or "/" not in p and not EXT.search(p) or p.startswith(".") or "X.Y.Z" in p or p.startswith(GENERATED):
             continue
         g = re.match(r"^(.+)\.[A-Z]\w*$", p)  # a Go identifier, package.Name: the package directory must exist
         if g and "/" in p and (ROOT / g.group(1)).is_dir():
             continue
-        if p.split("/")[0] not in TOP and not ("/" in p and EXT.search(p)):
+        if p.split("/")[0] not in TOP | KNOWN and not ("/" in p and EXT.search(p)):
             continue  # an image name, a URL path, a Vault path: not a file of this repository
-        if not ((ROOT / p).exists() or (f.parent / p).exists()):
+        if not ((ROOT / p).exists() or (f.parent / p).exists() or p.split("/")[0] not in TOP and p.rstrip("/") in TAILS):
             bad.append(f"{rel}: missing path `{m.group(1)}`")
 
 docs = ROOT / "docs"

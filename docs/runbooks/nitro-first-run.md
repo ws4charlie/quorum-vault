@@ -8,7 +8,7 @@ The Nitro path is **written and tested against fakes. It has never run on a Nitr
 |---|---|
 | Verifier of real attestation documents, pinned AWS root (SHA-256 `641a0321...bb5b`), every refusal tested | `mpc-party/internal/attest` (`nitro.go`, `nitro_root.go`, `nitro_real_test.go`) |
 | NSM attester (`/dev/nsm` ioctl, serde CBOR request) | `attest/nsm*.go` |
-| KMS release: SigV4 client, `Recipient` calls, CMS `EnvelopedData` reader, instance-role credentials, vsock dialer | `attest/kmsrelease` |
+| KMS release: SigV4 client, `Recipient` calls, CMS `EnvelopedData` reader, instance-role credentials, vsock dialer | `mpc-party/internal/attest/kmsrelease` |
 | Sealer on KMS (`sealer.type: attested`, `attester.type: nitro`, `release.type: kms`) | `internal/server/sealer_attested_*.go` |
 | Allowlist entries with PCR1, PCR2 and PCR8; one list for the broker and the KMS key policy | `mpc-party/internal/attest/allowlist.go`, `deploy/cloud/aws/nitro/` |
 | EIF build, reproducible; probe image | `deploy/images/eif-build.sh`, `Dockerfile.eif*` |

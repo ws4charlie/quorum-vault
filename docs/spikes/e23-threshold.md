@@ -39,7 +39,7 @@ On a real network add rounds x RTT per signature: 9 x 20 ms = 180 ms (one region
 
 1. **E23-2 must run `SelfTest` on all three after every DKG and refresh, before dropping old shares**, and treat any non-nil as "do not accept", with the 2-party two-phase commit extended to three.
 2. **Hot balances stay small and cosigner checks stay** (B and C each ask their own `qv-cosigner`). This is the design already; it is also the answer to the dishonest-majority model: two compromised members hold the key.
-3. **Keep watching upstream** (advisories, `ecdsa_mp` issues) and re-run the review at every pin change; the first upgrade must re-read `ec_dkg.cpp`, `ecdsa_mp.cpp` and `api/ecdsa_mp.cpp`. The access-structure layer postdates the Cure53 audit.
+3. **Keep watching upstream** (advisories, `ecdsa_mp` issues) and re-run the review at every pin change; the first upgrade must re-read `ec_dkg.cpp`, `ecdsa_mp.cpp` and `cb-mpc:api/ecdsa_mp.cpp`. The access-structure layer postdates the Cure53 audit.
 4. **Ask for an outside look at `ecdsa_mp` before balances grow**, or at least before production (cb-mpc's authors, a second reviewer). This is the one thing this spike cannot supply.
 5. **Plan the network.** Budget 9 round trips and 125 KB per signature across the three trust domains; the first fallback order (A+B, then A+C, B+C) costs a failed attempt's timeout before the next pair: use a short per-message timeout on signing.
 

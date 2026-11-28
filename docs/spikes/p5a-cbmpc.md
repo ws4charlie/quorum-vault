@@ -327,7 +327,7 @@ garbage #4 (2097152 bytes): peer replied/err = <nil>
 peer process: ALIVE
 sign ok in 48.572709ms verified=true 
 == peer log:
-	/Users/charlie/dev/quorum-vault/.claude/worktrees/wizardly-kirch-a623e2/spike/cbmpc/cmd/party/mux.go:106 +0x350
+	spike/cbmpc/cmd/party/mux.go:106 +0x350
 p2 session 2 op=sign failed: cb-mpc error 0xe000001
 Error code -16580607
 p2 session 2 op=sign failed: cb-mpc error 0x-fcffff
