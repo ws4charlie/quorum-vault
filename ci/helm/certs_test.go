@@ -108,6 +108,8 @@ type certSpec struct {
 	SecretName string   `yaml:"secretName"`
 	CN         string   `yaml:"commonName"`
 	URIs       []string `yaml:"uris"`
+	DNSNames   []string `yaml:"dnsNames"`
+	IPs        []string `yaml:"ipAddresses"`
 	IsCA       bool     `yaml:"isCA"`
 	PrivateKey struct {
 		Rotation string `yaml:"rotationPolicy"`
@@ -514,6 +516,8 @@ func TestCertsRefusals(t *testing.T) {
 		"no cluster":                 {"--set", "cluster="},
 		"unknown cluster":            {"--set", "cluster=party-d"},
 		"all with vault":             {"--set", "cluster=all"},
+		"ca in production":           {"--set", "cluster=business", "--set", "issuers.mode=ca"},
+		"ca with an unknown env":     {"--set", "cluster=business", "--set", "issuers.mode=ca", "--set", "env=staging"},
 		"vault without a server":     {"--set", "cluster=business", "--set", "issuers.vault.business.server="},
 		"http vault":                 {"--set", "cluster=business", "--set", "issuers.vault.business.server=http://vault:8200"},
 		"empty trust":                {"--set", "cluster=business", "--set", "trust.allowEmpty=false"},
@@ -675,5 +679,59 @@ func TestCertsSecretNamesMatchThePartyAndSigningCoreCharts(t *testing.T) {
 	check("qv-signing-core", scTxt, "signing-core")
 	if !strings.Contains(scTxt, "secretName: qv-signing-gateway-party-tls") { // the parties pin this certificate on their caller ports; the gateway must present it
 		t.Error("qv-signing-core does not mount the gateway-party certificate")
+	}
+}
+
+// The catalog's loopback names (localhost, 127.0.0.1, ::1) are for compose and kind: a production render (env empty) asks Vault for none of them, in any
+// cluster; the kind render (env dev) still has every name the catalog lists (dnsNames + devDnsNames, devIpAddresses).
+func TestCertsLoopbackNamesOnlyInDev(t *testing.T) {
+	loop := map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true}
+	for _, c := range certClusters {
+		for _, o := range leafCerts(mustRender(t, "values.yaml", "--set", "cluster="+c)) {
+			s := certSpecOf(o)
+			for _, n := range append(append([]string{}, s.DNSNames...), s.IPs...) {
+				if loop[n] {
+					t.Errorf("%s: production certificate %s asks for the loopback name %s", c, o.Metadata.Name, n)
+				}
+			}
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(certChart(), "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cat struct {
+		Entries []struct {
+			URI    string   `json:"uri"`
+			DNS    []string `json:"dnsNames"`
+			IPs    []string `json:"ipAddresses"`
+			DevDNS []string `json:"devDnsNames"`
+			DevIPs []string `json:"devIpAddresses"`
+		}
+	}
+	if err := json.Unmarshal(b, &cat); err != nil {
+		t.Fatal(err)
+	}
+	kind := map[string]certSpec{}
+	for _, o := range leafCerts(mustRender(t, "values-kind.yaml")) {
+		s := certSpecOf(o)
+		kind[s.URIs[0]] = s
+	}
+	devNames := 0
+	for _, e := range cat.Entries {
+		s, ok := kind[e.URI]
+		if !ok {
+			continue // operator identities etc.: checked elsewhere
+		}
+		devNames += len(e.DevDNS) + len(e.DevIPs)
+		if want := append(append([]string{}, e.DNS...), e.DevDNS...); strings.Join(s.DNSNames, ",") != strings.Join(want, ",") {
+			t.Errorf("kind %s: dnsNames %v, want %v", e.URI, s.DNSNames, want)
+		}
+		if want := append(append([]string{}, e.IPs...), e.DevIPs...); strings.Join(s.IPs, ",") != strings.Join(want, ",") {
+			t.Errorf("kind %s: ipAddresses %v, want %v", e.URI, s.IPs, want)
+		}
+	}
+	if devNames == 0 {
+		t.Error("the kind render holds no loopback name: the check proves nothing")
 	}
 }

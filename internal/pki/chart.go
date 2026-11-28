@@ -14,13 +14,15 @@ type ChartEntry struct {
 	Zone       string   `json:"zone"`     // the zone whose authority issues it
 	URI        string   `json:"uri"`      // spiffe://quorumvault/<zone>/<name>
 	CN         string   `json:"cn"`       // subject common name
-	DNS        []string `json:"dnsNames"` // names a client may dial
+	DNS        []string `json:"dnsNames"` // names a client may dial, in every environment (never a loopback name)
 	IPs        []string `json:"ipAddresses"`
-	Usages     []string `json:"usages"`     // cert-manager key usages: "server auth", "client auth"
-	Clusters   []string `json:"clusters"`   // where the chart makes it
-	Pinned     bool     `json:"pinned"`     // peers pin its public key: the key never rotates on renewal
-	Operator   bool     `json:"operator"`   // a person's or tool's identity: not made in production clusters
-	SecretName string   `json:"secretName"` // SecretName(zone, name)
+	DevDNS     []string `json:"devDnsNames"`    // the loopback names (localhost): the chart adds them only with env dev or test
+	DevIPs     []string `json:"devIpAddresses"` // 127.0.0.1, ::1: likewise
+	Usages     []string `json:"usages"`         // cert-manager key usages: "server auth", "client auth"
+	Clusters   []string `json:"clusters"`       // where the chart makes it
+	Pinned     bool     `json:"pinned"`         // peers pin its public key: the key never rotates on renewal
+	Operator   bool     `json:"operator"`       // a person's or tool's identity: not made in production clusters
+	SecretName string   `json:"secretName"`     // SecretName(zone, name)
 }
 
 // ChartCatalog is the catalog in the shape the chart reads.
@@ -38,10 +40,11 @@ func ChartCatalog() []ChartEntry {
 		if e.Usage&Client != 0 {
 			u = append(u, "client auth")
 		}
-		dns, ips := append([]string{}, e.DNS...), append([]string{}, e.IPs...)
+		dns, devDNS := splitLoopback(e.DNS)
+		ips, devIPs := splitLoopback(e.IPs)
 		out = append(out, ChartEntry{
 			Name: e.Service, Zone: e.Zone, URI: ID(e.Zone, e.Service), CN: cn,
-			DNS: dns, IPs: ips, Usages: u, Clusters: e.Clusters,
+			DNS: dns, IPs: ips, DevDNS: devDNS, DevIPs: devIPs, Usages: u, Clusters: e.Clusters,
 			Pinned: e.Pinned, Operator: e.Operator, SecretName: SecretName(e.Zone, e.Service),
 		})
 	}
