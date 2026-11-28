@@ -5,6 +5,10 @@
 # (catalog.json, generated from internal/pki/catalog.go). Required: there is no default, so a release cannot silently take the wrong zone.
 cluster: ""
 
+# Empty is production (the rule of the qv-party and qv-signing-core charts); dev or test only on kind and CI. issuers.mode ca is refused in production, and
+# the loopback names of the catalog (localhost, 127.0.0.1, ::1) are in the certificates only with dev or test: a production name is never a loopback name.
+env: ""
+
 # Identities of people and tools (catalog `operator`: admin). Off in production: an owner-level client certificate must not sit in a cluster Secret.
 operatorCertificates: false
 
@@ -19,7 +23,7 @@ renewBefore: { default: 24h, pinned: 1080h } # pinned: renew 45 days ahead, so t
 extraDNSNames: {}
 
 issuers:
-  mode: vault                 # vault (production) | ca (kind and CI only: the CA key lives in a cluster Secret made at install time)
+  mode: vault                 # vault (production) | ca (kind and CI only, env dev or test: the CA key lives in a cluster Secret made at install time)
   # One Issuer per zone this cluster holds identities of (cert-manager Issuer, in the release namespace). The Vault PKI mount is one per zone and the Vault role
   # is one per cluster: its allowed_uri_sans and allowed_domains list only that cluster's names (README, "Vault roles"). `path` is <mount>/sign/<role>.
   vault:
