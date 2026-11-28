@@ -133,6 +133,7 @@ imagePullSecrets: {{ toJson . }}
 {{- $pkcs11 := or (eq .Values.sealer.type "pkcs11") (and (eq .Values.sealer.type "attested") (eq .Values.attested.phase "migrate")) -}}
 {{- if and $pkcs11 (not .Values.hsm.provider) }}{{ fail "hsm.provider is required for sealer.type pkcs11 (and attested.phase migrate): cloudhsm in production, softhsm for kind and development; the party refuses an empty provider in production" }}{{ end -}}
 {{- if and $pkcs11 (eq .Values.hsm.provider "softhsm") .Values.images.party.digest }}{{ fail "hsm.provider softhsm needs the -dev image referenced by tag: SoftHSM is never used with an image referenced by digest (production)" }}{{ end -}}
+{{- if and $pkcs11 (eq .Values.hsm.provider "softhsm") (not .Values.hsm.softhsm.enabled) (not (has .Values.env (list "dev" "test"))) }}{{ fail "hsm.provider softhsm is for development only: it needs hsm.softhsm.enabled or env dev or test (production refuses SoftHSM at start)" }}{{ end -}}
 {{- if and .Values.hsm.softhsm.enabled $pkcs11 (ne .Values.hsm.provider "softhsm") }}{{ fail "hsm.softhsm.enabled needs hsm.provider softhsm" }}{{ end -}}
 {{- if not (has .Values.env (list "" "dev" "test")) }}{{ fail "env must be empty (production), dev or test" }}{{ end -}}
 {{- if and (has .Values.env (list "dev" "test")) .Values.images.party.digest }}{{ fail "env dev or test with an image referenced by digest: dev and test run images referenced by tag; production runs digests and env empty" }}{{ end -}}

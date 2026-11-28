@@ -1103,6 +1103,7 @@ func TestPartyRefusals(t *testing.T) {
 		{"no HSM provider", false, "A", []string{"--set", "hsm.provider="}, "hsm.provider is required"},
 		{"unknown HSM provider", false, "A", []string{"--set", "hsm.provider=yubihsm"}, "value must be one of"},
 		{"SoftHSM provider with a digest image", false, "A", []string{"--set", "hsm.provider=softhsm"}, "hsm.provider softhsm needs the -dev image"},
+		{"SoftHSM provider in production with a tag image", false, "A", []string{"--set", "images.party.digest=", "--set", "images.party.tag=x", "--set", "hsm.provider=softhsm"}, "hsm.provider softhsm is for development only"},
 		{"kind SoftHSM without the softhsm provider", true, "A", []string{"--set", "hsm.provider=cloudhsm"}, "hsm.softhsm.enabled needs hsm.provider softhsm"},
 		{"no PKCS#11 module", false, "A", []string{"--set", "hsm.module.path="}, "hsm.module.path is required"},
 		{"module outside the volume", false, "A", []string{"--set", "hsm.module.path=/usr/lib/x.so"}, "must lie under /etc/qv/hsm/"},
