@@ -10,6 +10,7 @@ deploy/helm/	ci/kind/parties.sh	1	deploy/helm/qv-party	-	same: the kind lane
 deploy/helm/	ci/kind/signing.sh	2	deploy/helm/qv-	-	same: the kind lane
 deploy/helm/	ci/kind/smoke/upgrade.sh	1	chart=deploy/helm/qv-business	-	same: the kind lane
 deploy/helm/	ci/kind/teesim.sh	2	deploy/helm/qv-	-	same: the kind lane
+deploy/helm/	ci/kind/gate.sh	3	deploy/helm/qv-	-	same: the kind lane (AgentGate onboarding, make kind-gate)
 deploy/helm/	deploy/cloud/aws/values/render_test.py	1	repo / "deploy/helm"	-	renders the charts with helm template; run only by deploy/cloud/aws/check.sh in .github/workflows/terraform.yml
 loadtest/	Makefile	1	SCENARIO ?= loadtest/scenarios/smoke.json	e2e-evm-4	the default scenario of load-local, which load-smoke (the e2e-evm-4 job) calls
 loadtest/	Makefile	1	KIND_SCENARIO := loadtest/scenarios/evm-kind.json	-	used only by the recipe of load-kind, which no ci.yml job calls
