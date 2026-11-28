@@ -50,8 +50,33 @@ func SecretName(zone, service string) string {
 	return "qv-" + service + "-tls"
 }
 
+// The loopback names every local server entry carries for compose and kind (a client on the same machine dials localhost). They are for development only:
+// the chart puts them in a certificate only with env dev or test (ChartEntry.DevDNS, DevIPs), so production never asks its PKI for a loopback name.
 var localNames = []string{"localhost"}
 var localIPs = []string{"127.0.0.1", "::1"}
+
+// Loopback reports whether a DNS name or IP of the catalog is one of the development loopback names.
+func Loopback(name string) bool {
+	for _, l := range append(append([]string{}, localNames...), localIPs...) {
+		if name == l {
+			return true
+		}
+	}
+	return false
+}
+
+// splitLoopback splits names into the ones production uses and the loopback ones (development only), each in catalog order.
+func splitLoopback(names []string) (prod, dev []string) {
+	prod, dev = []string{}, []string{}
+	for _, n := range names {
+		if Loopback(n) {
+			dev = append(dev, n)
+		} else {
+			prod = append(prod, n)
+		}
+	}
+	return prod, dev
+}
 
 // Catalog is every service identity. Server entries carry the DNS names and IPs a client may dial (compose service names and localhost).
 //
