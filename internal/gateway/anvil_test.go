@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/eth"
+	"github.com/ws4charlie/quorum-vault/internal/chain/eth/ethtest"
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 	"github.com/ws4charlie/quorum-vault/internal/signjob"
 )
@@ -37,7 +38,7 @@ func TestSignedTransactionsMineOnAnvil(t *testing.T) {
 	if err := raw.CallContext(ctx, nil, "anvil_setBalance", h.hot, (*hexutil.Big)(big.NewInt(1e18))); err != nil {
 		t.Fatalf("fund hot address: %v", err)
 	}
-	cl, err := eth.Dial(ctx, rpcURL)
+	cl, err := ethtest.Dial(ctx, rpcURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +63,7 @@ func TestSignedTransactionsMineOnAnvil(t *testing.T) {
 			t.Fatal("digest mismatch")
 		}
 		sig := signer.Signature{R: new(big.Int).SetBytes(d.Sig[:32]), S: new(big.Int).SetBytes(d.Sig[32:])}
-		signed, err := eth.Assemble(tx, sig, h.signer.PublicKey())
+		signed, err := ethtest.Assemble(tx, sig, h.signer.PublicKey())
 		if err != nil {
 			t.Fatal(err)
 		}

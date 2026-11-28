@@ -13,7 +13,7 @@ import (
 )
 
 // MPCSigners opens one cb-mpc signer per partition whose signers entry has backend "mpc". Every hot partition of a
-// chain must have a signer, from either HSMSigners or this function; the hot address must be the key's address.
+// chain must have a signer, from either HSMSignersWithGenerations or this function; the hot address must be the key's address.
 func MPCSigners(cfg *Config) (map[string]signer.Signer, func(), error) {
 	return MPCSignersRouted(cfg, nil)
 }
@@ -29,7 +29,7 @@ func MPCSignersRouted(cfg *Config, router *mpcsigner.Router) (map[string]signer.
 	}
 	parts := make([]string, 0, len(cfg.Signers))
 	for p, sf := range cfg.Signers {
-		if sf.Backend == "mpc" && sf.Scheme != "ed25519-2of3" { // Ed25519 signers are opened by MPCMessageSigners
+		if sf.Backend == "mpc" && sf.Scheme != "ed25519-2of3" { // Ed25519 signers are opened by MPCMessageSignersRouted
 			parts = append(parts, p)
 		}
 	}
@@ -110,14 +110,10 @@ func MPCSignersRouted(cfg *Config, router *mpcsigner.Router) (map[string]signer.
 	return out, closeAll, nil
 }
 
-// MPCMessageSigners opens the Ed25519 signers of the partitions whose signers entry has scheme "ed25519-2of3" (Solana hot shards): per
+// MPCMessageSignersRouted opens the Ed25519 signers of the partitions whose signers entry has scheme "ed25519-2of3" (Solana hot shards): per
 // partition the 2-of-3 hot signer, and when the entry has a deposit section, the signer of the 2-party HD deposit key tree. Each hot signer's
-// public key must be the address its chain pins for the partition (checked here, before anything is signed).
-func MPCMessageSigners(cfg *Config) (hot map[string]signer.MessageSigner, deposit map[string]signer.MessageDeriver, closeAll func(), err error) {
-	return MPCMessageSignersRouted(cfg, nil)
-}
-
-// MPCMessageSignersRouted is MPCMessageSigners with a Router that chooses the pair of every 2-of-3 signature (nil: the legacy order).
+// public key must be the address its chain pins for the partition (checked here, before anything is signed). router chooses the pair of every
+// 2-of-3 signature (nil: the legacy order).
 func MPCMessageSignersRouted(cfg *Config, router *mpcsigner.Router) (hot map[string]signer.MessageSigner, deposit map[string]signer.MessageDeriver, closeAll func(), err error) {
 	hot, deposit = map[string]signer.MessageSigner{}, map[string]signer.MessageDeriver{}
 	var closers []func()

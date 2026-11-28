@@ -13,19 +13,6 @@ import (
 	"github.com/ws4charlie/quorum-vault/migrations"
 )
 
-// Open connects to url and pings the server.
-func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		return nil, fmt.Errorf("db: open: %w", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("db: ping: %w", err)
-	}
-	return pool, nil
-}
-
 // migrateLockID serializes concurrent Migrate calls on one database.
 const migrateLockID = 0x71760001
 

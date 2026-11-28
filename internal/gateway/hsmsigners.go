@@ -11,16 +11,8 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/signer"
 )
 
-// HSMSigners opens one signer per configured partition from the config's
-// signers section. P5 replaces this backend; the Gateway only sees signer.Signer.
-// Every hot partition in the chain configs must have a signer.
-func HSMSigners(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer, func(), error) {
-	out, _, closeAll, err := HSMSignersWithGenerations(cfg, lib, pin)
-	return out, closeAll, err
-}
-
-// HSMSignersWithGenerations is HSMSigners that also returns the builder of the signers of later generations of a shard (gensigners.go), which opens
-// their keys in the tokens this call opened.
+// HSMSignersWithGenerations opens one signer per partition whose signers entry has backend "hsm" (the Gateway only sees signer.Signer), and
+// returns the builder of the signers of later generations of a shard (gensigners.go), which opens their keys in the tokens this call opened.
 func HSMSignersWithGenerations(cfg *Config, lib *hsm.Lib, pin string) (map[string]signer.Signer, GenerationSigner, func(), error) {
 	tokens := map[string]*hsm.Token{}
 	closeAll := func() {
