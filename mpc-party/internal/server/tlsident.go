@@ -97,8 +97,6 @@ func (s *Server) certNow() tls.Certificate {
 	return s.cert
 }
 
-func aadTLS(role string) []byte { return aadLocal(role, "tls", "key") }
-
 // PutTLSKey seals the DER (PKCS#8) private key and writes it with the certificate. It refuses to overwrite an existing sealed key.
 func (s *FileStore) putTLSIdentity(ctx context.Context, keyDER, certPEM []byte) error {
 	if s.scoped == nil {

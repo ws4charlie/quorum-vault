@@ -265,8 +265,6 @@ func (r *rig) enclave(party string) *enclave {
 	return e
 }
 
-func gens(g ...uint64) []uint64 { return g }
-
 func ctxOf(party, keyset string, purpose string, g ...uint64) attest.RequestContext {
 	return attest.RequestContext{Party: party, Keyset: keyset, Generations: g, Purpose: purpose}
 }

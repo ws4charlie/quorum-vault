@@ -240,12 +240,6 @@ func (r *Rig) SetAllowlist(entries ...attest.AllowEntry) {
 	}
 }
 
-// Allow allowlists measurement pcr0 (hex) for party for a day, besides what is listed now.
-func (r *Rig) Allow(party, pcr0 string, current []attest.AllowEntry) []attest.AllowEntry {
-	now := time.Now()
-	return append(current, attest.AllowEntry{Party: party, Measurement: pcr0, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(24 * time.Hour)})
-}
-
 // Revoke removes the party's entries (the broker refuses it from now on).
 func (r *Rig) Revoke(party string) {
 	var keep []attest.AllowEntry

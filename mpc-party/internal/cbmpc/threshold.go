@@ -267,14 +267,9 @@ func verifyLowS(pub, digest, der []byte) error {
 	return nil
 }
 
-// SelfTestDigest is the fixed message every pair signs in SelfTest: a hash of a domain tag, the group public key, the
-// caller's label and the pair. It is derived from public data only, never from anything a peer sent, so a hostile
+// SelfTestDigestAlg is the fixed message every pair signs in SelfTest: a hash of a domain tag (which names the scheme), the group
+// public key, the caller's label and the pair. It is derived from public data only, never from anything a peer sent, so a hostile
 // peer cannot use the self-test as a signing oracle for a digest of its choosing.
-func SelfTestDigest(pub, label []byte, a, b Member) []byte {
-	return selfTestDigest(ECDSA, pub, label, a, b)
-}
-
-// SelfTestDigestAlg is SelfTestDigest for either scheme (the scheme is part of the hashed domain tag).
 func SelfTestDigestAlg(alg Alg, pub, label []byte, a, b Member) []byte {
 	return selfTestDigest(alg, pub, label, a, b)
 }
@@ -298,7 +293,7 @@ func selfTestDigest(alg Alg, pub, label []byte, a, b Member) []byte {
 // SelfTest proves that every pair of members can sign with these shares. All three members call it together over
 // their meshes, with the same label (bind it to the keyset id and generation, so a recorded run cannot be replayed
 // for another generation). For each pair in the fixed order (0,1), (0,2), (1,2): the lower member receives a
-// signature over SelfTestDigest and checks it; it then sends the signature to the higher member, which checks it
+// signature over SelfTestDigestAlg and checks it; it then sends the signature to the higher member, which checks it
 // with btcec against ITS OWN public key and answers with one byte, so each member returns nil only if both of its
 // pairs signed and the counterpart confirmed it.
 //
