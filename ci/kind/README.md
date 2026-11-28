@@ -41,9 +41,44 @@ Solana is **not** in the kind lane (the validator image is 778 MB and not needed
 | `upgrade` | a no-change `helm upgrade` replaces no pod; a changed value rolls the pods that read it and core stays available (a prober dials it twice a second: no refused connection) |
 | `admission` | the cluster policies (`deploy/policy/qv-policy`, installed by `policy.sh` in kind mode for the namespace `qv-ptest` only) are live: every policy has its binding and no type-checking warning; each denied example is refused by the real API server **with the policy's own message** (foreign registry, hostNetwork, hostPath, privileged, added capability, root, escalation, automounted token, mutable ConfigMap, NodePort, public LoadBalancer, externalIPs, Ingress; Pod Security `restricted` in `qv-ptest`), the controls are admitted (conforming pod, immutable ConfigMap, private LoadBalancer), and exec, port-forward and debug into a pod are refused outside the break-glass group and, for a member, reach the pod (the runtime answers the exec, the forward is ready, the ephemeral container is added). The helpers can fail: a negative control passes an admitted manifest to `deny` and requires it to register a failure (checked: a denied example made admissible turns the case red) |
 | `certs` | rotation without restart: the core's certificate Secret is deleted, cert-manager issues a new one, and the same pod (same uid, no restart) serves it about a minute later, trusted by the authority; an expired certificate refuses start: the core's own pod template with a certificate that expired two days ago (made by `tools/kindcert` from the lane's authority) exits with the service's expiry message |
+| `gate` | AgentGate onboarding (below): `gate.sh` with a Gate key made at test time; a pod in namespace `agentgate` with **only the output files** (and Gate's own key) mounted gets a token by client credentials, calls `/v2/gate/signatures` for a 0.01 USDC EIP-3009 payment (200), checks the signature against the token's EIP-712 domain and `wallet_address`, and submits `transferWithAuthorization` to anvil (it mines and pays). A second `gate.sh` changes nothing (same files, no pod replaced, same setting version; the funding tops up only what was paid). Reconcile is clean. From `agentgate` the business database is refused, from another namespace the core's port is refused. Runs after `withdraw`, `crash` and `upgrade`: it makes hot shard 0 Gate-governed. About 60 s |
 | `teesim` | **simulated enclave**; run last because it replaces the three parties (new keys). A broker per party in its own namespace (chart `qv-attest-broker`), the parties in attested mode with sealed TLS keys and no HSM, the enrolment Jobs, signed allowlists made by the lane, a DKG through party A, and a restarted party that attests again. Not shown: a signature (the gateway's config would need the new pins), isolation (the evidence is a mock) |
 
-`smoke/run.sh --pending` lists what is not done. `withdraw` and `crash` drive the pods from the host through port-forwards (`tools/kindwd`); the person tokens come from the dev realm's test-only login (`qv-e2e`, as `e2e/idp`), passwords from the gitignored work dir. kind's qv-core runs `QV_ENV=dev` (`core.env: dev` in `deploy/helm/qv-business/values-kind.yaml`) because the smoke logs in with the dev realm's e2e clients, which a production core refuses; TLS stays on everywhere (`QV_ALLOW_PLAINTEXT` is not set).
+`smoke/run.sh --pending` lists what is not done. Each case's output also goes to `QV_KIND_SMOKE_LOGS` (default `.work/<name>/smoke-logs/<case>.log`), and the full output of every failed case is printed again at the end; CI uploads these logs and `up`'s as the artifact `kind-logs` on failure. `withdraw` and `crash` drive the pods from the host through port-forwards (`tools/kindwd`); the person tokens come from the dev realm's test-only login (`qv-e2e`, as `e2e/idp`), passwords from the gitignored work dir. kind's qv-core runs `QV_ENV=dev` (`core.env: dev` in `deploy/helm/qv-business/values-kind.yaml`) because the smoke logs in with the dev realm's e2e clients, which a production core refuses; TLS stays on everywhere (`QV_ALLOW_PLAINTEXT` is not set).
+
+## AgentGate onboarding
+
+One idempotent command, after `make kind-up`, connects an AgentGate to this cluster and writes what it needs into a directory:
+
+```bash
+make kind-gate PUBKEY=gate.pub KID=gate-1 FUND=1000000 OUT=/abs/out    # NAMESPACE=agentgate by default
+"$QV_REPO/ci/kind/gate.sh" --pubkey gate.pub --kid gate-1 --namespace agentgate --fund 1000000 --out out   # from another repository
+```
+
+| Input | Meaning |
+|---|---|
+| `--pubkey` | Gate's Ed25519 public key: base64url (as `agentgate` keygen prints it), base64, hex or PEM |
+| `--kid` | its key id in the gate setting |
+| `--namespace` | where Gate runs; only this namespace gets the network access below (default `agentgate`) |
+| `--fund` | USDC base units the Gate wallet holds afterwards (a top-up, not an addition) |
+| `--out` | the output directory. Relative paths are read against the caller's directory (with `make -C`, give absolute ones). `QV_KIND_NAME` picks the cluster |
+
+It writes one file per value (the PHASE2 onboarding contract); Gate maps them 1:1 to its `AG_VAULT_*` and `AG_RPC_URL` settings:
+
+| File | Value here |
+|---|---|
+| `vault_url` | `https://qv-core.qv.svc:8443` (a Service named as the core's server certificate is) |
+| `ca.crt`, `token_ca.crt` | the business CA (it signs the core's and Keycloak's server certificates) |
+| `tls.crt`, `tls.key` | Gate's client certificate `spiffe://quorumvault/business/agentgate` (Secret `qv-agentgate-tls`) |
+| `token_url` | `https://keycloak.qv.svc:8443/realms/quorumvault/protocol/openid-connect/token` |
+| `client_id`, `client_secret` | the Keycloak client `agentgate` (client credentials only, realm role `gate` and no other); the secret is written here and nowhere else |
+| `audience` | `qv-kind`: the credential audience, the same in the core's gate section and the signed gate setting |
+| `wallet_id`, `wallet_address` | the Gate-governed wallet (made once) and its address: the lane's EVM hot shard 0, the MPC 2-of-3 key |
+| `chain_id`, `rpc_url`, `usdc_address` | the lane's chain id (`lib.sh`, Base Sepolia's), `http://anvil.qv.svc:8545`, the mock USDC with EIP-3009 (EIP-712 name `USDC`, version `2`, 6 decimals) |
+
+What it changes, all from the gitignored work dir (`.work/<name>/gate/`): the mock USDC is deployed once (reused while anvil has it) and minted up to `--fund`, each mint booked as the operator's seed; the gateway's and both cosigners' configs get USDC with x402 on hot shard 0 and two zone operators (keys made once); the gate setting (Gate's key, the wallet, fast lane 0.10 USDC per payment, 1 USDC per hour, 2 USDC per day) is signed by both operators and applied to the three guard databases with `qv-approvers`; Keycloak gets the role and the client; `qv-business` gets the gate section in the custody config and `agentgate.enabled`, `oidc.serviceClients=agentgate` by `--set` (`values-kind.yaml` is unchanged, so a plain `kind-up` stays as it was); NetworkPolicies let `--namespace` reach the core's 8443, Keycloak's 8443 and anvil's 8545, nothing else. A second run changes nothing: no second client, wallet or token, no new setting version, no pod replaced.
+
+After it, hot shard 0 is Gate-governed (every asset of it): ETH withdrawals from it need a Gate credential, so the `withdraw` and `crash` cases need a fresh cluster. `make kind-up` again puts the lane's own configs back on the zone; run `kind-gate` again after it.
 
 ## Trust bundles
 
