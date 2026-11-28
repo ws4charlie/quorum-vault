@@ -208,6 +208,7 @@ var cloudHSMProfile = profile{
 	retryFunctionFailed: true,
 }
 
+// profileFor maps the provider to its profile. "" is the SoftHSM profile, accepted only in development and tests (NewPKCS11Sealer refuses it in production).
 func profileFor(provider string) (profile, error) {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "", ProviderSoftHSM:
@@ -237,6 +238,10 @@ type PKCS11Sealer struct {
 // NewPKCS11Sealer loads the module, finds the token by label, logs in and makes sure the wrap key exists. Any problem is an
 // error: the process must not start without a working token.
 func NewPKCS11Sealer(c SealerConfig) (*PKCS11Sealer, error) {
+	if strings.TrimSpace(c.Provider) == "" && productionEnv() {
+		// An empty provider means the SoftHSM profile (process-made IV, pin_env allowed): a real HSM must be named, never guessed.
+		return nil, errors.New("sealer pkcs11: provider is required in production (QV_ENV unset, or not dev or test): cloudhsm, or softhsm for development")
+	}
 	prof, err := profileFor(c.Provider)
 	if err != nil {
 		return nil, err

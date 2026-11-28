@@ -190,7 +190,8 @@ func TestPKCS11SealerRefusesSoftHSMInProduction(t *testing.T) {
 		t.Fatal(err)
 	}
 	// pin_file: production refuses pin_env before the module is looked at (TestPKCS11PinEnvRefusedInProduction).
-	cfg := server.SealerConfig{Type: "pkcs11", Token: "qv-party-1", PinFile: pinFile}
+	// provider softhsm: production refuses an empty provider before the module is looked at (TestPKCS11EmptyProviderRefusedInProduction).
+	cfg := server.SealerConfig{Type: "pkcs11", Provider: server.ProviderSoftHSM, Token: "qv-party-1", PinFile: pinFile}
 	for _, env := range []string{"", "production", "staging"} {
 		t.Setenv("QV_ENV", env)
 		_, err := server.NewPKCS11Sealer(cfg)

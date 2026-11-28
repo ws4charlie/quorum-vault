@@ -130,6 +130,10 @@ imagePullSecrets: {{ toJson . }}
 {{- $role := include "qp.role" . -}}
 {{- if and .Values.hsm.softhsm.enabled .Values.images.party.digest }}{{ fail "hsm.softhsm.enabled needs the -dev image referenced by tag: SoftHSM is never used with an image referenced by digest (production)" }}{{ end -}}
 {{- if not (has .Values.sealer.type (list "pkcs11" "attested")) }}{{ fail "sealer.type must be pkcs11 or attested" }}{{ end -}}
+{{- $pkcs11 := or (eq .Values.sealer.type "pkcs11") (and (eq .Values.sealer.type "attested") (eq .Values.attested.phase "migrate")) -}}
+{{- if and $pkcs11 (not .Values.hsm.provider) }}{{ fail "hsm.provider is required for sealer.type pkcs11 (and attested.phase migrate): cloudhsm in production, softhsm for kind and development; the party refuses an empty provider in production" }}{{ end -}}
+{{- if and $pkcs11 (eq .Values.hsm.provider "softhsm") .Values.images.party.digest }}{{ fail "hsm.provider softhsm needs the -dev image referenced by tag: SoftHSM is never used with an image referenced by digest (production)" }}{{ end -}}
+{{- if and .Values.hsm.softhsm.enabled $pkcs11 (ne .Values.hsm.provider "softhsm") }}{{ fail "hsm.softhsm.enabled needs hsm.provider softhsm" }}{{ end -}}
 {{- if not (has .Values.env (list "" "dev" "test")) }}{{ fail "env must be empty (production), dev or test" }}{{ end -}}
 {{- if and (has .Values.env (list "dev" "test")) .Values.images.party.digest }}{{ fail "env dev or test with an image referenced by digest: dev and test run images referenced by tag; production runs digests and env empty" }}{{ end -}}
 {{- if and .Values.hsm.softhsm.enabled (eq .Values.sealer.type "attested") (ne .Values.attested.phase "migrate") }}{{ fail "hsm.softhsm.enabled with sealer.type attested is only for the one-time migration (attested.phase migrate): the attested sealer uses no HSM" }}{{ end -}}
@@ -203,7 +207,7 @@ prometheus.remote_write "out" {
 {{- define "qp.sealerBlock" -}}
 {{- $v := .Values -}}
 {{- if eq $v.sealer.type "pkcs11" -}}
-{{ dict "type" "pkcs11" "token" (include "qp.token" .) "lib" $v.hsm.module.path "pin_file" "/etc/qv/hsm-pin/pin" | toJson }}
+{{ dict "type" "pkcs11" "provider" $v.hsm.provider "token" (include "qp.token" .) "lib" $v.hsm.module.path "pin_file" "/etc/qv/hsm-pin/pin" | toJson }}
 {{- else -}}
 {{- $a := $v.attested -}}
 {{- $s := dict "type" "attested" "broker_url" $a.broker.url "broker_pins" $a.broker.pins "attester" (dict "type" $a.attester.type "ca_dir" "/etc/qv/attester-ca") -}}
@@ -228,7 +232,7 @@ prometheus.remote_write "out" {
 {{- $_ := unset $c "tls_sealed" -}}
 {{- $_ := set $c "cert_file" "/etc/qv/party-tls/tls.crt" -}}
 {{- $_ := set $c "key_file" "/etc/qv/party-tls/tls.key" -}}
-{{- $_ := set $c "sealer" (dict "type" "pkcs11" "token" (include "qp.token" .) "lib" .Values.hsm.module.path "pin_file" "/etc/qv/hsm-pin/pin") -}}
+{{- $_ := set $c "sealer" (dict "type" "pkcs11" "provider" .Values.hsm.provider "token" (include "qp.token" .) "lib" .Values.hsm.module.path "pin_file" "/etc/qv/hsm-pin/pin") -}}
 {{ $c | toPrettyJson }}
 {{- end -}}
 {{- define "qp.fromConfigName" -}}{{ printf "%s-%s" (printf "%s-from-config" (include "qp.fullname" .) | trunc 52 | trimSuffix "-") (include "qp.fromConfig" . | sha256sum | trunc 10) }}{{- end -}}

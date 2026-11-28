@@ -6,6 +6,7 @@ peers:
   b: { address: "party-b.endpoint.internal:7003", pins: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"] }
   c: { address: "party-c.endpoint.internal:7003", pins: ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"] }
 hsm:
+  provider: cloudhsm
   module:
     path: /etc/qv/hsm/libvendor-pkcs11.so
     volume: { persistentVolumeClaim: { claimName: vendor-pkcs11, readOnly: true } }

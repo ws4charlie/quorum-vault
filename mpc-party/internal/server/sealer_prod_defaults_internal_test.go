@@ -1,6 +1,8 @@
 package server
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -11,7 +13,7 @@ func TestPKCS11PinEnvRefusedInProduction(t *testing.T) {
 	t.Setenv("QV_S4_PIN", "1234")
 	for _, env := range []string{"", "production", "staging", " Prod "} {
 		t.Setenv("QV_ENV", env)
-		for _, prov := range []string{"", ProviderSoftHSM, ProviderCloudHSM} {
+		for _, prov := range []string{ProviderSoftHSM, ProviderCloudHSM} { // "" is refused first (TestPKCS11EmptyProviderRefusedInProduction)
 			_, err := NewPKCS11Sealer(SealerConfig{Type: "pkcs11", Provider: prov, Token: "t", PinEnv: "QV_S4_PIN", Lib: "/nonexistent"})
 			if err == nil || !strings.Contains(err.Error(), "pin_env is refused in production") {
 				t.Errorf("QV_ENV=%q provider=%q: want the pin_env refusal, got %v", env, prov, err)
@@ -62,4 +64,46 @@ func TestKMSNitroWithoutVsockRefusedInProduction(t *testing.T) {
 			t.Errorf("QV_ENV=%s: the test setup (network KMS, AWS_* credentials) must still be accepted: %v", env, err)
 		}
 	}
+}
+
+// S4 fix1: in production the provider must be named; an empty one used to select the SoftHSM profile silently (process-made IV, pin_env) for any
+// module that does not call itself SoftHSM. Development and tests keep the empty default.
+func TestPKCS11EmptyProviderRefusedInProduction(t *testing.T) {
+	pin := writePINFile(t, "1234")
+	for _, env := range []string{"", "production", "staging"} {
+		t.Setenv("QV_ENV", env)
+		for _, prov := range []string{"", "  "} {
+			_, err := NewPKCS11Sealer(SealerConfig{Type: "pkcs11", Provider: prov, Token: "t", PinFile: pin, Lib: "/nonexistent"})
+			if err == nil || !strings.Contains(err.Error(), "provider is required in production") {
+				t.Errorf("QV_ENV=%q provider=%q: want the provider refusal, got %v", env, prov, err)
+			}
+		}
+		// Named providers pass this check (and fail later, on the missing library).
+		for _, prov := range []string{ProviderSoftHSM, ProviderCloudHSM} {
+			p := pin
+			if prov == ProviderCloudHSM {
+				p = writePINFile(t, "user:pw")
+			}
+			_, err := NewPKCS11Sealer(SealerConfig{Type: "pkcs11", Provider: prov, Token: "t", PinFile: p, Lib: "/nonexistent"})
+			if err == nil || !strings.Contains(err.Error(), "library") {
+				t.Errorf("QV_ENV=%q provider=%q: want the library error, got %v", env, prov, err)
+			}
+		}
+	}
+	for _, env := range []string{"dev", "test"} {
+		t.Setenv("QV_ENV", env)
+		_, err := NewPKCS11Sealer(SealerConfig{Type: "pkcs11", Token: "t", PinFile: pin, Lib: "/nonexistent"})
+		if err == nil || !strings.Contains(err.Error(), "library") {
+			t.Errorf("QV_ENV=%s: the empty provider (SoftHSM profile) must still be accepted: %v", env, err)
+		}
+	}
+}
+
+func writePINFile(t *testing.T, pin string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "pin")
+	if err := os.WriteFile(p, []byte(pin), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

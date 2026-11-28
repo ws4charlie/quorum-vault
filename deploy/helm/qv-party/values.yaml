@@ -89,6 +89,9 @@ attested:
     timeoutSeconds: 3600
     resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { cpu: "2", memory: 1Gi } }
 hsm:
+  # REQUIRED for sealer.type pkcs11 (and attested.phase migrate): the PKCS#11 profile, cloudhsm (production) or softhsm (kind and development only).
+  # No default: the party refuses an empty provider in production, and the chart refuses softhsm with an image referenced by digest.
+  provider: ""
   token: ""                             # PKCS#11 token label; empty = qv-party-1, -2, -3 for A, B, C
   # Production: the vendor's PKCS#11 module comes from a volume you name (the image has none). It is mounted read-only at /etc/qv/hsm; module.path must lie under it.
   module:
