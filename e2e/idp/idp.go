@@ -7,8 +7,9 @@
 //     what most groups use. Simulated: nobody logged in, and the token says acr=aal3 and auth_time=now because the harness says so.
 //   - Real Keycloak (QV_E2E_KEYCLOAK_URL set, started by `make keycloak-up`): tokens come from the dev realm in deploy/keycloak with a
 //     scripted login, and qv-core fetches the real JWKS. Simulated: the test client `qv-e2e` skips the passkey step, and a mapper sets
-//     acr=aal3 on its tokens. That client exists only in the dev realm file, and a production core refuses the dev realm's issuer
-//     (it is http) and the QV_ENV that goes with it.
+//     acr=aal3 on its tokens. That client and the other "TEST ONLY" clients of the dev realm are listed in auth.E2EClients: a production
+//     core (QV_ENV unset) refuses a configuration that names one and any token whose azp (or client_id) is one, whatever issuer signed
+//     it. The dev realm is served over https, so its issuer alone would not be refused.
 package idp
 
 import (
