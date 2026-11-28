@@ -29,7 +29,7 @@ func TestApprovalOnPassesEveryCheck(t *testing.T) {
 	for _, vf := range valuesFiles {
 		t.Run(vf.file, func(t *testing.T) {
 			objs := render(t, vf.file, approvalOn...)
-			for _, m := range append(CheckPolicy(objs, opts(vf.requireDigest)), CheckMigration(objs, vf.enableLogin)...) {
+			for _, m := range policyFindings(objs, vf.file, vf.requireDigest, vf.enableLogin) {
 				t.Error(m)
 			}
 			for _, m := range CheckContract(objs, c) {

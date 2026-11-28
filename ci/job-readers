@@ -37,3 +37,4 @@ e2e/mpcstack/prebuilt_test.go	7	ci/e2e-prebuild.sh	reads ci/e2e-prebuild.sh (its
 ci/kind/tools/kindcfg/chainid_test.go	1	ci/kind/*,loadtest/kind/*	sources ci/kind/lib.sh, renders ci/kind/deps/chains.yaml, and walks ci/kind and loadtest/kind for a second chain id
 internal/chain/evm/receiptfee_test.go	1	internal/*.go,cmd/*.go	walks every non-test .go file under internal/ and cmd/ (the paid fee is computed only in receiptfee.go)
 internal/custody/evmreader_fee_test.go	1	internal/chain/evm/testdata/*	a real Base Sepolia receipt
+internal/auth/e2eclients_test.go	1	deploy/keycloak/quorumvault-realm.json	the dev realm: every test client there must be in auth.E2EClients

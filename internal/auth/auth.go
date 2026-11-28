@@ -66,6 +66,22 @@ func EnvironmentFromEnv() Environment {
 	return Production
 }
 
+// E2EClients are the OAuth client ids of the dev realm's test clients (deploy/keycloak/quorumvault-realm.json, the clients named
+// "TEST ONLY"). They skip the passkey and a mapper hard-codes acr=aal3 on their tokens, so a token of one of them proves no step-up.
+// Production refuses them twice: New refuses a configuration that names one (audience or service client), and Verify refuses a token
+// whose azp or client_id is one (either claim, case and surrounding space ignored), whatever issuer signed it. A test in this package fails when the realm file gains a test
+// client that is missing here.
+var E2EClients = []string{"qv-e2e", "qv-approve-e2e", "qv-approval-e2e"}
+
+func isE2EClient(id string) bool {
+	for _, c := range E2EClients {
+		if strings.EqualFold(strings.TrimSpace(id), c) {
+			return true
+		}
+	}
+	return false
+}
+
 // Config configures the verifier.
 type Config struct {
 	Issuer   string // exact `iss` of the tokens; its /.well-known/openid-configuration names the JWKS when JWKSURL is empty
@@ -172,7 +188,8 @@ type Authenticator struct {
 
 // New checks the configuration against the environment and returns an Authenticator.
 //
-//   - Production (QV_ENV unset or anything but dev/test): the issuer must be an https URL, the dev header and static keys are refused.
+//   - Production (QV_ENV unset or anything but dev/test): the issuer must be an https URL, the dev header and static keys are refused,
+//     and so is any E2EClients id as audience or service client.
 //   - devActorHeader accepts "X-Actor" with nothing verified. It needs QV_ENV=dev or test.
 func New(cfg Config, env Environment, devActorHeader bool) (*Authenticator, error) {
 	if env != Dev && env != Test {
@@ -197,6 +214,13 @@ func New(cfg Config, env Environment, devActorHeader bool) (*Authenticator, erro
 		}
 		if cfg.Audience == "" {
 			return nil, errors.New("auth: an audience is required")
+		}
+	}
+	if env == Production {
+		for _, id := range append([]string{cfg.Audience}, cfg.ServiceClients...) {
+			if isE2EClient(id) {
+				return nil, fmt.Errorf("auth: %q is a test client of the dev realm (no passkey, hard-coded acr) and is refused in production", id)
+			}
 		}
 	}
 	if cfg.RolesClaim == "" {
