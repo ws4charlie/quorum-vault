@@ -1,6 +1,7 @@
 # qv-party, role C, in the party-c cluster (roots/party-c), namespace qv-party-c. The guard database (CloudNativePG cluster qv-guard) is in the SAME namespace.
 # Every endpoint has one interface per subnet: list ALL of them. Three zones shown; drop the .2 lines with two zones.
 role: C
+hsm: { provider: cloudhsm }                           # the party's own CloudHSM cluster (modules/hsm); module.path and module.volume: your vendor-module volume
 persistence:
   storageClassName: qv-gp3-encrypted                  # kmsKeyId = <party-c.kms_keys.ebs>
 service:

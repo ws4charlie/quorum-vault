@@ -1,5 +1,6 @@
 # qv-party, role A, in the signing-core cluster (namespace qv-signing). A dials B and C through endpoints of this VPC (all interfaces, one per subnet).
 role: A
+hsm: { provider: cloudhsm }                           # the party's own CloudHSM cluster (modules/hsm); module.path and module.volume: your vendor-module volume
 persistence:
   storageClassName: qv-gp3-encrypted                  # StorageClass with kmsKeyId = <signing-core.kms_keys.ebs>, volumeBindingMode WaitForFirstConsumer
 serviceAccount: { annotations: {} }                   # the party needs no AWS API: the HSM is reached on the network

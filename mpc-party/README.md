@@ -176,7 +176,7 @@ go build -o /tmp/mpc-party ./cmd/mpc-party                       # production bu
 ```
 
 Make certificates (any tool; the tests generate P-256 self-signed ones) for party A, party B and one caller, and compute
-pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Create the SoftHSM tokens with `../scripts/setup-softhsm.sh` (A: `qv-party-1`, B: `qv-party-2`) and export the PIN (`QV_PARTY_PIN`, or use `pin_file`, mode 0400). (The insecure test sealer exists only in `-tags devauth` builds.)
+pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Create the SoftHSM tokens with `../scripts/setup-softhsm.sh` (A: `qv-party-1`, B: `qv-party-2`) and write the PIN to a file, mode 0400 (`pin_file`; `pin_env` is accepted only with `QV_ENV=dev` or `test`, and SoftHSM needs `QV_ENV=dev` anyway). (The insecure test sealer exists only in `-tags devauth` builds.)
 `b.json`:
 
 ```json
@@ -186,7 +186,7 @@ pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Create the SoftHSM toke
   "peer_pins": ["<sha256 of a.crt>"], "caller_pins": ["<sha256 of caller.crt>"],
   "data_dir": "data-b",
   "admin_keys": ["<64 hex chars: an operator's Ed25519 public key>"],
-  "sealer": {"type": "pkcs11", "token": "qv-party-2", "pin_env": "QV_PARTY_PIN"},
+  "sealer": {"type": "pkcs11", "provider": "softhsm", "token": "qv-party-2", "pin_file": "pin-b"},
   "authorizer": {"type": "dev-allow-all", "accept_risk": "I UNDERSTAND THIS PARTY SIGNS ANYTHING WITHOUT POLICY CHECKS"}
 }
 ```
@@ -195,6 +195,7 @@ pins: `openssl x509 -in a.crt -outform DER | sha256sum`. Create the SoftHSM toke
 `"peer_address": "127.0.0.1:7003"`, `peer_pins` = pin of `b.crt`. Start B, then A, each with `-config`:
 
 ```bash
+export QV_ENV=dev   # SoftHSM is refused in production
 /tmp/mpc-party-dev -config b.json &  /tmp/mpc-party-dev -config a.json &
 ```
 
@@ -245,7 +246,7 @@ duration, outcome, kind); no secrets.
 
 ## Sealing, generations, backup
 
-- **Sealer** `pkcs11` (`token`, optional `lib`, and `pin_env` or `pin_file`): AES-256-GCM in the party's own token; AAD binds role,
+- **Sealer** `pkcs11` (`provider`, `token`, optional `lib`, and `pin_file`; in production `provider` is required and `pin_env` is refused): AES-256-GCM in the party's own token; AAD binds role,
   keyset id, generation. Missing token / wrong PIN: the process refuses to start. HSM error at run time: `UNAVAILABLE`.
 - **Generations and reconciliation**: DKG and Refresh are a durable two-phase commit; after a restart every keyset is reconciled
   with the peer and proven by a self-test before it serves (until then `UNAVAILABLE`).

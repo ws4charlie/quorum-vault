@@ -359,7 +359,7 @@ func checkPartyConfig(role string, c map[string]any) []string {
 	sealer, _ := c["sealer"].(map[string]any)
 	auth, _ := c["authorizer"].(map[string]any)
 	for k := range sealer {
-		if !map[string]bool{"type": true, "token": true, "lib": true, "pin_env": true, "pin_file": true, "key_file": true}[k] {
+		if !map[string]bool{"type": true, "provider": true, "token": true, "lib": true, "pin_env": true, "pin_file": true, "key_file": true}[k] {
 			add("sealer: unknown field %q", k)
 		}
 	}
@@ -369,6 +369,9 @@ func checkPartyConfig(role string, c map[string]any) []string {
 		}
 		if str(sealer["token"]) == "" || str(sealer["lib"]) == "" {
 			add("sealer: token and lib are required")
+		}
+		if p := str(sealer["provider"]); p != "cloudhsm" && p != "softhsm" {
+			add("sealer: provider %q: want cloudhsm or softhsm (the party refuses an empty provider in production)", p)
 		}
 	}
 	if str(sealer["type"]) == "insecure-static-key-for-tests" || str(auth["type"]) == "dev-allow-all" || str(auth["type"]) == "deny-all" {
@@ -731,6 +734,9 @@ func checkParty(objs []Obj, role string, kind bool) []string {
 		if soft != nil {
 			add("production render has the SoftHSM init container")
 		}
+		if s, _ := cfg["sealer"].(map[string]any); str(s["type"]) == "pkcs11" && str(s["provider"]) != "cloudhsm" {
+			add("production render: sealer.provider is %q, want cloudhsm", str(s["provider"]))
+		}
 		for _, o := range objs {
 			low := strings.ToLower(o.Raw)
 			if strings.Contains(low, "softhsm") || strings.Contains(o.Raw, "QV_ENV") || regexp.MustCompile(`-dev(@|:|")`).MatchString(o.Raw) {
@@ -981,6 +987,8 @@ func TestPartyChecksCatch(t *testing.T) {
 		{"PIN from a Secret env", "A", false, `- { name: QV_HEALTH_LISTEN, value: "0.0.0.0:9100" }`, `- { name: QV_HEALTH_LISTEN, value: "0.0.0.0:9100" }` + "\n            - { name: HSM_PIN, valueFrom: { secretKeyRef: { name: x, key: y } } }", "the PIN is a file from a Secret", false},
 		{"PIN in the config", "A", false, `"pin_file": "/etc/qv/hsm-pin/pin"`, `"pin": "1234"`, "unknown field", false},
 		{"PIN in an environment variable of the config", "A", false, `"pin_file": "/etc/qv/hsm-pin/pin"`, `"pin_env": "QV_PARTY_PIN"`, "never pin_env", false},
+		{"no provider in the config", "A", false, `"provider": "cloudhsm",`, ``, "want cloudhsm or softhsm", false},
+		{"provider softhsm in production", "A", false, `"provider": "cloudhsm"`, `"provider": "softhsm"`, "want cloudhsm", false},
 		{"PIN file not on the Secret", "A", false, `"pin_file": "/etc/qv/hsm-pin/pin"`, `"pin_file": "/tmp/pin"`, "sealer.pin_file", false},
 		{"unknown config field", "A", false, `"role": "A"`, `"role": "A",` + "\n    \"skip_checks\": true", "unknown field", false},
 		{"role mismatch", "B", false, `"role": "B"`, `"role": "A"`, "the release is", false},
@@ -1092,6 +1100,11 @@ func TestPartyRefusals(t *testing.T) {
 		{"SoftHSM with a digest image", false, "A", []string{"--set", "hsm.softhsm.enabled=true"}, "SoftHSM is never used with an image referenced by digest"},
 		{"attested sealer without a broker", false, "A", []string{"--set", "sealer.type=attested"}, "attested.broker.url is required"},
 		{"the former attestBroker switch", false, "A", []string{"--set", "attestBroker.enabled=true"}, "additional properties 'attestBroker' not allowed"},
+		{"no HSM provider", false, "A", []string{"--set", "hsm.provider="}, "hsm.provider is required"},
+		{"unknown HSM provider", false, "A", []string{"--set", "hsm.provider=yubihsm"}, "value must be one of"},
+		{"SoftHSM provider with a digest image", false, "A", []string{"--set", "hsm.provider=softhsm"}, "hsm.provider softhsm needs the -dev image"},
+		{"SoftHSM provider in production with a tag image", false, "A", []string{"--set", "images.party.digest=", "--set", "images.party.tag=x", "--set", "hsm.provider=softhsm"}, "hsm.provider softhsm is for development only"},
+		{"kind SoftHSM without the softhsm provider", true, "A", []string{"--set", "hsm.provider=cloudhsm"}, "hsm.softhsm.enabled needs hsm.provider softhsm"},
 		{"no PKCS#11 module", false, "A", []string{"--set", "hsm.module.path="}, "hsm.module.path is required"},
 		{"module outside the volume", false, "A", []string{"--set", "hsm.module.path=/usr/lib/x.so"}, "must lie under /etc/qv/hsm/"},
 		{"load balancer without annotations", false, "B", []string{"--set", "service.peer.type=LoadBalancer"}, "internal-load-balancer annotations"},

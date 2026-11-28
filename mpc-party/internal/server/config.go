@@ -79,7 +79,8 @@ type SealerConfig struct {
 	// never in this file: PinEnv names an environment variable, or PinFile a file readable only by its owner.
 	Token string `json:"token"`
 	Lib   string `json:"lib"`
-	// Provider selects the behaviour set for the module: "softhsm" (default) or "cloudhsm" (AWS CloudHSM: HSM-made IV, size limit, "user:password" PIN from pin_file only).
+	// Provider selects the behaviour set for the module: "cloudhsm" (AWS CloudHSM: HSM-made IV, size limit, "user:password" PIN) or "softhsm". Required in
+	// production (QV_ENV unset, or not dev or test); empty means softhsm only with QV_ENV=dev or test. Production also refuses pin_env: the PIN comes from pin_file.
 	Provider string `json:"provider"`
 	// WrapKeyLabel is the label of the wrap key in the token that NEW envelopes are sealed under (default "qv-share-wrap"). Envelopes name the key they
 	// were sealed under, so shares sealed under another label still open while that key exists. `mpc-party reseal` moves a party's shares to a new
