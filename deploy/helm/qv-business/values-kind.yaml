@@ -20,6 +20,7 @@ archive:
   tls: { secretName: qv-archiver-tls }
 core:
   replicas: 1
+  env: dev                       # QV_ENV=dev: the smoke logs in with the dev realm's test clients (qv-e2e), which a production core refuses
   resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: "1", memory: 512Mi } }
 worker:
   replicas: 1

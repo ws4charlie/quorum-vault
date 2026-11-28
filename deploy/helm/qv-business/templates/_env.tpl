@@ -1,5 +1,11 @@
 {{/* The data of each environment ConfigMap, one template per component: the ConfigMap and the Deployment that reads it both take the name from the content. */}}
 {{- define "qv.env.core" -}}
+{{- $env := default "" .Values.core.env -}}
+{{- if not (has $env (list "" "dev" "test")) }}{{ fail "core.env must be empty (production), dev or test" }}{{ end -}}
+{{- if and $env .Values.images.core.digest }}{{ fail "core.env dev or test with an image referenced by digest: dev and test run images referenced by tag; production runs digests and core.env empty" }}{{ end -}}
+{{- with $env }}
+QV_ENV: {{ . | quote }}
+{{- end }}
 QV_HTTP_ADDR: {{ printf "0.0.0.0:%d" (int .Values.core.port) | quote }}
 DATABASE_URL: {{ include "qv.dsn" (dict "ctx" . "role" "qv_core" "dir" "/etc/qv/tls") | quote }}
 QV_TEMPORAL_ADDR: {{ .Values.temporal.address | quote }}

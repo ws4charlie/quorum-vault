@@ -41,7 +41,7 @@
     "core": {
       "type": "object",
       "required": ["replicas", "port", "resources", "probes"],
-      "properties": { "replicas": { "type": "integer", "minimum": 1 }, "resources": { "$ref": "#/definitions/resources" }, "probes": { "$ref": "#/definitions/probes" } }
+      "properties": { "replicas": { "type": "integer", "minimum": 1 }, "resources": { "$ref": "#/definitions/resources" }, "probes": { "$ref": "#/definitions/probes" }, "env": { "enum": ["", "dev", "test"] } }
     },
     "worker": {
       "type": "object",
