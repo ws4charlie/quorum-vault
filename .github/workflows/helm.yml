@@ -1,7 +1,7 @@
 name: helm
 
 # Checks the business-zone chart (deploy/helm/qv-business): lint, render for production and kind values, Kubernetes schema validation, the policy test and the
-# image-contract test (ci/helm). No cluster is created here. Tool versions are pinned and their downloads are checked against SHA-256 values written below.
+# image-contract test (ci/helm), and the image pins of the kind lane (ci/kind/check-pins.sh). No cluster is created here. Tool versions are pinned and their downloads are checked against SHA-256 values written below.
 on:
   pull_request:
     paths:
@@ -18,6 +18,7 @@ on:
       - "deploy/images/verify-release.sh"    # and the verifier
       - "deploy/images/Dockerfile"
       - ".github/workflows/helm.yml"
+      - "ci/kind/**"                         # the kind lane's image pins (ci/kind/check-pins.sh)
   workflow_dispatch:
 
 permissions:
@@ -57,5 +58,7 @@ jobs:
           tar -xzf kubeconform-linux-amd64.tar.gz kubeconform
           mv kubeconform "$RUNNER_TEMP/tools/bin/kubeconform"
           echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+      - name: Kind lane image pins
+        run: ci/kind/check-pins.sh
       - name: Lint, render, validate, policy and contract tests
         run: ci/helm/check.sh
