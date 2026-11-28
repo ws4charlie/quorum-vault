@@ -29,6 +29,9 @@ grep -rqs "$(cat "$d/out/client_secret")" "$QV_KIND_ROOT" --include='*.yaml' --i
 
 echo "-- pay from a pod in $GNS with only the output files"
 CGO_ENABLED=0 GOOS=linux GOARCH="$(arch)" go build -o "$d/kindgatepay" ./ci/kind/tools/kindgatepay || bad "build kindgatepay"
+# a pod of an earlier run may still be terminating (its exit trap does not wait): an apply would land on it, with that run's key mounted
+kn "$GNS" delete pod "$POD" --ignore-not-found --wait=true --timeout=120s > /dev/null
+kn "$GNS" delete secret kind-gate-out kind-gate-key --ignore-not-found > /dev/null
 kn "$GNS" create secret generic kind-gate-out --from-file="$d/out" > /dev/null
 kn "$GNS" create secret generic kind-gate-key --from-file=gate.key="$d/key/gate.key" > /dev/null
 jq -n --arg ns "$GNS" --arg n "$POD" --arg img "$img" '{apiVersion:"v1",kind:"Pod",metadata:{name:$n,namespace:$ns,labels:{app:"kind-gate-smoke"}},
