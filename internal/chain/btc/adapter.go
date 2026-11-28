@@ -158,7 +158,7 @@ func (a *Adapter) DeriveDepositAddress(_ context.Context, customerID string, ind
 
 // DepositIdentity is what the keyset registry records of the chain's deposit key tree at generation 1: the account xpub (the identity the addresses derive
 // from) and the account's compressed public key. The hot shard addresses derive from the same account (branch 1), so the registry's deposit-tree entry and its
-// hot shard entries name one key until the hot shards get their own (research/Key-replacement.md D1).
+// hot shard entries name one key until the hot shards get their own (docs/key-replacement.md).
 func DepositIdentity(network, accountXpub string) (identity string, pub []byte, err error) {
 	acct, err := NewAccount(network, accountXpub)
 	if err != nil {

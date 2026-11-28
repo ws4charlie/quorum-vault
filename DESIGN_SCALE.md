@@ -1,5 +1,9 @@
 # Scaling quorum-vault to a million wallets
 
+> **Snapshot of 2026-11-05.** Parts of this note are out of date: the signer is now 2-of-3 (parties A, B and C), a cold tier exists
+> ([Tiers](docs/tiers.md), `cmd/qv-cold`), and the [P4] numbers have been measured in [the local load test](docs/measurements/load-local.md).
+> For the current design read the [README](README.md) and [docs/](docs/); this note is kept for its scaling arithmetic.
+
 This note takes the miniature in this repo (a custody core on one Postgres,
 SoftHSM tokens, and a two-party MPC signer: `mpc-party` A and B with a
 cosigner next to B) and works out what changes at 1M wallets. Each section gives a recommendation, the alternatives, and the

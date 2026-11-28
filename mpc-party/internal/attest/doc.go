@@ -9,7 +9,7 @@
 // or about AWS's own chain and revocation handling. The production build contains neither the mock attester nor any test root
 // (TestProductionBuildHasNoMock).
 //
-// Nothing calls this package yet: the attestation broker and the attested sealer come later (research/TEE.md, tasks T2 and T3).
+// Nothing calls this package yet: the attestation broker and the attested sealer come later (docs/enclaves.md).
 //
 // References (cited again next to each rule in nitro.go):
 //   - [AWS-DOC]  https://docs.aws.amazon.com/enclaves/latest/user/verify-root.html  (attestation document, validation, certificate chain)

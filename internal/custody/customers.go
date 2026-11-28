@@ -62,7 +62,7 @@ type DepositAddress struct {
 	Kind     string `json:"kind"`
 	// Generation is the generation of the deposit key tree the address derives from (Bitcoin and Solana; 0, and absent, on EVM, whose forwarder
 	// addresses come from no key). Older lists the customer's addresses of earlier generations that are still watched: a deposit to one is credited as
-	// ever, and the caller should ask the customer to move to the address above (research/Key-replacement.md D5).
+	// ever, and the caller should ask the customer to move to the address above (docs/key-replacement.md, "What a customer sees").
 	Generation int            `json:"generation,omitempty"`
 	Older      []OlderAddress `json:"older_addresses,omitempty"`
 }

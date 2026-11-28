@@ -94,7 +94,7 @@ Every component (core, worker, relay, archiver) runs the health listener of PR #
 | Redpanda | mTLS on the Kafka listener, principal mapping rule from the certificate's CN; ACLs by name (relay writes the outbox topics and audit heads; archiver reads audit heads in its group; the signing link names publish heads only); the relay creates its topics (the ACLs allow it) | [`deploy/redpanda`](../../redpanda) |
 | Temporal | the frontend reachable only through the **name gate** that admits the certificate names `worker`, `core`, `admin`; the namespace in `temporal.namespace` | [`deploy/temporal-gate`](../../temporal-gate) |
 | Audit bucket | an S3 bucket with Object Lock in COMPLIANCE mode and default retention of at least `archive.retention`, in a separate account, write-only for the archiver | `docs/runbooks/audit-archive.md` |
-| cert-manager (task D5) | Secrets `qv-core-tls`, `qv-worker-tls`, `qv-relay-tls`, `qv-archiver-tls`, `qv-admin-tls` with `tls.crt`, `tls.key`, `ca.crt`; certificate names as in `internal/pki/catalog.go` | `docs/runbooks/certificates.md` |
+| cert-manager (task D5) | Secrets `qv-core-tls`, `qv-worker-tls`, `qv-relay-tls`, `qv-archiver-tls`, `qv-migrator-tls` with `tls.crt`, `tls.key`, `ca.crt`; certificate names as in `internal/pki/catalog.go` | `docs/runbooks/certificates.md` |
 | Operator-made Secrets | the custody config, the auto-approver seed, archive keys if used | n/a |
 
 ## Known limits
@@ -102,5 +102,5 @@ Every component (core, worker, relay, archiver) runs the health listener of PR #
 - Hook resources (the migration job's service account and network policies) are not removed by `helm uninstall`.
 - Default egress to the IdP, chain nodes and archive store is "public addresses on 443"; narrow it per deployment (NetworkPolicy has no names).
 
-- Nothing here was installed on a cluster (the kind lane is task D8). The tests prove the manifests follow the rules and the image contract, not that the pods start.
+- The kind lane (`ci/kind/`, `make kind-up`; the kind workflow in CI) installs this chart and runs its smoke cases against the pods.
 - Same logic in kind and production: only the values differ (images by tag, replica counts, requests, the dependency peers, the ingress host).

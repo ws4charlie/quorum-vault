@@ -35,7 +35,7 @@ The endpoint services need load balancers that the charts create, so each root i
 | 5 | `roots/business`, `roots/party-b`, `roots/party-c` | set `nlb_services` to the `namespace/service` of the `LoadBalancer` Services the charts made, apply. Output `endpoint_services` |
 | 6 | `roots/signing-core`, `roots/party-b`, `roots/party-c` | copy the service names into `endpoint_service_names` (path id → name), apply. This creates the consumer endpoints, which send connection requests (output `endpoint_ips`) |
 | 7 | the provider's account | accept each pending request (`aws ec2 describe-vpc-endpoint-connections`, then `accept-vpc-endpoint-connections`): a person reads the consumer's account number first. Until accepted, the endpoint stays `pendingAcceptance` and nothing connects |
-| 8 | charts | put **every** endpoint address (one per zone) and the HSM addresses into the NetworkPolicy values (`values/*.yaml`; the test `values/render_test.py` shows the shape), upgrade |
+| 8 | charts | put **every** endpoint address (one per zone) and the HSM addresses into the NetworkPolicy values (`values/*.yaml`; the test `deploy/cloud/aws/values/render_test.py` shows the shape), upgrade |
 | 9 | party accounts, only if `enable_cloudhsm` | initialise the CloudHSM by hand (cluster certificate, crypto officer, crypto user for the sealer); the PIN goes into Secrets Manager under `qv/<domain>/`, never into Terraform |
 
 **Reaching a private cluster.** Set `enable_ops_host = true` and apply. An operator starts a Session Manager port forward to the cluster endpoint
@@ -83,14 +83,14 @@ Order matters: nothing may be deleted while something still uses it.
 ## 6. What is still unproven
 
 - Nothing has been applied. Every resource argument was checked by the provider's schema (`validate`) and by a mocked test, not by AWS. Expect small errors on the first apply.
-- The load balancer controller's policy is a hand-made subset of the upstream one: compare it with the upstream file of the version you install ([`policies/README.md`](../../deploy/cloud/aws/modules/irsa/policies/README.md)).
+- The load balancer controller's policy is a hand-made subset of the upstream one: compare it with the upstream file of the version you install ([`deploy/cloud/aws/modules/irsa/policies/README.md`](../../deploy/cloud/aws/modules/irsa/policies/README.md)).
 - Kafka through one network load balancer needs one listener per broker and advertised addresses that match the endpoint names (ports 9092-9094 are assumed): the Redpanda values must be set to match. Not tried.
 - NetworkPolicy peers: PrivateLink traffic reaches pods from the NLB's addresses (private subnets), not from the other VPC. The values files use subnet ranges for the business side.
 - ECR pull-through cache with digests and Kyverno image-signature checks: the signatures live next to the images on ghcr.io; whether the cache serves them to the admission check is unconfirmed. `qv-policy`'s registry value must name the ECR host.
 - The chart default `network.archive` allows public addresses on 443 (the S3 gateway endpoint carries that traffic inside AWS); narrow it with the S3 prefix list if you can.
 - EKS add-on versions are the cluster's defaults; the Kubernetes version default is 1.32 (the charts need 1.30 or later). Check what EKS offers when you apply.
 - The control-plane (API-server audit) logs stay in a CloudWatch log group of the workload account. They are not yet copied to the audit account.
-- CloudHSM: the sealer change (D12) is not merged; the HSM addresses and ports are right for the client library, the rest is by hand and untested.
+- CloudHSM: the sealer (D12) is merged but has not run on CloudHSM hardware ([CloudHSM sealer](cloudhsm-sealer.md)); the HSM addresses and ports are right for the client library, the rest is by hand and untested.
 
 ## 7. Check at first apply
 
@@ -100,16 +100,16 @@ Claims about AWS behaviour that no account has shown yet. Each has the documenta
 |---|---|---|
 | EBS CSI role: deletes only volumes and snapshots with the driver's ownership tag; tags added only at creation | [AmazonEBSCSIDriverPolicy v15](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonEBSCSIDriverPolicy.html): the role copies its statements, drops `CopyVolumes`, `LockSnapshot`, `EnableFastSnapshotRestores`, and limits `DeleteTags` to tagged resources | That the driver version you install creates volumes with `ebs.csi.aws.com/cluster` or `CSIVolumeName`, and works without the dropped actions |
 | ECR repository creation role needed for a template with a customer key | [repository creation templates](https://docs.aws.amazon.com/AmazonECR/latest/userguide/repository-creation-templates.html): "must be provided when using repository tags and/or KMS" | The trust principal (`ecr.amazonaws.com`) and the role's permissions: the pages read state neither. Expect to adjust on the first failed pull |
-| Load balancer controller policy covers NLBs, including tagging a new security group | upstream `iam_policy.json` (main branch, no version in the file); see `modules/irsa/policies/README.md` | The version you install; run one `LoadBalancer` Service and read the controller log for denied calls |
+| Load balancer controller policy covers NLBs, including tagging a new security group | upstream `iam_policy.json` (main branch, no version in the file); see `deploy/cloud/aws/modules/irsa/policies/README.md` | The version you install; run one `LoadBalancer` Service and read the controller log for denied calls |
 | Kafka through one NLB with a listener per broker | none read | Redpanda's advertised addresses; and the two chart gaps below |
 | ECR cache serves the signatures that Kyverno verifies | none read | an image pull with admission on |
 | PrivateLink: the target sees NLB addresses | [PrivateLink concepts](https://docs.aws.amazon.com/vpc/latest/privatelink/concepts.html) not re-read for this round | the source addresses in the pod's connection log; the NetworkPolicy values rest on it |
 | EKS API certificate names the endpoint host | [EKS cluster endpoint access](https://docs.aws.amazon.com/eks/latest/userguide/cluster-endpoint.html) not re-read for this round | `kubectl` through the port forward with `--tls-server-name` |
 
-**Chart changes the lead must schedule** (found by `values/render_test.py`, listed in its `KNOWN_GAPS`; the test fails when one closes): `qv-signing-core` `network.kafka` and `qv-business` `network.kafka`
+**Chart changes the lead must schedule** (found by `deploy/cloud/aws/values/render_test.py`, listed in its `KNOWN_GAPS`; the test fails when one closes): `qv-signing-core` `network.kafka` and `qv-business` `network.kafka`
 take one port, but Redpanda brokers listen on 9092, 9093 and 9094 behind the endpoint (a list `ports` is needed in both); until then only the first broker is reachable.
 
 ## 8. Follow-up: attestation brokers (not built)
 
-The party chart now has an attested mode and there is a broker chart (`qv-attest-broker`). The broker placement decision (`reports/Broker-chart-r1.md`, still needing the human's confirmation) is **one broker per party, in a cluster of its own**, outside the party's cluster and the business cluster, run by a group apart from the party's operators. If that holds, the AWS reference needs **three more clusters (one per party, each in its own account or at least its own administrator domain)** and three more paths: party → its broker (port 8443, mTLS, a private endpoint service of the broker's account, consumer: that party's account only).
+The party chart now has an attested mode and there is a broker chart (`qv-attest-broker`). The broker placement decision (still to be confirmed) is **one broker per party, in a cluster of its own**, outside the party's cluster and the business cluster, run by a group apart from the party's operators. If that holds, the AWS reference needs **three more clusters (one per party, each in its own account or at least its own administrator domain)** and three more paths: party → its broker (port 8443, mTLS, a private endpoint service of the broker's account, consumer: that party's account only).
 None of this is in the reference deployment: it uses the PKCS#11 sealer (CloudHSM or, in a throw-away, SoftHSM), and the values files here set no `attested` or `network.broker` value. Adding it means three roots, three entries in `cidrs.json`, one path each in `paths.json` (the tests then check them), and an `attested` overlay per party. It also replaces CloudHSM, so the hourly HSM cost goes away and the broker clusters' cost comes in. Needs T7 (the real attester) first; the broker today has only the mock attester.

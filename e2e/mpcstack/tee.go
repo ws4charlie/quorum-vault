@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// The tee-sim run mode of the three-party stack (research/TEE.md, task TEE-T4). SIMULATED: the parties are built with -tags teesim, so they
+// The tee-sim run mode of the three-party stack (docs/enclaves.md, "What is simulated"). SIMULATED: the parties are built with -tags teesim, so they
 // contain the mock attester; each party runs the ATTESTED sealer against its own qv-attest-broker (a real process with its own SoftHSM token and a
 // signed allowlist), keeps its TLS key sealed, and measures its own binary and config file. Nothing here proves isolation; it proves that our code
 // does what it must around an enclave. See docs/runbooks/tee-broker.md.

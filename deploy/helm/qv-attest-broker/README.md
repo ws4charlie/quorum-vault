@@ -33,4 +33,4 @@ Its own trust zone: a cluster that neither this party's operators nor the busine
 - Metrics (`/metrics`) are on the health port, plain http, not published by the Service; `network.metricsIngress.from` names a scraper (policy purpose `metrics-scrape`).
 
 ## Check
-`ci/helm/broker-check.sh` (lint, render production and kind values, kubeconform) and the Go tests in `ci/helm` (`broker_test.go`, `qvpolicy/broker_test.go`); `make helm-check` runs both. `values-kind.yaml` is the tee-sim development values (image `qv-image/qv-attest-broker-teesim`, built with `deploy/images/build.sh qv-attest-broker-teesim`).
+`ci/helm/broker-check.sh` (lint, render production and kind values, kubeconform) and the Go tests in `ci/helm` (`ci/helm/broker_test.go`, `ci/helm/qvpolicy/broker_test.go`); `make helm-check` runs both. `values-kind.yaml` is the tee-sim development values (image `qv-image/qv-attest-broker-teesim`, built with `deploy/images/build.sh qv-attest-broker-teesim`).

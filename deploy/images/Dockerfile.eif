@@ -5,7 +5,7 @@
 # Why the released image and not a rebuild: the PCRs of the EIF are over its content, so the content must be the bytes that were released, signed and
 # scanned. A digest names them; a tag does not (eif-build.sh refuses a tag).
 # Why the configuration is inside: the party's peer pins, caller pins and admin keys decide who may call it. Inside the image they are measured (PCR0, PCR2);
-# outside it, the parent instance could change them (research/TEE.md, "Measure the config"). One deployment, one party, one configuration, one set of PCRs.
+# outside it, the parent instance could change them (docs/enclaves.md, "Which builds may get the keys"). One deployment, one party, one configuration, one set of PCRs.
 #
 # The config directory holds party.json (and the certificate and key files it names: generated for the deployment, never in this repository). The base is
 # distroless: no shell, nothing the party does not need. Entry point as in the Helm chart (deploy/helm/qv-party): `mpc-party -config /etc/qv/config/party.json`.

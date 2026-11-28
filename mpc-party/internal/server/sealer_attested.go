@@ -23,7 +23,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/mpc-party/internal/attest/kmsrelease"
 )
 
-// The attested sealer (research/TEE.md, task TEE-T3). The party holds NO long-lived key. At start it proves what it runs (evidence from an
+// The attested sealer (docs/enclaves.md). The party holds NO long-lived key. At start it proves what it runs (evidence from an
 // Attester, bound to a broker nonce, to the request and to the TLS key of its link to the broker) and the broker (cmd/qv-attest-broker) hands
 // back one AES-256 data key per (party, keyset, generation), encrypted to a key made in this process. The keys live in locked memory and are
 // wiped at shutdown; neither they nor the evidence private key are ever written to disk or to a log. What sits on disk is only ciphertext plus the

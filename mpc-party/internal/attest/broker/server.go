@@ -1,6 +1,6 @@
 // Package broker is the attestation release broker: it holds (through its HSM) the keys that wrap each MPC party's data keys, and releases a
 // data key only to an enclave whose evidence verifies, matches a signed allowlist entry of that party and is bound to this very request.
-// Every refusal is final and audited; nothing leaves in plaintext. Design: research/TEE.md ("Release protocol"), task TEE-T2.
+// Every refusal is final and audited; nothing leaves in plaintext. Design: docs/enclaves.md ("The key is released only on proof").
 package broker
 
 import (

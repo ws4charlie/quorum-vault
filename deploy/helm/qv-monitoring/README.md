@@ -1,6 +1,6 @@
 # qv-monitoring: metrics, rules and routing on Kubernetes
 
-Design: `research/K8s-deployment.md` §10 and decision D12. One chart, one `clusterKind` per release.
+Design: [Deployment](../../../docs/deployment.md). One chart, one `clusterKind` per release.
 
 | `clusterKind` | Renders | Where |
 |---|---|---|

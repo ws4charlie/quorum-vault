@@ -1,4 +1,4 @@
-{{/* Names and checks shared by every template. Every refusal here is a rule of the design (research/K8s-deployment.md), not a convenience. */}}
+{{/* Names and checks shared by every template. Every refusal here is a rule of the design (docs/deployment.md), not a convenience. */}}
 {{- define "qvp.signing" -}}{{ if ne .Values.clusterKind "business" }}true{{ end }}{{- end -}}
 {{- define "qvp.prod" -}}{{ if eq .Values.environment "production" }}true{{ end }}{{- end -}}
 {{- define "qvp.actions" -}}{{ if eq .Values.enforcement "Deny" }}[Deny, Audit]{{ else }}[Warn, Audit]{{ end }}{{- end -}}
