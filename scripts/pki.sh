@@ -19,7 +19,7 @@ fi
 if [ "${1:-}" = renew ]; then shift; exec "$BIN" renew "$@"; fi
 "$BIN" init
 "$BIN" issue
-# Test CA of the simulated TEE attester (mock AWS Nitro documents, research/TEE.md): root and intermediate under $QV_PKI_DIR/tee. Built only with
+# Test CA of the simulated TEE attester (mock AWS Nitro documents, docs/enclaves.md): root and intermediate under $QV_PKI_DIR/tee. Built only with
 # -tags teesim, so no production binary contains it; production verifies against the vendor's root. QV_PKI_TEE=0 skips it.
 if [ "${QV_PKI_TEE:-1}" != 0 ]; then
   TEE_BIN="${QV_ATTEST_CA_BIN:-$ROOT/bin/qv-attest-ca}"

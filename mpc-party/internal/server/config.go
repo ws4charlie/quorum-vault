@@ -90,7 +90,7 @@ type SealerConfig struct {
 	PinFile      string `json:"pin_file"`
 	KeyFile      string `json:"key_file"` // devauth sealer only: hex, 32 bytes
 
-	// attested (research/TEE.md): the party holds no key of its own. At start it proves what it runs to the broker (qv-attest-broker) and gets
+	// attested (docs/enclaves.md): the party holds no key of its own. At start it proves what it runs to the broker (qv-attest-broker) and gets
 	// one data key per generation back, kept in memory only.
 	BrokerURL  string   `json:"broker_url"`  // https://host:port of the broker
 	BrokerPins []string `json:"broker_pins"` // pin (SHA-256 of the SPKI) of the broker's certificate; several during a rotation

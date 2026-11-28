@@ -167,7 +167,7 @@ keycloak-up:
 	docker compose --profile identity up -d --wait keycloak
 keycloak-down:
 	docker compose --profile identity down keycloak
-# SIMULATED enclave run mode (research/TEE.md, docs/runbooks/tee-broker.md): the whole signing path with the three parties built with -tags teesim,
+# SIMULATED enclave run mode (docs/enclaves.md, docs/runbooks/tee-broker.md): the whole signing path with the three parties built with -tags teesim,
 # on the attested sealer, each with its own broker (own SoftHSM token, signed allowlist) and its TLS key sealed. Any mpc test runs in this mode with
 # QV_CUSTODY_TEE=sim (for example: make test-e2e-evm TEST=TestMPCRefreshDuringLiveWithdrawals with that variable set).
 E2E_TEE_SIM := TestTEESim

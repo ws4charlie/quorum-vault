@@ -14,7 +14,7 @@ Question: should hot shards, deposit addresses or the cold wallet move from P2WP
 
 ## What cb-mpc and the zone offer
 
-- **BIP340 2-party signing exists, non-HD.** `DKGBIP340`, `Sign`, `XOnlyPublicKey` wrap `schnorr_2p` (the BIP340 variant). The key blob holds a role, the curve, the compressed public key and one additive scalar share (`api/schnorr2pc.cpp`).
+- **BIP340 2-party signing exists, non-HD.** `DKGBIP340`, `Sign`, `XOnlyPublicKey` wrap `schnorr_2p` (the BIP340 variant). The key blob holds a role, the curve, the compressed public key and one additive scalar share (`cb-mpc:api/schnorr2pc.cpp`).
 - **No HD for Schnorr.** HD keysets exist only for ECDSA and Ed25519 (`hd_keyset_ecdsa_2p`, `hd_keyset_eddsa_2p`). A derived ECDSA key is an ECDSA key (it carries the Paillier material) and cannot sign BIP340. Deposit addresses per customer would need either one key per customer (a DKG each: not viable at our scale) or our own derivation on top of cb-mpc internals.
 - **No tweak.** The words "tweak" and "taproot" do not occur in the cb-mpc source. The BIP341 key-only tweak (no script tree) is additive: `Q' = P + t·G`, with `t = taggedhash("TapTweak", P_x)`, and `P` first negated when its y is odd. On additive shares this is easy in principle: negate both shares if needed and add `t` to one share. But cb-mpc gives no call for it. We would have to rewrite the key blob (`x_share` of one party and `Q`) in our wrapper, which is an undocumented internal format that every cb-mpc upgrade could break, and a second party must agree on the same tweak. That is exactly the kind of change the Schnorr code path's audit would have to cover.
 - **The zone.** The verifier, the sighash code (`BuildUnsigned`, BIP143) and the guard know only P2WPKH inputs and an ECDSA signer key. P2TR needs BIP341 sighash with all previous outputs, a 64-byte signature check, a `SignerKey` that is x-only, and new rules for dust, vsize estimates and the fee-bump reserve. The cosigner shares this code.
@@ -56,4 +56,4 @@ If it becomes go, split it as: (a) a spike on the tweak with BIP341 vectors agai
 - Bech32 adoption: <https://en.bitcoin.it/wiki/Bech32_adoption>
 - Taproot support by exchanges (trackers and press, to be checked against each exchange): <https://www.spark.money/tools/bitcoin-segwit-adoption-tracker>, <https://unchainedcrypto.com/coinbase-activates-bitcoin-taproot-transfers/>, <https://www.crowdfundinsider.com/?p=200147>
 - SoftHSM mechanisms: <https://www.mintlify.com/softhsm/SoftHSMv2/pkcs11/mechanisms>
-- In this repo: `mpc-party/README.md`, `mpc-party/internal/cbmpc/sign.go`, cb-mpc v0.2.2 `src/cbmpc/api/schnorr2pc.cpp` and `src/cbmpc/protocol`.
+- In this repo: `mpc-party/README.md`, `mpc-party/internal/cbmpc/sign.go`, cb-mpc v0.2.2 `cb-mpc:src/cbmpc/api/schnorr2pc.cpp` and `cb-mpc:src/cbmpc/protocol`.

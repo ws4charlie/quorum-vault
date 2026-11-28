@@ -13,7 +13,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/outbox"
 )
 
-// Keyset states (research/Key-replacement.md §6.1). A candidate has been made and signs nothing; an active keyset serves the shard (exactly one per shard);
+// Keyset states (docs/key-replacement.md, "Every key has a generation and a state"). A candidate has been made and signs nothing; an active keyset serves the shard (exactly one per shard);
 // a draining one only empties itself; a retired one does nothing; compromised is final.
 const (
 	StateCandidate   = "candidate"

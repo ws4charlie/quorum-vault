@@ -21,8 +21,7 @@ import (
 	"time"
 )
 
-// The party's TLS identity when its private key is sealed (config tls_sealed, attested sealer only; research/TEE.md "what moves into the
-// enclave"). The key is made INSIDE the party by `mpc-party tls-init` (the enrolment step), sealed under the party's local data key, and exported
+// The party's TLS identity when its private key is sealed (config tls_sealed, attested sealer only; docs/enclaves.md). The key is made INSIDE the party by `mpc-party tls-init` (the enrolment step), sealed under the party's local data key, and exported
 // only as a certificate and a pin (the pins of every pinned link are by public key). The key never exists on disk in the clear: the data directory
 // holds tls-key.sealed.json (ciphertext) and tls-cert.pem (public). At start the party loads the key only after the broker released the data keys;
 // until then every TLS handshake fails (the party is not ready anyway).

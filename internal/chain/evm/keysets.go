@@ -13,7 +13,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
-// A hot shard may have more than one key generation (research/Key-replacement.md). The configuration names generation 1 of every shard; the
+// A hot shard may have more than one key generation (docs/key-replacement.md). The configuration names generation 1 of every shard; the
 // keyset registry of the business database (table keysets, internal/partition) says which generation is active now. New work (withdrawals, sweeps,
 // rebalances, cold moves) is built from the ACTIVE generation's address; work already built keeps the address it was built for (the nonce allocation
 // stores it), so a replacement or a cancel of it is signed by the generation that signed the original.

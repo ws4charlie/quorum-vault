@@ -41,7 +41,7 @@ const (
 
 // HSM wraps and unwraps data keys under a per-party AES-256 key that lives in a PKCS#11 token and cannot be extracted: the broker process
 // never holds a wrapping key. (A data key is in this process's memory for the moment between the HSM returning it and SealTo encrypting it to
-// the enclave; that is the exposure research/TEE.md names for a broker, the same as AWS KMS has.) The session code is a copy of the minimum in
+// the enclave; that is the exposure docs/enclaves.md accepts for a broker, the same as AWS KMS has.) The session code is a copy of the minimum in
 // internal/server/sealer_pkcs11.go (owned by another task, and that package links the whole party): same login model, same library lookup.
 type HSM struct {
 	ctx   *pkcs11.Ctx

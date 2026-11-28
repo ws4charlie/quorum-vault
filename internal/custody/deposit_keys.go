@@ -32,7 +32,7 @@ func (c *Config) depositIdentity() (identity string, pub []byte, ok bool, err er
 
 // loadDepositTree registers generation 1 of the chain's deposit key tree as active (idempotent). The registered identity is the configured account key; a
 // registered generation 1 with another key refuses the start, as for a hot shard: the key of a generation never changes, a replacement is a new generation.
-// On Bitcoin the hot shard addresses derive from this same account (branch 1, research/Key-replacement.md D1), so the deposit tree's entry and the hot
+// On Bitcoin the hot shard addresses derive from this same account (branch 1, docs/key-replacement.md), so the deposit tree's entry and the hot
 // shards' entries are generation 1 of one key; replacing it (K6) replaces both.
 func (s *Service) loadDepositTree(ctx context.Context) error {
 	identity, pub, ok, err := s.Cfg.depositIdentity()

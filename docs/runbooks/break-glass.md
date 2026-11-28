@@ -2,7 +2,7 @@
 
 When this applies: something is wrong inside a gateway, cosigner, party or broker pod and the normal tools (logs, metrics, the operators' CLI, a new release) cannot fix it. Nobody has standing access. Read-only access (`qv:readers`) is separate and needs no approval.
 
-Design: `research/K8s-deployment.md` §10 "Who has kubectl". Rules in force: chart `deploy/policy/qv-policy` (`qv-no-exec`, RBAC role `qv-break-glass`).
+Design: [Deployment](../deployment.md), "How each process is kept safe". Rules in force: chart `deploy/policy/qv-policy` (`qv-no-exec`, RBAC role `qv-break-glass`).
 
 ## Who may get access
 
