@@ -46,7 +46,7 @@ type Config struct {
 }
 
 // genesis hashes of the public clusters; a node of another cluster than the config names is refused at start. A local validator has a
-// genesis hash of its own and is not checked.
+// genesis hash of its own and is not checked, so New refuses "localnet" unless QV_ENV is dev or test.
 var genesis = map[string]string{
 	"mainnet": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d", // public genesis hash, not a secret; ggignore
 	"devnet":  "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG", // public genesis hash, not a secret; ggignore

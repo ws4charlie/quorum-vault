@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ws4charlie/quorum-vault/internal/auth"
 	"github.com/ws4charlie/quorum-vault/internal/chain"
 	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
@@ -30,10 +31,13 @@ var (
 )
 
 // New validates cfg, connects to the node, refuses a node of another cluster than the config names and refuses a token whose decimals on
-// the chain differ from the config.
+// the chain differ from the config. Network "localnet" is refused unless QV_ENV is dev or test: its genesis hash is not checked.
 func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) {
 	v, err := cfg.validated()
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseLocalnet(v.Network, auth.EnvironmentFromEnv()); err != nil {
 		return nil, err
 	}
 	if cfg.RPCURL == "" {
@@ -67,6 +71,15 @@ func New(ctx context.Context, cfg Config, pool *pgxpool.Pool) (*Adapter, error) 
 		return nil, err
 	}
 	return a, nil
+}
+
+// refuseLocalnet is New's environment rule: a local validator's genesis hash is not pinned, so production (QV_ENV unset, or anything but
+// dev or test) would accept a node of any cluster.
+func refuseLocalnet(network string, env auth.Environment) error {
+	if network == "localnet" && env == auth.Production {
+		return errors.New("sol: config: network localnet is refused in production (QV_ENV is not dev or test): a local validator's genesis hash is not checked, so a node of any cluster would be accepted; use devnet, testnet or mainnet")
+	}
+	return nil
 }
 
 // Close releases nothing: the client keeps no connection of its own.
