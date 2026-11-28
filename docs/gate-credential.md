@@ -95,6 +95,8 @@ One credential pays one payment. A second payload under the same `credential_id`
 
 A **Gate-governed wallet** is marked in a signed setting of the signing zone: a quorum of zone operators signs it, it is versioned, and the gateway and every cosigner enforce it. A Gate-governed wallet pays nothing without a verified credential, by any path. The setting names each wallet by its `wallet_id` and a hot partition; the zone governs that partition's whole hot shard, every asset and every key generation of it, so neither another asset nor a replaced key is a way around the credential. A batch is never signed for it. Other wallets keep today's rules. **Internal moves** (sweeps, refills, drains, cold moves, consolidations, rebalances) need no credential.
 
+A Gate shard is used only by Gate. Vault's own withdrawals, sweeps, rebalances and moves to cold never use it, so Gate's funds and Vault's stay apart, and Vault refuses a configuration that would send its own money there.
+
 With a valid credential, a payment from a Gate-governed wallet needs no human approval (Gate's approval is the approval; approvals sent with it are ignored), and the zone's own withdrawal rules (destinations, caps, rates) still apply, if it is within all three limits of the same signed setting, kept per wallet and asset in that asset's minor units:
 
 | Limit | Meaning |

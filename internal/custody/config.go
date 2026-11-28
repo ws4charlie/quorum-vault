@@ -231,8 +231,10 @@ type Config struct {
 	X402Shard map[string]int
 	// Gate is the signing API's setting; nil when the API is off.
 	Gate *GateConfig
-	Assets    map[string]Asset
-	AssetList []string // sorted
+	// gateShards are the hot shards a Gate wallet pays from (GateShard), derived from Gate.Wallets.
+	gateShards map[int]bool
+	Assets     map[string]Asset
+	AssetList  []string // sorted
 
 	SweepK           int
 	SweepRetryAfter  time.Duration
@@ -732,13 +734,17 @@ func (f File) Build() (*Config, error) {
 		return nil, err
 	}
 	c.StartHeight = f.Scan.StartHeight
+	// The gate section comes first: the cold limits and the rebalance targets below leave its shards out.
+	if err := c.buildGate(f.Gate); err != nil {
+		return nil, err
+	}
+	if err := c.checkGateShards(); err != nil {
+		return nil, err
+	}
 	if err := c.buildCold(f.Cold, hot); err != nil {
 		return nil, err
 	}
 	if err := c.buildRebalance(f.Cold.Rebalance); err != nil {
-		return nil, err
-	}
-	if err := c.buildGate(f.Gate); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -1045,6 +1051,13 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 	c.ColdLimits = map[string]HotLimits{}
 	for _, sym := range c.AssetList {
 		for i := 0; i < c.shardCount(); i++ {
+			if c.GateShard(i) {
+				// A move to cold spends from the hot shard, and only a Gate credential spends from a Gate shard: no limits there.
+				if _, ok := cf.ShardLimits[fmt.Sprintf("%s/%d", sym, i)]; ok {
+					return fmt.Errorf("custody: config: cold shard_limits %s/%d: shard %d is Gate's (only Gate spends from it)", sym, i, i)
+				}
+				continue
+			}
 			lf, ok := cf.ShardLimits[fmt.Sprintf("%s/%d", sym, i)]
 			if !ok {
 				if lf, ok = cf.Limits[sym]; !ok {
@@ -1066,6 +1079,24 @@ func (c *Config) buildCold(cf ColdFile, hot map[string]common.Address) error {
 		}
 	}
 	_ = hot
+	return nil
+}
+
+// GateShard reports whether hot shard i is Gate-governed: a wallet of the gate section pays from it. The signing zone governs the whole shard, every
+// asset, so only a request with a Gate credential spends from it: Vault's own flows (withdrawals, sweeps, rebalances, moves to cold) never use it.
+func (c *Config) GateShard(i int) bool { return c.gateShards[i] }
+
+// checkGateShards refuses a configuration whose own flows would need a Gate shard: the sweep destination, or no shard left for Vault.
+func (c *Config) checkGateShards() error {
+	if len(c.gateShards) == 0 {
+		return nil
+	}
+	if len(c.gateShards) >= c.shardCount() {
+		return errors.New("custody: config: every hot shard is Gate's: Vault needs at least one hot shard of its own to pay from")
+	}
+	if c.GateShard(c.SinkShard) {
+		return fmt.Errorf("custody: config: sweep_destination is hot shard %d, which is Gate's (only Gate spends from it)", c.SinkShard)
+	}
 	return nil
 }
 
@@ -1101,6 +1132,9 @@ func (c *Config) buildRebalance(rf RebalanceFile) error {
 	if c.shardCount() < 2 {
 		return errors.New("custody: config: rebalance targets need at least two hot shards")
 	}
+	if c.shardCount()-len(c.gateShards) < 2 {
+		return errors.New("custody: config: rebalance targets need at least two hot shards that are not Gate's")
+	}
 	c.RebalanceTargets = map[string]*big.Int{}
 	for k, v := range rf.Targets {
 		sym, shard, hasShard := strings.Cut(k, "/")
@@ -1111,6 +1145,9 @@ func (c *Config) buildRebalance(rf RebalanceFile) error {
 			i, err := strconv.Atoi(shard)
 			if err != nil || i < 0 || i >= c.shardCount() {
 				return fmt.Errorf("custody: config: rebalance target %q: shard must be 0..%d", k, c.shardCount()-1)
+			}
+			if c.GateShard(i) {
+				return fmt.Errorf("custody: config: rebalance target %q: shard %d is Gate's (only Gate spends from it)", k, i)
 			}
 		}
 		if _, err := amount("rebalance target "+k, v); err != nil {
@@ -1126,6 +1163,9 @@ func (c *Config) buildRebalance(rf RebalanceFile) error {
 			}
 		}
 		for i := 0; i < c.shardCount(); i++ {
+			if c.GateShard(i) {
+				continue // never a source or a destination of a rebalance
+			}
 			v, ok := rf.Targets[fmt.Sprintf("%s/%d", sym, i)]
 			if !ok {
 				v, ok = rf.Targets[sym]

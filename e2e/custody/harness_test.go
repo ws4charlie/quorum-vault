@@ -185,7 +185,7 @@ type opts struct {
 	// config short drain timings (drain_test.go).
 	keysets bool
 	// gate is the GATE-CONNECT demo (gate_test.go): the node takes chain id 84532 (Base Sepolia) for the test, USDT is the EIP-3009 test token, the
-	// business config and the zone sign x402 authorizations of USDT on shard 0, which is a Gate-governed wallet (gateDemoWallet), and the zone has two
+	// business config and the zone sign x402 authorizations of USDT on shard 1 (two shards at least), which is a Gate-governed wallet (gateDemoWallet), and the zone has two
 	// operators (op1, op2) to sign its gate setting. The test signs and applies that setting itself (gate_test.go).
 	gate bool
 }
@@ -389,6 +389,9 @@ func newSystem(t *testing.T, o opts) *system {
 	if o.shards == 0 {
 		o.shards = 1
 	}
+	if o.gate && o.shards < 2 {
+		o.shards = 2 // shard 1 is Gate's (a Gate shard is Gate's alone: sweeps and Vault's withdrawals stay on shard 0)
+	}
 	if o.approvalTimeout == "" {
 		o.approvalTimeout = "20s"
 	}
@@ -587,7 +590,7 @@ func newSystem(t *testing.T, o opts) *system {
 	if o.gate {
 		cf.Chain.ChainID = evmtest.BaseSepoliaChainID
 		cf.Chain.L1Fee = "none" // anvil keeps the chain id but never reports an OP-stack l1Fee (docs/limits.md)
-		cf.Chain.X402 = map[string]custody.X402File{"USDT": {Name: "USDC", Version: "2", MaxWindowSeconds: 600, PerPaymentLimit: "500000"}}
+		cf.Chain.X402 = map[string]custody.X402File{"USDT": {Name: "USDC", Version: "2", MaxWindowSeconds: 600, PerPaymentLimit: "500000", Shard: gateDemoShard}}
 	}
 	s.cf = cf
 	s.cfgPath = filepath.Join(s.dir, "custody.json")
@@ -595,8 +598,8 @@ func newSystem(t *testing.T, o opts) *system {
 	if s.cfg, err = custody.LoadConfig(s.cfgPath); err != nil {
 		t.Fatal(err)
 	}
-	if o.gate { // the Gate-governed wallet is USDT's shard 0, named by its partition id, which the loaded config knows
-		cf.Gate = &custody.GateFile{Audience: gateDemoAudience, Wallets: map[string]custody.GateWalletFile{gateDemoWallet: {Partition: s.cfg.PartitionKey("USDT", 0).String()}}}
+	if o.gate { // the Gate-governed wallet is USDT's shard 1, named by its partition id, which the loaded config knows
+		cf.Gate = &custody.GateFile{Audience: gateDemoAudience, Wallets: map[string]custody.GateWalletFile{gateDemoWallet: {Partition: s.cfg.PartitionKey("USDT", gateDemoShard).String()}}}
 		s.cf = cf
 		writeJSON(t, s.cfgPath, cf)
 		if s.cfg, err = custody.LoadConfig(s.cfgPath); err != nil {

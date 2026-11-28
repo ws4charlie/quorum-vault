@@ -29,6 +29,8 @@ import (
 const (
 	gateDemoAudience = "qv-e2e"
 	gateDemoWallet   = "7d1e0c5a-2f4b-4a9e-8c3d-6b5a4f3e2d1c"
+	// gateDemoShard is the Gate-governed hot shard. Not shard 0: a Gate shard is Gate's alone, and Vault's sweeps land on shard 0.
+	gateDemoShard = 1
 )
 
 // TestGatePaymentSignedByMPCOnALocalBaseSepolia is the demo of the Gate connection with everything real: qv-core's signing API behind AgentGate's client
@@ -41,8 +43,8 @@ const (
 func TestGatePaymentSignedByMPCOnALocalBaseSepolia(t *testing.T) {
 	s := newSystem(t, opts{gate: true})
 	t.Logf("signer: %s", map[bool]string{true: "two-party MPC (mpc-party A and B, cosigners of B and C)", false: "HSM"}[mpcMode()])
-	part := s.cfg.PartitionKey("USDT", 0).String()
-	payer := s.shardAddr[0]
+	part := s.cfg.PartitionKey("USDT", gateDemoShard).String()
+	payer := s.shardAddr[gateDemoShard]
 	if now, chainNow := time.Now().Unix(), int64(s.base.BlockTime(t)); chainNow > now+60 || chainNow < now-600 {
 		t.Fatalf("the node's clock (%d) is not near this machine's (%d): an earlier test moved it; use a fresh node", chainNow, now)
 	}
@@ -65,7 +67,7 @@ func TestGatePaymentSignedByMPCOnALocalBaseSepolia(t *testing.T) {
 
 	// The x402 money: the wallet holds 1 USDT on chain and in the books.
 	s.x402.Mint(t, payer, 1_000_000)
-	if err := s.svc.FundHotAsset(s.ctx, "seed-usdt-"+s.tag, 0, "USDT", big.NewInt(1_000_000)); err != nil {
+	if err := s.svc.FundHotAsset(s.ctx, "seed-usdt-"+s.tag, gateDemoShard, "USDT", big.NewInt(1_000_000)); err != nil {
 		t.Fatal(err)
 	}
 	s.reconcileClean()

@@ -103,6 +103,10 @@ func (s *Service) PlanColdMoves(ctx context.Context, log *slog.Logger) ([]ColdMo
 	}
 	parts := make([]string, 0, len(c.ColdLimits))
 	for p := range c.ColdLimits {
+		// never from a Gate shard (the config gives it no limits): only a Gate credential spends from it
+		if i, err := c.ShardIndex(p); err == nil && c.GateShard(i) {
+			continue
+		}
 		parts = append(parts, p)
 	}
 	sort.Strings(parts)
