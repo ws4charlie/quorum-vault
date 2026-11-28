@@ -76,8 +76,9 @@ nonce1="$(curl -s -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\
 [ "$nonce1" = 0x0 ] || bad "Gate's shard 1 sent a transaction (nonce $nonce1): a Vault flow used it"
 echo "-- the zone refuses a job for Gate's shard without a credential"
 mkdir -p "$d/core"; for f in tls.crt tls.key ca.crt; do kn "$NS_BIZ" get secret qv-core-tls -o jsonpath="{.data.${f//./\\.}}" | base64 -d > "$d/core/$f"; done; chmod 600 "$d/core/tls.key"
+fwd P_DB2 "$NS_BIZ" svc/qv-business-db-rw 5432   # its own forward: fund_hot's died when Postgres reset its connection (kubectl drops a forward then)
 r="$(go run ./ci/kind/tools/kindgate direct -cfg "$WORK/gate/custody.json" -rpc "http://127.0.0.1:$P_ANVIL" \
-  -dsn "postgres://qv_core@127.0.0.1:$P_DB/quorumvault?sslmode=verify-ca&sslrootcert=$d/core/ca.crt&sslcert=$d/core/tls.crt&sslkey=$d/core/tls.key")" \
+  -dsn "postgres://qv_core@127.0.0.1:$P_DB2/quorumvault?sslmode=verify-ca&sslrootcert=$d/core/ca.crt&sslcert=$d/core/tls.crt&sslkey=$d/core/tls.key")" \
   && echo "zone: $r" || bad "the zone did not refuse a credential-less job for Gate's shard: $r"
 echo "-- Reconcile"
 wd reconcile || bad "Reconcile is not clean after the payment, the top-up and the withdrawal"
