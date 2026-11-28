@@ -151,5 +151,5 @@ The same templates and the same binary logic. What differs is configuration only
 
 - **PIN as a file: done.** The gateway reads `QV_HSM_PIN_FILE` (`docs/runbooks/hsm-pin.md`); the chart mounts the Secret's `pin` key as a file and never sets `QV_HSM_PIN`. A policy test fails the render if `QV_HSM_PIN` is an environment variable.
 - The CloudHSM module path and client-config location, and the Alloy sidecar, are not run here (see above).
-- The kind lane (task D8) installs this chart later; no cluster install was done in this task.
+- The kind lane (`ci/kind/`, `make kind-up`; the kind workflow in CI) installs this chart and runs its smoke cases against the pods.
 - Party A's ingress rule for the gateway, and the business chart's `signingLink.from`, are in other charts.

@@ -1,5 +1,7 @@
 # Where the end-to-end suite spends its time (P6-fix)
 
+> **Historical (2026-11-08).** Measured with two-party MPC hot keys, before the switch to 2-of-3; the suite and its CI groups have changed since ([Testing](../testing.md)).
+
 `make test-e2e-evm` (all 32 tests that build a full system, two-party MPC hot keys) on an Apple M3 Pro, everything local. The harness writes
 one JSON line per test when `QV_E2E_TIMING_FILE` is set: start-up in phases, the test body with each condition wait of half a second or more
 and what it waited on, and teardown. Numbers below are from one run before the changes and one run after.

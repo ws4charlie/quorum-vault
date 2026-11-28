@@ -16,7 +16,7 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/partition"
 )
 
-// The business keyset registry is a MIRROR for planning (research/Key-replacement.md §6, §7): the signing zone decides from its own operator-signed
+// The business keyset registry is a MIRROR for planning (docs/key-replacement.md): the signing zone decides from its own operator-signed
 // records (qv-keysets, internal/gateway/keysets.go), never from this table. So a wrong mirror can stall work but cannot move money:
 //
 //   - the core builds from generation 2 and the zone still has it as a candidate: the zone refuses the job; a withdrawal is voided with the zone's

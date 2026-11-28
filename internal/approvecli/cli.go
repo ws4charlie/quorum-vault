@@ -1,6 +1,6 @@
 // Package approvecli is qv-approve: an approver's command-line client. It fetches a withdrawal's intent from the core, recomputes the hash from the
 // canonical bytes, prints every field in plain words, and asks a FIDO2 security key to sign the hash (WebAuthn, challenge = the hash, user
-// verification required). It is the "small client on a minimal approver machine" of research/SPIRE-and-YubiKey.md section 2.2: a browser is a large
+// verification required). It is the "small client on a minimal approver machine" (docs/runbooks/approvers.md): a browser is a large
 // thing to trust, and this is not. It still trusts its own host: see docs/runbooks/webauthn-approver.md for what that does and does not buy.
 //
 // The key sits behind ctap.Authenticator and the login behind TokenFunc, so tests run the whole path with a software key (internal/ctap/ctaptest,

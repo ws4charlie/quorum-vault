@@ -147,7 +147,7 @@ Both processes serve their metrics on **loopback only** inside the pod (`127.0.0
 
 ## Known limits
 
-- Nothing here was installed on a cluster (the kind lane is task D8). The tests prove that the manifests follow the rules and the image contract, not that the pods start.
+- The kind lane (`ci/kind/`, `make kind-up`; the kind workflow in CI) installs this chart for parties A, B and C and runs its smoke cases against the pods.
 - **Restore with a cloud HSM (open, on the lead's backlog).** `mpc-party backup restore` needs the party's HSM and the recovery private key together; for an HSM reachable only from the party's cluster it would run in a pod there with the key delivered by the custodians. Undecided, so the chart has no restore Job.
 - `mlockall` depends on the node's memlock limit (above).
 - **Admin tool (open, backlog).** No in-cluster tool exists for the signed admin calls (DKG, refresh, freeze, unfreeze); the chart gives only the pod label and the network path.

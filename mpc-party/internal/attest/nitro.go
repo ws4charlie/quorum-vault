@@ -96,7 +96,7 @@ type NitroConfig struct {
 }
 
 // NitroVerifier verifies AWS Nitro attestation documents. It makes no network call and has no switch that skips a rule. Revocation (CRL/OCSP)
-// is not checked and stays off: the Nitro PKI is verified offline against its root (research/TEE.md, Q2).
+// is not checked and stays off: the Nitro PKI is verified offline against its root (docs/limits.md).
 type NitroVerifier struct {
 	roots []*x509.Certificate
 	cfg   NitroConfig

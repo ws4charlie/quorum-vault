@@ -1,5 +1,7 @@
 # Two-party MPC signer in the closed loop (P5b-5)
 
+> **Historical (2026-11-08).** Measured with the two-party signer, before the switch to 2-of-3 (parties A, B and C). Current numbers: [the local load test](load-local.md).
+
 Local run, all components real and in separate processes: `mpc-party` A and B (production build, cb-mpc v0.2.2, share sealing in
 SoftHSM tokens `qv-party-1` / `qv-party-2`), `qv-cosigner`, `qv-gateway`, `qv-worker`, `qv-core`, `qv-relay`, Postgres 16,
 Temporal, Redpanda, anvil (chain ID 11155111, instant blocks). Machine: Apple Silicon laptop, everything on one host over

@@ -1,4 +1,4 @@
--- Deposit addresses know their key generation (K5 of key replacement, research/Key-replacement.md §4.3, §6.1).
+-- Deposit addresses know their key generation (K5 of key replacement, docs/key-replacement.md).
 -- On Bitcoin and Solana every customer deposit address derives from the deposit key tree; replacing that key (K6) changes every address. Until now a customer had
 -- one address per chain and nothing recorded which key it came from. From here an address belongs to a generation of the deposit tree (the keysets registry
 -- holds the generations: shard id entity/chain/deposit-tree/0), a customer may hold one address per generation, and an address stays unique per chain.
