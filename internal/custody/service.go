@@ -229,8 +229,6 @@ func parseBig(s string) *big.Int {
 	return n
 }
 
-func sumOf(a, b *big.Int) *big.Int { return new(big.Int).Add(a, b) }
-
 func (s *Service) transfer(ctx context.Context, tx pgx.Tx, id, from, to string, amt *big.Int, meta map[string]any) error {
 	if amt.Sign() == 0 {
 		return nil

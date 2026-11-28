@@ -19,6 +19,7 @@ import (
 
 	"github.com/ws4charlie/quorum-vault/e2e/mpcstack"
 	"github.com/ws4charlie/quorum-vault/internal/chain/eth"
+	"github.com/ws4charlie/quorum-vault/internal/chain/eth/ethtest"
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/gateway/gatewaytest"
@@ -47,7 +48,7 @@ func TestEndToEndWithdrawalMinesOnAnvil(t *testing.T) {
 	if err := raw.CallContext(x, nil, "anvil_setBalance", s.hot, (*hexutil.Big)(big.NewInt(1e18))); err != nil {
 		t.Fatalf("fund hot address: %v", err)
 	}
-	cl, err := eth.Dial(x, rpcURL)
+	cl, err := ethtest.Dial(x, rpcURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func TestEndToEndWithdrawalMinesOnAnvil(t *testing.T) {
 	}
 	sig := signer.Signature{R: new(big.Int).SetBytes(got.Signature[:32]), S: new(big.Int).SetBytes(got.Signature[32:])}
 	pk, _ := signerPub(s)
-	signed, err := eth.Assemble(tx, sig, pk)
+	signed, err := ethtest.Assemble(tx, sig, pk)
 	if err != nil {
 		t.Fatal(err)
 	}

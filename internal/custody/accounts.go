@@ -37,22 +37,14 @@ func rebalAcct(chain, asset string) string { return "rebal:" + chain + ":" + ass
 func refillAcct(chain, asset string) string { return "refill:" + chain + ":" + asset }
 func opFundAcct(chain, asset string) string { return "opfund:" + chain + ":" + asset }
 
-// CustomerAccount is the ledger account owing a customer an asset.
-func CustomerAccount(customer, chain, asset string) string { return custAcct(customer, chain, asset) }
-
-// DepAccount, SweepAccount, WdAccount, SuspenseAccount, FeeAccount and
-// HotAccount expose the other accounts to tests and tools.
-func DepAccount(chain, asset string) string       { return depAcct(chain, asset) }
+// SweepAccount, FeeAccount, HotAccount and the others below expose the ledger accounts to tests and tools.
 func SweepAccount(chain, asset string) string     { return sweepAcct(chain, asset) }
-func WdAccount(chain, asset string) string        { return wdAcct(chain, asset) }
-func SuspenseAccount(chain, asset string) string  { return suspenseAcct(chain, asset) }
 func FeeAccount(chain, native string) string      { return feeAcct(chain, native) }
 func HotAccount(partitionID string) string        { return hotAcct(partitionID) }
 func ColdAccount(partitionID string) string       { return coldAcct(partitionID) }
 func ToColdAccount(chain, asset string) string    { return toColdAcct(chain, asset) }
 func RebalanceAccount(chain, asset string) string { return rebalAcct(chain, asset) }
 func RefillAccount(chain, asset string) string    { return refillAcct(chain, asset) }
-func OpFundAccount(chain, asset string) string    { return opFundAcct(chain, asset) }
 
 // ensureCustomerAccount creates a customer's account for asset.
 func (s *Service) ensureCustomerAccount(ctx context.Context, tx pgx.Tx, customer, asset string) error {

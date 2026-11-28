@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/ws4charlie/quorum-vault/internal/chain/eth"
+	"github.com/ws4charlie/quorum-vault/internal/chain/eth/ethtest"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm"
 	"github.com/ws4charlie/quorum-vault/internal/chain/evm/evmtest"
 	"github.com/ws4charlie/quorum-vault/internal/gatecred"
@@ -45,7 +46,7 @@ func TestGateCredentialPaymentsLandOnAnvil(t *testing.T) {
 		t.Fatalf("fund the hot address: %v", err)
 	}
 	token.Mint(t, z.hot, 1_000_000)
-	cl, err := eth.Dial(ctx, node.URL)
+	cl, err := ethtest.Dial(ctx, node.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestGateCredentialPaymentsLandOnAnvil(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		signed, err := eth.Assemble(tx, signer.Signature{R: new(big.Int).SetBytes(d.Sig[:32]), S: new(big.Int).SetBytes(d.Sig[32:])}, z.signer.PublicKey())
+		signed, err := ethtest.Assemble(tx, signer.Signature{R: new(big.Int).SetBytes(d.Sig[:32]), S: new(big.Int).SetBytes(d.Sig[32:])}, z.signer.PublicKey())
 		if err != nil {
 			t.Fatal(err)
 		}

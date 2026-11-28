@@ -9,7 +9,7 @@
 // Appends are serialized with a transaction-scoped advisory lock, so seq is
 // gap-free and every row links to the one before it. The DB trigger from
 // migrations/0001_init.sql rejects UPDATE/DELETE/TRUNCATE; the chain makes any
-// edit that bypasses the trigger detectable by Verify.
+// edit that bypasses the trigger detectable by VerifyChain.
 package audit
 
 import (
@@ -23,33 +23,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ws4charlie/quorum-vault/internal/domain"
 )
 
-// appendLockID serializes Append calls across every connection and process.
+// appendLockID serializes AppendTx calls across every connection and process.
 const appendLockID = 0x71760002
 
 // genesis is the prev_hash of seq 1.
 var genesis = make([]byte, sha256.Size)
-
-// Log implements domain.Auditor on the audit_log table.
-type Log struct {
-	pool *pgxpool.Pool
-}
-
-var _ domain.Auditor = (*Log)(nil)
-
-// New returns a Log backed by pool.
-func New(pool *pgxpool.Pool) *Log { return &Log{pool: pool} }
-
-// Filter narrows List. Empty fields match everything; Limit 0 = no limit.
-type Filter struct {
-	RequestID string
-	WalletID  string
-	Limit     int
-}
 
 // canonical is the hashed form of an event. Field order is part of the format.
 type canonical struct {
@@ -107,42 +89,10 @@ func nullable(s string) any {
 	return s
 }
 
-// Append stores ev at the end of the chain. Seq, At, PrevHash and Hash are set
-// by Append (At = now, truncated to microseconds so it round-trips through
-// Postgres exactly); the returned event is exactly what was stored.
-func (l *Log) Append(ctx context.Context, ev domain.AuditEvent) (domain.AuditEvent, error) {
-	if ev.Actor == "" || ev.Type == "" {
-		return domain.AuditEvent{}, errors.New("audit: actor and type are required")
-	}
-	var err error
-	if ev.RequestID, err = normUUID("request_id", ev.RequestID); err != nil {
-		return domain.AuditEvent{}, err
-	}
-	if ev.WalletID, err = normUUID("wallet_id", ev.WalletID); err != nil {
-		return domain.AuditEvent{}, err
-	}
-	if ev.KeyID, err = normUUID("key_id", ev.KeyID); err != nil {
-		return domain.AuditEvent{}, err
-	}
-
-	tx, err := l.pool.Begin(ctx)
-	if err != nil {
-		return domain.AuditEvent{}, fmt.Errorf("audit: begin: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	ev, err = AppendTx(ctx, tx, ev, "")
-	if err != nil {
-		return domain.AuditEvent{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.AuditEvent{}, fmt.Errorf("audit: commit: %w", err)
-	}
-	return ev, nil
-}
-
 // AppendTx stores ev at the end of the chain inside the caller's transaction, which keeps the append lock until it
 // ends: call it last. sourceID, when not empty, is the UUID of what the entry was made from (an outbox row); the database
-// refuses a second entry with the same one. Seq, At, PrevHash and Hash are set here, as in Append.
+// refuses a second entry with the same one. Seq, At, PrevHash and Hash are set here (At = now, truncated to microseconds so it
+// round-trips through Postgres exactly); the returned event is exactly what was stored.
 func AppendTx(ctx context.Context, tx pgx.Tx, ev domain.AuditEvent, sourceID string) (domain.AuditEvent, error) {
 	if ev.Actor == "" || ev.Type == "" {
 		return domain.AuditEvent{}, errors.New("audit: actor and type are required")
@@ -221,46 +171,14 @@ func scanEvent(row pgx.Row) (domain.AuditEvent, error) {
 	return ev, nil
 }
 
-// List returns the events matching f, ordered by seq.
-func (l *Log) List(ctx context.Context, f Filter) ([]domain.AuditEvent, error) {
-	q := `SELECT ` + selectCols + ` FROM audit_log
-		WHERE ($1 = '' OR request_id::text = $1) AND ($2 = '' OR wallet_id::text = $2)
-		ORDER BY seq`
-	args := []any{f.RequestID, f.WalletID}
-	if f.Limit > 0 {
-		q += ` LIMIT $3`
-		args = append(args, f.Limit)
-	}
-	rows, err := l.pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("audit: list: %w", err)
-	}
-	defer rows.Close()
-	var out []domain.AuditEvent
-	for rows.Next() {
-		ev, err := scanEvent(rows)
-		if err != nil {
-			return nil, fmt.Errorf("audit: list scan: %w", err)
-		}
-		out = append(out, ev)
-	}
-	return out, rows.Err()
-}
-
-// Verify recomputes the chain from genesis. It returns ok=false and the first
-// seq whose prev_hash, hash or position (seq must be 1, 2, 3, ...) is wrong.
-// An empty log is valid.
-func (l *Log) Verify(ctx context.Context) (ok bool, firstBadSeq int64, err error) {
-	return VerifyChain(ctx, l.pool)
-}
-
 // Querier is what a pool and a transaction both offer.
 type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// VerifyChain is Verify on any connection.
+// VerifyChain recomputes the chain from genesis on any connection. It returns ok=false and the first seq whose prev_hash, hash or
+// position (seq must be 1, 2, 3, ...) is wrong. An empty log is valid.
 func VerifyChain(ctx context.Context, q Querier) (ok bool, firstBadSeq int64, err error) {
 	rows, err := q.Query(ctx, `SELECT `+selectCols+` FROM audit_log ORDER BY seq`)
 	if err != nil {

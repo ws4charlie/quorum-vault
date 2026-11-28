@@ -124,19 +124,6 @@ func DecodeBase64URL(s string, n int) ([]byte, bool) {
 	return b, true
 }
 
-// printable reports whether s is 1..max characters of printable ASCII (0x20-0x7e).
-func printable(s string, max int) bool {
-	if len(s) < 1 || len(s) > max {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < 0x20 || s[i] > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
 // Parse reads a credential strictly: one JSON object, exactly the contract's
 // fields and "sig", no duplicate or unknown names, every value of the right
 // JSON type and format. Empty input is credential_missing; anything else that

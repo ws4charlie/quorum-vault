@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 
 	"github.com/jackc/pgx/v5"
 
@@ -226,13 +225,6 @@ func (s *Service) creditDeposit(ctx context.Context, tx pgx.Tx, d chain.Observed
 		ev["customer"] = *customer
 	}
 	return true, emit(ctx, tx, outbox.TopicDeposits, id, "deposit."+status, ev)
-}
-
-func bigOrZero(s *string) *big.Int {
-	if s == nil {
-		return new(big.Int)
-	}
-	return parseBig(*s)
 }
 
 // ErrScanHalted is returned while scanning of the chain is stopped by an operator-visible halt (see haltScan).

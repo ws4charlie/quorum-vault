@@ -18,14 +18,6 @@ import (
 // sha256(hot shard, seed, system program) with a seed the zone can compute. Creating one needs no signature but the hot shard's, and the signing
 // zone knows every address of every pool from its own config.
 
-// IsAdvanceNonce / IsInitNonce / IsCreateWithSeed tell the system instructions apart by their leading u32.
-func systemOp(data []byte) (uint32, bool) {
-	if len(data) < 4 {
-		return 0, false
-	}
-	return binary.LittleEndian.Uint32(data), true
-}
-
 // NonceState is an initialized nonce account.
 type NonceState struct {
 	Authority [32]byte
