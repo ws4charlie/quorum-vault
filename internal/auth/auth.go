@@ -68,14 +68,14 @@ func EnvironmentFromEnv() Environment {
 
 // E2EClients are the OAuth client ids of the dev realm's test clients (deploy/keycloak/quorumvault-realm.json, the clients named
 // "TEST ONLY"). They skip the passkey and a mapper hard-codes acr=aal3 on their tokens, so a token of one of them proves no step-up.
-// Production refuses them twice: New refuses a configuration that names one (audience or service client), and Authenticate refuses a
-// token whose azp (or client_id) is one, whatever issuer signed it. A test in this package fails when the realm file gains a test
+// Production refuses them twice: New refuses a configuration that names one (audience or service client), and Verify refuses a token
+// whose azp or client_id is one (either claim, case and surrounding space ignored), whatever issuer signed it. A test in this package fails when the realm file gains a test
 // client that is missing here.
 var E2EClients = []string{"qv-e2e", "qv-approve-e2e", "qv-approval-e2e"}
 
 func isE2EClient(id string) bool {
 	for _, c := range E2EClients {
-		if id == c {
+		if strings.EqualFold(strings.TrimSpace(id), c) {
 			return true
 		}
 	}
@@ -320,10 +320,6 @@ func (a *Authenticator) Authenticate(r *http.Request) (*Principal, *Failure) {
 	p, err := a.Verify(r.Context(), strings.TrimSpace(tok))
 	if err != nil {
 		return nil, &Failure{Status: http.StatusUnauthorized, Message: "invalid token: " + err.Error(), Challenge: `Bearer realm="qv-core", error="invalid_token"`}
-	}
-	if a.env == Production && isE2EClient(p.Client) {
-		return nil, &Failure{Status: http.StatusUnauthorized, Message: "invalid token: client " + p.Client + " is a test client and is refused in production",
-			Challenge: `Bearer realm="qv-core", error="invalid_token"`}
 	}
 	if a.svcCert != nil {
 		hasCert := r.TLS != nil && len(r.TLS.PeerCertificates) > 0
