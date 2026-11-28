@@ -3,8 +3,11 @@
 #   1. versions.env: every PINNED_IMAGES line is `repo:tag|sha256:<64 hex>` with an exact tag (not latest), KIND_NODE_IMAGE carries a digest, and the
 #      cert-manager images carry the chart's version (the chart pulls its images by that tag; up.sh loads the pinned ones under it).
 #   2. every image the lane's manifests, scripts and values-kind files name is a pinned tag, or qv-image/<name>:local built by the lane
-#      (LOCAL_IMAGES, or a literal deploy/images/build.sh argument in ci/kind), or one of the EXEMPT names below.
-# Fails listing every offender.
+#      (LOCAL_IMAGES, or a literal deploy/images/build.sh argument in ci/kind), or one of the EXEMPT names below. Scripts: image:, imageName:,
+#      --image=X / --image X, *IMG= / img=, and the image of `docker run` / `dk` (teesim.sh's docker-run helper). values-kind files are parsed as YAML
+#      (ci/helm/kindimages, Go: the helm workflow has Go for ci/helm), so key order and block or flow style do not matter.
+#   3. every PINNED_IMAGES entry is used by some lane file (an unused pin is a stale line).
+# Fails listing every offender. Needs git, perl and Go.
 #   ci/kind/check-pins.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -41,10 +44,15 @@ refs="$(
     git grep -h -E 'image|IMG|img' -- 'ci/kind/*.yaml' 'ci/kind/*.sh' | perl -ne '
       next if /^\s*#/;
       print "$1\n" while /(?:\bimage|\bimageName):\s*"?([^\s"\x27|#]+)/g;
-      print "$1\n" while /--image=([^\s"\x27]+)/g;
+      print "$1\n" while /--image[= ]+"?([^\s"\x27]+)/g;
+      if (/(?:\bdocker\s+run|(?:^|[\s;&|(])dk)\s+(.*)/) {    # docker run [flags] IMAGE ...: the first word that is not a flag or a flag value
+        (my $rest = $1) =~ s/\$\([^)]*\)/X/g; my @w = map { s/^["\x27]|["\x27]$//gr } split /\s+/, $rest;
+        my %val = map { $_ => 1 } qw(-v --volume -e --env -w --workdir -u --user --entrypoint --name --network --platform -p --publish --mount -l --label --cap-add --cap-drop --security-opt --add-host --env-file --pull);
+        while (@w) { my $x = shift @w; if ($x =~ /^-/) { shift @w if $val{$x}; next } print "$x\n"; last }
+      }
       print "$1\n" while /(?:IMG|\bimg)="?([^\s";\x27]+)/g;'
-    # values-kind: `{ ..., tag: T, repository: R }` on one line
-    git grep -h -E 'repository:' -- 'deploy/helm/*/values-kind*.yaml' | sed -n -E 's/.*tag:[[:space:]]*"?([^,"[:space:]}]+)"?.*repository:[[:space:]]*"?([^,"[:space:]}]+).*/\2:\1/p'
+    # values-kind: every map with a repository key, parsed as YAML
+    git ls-files -z -- 'deploy/helm/*/values-kind*.yaml' | xargs -0 -I{} printf '%s\n' "$PWD/{}" | xargs go -C ci/helm run ./kindimages
   } | grep -E '^[a-z0-9][a-z0-9._/-]*(:[A-Za-z0-9._-]+)?(@sha256:[0-9a-f]{64})?$' | sort -u
 )"
 [ -n "$refs" ] || { echo "check-pins: found no image reference at all: the extraction is broken"; exit 1; }
@@ -58,5 +66,10 @@ while IFS= read -r ref; do
   where="$(git grep -l -F -- "$ref" -- ci/kind 'deploy/helm/*/values-kind*.yaml' || git grep -l -F -- "${ref%:*}" -- 'deploy/helm/*/values-kind*.yaml' || true)"
   bad "$ref is named by the kind lane ($(printf '%s' "$where" | tr '\n' ' ')) but is not in PINNED_IMAGES of ci/kind/versions.env (repo:tag|digest), not a lane-built qv-image/<name>:local, and not exempt"
 done <<<"$refs"
+# 3. no stale pin: each pinned tag is named somewhere in the lane (manifests, scripts, values-kind)
+for ref in $pinned; do
+  case "$ref" in quay.io/jetstack/cert-manager-*|ghcr.io/cloudnative-pg/cloudnative-pg:*) continue;; esac   # pulled by the cert-manager and CNPG charts (up.sh), named by no lane file
+  printf '%s\n' "$refs" | grep -qxF -- "$ref" || bad "versions.env: $ref is pinned but no kind lane file names it (a stale pin: drop the line)"
+done
 [ "$fail" = 0 ] && echo "check-pins: ok ($n image references, all pinned, built by the lane or exempt)"
 exit "$fail"
