@@ -41,7 +41,7 @@ while IFS= read -r args; do for n in $args; do case "$n" in *'$'*|-*) ;; *) buil
 refs="$(
   {
     # image: / imageName: in manifests and heredocs, --image=, and *IMG= / img= assignments in scripts; comment lines are skipped
-    git grep -h -E 'image|IMG|img' -- 'ci/kind/*.yaml' 'ci/kind/*.sh' | perl -ne '
+    git grep -h -E 'image|IMG|img|docker[[:space:]]+run|(^|[[:space:];&|(])dk[[:space:]]' -- 'ci/kind/*.yaml' 'ci/kind/*.sh' | perl -ne '
       next if /^\s*#/;
       print "$1\n" while /(?:\bimage|\bimageName):\s*"?([^\s"\x27|#]+)/g;
       print "$1\n" while /--image[= ]+"?([^\s"\x27]+)/g;
