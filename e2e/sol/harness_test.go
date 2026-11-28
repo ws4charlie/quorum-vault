@@ -477,8 +477,6 @@ func (s *system) reconcileClean(stage string) {
 	s.t.Fatalf("%s: Reconcile is not clean: %v", stage, out)
 }
 
-func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
-
 var _ sync.Mutex
 
 func bigU(n uint64) *big.Int { return new(big.Int).SetUint64(n) }

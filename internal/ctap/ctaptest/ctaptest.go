@@ -94,13 +94,6 @@ func cborUint(major byte, n int) []byte {
 	return []byte{major<<5 | 25, byte(n >> 8), byte(n)}
 }
 
-func cborInt(n int) []byte {
-	if n >= 0 {
-		return cborUint(0, n)
-	}
-	return cborUint(1, -1-n)
-}
-
 func cborBytes(b []byte) []byte { return append(cborUint(2, len(b)), b...) }
 
 // MakeCredential makes a credential for the first algorithm of r that the key offers.

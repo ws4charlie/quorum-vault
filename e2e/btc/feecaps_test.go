@@ -175,17 +175,6 @@ func TestFeeCapsApplyWindowWaitsThenSendsUnderTheNewCaps(t *testing.T) {
 	s.reconcileClean()
 }
 
-// wantCapsOf checks each database against its own expected caps and sequence number.
-func (s *system) wantCapsOf(want map[string]capsRow) {
-	s.t.Helper()
-	rows, out := s.showCaps(everywhere)
-	for name, w := range want {
-		if rows[name] != w {
-			s.t.Fatalf("%s is at %+v, want %+v:\n%s", name, rows[name], w, out)
-		}
-	}
-}
-
 // Refused changes leave everything as it was: no row in any database, the same caps and sequence number in show and metrics, nothing in the audit trail of the fee
 // caps. The same file applied twice is not an error and adds nothing.
 func TestFeeCapsRefusedChangesLeaveEverythingAsItWas(t *testing.T) {

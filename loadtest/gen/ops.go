@@ -48,8 +48,6 @@ type dcust struct {
 	credited *big.Int // sum of deposits seen credited
 }
 
-func (r *Runner) bearerOps() string { return r.T.Actors.Ops }
-
 // createCustomer makes a customer and its deposit address on the chain.
 func (r *Runner) createCustomer(ctx context.Context, id string) (common.Address, error) {
 	if _, _, err := r.C.Call(ctx, r.T.Actors.Ops, "POST", "/v2/customers", nil, map[string]any{"id": id}); err != nil {

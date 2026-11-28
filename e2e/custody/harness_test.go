@@ -877,12 +877,6 @@ func (s *system) setDestination(dest common.Address) {
 	s.mustSend(s.admin, &s.factory, new(big.Int), data)
 }
 
-func (s *system) freeze() {
-	s.t.Helper()
-	data, _ := s.factoryABI.Pack("freeze")
-	s.mustSend(s.guardian, &s.factory, new(big.Int), data)
-}
-
 // ---- processes ----
 
 func (s *system) spawn(name string, env []string, args ...string) *proc {

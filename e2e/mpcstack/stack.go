@@ -1,6 +1,6 @@
 // Package mpcstack starts the real processes of the two-party signing service for end-to-end tests: mpc-party A and B (real
-// SoftHSM sealing, mTLS with pinned certificates), the qv-cosigner next to B, and an optional session-level proxy between
-// A and B for partition, latency and tamper tests. It is test support: the root module links it only into test binaries.
+// SoftHSM sealing, mTLS with pinned certificates), the qv-cosigner next to B. Stack3 (stack3.go) is the 2-of-3 stack, with an
+// optional session-level proxy on every link for partition, latency and tamper tests. It is test support: the root module links it only into test binaries.
 package mpcstack
 
 import (
@@ -11,7 +11,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -33,14 +32,12 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
 	"github.com/ws4charlie/quorum-vault/internal/db/dbtest"
-	"github.com/ws4charlie/quorum-vault/internal/gateway"
 	"github.com/ws4charlie/quorum-vault/internal/hsm"
 	"github.com/ws4charlie/quorum-vault/internal/pki/pkitest"
 	pb "github.com/ws4charlie/quorum-vault/mpc-party/api/mpcparty/v1"
@@ -389,7 +386,7 @@ func FreeAddr(t testing.TB) string {
 // ---- the stack ----
 
 type Opts struct {
-	// Proxy puts a session-level proxy between A and B (partition, latency, tamper).
+	// Proxy puts a session-level proxy on every link of Start3 (partition, latency, tamper). Start (two parties) refuses it.
 	Proxy bool
 	// Limits override the parties' defaults; zero keeps the value below.
 	RecvTimeoutMS, SessionTimeoutMS, KeygenRecvTimeoutMS int
@@ -402,17 +399,15 @@ type Stack struct {
 	Dir string
 	Bin Binaries
 
-	CertA, CertB, CertGW, CertProx Cert
-	CertCosB                       Cert     // the certificate B's cosigner presents on its socket (B pins it; the cosigner pins B)
-	Admins                         AdminSet // the three admin keys; the parties are configured with them and admin_threshold 2
+	CertA, CertB, CertGW Cert
+	CertCosB             Cert     // the certificate B's cosigner presents on its socket (B pins it; the cosigner pins B)
+	Admins               AdminSet // the three admin keys; the parties are configured with them and admin_threshold 2
 
 	CallerA, CallerB, PeerB string
-	peerForA                string
 	Sock                    string // the cosigner's unix socket
 
-	Proxy *Proxy
-	A, B  *Proc
-	Cos   *Proc
+	A, B *Proc
+	Cos  *Proc
 
 	cfgA, cfgB string
 	Client     pb.MpcPartyClient // gateway identity -> party A
@@ -434,25 +429,21 @@ func New(t testing.TB, dir string, bin Binaries, o Opts) *Stack {
 // for them when the keys are needed. The keyset does not exist yet.
 func Start(t testing.TB, dir string, bin Binaries, o Opts) *Stack {
 	t.Helper()
+	if o.Proxy {
+		t.Fatal("mpcstack: Opts.Proxy is for Start3 only (the two-party stack has no proxy)")
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	s := &Stack{t: t, Dir: dir, Bin: bin, KeysetID: "hot"}
-	s.CertA, s.CertB, s.CertGW, s.CertProx = NewCert(t, "party-a"), NewCert(t, "party-b"), NewCert(t, "gateway"), NewCert(t, "proxy")
+	s.CertA, s.CertB, s.CertGW = NewCert(t, "party-a"), NewCert(t, "party-b"), NewCert(t, "gateway")
 	s.CertCosB = NewCert(t, "cosigner-b")
 	s.Admins = newAdminSet()
 	s.CallerA, s.CallerB, s.PeerB = FreeAddr(t), FreeAddr(t), FreeAddr(t)
-	s.peerForA = s.PeerB
 	s.Sock = filepath.Join(os.TempDir(), fmt.Sprintf("qvcs-%d.sock", time.Now().UnixNano()%1e9))
 	t.Cleanup(func() { os.Remove(s.Sock) })
-	pinForA, pinForB := s.CertB.Pin, s.CertA.Pin
-	if o.Proxy {
-		// A believes the proxy is party B; B believes the proxy is party A.
-		s.Proxy, s.peerForA = startProxy(t, s)
-		pinForA, pinForB = s.CertProx.Pin, s.CertProx.Pin
-	}
-	s.cfgA = s.writeParty("A", pinForA, o)
-	s.cfgB = s.writeParty("B", pinForB, o)
+	s.cfgA = s.writeParty("A", s.CertB.Pin, o)
+	s.cfgB = s.writeParty("B", s.CertA.Pin, o)
 	env := SoftHSMEnv()
 	s.B = NewProc(t, "party-B", filepath.Join(dir, "party-B.log"), bin.MPCParty, env, "-config", s.cfgB)
 	s.A = NewProc(t, "party-A", filepath.Join(dir, "party-A.log"), bin.MPCParty, env, "-config", s.cfgA)
@@ -490,7 +481,7 @@ func (s *Stack) writeParty(role, peerPin string, o Opts) string {
 		"sealer": SealerConfig(role), "limits": lim,
 	}
 	if role == "A" {
-		cfg["caller_listen"], cfg["peer_address"] = s.CallerA, s.peerForA
+		cfg["caller_listen"], cfg["peer_address"] = s.CallerA, s.PeerB
 		cfg["authorizer"] = map[string]any{"type": "pinned-caller"}
 	} else {
 		cfg["caller_listen"], cfg["peer_listen"] = s.CallerB, s.PeerB
@@ -560,59 +551,6 @@ type Shard struct {
 	Addr  common.Address
 }
 
-// Derive derives the i-th hot key (m/44'/60'/0'/i).
-func (s *Stack) Derive(i int) Shard {
-	s.t.Helper()
-	x, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	d, err := s.Client.Derive(x, &pb.DeriveRequest{KeysetId: s.KeysetID, HardenedPath: []uint32{44, 60, 0}, Path: []uint32{uint32(i)}})
-	if err != nil {
-		s.t.Fatalf("Derive %d: %v", i, err)
-	}
-	pk, err := crypto.DecompressPubkey(d.PublicKey)
-	if err != nil {
-		s.t.Fatal(err)
-	}
-	return Shard{KeyID: d.KeyId, Pub65: crypto.FromECDSAPub(pk), Addr: crypto.PubkeyToAddress(*pk)}
-}
-
-// Refresh re-randomizes the shares through A. It returns the error unchanged.
-func (s *Stack) Refresh() error {
-	x, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	_, err := s.Client.Refresh(x, s.Admins.Refresh(&pb.RefreshRequest{KeysetId: s.KeysetID}))
-	return err
-}
-
-// Unfreeze lifts the freeze on both parties with an operator signature.
-func (s *Stack) Unfreeze() error {
-	x, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	_, err := s.Client.Unfreeze(x, s.Admins.Unfreeze(&pb.UnfreezeRequest{KeysetId: s.KeysetID}))
-	return err
-}
-
-// Frozen reports whether party A says the keyset is frozen.
-func (s *Stack) Frozen() bool {
-	h, err := s.Health()
-	if err != nil {
-		return false
-	}
-	for _, k := range h.Keysets {
-		if k.KeysetId == s.KeysetID {
-			return k.Frozen
-		}
-	}
-	return false
-}
-
-// GatewaySigner is the gateway.json signer entry for one derived key. It writes the gateway's client certificate.
-func (s *Stack) GatewaySigner(sh Shard) gateway.SignerFile {
-	crt, key := s.CertGW.Write(s.t, s.Dir)
-	return gateway.SignerFile{Backend: "mpc", KeyID: sh.KeyID, PublicKey: hex.EncodeToString(sh.Pub65),
-		MPC: &gateway.MPCSignerFile{Address: s.CallerA, CertFile: crt, KeyFile: key, ServerPin: s.CertA.Pin}}
-}
-
 // StartCosigner starts qv-cosigner (B's authorizer) with its own config and guard database.
 func (s *Stack) StartCosigner(cfgPath, guardDSN, gatewayGuardDSN string) {
 	s.t.Helper()
@@ -638,19 +576,12 @@ func (s *Stack) StartCosignerAgain() {
 	s.t.Fatalf("cosigner did not start: %s", tail(s.Cos.Output()))
 }
 
-// RestartA / RestartB start a killed party again and wait until A sees B and the keyset is reconciled.
-func (s *Stack) RestartA() { s.A.Start(s.t); s.WaitReady(60 * time.Second) }
-func (s *Stack) RestartB() { s.B.Start(s.t); s.WaitReady(60 * time.Second) }
-
 // ---- the session proxy ----
 
 // Proxy is a man in the middle at the session layer (TLS is terminated on both sides with the proxy's own certificate,
 // pinned by A and by B). It forwards frames and can: add latency to every frame, cut the link (a partition), and flip one
 // byte in the payload of the n-th DATA frame in one direction.
 type Proxy struct {
-	pb.UnimplementedPeerServer
-	client pb.PeerClient
-
 	delayNS atomic.Int64
 	cut     atomic.Bool
 
@@ -716,8 +647,6 @@ func (p *Proxy) delay(ctx context.Context) bool {
 	}
 }
 
-func (p *Proxy) Session(in pb.Peer_SessionServer) error { return p.session(in, p.client) }
-
 // session forwards one stream to client (the target of this link).
 func (p *Proxy) session(in pb.Peer_SessionServer, client pb.PeerClient) error {
 	if p.cut.Load() {
@@ -781,27 +710,6 @@ func (p *Proxy) session(in pb.Peer_SessionServer, client pb.PeerClient) error {
 	case <-ctx.Done():
 	}
 	return nil
-}
-
-func startProxy(t testing.TB, s *Stack) (*Proxy, string) {
-	conn, err := grpc.NewClient(s.PeerB, grpc.WithTransportCredentials(credentials.NewTLS(PinnedTLS(s.CertProx, s.CertB.Pin))))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	p := &Proxy{client: pb.NewPeerClient(conn)}
-	p.tn.Store(-1)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := PinnedTLS(s.CertProx, s.CertA.Pin)
-	cfg.ClientAuth = tls.RequireAnyClientCert
-	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(cfg)))
-	pb.RegisterPeerServer(srv, p)
-	go srv.Serve(ln)
-	t.Cleanup(srv.Stop)
-	return p, ln.Addr().String()
 }
 
 func grpcUnavailable() error { return status.Error(codes.Unavailable, "proxy: link is cut") }

@@ -288,23 +288,6 @@ func (s *wdSys) waitFinalized(what string, cond func() bool) {
 	s.waitFor(60*time.Second, what, cond)
 }
 
-func (s *wdSys) posted(acct string) *big.Int {
-	var p string
-	if err := s.pool.QueryRow(s.ctx, `SELECT posted::text FROM ledger_accounts WHERE id=$1`, acct).Scan(&p); err != nil {
-		s.t.Fatalf("account %s: %v", acct, err)
-	}
-	n, _ := new(big.Int).SetString(p, 10)
-	return n
-}
-
-func (s *wdSys) workflowStatus(id string) string {
-	d, err := s.tc.DescribeWorkflowExecution(s.ctx, id, "")
-	if err != nil {
-		return ""
-	}
-	return d.WorkflowExecutionInfo.Status.String()
-}
-
 // ---- the flows ----
 
 func TestWdFlows(t *testing.T) {

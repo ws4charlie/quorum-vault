@@ -105,11 +105,6 @@ func InitMint2(mint, authority [32]byte, decimals uint8) Ix {
 	return Ix{Program: prog(sol.TokenProgram), Accts: []Meta{{mint, false, true}}, Data: append(append([]byte{20, decimals}, authority[:]...), 0)}
 }
 
-// InitAccount3 initializes a token account.
-func InitAccount3(acct, mint, owner [32]byte) Ix {
-	return Ix{Program: prog(sol.TokenProgram), Accts: []Meta{{acct, false, true}, {mint, false, false}}, Data: append([]byte{18}, owner[:]...)}
-}
-
 // MintTo mints tokens to an account.
 func MintTo(mint, dest, authority [32]byte, amount uint64) Ix {
 	return Ix{Program: prog(sol.TokenProgram), Accts: []Meta{{mint, false, true}, {dest, false, true}, {authority, true, false}}, Data: binary.LittleEndian.AppendUint64([]byte{7}, amount)}
@@ -128,18 +123,6 @@ func Assemble(msg []byte, sigs ...[]byte) []byte {
 func AdvanceNonce(nonce, authority [32]byte) Ix {
 	return Ix{Program: prog(sol.SystemProgram), Accts: []Meta{{nonce, false, true}, {prog(sol.SysvarRecentBlockhashes), false, false}, {authority, true, false}},
 		Data: sol.AdvanceNonceData()}
-}
-
-// CreateNonceWithSeed is CreateAccountWithSeed for pool account i of hot (the hot shard is the base and pays).
-func CreateNonceWithSeed(hot [32]byte, i int, lamports uint64) Ix {
-	return Ix{Program: prog(sol.SystemProgram), Accts: []Meta{{hot, true, true}, {sol.NonceAddress(hot, i), false, true}},
-		Data: sol.CreateWithSeedData(hot, sol.NonceSeed(i), lamports, sol.NonceAccountSize)}
-}
-
-// InitNonce is InitializeNonceAccount with authority.
-func InitNonce(nonce, authority [32]byte) Ix {
-	return Ix{Program: prog(sol.SystemProgram), Accts: []Meta{{nonce, false, true}, {prog(sol.SysvarRecentBlockhashes), false, false}, {prog(sol.SysvarRent), false, false}},
-		Data: sol.InitNonceData(authority)}
 }
 
 // WithdrawNonce is the system program's WithdrawNonceAccount (index 5): authority takes lamports out of nonce to dest. The zone must refuse it.

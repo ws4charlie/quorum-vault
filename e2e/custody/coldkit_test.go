@@ -93,12 +93,6 @@ func (k *coldKit) configure(s *system) {
 // write saves the (possibly edited) offline config.
 func (k *coldKit) write() { writeJSON(k.t, k.cfgPath, k.cfg) }
 
-func newColdKit(t *testing.T, s *system) *coldKit {
-	k := newColdKey(t, s, "cold")
-	k.configure(s)
-	return k
-}
-
 // run executes qv-cold with the repo-local SoftHSM config and the dev PIN.
 func (k *coldKit) run(args ...string) (string, error) {
 	cmd := exec.Command(filepath.Join(binDir, "qv-cold"), args...)

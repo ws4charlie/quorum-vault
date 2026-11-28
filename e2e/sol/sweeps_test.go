@@ -94,10 +94,6 @@ func (s *wdSys) sweeps() []swRow {
 	return out
 }
 
-func (s *wdSys) confirmedSweeps() int {
-	return s.count(`SELECT count(*) FROM sweeps WHERE chain=$1 AND status='confirmed'`, s.chain)
-}
-
 func (s *wdSys) openSweeps() int {
 	return s.count(`SELECT count(*) FROM sweeps WHERE chain=$1 AND status NOT IN ('confirmed','failed')`, s.chain)
 }
