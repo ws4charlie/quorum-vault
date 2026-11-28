@@ -244,6 +244,10 @@ func NewPKCS11Sealer(c SealerConfig) (*PKCS11Sealer, error) {
 	if c.Token == "" {
 		return nil, errors.New("sealer pkcs11: token (label) is required")
 	}
+	if c.PinEnv != "" && productionEnv() {
+		// The rule the gateway has (internal/hsm/pin.go): an environment variable is readable by anything that can dump the process environment.
+		return nil, fmt.Errorf("sealer pkcs11: pin_env is refused in production (QV_ENV unset, or not dev or test): the PIN comes from pin_file only")
+	}
 	if c.PinEnv != "" && !prof.pinFromEnvAllowed {
 		return nil, fmt.Errorf("sealer pkcs11 (%s): pin_env is not accepted for this provider: the PIN holds a password; use pin_file", prof.name)
 	}

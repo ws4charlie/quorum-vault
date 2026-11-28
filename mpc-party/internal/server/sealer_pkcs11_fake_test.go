@@ -498,6 +498,7 @@ func TestCloudHSMProfileInputs(t *testing.T) {
 		return p
 	}
 	secret := randHex(6)
+	t.Setenv("QV_ENV", "test") // "softhsm env stays" reads pin_env, which production refuses (TestPKCS11PinEnvRefusedInProduction)
 	t.Setenv("QV_TEST_CLOUD_PIN", "user:"+secret)
 	for name, tc := range map[string]struct {
 		c    SealerConfig

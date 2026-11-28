@@ -185,8 +185,12 @@ func TestFileStoreSealedBlobsAreBound(t *testing.T) {
 // The real SoftHSM module is refused when QV_ENV says production (unset, or anything but dev or test), and works in development and tests.
 func TestPKCS11SealerRefusesSoftHSMInProduction(t *testing.T) {
 	pin := testenv.HSMEnv(t) // sets QV_ENV=test
-	t.Setenv("QV_TEST_PIN", pin)
-	cfg := server.SealerConfig{Type: "pkcs11", Token: "qv-party-1", PinEnv: "QV_TEST_PIN"}
+	pinFile := filepath.Join(t.TempDir(), "pin")
+	if err := os.WriteFile(pinFile, []byte(pin), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	// pin_file: production refuses pin_env before the module is looked at (TestPKCS11PinEnvRefusedInProduction).
+	cfg := server.SealerConfig{Type: "pkcs11", Token: "qv-party-1", PinFile: pinFile}
 	for _, env := range []string{"", "production", "staging"} {
 		t.Setenv("QV_ENV", env)
 		_, err := server.NewPKCS11Sealer(cfg)
