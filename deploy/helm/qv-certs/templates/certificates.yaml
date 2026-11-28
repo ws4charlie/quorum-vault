@@ -1,8 +1,10 @@
-{{- /* One cert-manager Certificate per catalog identity of this cluster. The Secret holds tls.crt, tls.key and ca.crt; mount it as a volume (not subPath), the services re-read it. */ -}}
+{{- /* One cert-manager Certificate per catalog identity of this cluster. The loopback names (devDnsNames, devIpAddresses) only with env dev or test. The Secret holds tls.crt, tls.key and ca.crt; mount it as a volume (not subPath), the services re-read it. */ -}}
 {{- $root := . -}}
 {{- range $e := (include "qv-certs.selected" . | fromJsonArray) }}
 {{- $name := include "qv-certs.secretName" (dict "zone" $e.zone "name" $e.name) }}
-{{- $dns := concat $e.dnsNames (default (list) (get $root.Values.extraDNSNames $e.name)) | uniq }}
+{{- $dev := has $root.Values.env (list "dev" "test") }}
+{{- $dns := concat $e.dnsNames (ternary $e.devDnsNames (list) $dev) (default (list) (get $root.Values.extraDNSNames $e.name)) | uniq }}
+{{- $ips := concat $e.ipAddresses (ternary $e.devIpAddresses (list) $dev) }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -23,7 +25,7 @@ spec:
     - {{ . }}
     {{- end }}
   {{- end }}
-  {{- with $e.ipAddresses }}
+  {{- with $ips }}
   ipAddresses:
     {{- range . }}
     - {{ . | quote }}

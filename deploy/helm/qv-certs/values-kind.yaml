@@ -1,6 +1,7 @@
 # Local kind cluster and CI (the kind lane installs this with the same templates). Only configuration differs from production: one cluster holds every
 # identity (cluster: all), the authorities are CA issuers made at install time, and the operators' identities are made too.
 cluster: all
+env: dev
 operatorCertificates: true
 issuers:
   mode: ca

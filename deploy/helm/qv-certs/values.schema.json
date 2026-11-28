@@ -28,6 +28,7 @@
     "interval": { "type": "string", "pattern": "^[0-9]+h$" }
   },
   "properties": {
+    "env": { "enum": ["", "dev", "test"] },
     "cluster": { "enum": ["", "business", "signing-core", "party-b", "party-c", "broker", "all"] },
     "operatorCertificates": { "type": "boolean" },
     "duration": { "type": "object", "additionalProperties": false, "required": ["default", "pinned"], "properties": { "default": { "$ref": "#/definitions/interval" }, "pinned": { "$ref": "#/definitions/interval" } } },
