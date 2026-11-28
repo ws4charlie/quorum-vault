@@ -11,6 +11,7 @@ fails when catalog.json (generated from the Go rule) disagrees:
 {{- define "qv-certs.selected" -}}
 {{- $c := .Values.cluster -}}
 {{- if not $c -}}{{ fail "cluster is required: business, signing-core, party-b, party-c or broker (all: kind only)" }}{{- end -}}
+{{- if and (eq .Values.issuers.mode "ca") (not (has .Values.env (list "dev" "test"))) -}}{{ fail "issuers.mode ca (a CA whose key sits in a cluster Secret) is for kind and CI only: it needs env dev or test, and production (env empty) uses mode vault" }}{{- end -}}
 {{- if and (eq $c "all") (ne .Values.issuers.mode "ca") -}}{{ fail "cluster: all puts every zone in one cluster and is for kind and CI only: it needs issuers.mode: ca" }}{{- end -}}
 {{- $cat := .Files.Get "catalog.json" | fromJson -}}
 {{- $out := list -}}
