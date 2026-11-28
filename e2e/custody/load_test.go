@@ -7,7 +7,8 @@ package custody_test
 //
 // Knobs (environment): QV_LOAD_SCENARIO (file), QV_LOAD_OUT (result directory), QV_LOAD_SHARDS (hot shards per asset, default 2), QV_LOAD_WORKERS and
 // QV_LOAD_CORES (copies of qv-worker and qv-core, default 1), QV_LOAD_LINK_DELAY_MS (delay added to every frame between party A and B, each way),
-// QV_LOAD_RATE_SCALE, QV_LOAD_SEED, QV_LOAD_TARGETS_DIR (a file_sd directory for the live dashboard's Prometheus), QV_LOAD_LABEL (names the shape in the result).
+// QV_LOAD_RATE_SCALE, QV_LOAD_SEED, QV_LOAD_RUN_ID (the run identifier; open-loop arrivals come from the seed AND the run identifier, so a run is
+// repeated exactly with the same QV_LOAD_SEED and QV_LOAD_RUN_ID; default random), QV_LOAD_TARGETS_DIR (a file_sd directory for the live dashboard's Prometheus), QV_LOAD_LABEL (names the shape in the result).
 
 import (
 	"bufio"
@@ -113,9 +114,6 @@ func TestLoadLocal(t *testing.T) {
 		"actors":             map[string]any{"initiator": "initiator", "ops": "ops", "approvers": []string{"alice", "bob", "carol"}},
 		"approver_key_files": files,
 		"evm":                map[string]any{"chain": s.chainName, "rpc": s.rpcURL, "funder_key_file": funder, "chain_id": 11155111},
-	}
-	if v := os.Getenv("QV_LOAD_PROM_URL"); v != "" {
-		target["prometheus_url"] = v
 	}
 	tb, _ := json.MarshalIndent(target, "", " ")
 	targetPath := filepath.Join(s.dir, "target.json")

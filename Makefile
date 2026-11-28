@@ -22,7 +22,7 @@ export DATABASE_URL
 QV_SIGNING_DB_URL ?= postgres://qv@localhost:$(or $(QV_SIGNING_DB_PORT),55433)/qv_signing?sslmode=verify-full&sslrootcert=$(QV_PKI_DIR)/signing/admin/ca.crt&sslcert=$(QV_PKI_DIR)/signing/admin/tls.crt&sslkey=$(QV_PKI_DIR)/signing/admin/tls.key
 export QV_SIGNING_DB_URL
 
-.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-failure test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-drill test-e2e-evm-identity test-e2e-x402 test-e2e-evm-gate base-up base-down test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery test-e2e-tee-sim mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images e2e-lane e2e-clean e2e-clean-stale e2e-slots e2e-repeat
+.PHONY: migrate pki monitoring-up monitoring-down test-monitoring dev-env test-e2e-all test-mpc test-mpc-soak test-e2e-evm test-e2e-evm-latency test-e2e-evm-flows test-e2e-evm-drill test-e2e-evm-identity test-e2e-x402 test-e2e-evm-gate base-up base-down test-e2e-approval-web keycloak-up keycloak-down test-e2e-evm-tx-failures test-e2e-evm-recovery test-e2e-tee-sim mpc-build btc-up btc-down sol-up sol-down test-e2e-sol-deposits test-e2e-sol-signing test-e2e-sol-withdrawals test-e2e-sol-wd-faults test-e2e-sol-sweeps test-e2e-sol-sweep-faults test-e2e-sol-cold test-e2e-sol-cold-crash test-e2e-sol-cold-moves-crash test-e2e-sol-nonces test-e2e-btc-deposits test-e2e-btc-withdrawals test-e2e-btc-recovery test-e2e-btc-feecaps test-e2e-btc-sweeps test-e2e-btc-cold test-e2e-btc-refill test-e2e-btc-refill-stuck test-e2e-btc-consolidate test-e2e-btc-batching test-e2e-btc-batching-recovery setup softhsm db-up db-down chain-up chain-down infra-up infra-down test-infra test test-short vet test-e2e-btc-cpfp images e2e-lane e2e-clean e2e-clean-stale e2e-slots e2e-repeat
 
 setup: softhsm pki db-up chain-up
 
@@ -95,32 +95,7 @@ vet:
 gate-vectors:
 	go run ./internal/gatecred/gatecredtest/gen > testdata/gate-credential/vectors.json
 
-# Phase 2 / P3a: signing gateway and outbox relay.
-.PHONY: build-gateway build-relay test-gateway test-relay
-
-build-gateway:
-	go build -o bin/qv-gateway ./cmd/qv-gateway
-	go build -o bin/qv-route ./cmd/qv-route
-
-build-relay:
-	go build -o bin/qv-relay ./cmd/qv-relay
-
-# Gateway attack tests and queue tests (needs Postgres and SoftHSM; `make db-up softhsm`).
-test-gateway:
-	QV_REQUIRE_DB=1 QV_REQUIRE_HSM=1 go test -count=1 -p 1 ./internal/gateway/... ./internal/signjob/...
-
-# Relay tests against Redpanda (`make infra-up`).
-test-relay:
-	QV_REQUIRE_DB=1 QV_REQUIRE_INFRA=1 go test -count=1 -p 1 ./internal/outbox/...
-
-# Phase 2 / P3b: the closed loop (deposit, sweep, withdrawal).
-.PHONY: build-core build-worker test-custody
-build-core:
-	go build -o bin/qv-core ./cmd/qv-core
-
-build-worker:
-	go build -o bin/qv-worker ./cmd/qv-worker
-
+.PHONY: test-custody
 # End-to-end closed loop with real everything. Needs: Postgres (`make db-up`), SoftHSM
 # (`make softhsm`), Temporal + Redpanda (`make infra-up`) and an anvil node with chain ID
 # 11155111 on QV_ANVIL_RPC (default http://127.0.0.1:18545, e.g.
@@ -142,19 +117,13 @@ E2E_EVM_ENV := QV_CUSTODY_SIGNER=mpc QV_REQUIRE_CUSTODY=1 QV_REQUIRE_DB=1 QV_REQ
 test-e2e-evm:
 	$(E2E_EVM_ENV) $(QV_GOTEST) -count=1 -p 1 -timeout 40m -v $(if $(TEST),-run '$(TEST)') ./e2e/custody/...
 
-# The heavy tests, which pull-request CI leaves to the nightly run: every crash boundary, a component killed at each custody
-# boundary, the freeze test, and the link tests (kill mid-session, partition).
-E2E_EVM_FAILURE := TestCrashAtEveryBoundary|TestColdMoveCrashAtEveryBoundary|TestRebalanceCrashAtEveryBoundary|TestRefillCrashAtEveryBoundary|TestMPCKillSigningComponentAtCustodyBoundary|TestMPCFreezeDuringLiveWithdrawals|TestMPCKillPartyMidSession|TestMPCPartitionBetweenPartiesDuringWithdrawal|TestMPCRouteOneFailedSignatureDoesNotMoveIt
-test-e2e-evm-failure:
-	$(E2E_EVM_ENV) $(QV_GOTEST) -count=1 -p 1 -timeout 40m -v -run '$(E2E_EVM_FAILURE)' ./e2e/custody/...
-
 # The signing latency with delay added between the two parties (20 ms, 100 ms, 1 s per frame): a measurement of a real duration (about
 # 2 minutes) that asserts little, so it is not part of test-e2e-evm. The nightly workflow runs it.
 test-e2e-evm-latency:
 	$(E2E_EVM_ENV) QV_E2E_LATENCY=1 $(QV_GOTEST) -count=1 -p 1 -timeout 20m -v -run 'TestMPCWithdrawalLatencyWithSlowLink' ./e2e/custody/...
 
 # Pull-request CI: everything except the failure tests, in three groups that run in parallel jobs (each on its own runner with its
-# own anvil, Temporal, Redpanda and Postgres). Together with test-e2e-evm-failure they cover test-e2e-evm.
+# own anvil, Temporal, Redpanda and Postgres). The nightly workflow runs all of test-e2e-evm.
 #   flows        deposits, sweeps, withdrawals, approvals, hot to cold, refills: the business flows working
 #   tx-failures  what the chain does to a transaction: reverted, dropped, stuck, replaced, nonce taken from under us
 #   recovery     processes and links dying: gateway and relay restarts, a refresh under load, a worker crash at a boundary
@@ -406,7 +375,7 @@ SCENARIO ?= loadtest/scenarios/smoke.json
 load-local:
 	QV_LOAD_SCENARIO=$(abspath $(SCENARIO)) $(if $(OUT),QV_LOAD_OUT=$(abspath $(OUT))) $(if $(OUT),,QV_LOAD_OUT=$(abspath data/load)/$(shell date +%Y%m%d-%H%M%S)) $(if $(SHARDS),QV_LOAD_SHARDS=$(SHARDS)) $(if $(WORKERS),QV_LOAD_WORKERS=$(WORKERS)) \
 	  $(if $(CORES),QV_LOAD_CORES=$(CORES)) $(if $(DELAY_MS),QV_LOAD_LINK_DELAY_MS=$(DELAY_MS)) $(if $(RATE_SCALE),QV_LOAD_RATE_SCALE=$(RATE_SCALE)) \
-	  $(if $(SEED),QV_LOAD_SEED=$(SEED)) $(if $(LABEL),QV_LOAD_LABEL='$(LABEL)') $(if $(wildcard data/load/targets),QV_LOAD_TARGETS_DIR=$(abspath data/load/targets)) \
+	  $(if $(SEED),QV_LOAD_SEED=$(SEED)) $(if $(RUN_ID),QV_LOAD_RUN_ID=$(RUN_ID)) $(if $(LABEL),QV_LOAD_LABEL='$(LABEL)') $(if $(wildcard data/load/targets),QV_LOAD_TARGETS_DIR=$(abspath data/load/targets)) \
 	  $(E2E_EVM_ENV) $(QV_GOTEST) -count=1 -p 1 -timeout 90m -v -run 'TestLoadLocal$$' ./e2e/custody/
 
 # The smoke scenario: a handful of operations, correctness only.
