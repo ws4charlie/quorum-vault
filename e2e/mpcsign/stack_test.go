@@ -563,8 +563,6 @@ func (s *stack) waitJob(id string, d time.Duration) signjob.Job {
 	return signjob.Job{}
 }
 
-func hasPrefix(s, p string) bool { return strings.HasPrefix(s, p) }
-
 func bigInt(v int64) *big.Int { return big.NewInt(v) }
 
 func newAdminKey() (ed25519.PublicKey, ed25519.PrivateKey) {

@@ -143,35 +143,6 @@ func (e *env) form(path string, v url.Values) (map[string]any, error) {
 	return out, nil
 }
 
-func (e *env) kcAdmin(method, path string, body any) ([]byte, error) {
-	pw, err := readSecret(e.secrets, "kc-admin")
-	if err != nil {
-		return nil, err
-	}
-	t, err := e.form("/realms/master/protocol/openid-connect/token", url.Values{"grant_type": {"password"}, "client_id": {"admin-cli"}, "username": {"admin"}, "password": {pw}})
-	if err != nil {
-		return nil, err
-	}
-	var rd io.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		rd = bytes.NewReader(b)
-	}
-	req, _ := http.NewRequest(method, "https://keycloak:8443"+path, rd)
-	req.Header.Set("Authorization", "Bearer "+t["access_token"].(string))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := e.kcC.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("keycloak admin %s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(b)))
-	}
-	return b, nil
-}
-
 // token is a fresh access token of a dev realm user (alice requests, ops operates), made through the realm's login page the way the e2e suite does (e2e/idp): authorization code, the
 // username and password step only, with the client qv-e2e that is bound to the realm's test-only flow (the passkey step of qv-cli needs a browser).
 func (e *env) token(user string) (string, error) {

@@ -430,9 +430,7 @@ func (s *Stack3) startCos(p *Proc, sock string) {
 	s.t.Fatalf("%s did not start: %s", p.Name, tail(p.Output()))
 }
 
-// RestartA/B/C start a killed party again and wait until all three see each other and every keyset is reconciled.
-func (s *Stack3) RestartA() { s.A.Start(s.t); s.WaitReady(90 * time.Second) }
-func (s *Stack3) RestartB() { s.B.Start(s.t); s.WaitReady(90 * time.Second) }
+// RestartC starts a killed party C again and waits until all three see each other and every keyset is reconciled.
 func (s *Stack3) RestartC() { s.C.Start(s.t); s.WaitReady(90 * time.Second) }
 
 // Party returns the process of a party ("A", "B" or "C").

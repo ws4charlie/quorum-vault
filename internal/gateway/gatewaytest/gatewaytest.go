@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"os"
 	"testing"
 	"time"
 
@@ -99,15 +98,6 @@ func (h *Harness) Reparse() {
 		h.T.Fatal(err)
 	}
 	h.Cfg = cfg
-}
-
-// WriteConfig writes File as JSON and returns the path.
-func (h *Harness) WriteConfig(path string) string {
-	raw, _ := json.MarshalIndent(h.File, "", " ")
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		h.T.Fatal(err)
-	}
-	return path
 }
 
 // TxSpec is a transaction to build from the hot address.

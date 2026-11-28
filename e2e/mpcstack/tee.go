@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -295,17 +294,6 @@ func (t *TEE) Allow(role string) {
 	time.Sleep(700 * time.Millisecond)
 }
 
-// AllowMeasurement publishes an allowlist in which the party's allowed measurement is the given one (hex): the image of a different build or config.
-func (t *TEE) AllowMeasurement(role, hex string) {
-	m := map[string]string{}
-	for r, v := range t.measured {
-		m[r] = v
-	}
-	m[role] = hex
-	t.setAllowlist(m, nil)
-	time.Sleep(700 * time.Millisecond)
-}
-
 // Measure computes the mock measurement of a binary and a config file (what a release build would publish).
 func (t *TEE) Measure(bin, cfg string) string {
 	return t.run(t.s.Bin.AttestCA, "measure", "-binary", bin, "-config", cfg)
@@ -327,15 +315,6 @@ func (t *TEE) AuditLines(role string, parts ...string) int {
 		}
 	}
 	return n
-}
-
-// ReloadBrokers asks every broker to re-read its allowlist now (SIGHUP).
-func (t *TEE) ReloadBrokers() {
-	for _, p := range t.Brokers {
-		if pid := p.Pid(); pid != 0 && p.Running() {
-			_ = syscall.Kill(pid, syscall.SIGHUP)
-		}
-	}
 }
 
 // RestartPartyWith starts party `role` again with another binary and/or config file (nil args keep the stack's own). It returns the new process,

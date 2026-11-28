@@ -521,11 +521,3 @@ func quant(v []int64) Quantiles {
 	}
 	return Quantiles{N: len(s), P50: q(0.5), P90: q(0.9), P95: q(0.95), P99: q(0.99), Max: float64(s[len(s)-1])}
 }
-
-func addrs(a []common.Address) []string {
-	out := make([]string, len(a))
-	for i, x := range a {
-		out[i] = x.Hex()
-	}
-	return out
-}

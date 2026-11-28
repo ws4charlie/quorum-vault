@@ -124,9 +124,6 @@ func CosignerEnv(role string) []string {
 	return append(Env(pki.ZoneSigning, "cosigner-"+role), "QV_LINK_TLS_CERT="+c, "QV_LINK_TLS_KEY="+k, "QV_LINK_TLS_CA="+a)
 }
 
-// AdminDSN returns base (a DSN of the server of zone, as DATABASE_URL or QV_SIGNING_DB_URL) with the admin certificate of that zone and that zone's CA.
-func AdminDSN(base, zone string) string { return WithCert(base, zone, "admin", zone) }
-
 // WithCert returns base using the client certificate of (clientZone, clientService) and the CA of serverZone to verify the server.
 func WithCert(base, clientZone, clientService, serverZone string) string {
 	c, k, _ := Files(clientZone, clientService)

@@ -16,12 +16,6 @@ func rsOf(tx *types.Transaction, key *ecdsa.PrivateKey) (*big.Int, *big.Int) {
 	return new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:64])
 }
 
-// mustSign signs with a throwaway key (the "attacker's"), returning (r, s) for assemble.
-func mustSign(tx *types.Transaction) (*big.Int, *big.Int) {
-	k, _ := crypto.GenerateKey()
-	return rsOf(tx, k)
-}
-
 func types_sign(tx *types.Transaction, key *ecdsa.PrivateKey) (*types.Transaction, error) {
 	return types.SignTx(tx, signerFor(tx), key)
 }

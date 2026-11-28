@@ -274,18 +274,6 @@ func (s *system) waitWd(id, status string, timeout time.Duration) wd {
 	return w
 }
 
-func (s *system) approve(actor, id string) (int, map[string]any) {
-	s.t.Helper()
-	code, in := s.call("GET", "/v2/withdrawals/"+id+"/intent", nil)
-	if code != 200 {
-		s.t.Fatalf("intent: %d %v", code, in)
-	}
-	h, _ := hex.DecodeString(in["hash"].(string))
-	sig := ed25519.Sign(s.approv[actor], h)
-	return s.callWith("POST", "/v2/withdrawals/"+id+"/approvals", map[string]string{"X-Actor": actor},
-		map[string]any{"actor": actor, "signature": hex.EncodeToString(sig)})
-}
-
 // fundHot sends sats from the node's wallet to the hot address, mines to safe depth and waits until the scan has recorded it as an output and
 // booked it as operator funding.
 func (s *system) fundHot(sats int64) {
