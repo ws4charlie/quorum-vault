@@ -6,13 +6,14 @@
 //	                                                 deploys the EIP-3009 mock USDC (contracts/test/mocks/Tokens.sol, internal/chain/evm/testdata) once (its address is kept
 //	                                                 in -state and reused while the chain still has its code), then mints so that ADDR holds exactly N if it holds less, and
 //	                                                 appends "<tx> <amount>" of the mint to -pending (the books must record it: book). Prints the address.
-//	kindgate cfg    -in DIR -out DIR -usdc ADDR -wallet-id ID -audience A -kid K -pubkey FILE -ops DIR [-per-payment N -per-hour N -per-day N]
+//	kindgate cfg    -in DIR -out DIR -usdc ADDR -wallet-id ID -audience A -kid K -pubkey FILE -ops DIR -hot1 FILE [-per-payment N -per-hour N -per-day N]
 //	                                                 from the lane's generated configs (signing.json, cosigner.json, custody-evm.json in -in) writes the Gate versions of them
-//	                                                 to -out (USDC with x402 on hot shard 0, the operators section, the core's gate section) and the gate setting (setting.json).
+//	                                                 to -out (Gate's hot shard 1 with keyset hot-1, USDC with x402 on it, the operators section, the core's gate section)
+//	                                                 and the gate setting (setting.json).
 //	                                                 The two zone operators' keys are made in -ops once. Prints {"partition","wallet_address"}.
 //	kindgate book   -cfg custody.json -rpc URL -dsn DSN -pending FILE
-//	                                                 books each mint of -pending on the Gate wallet's hot shard (the operator's seed step), once per mint transaction, then
-//	                                                 empties the file. The books follow the chain mint by mint, so a top-up while a payment is still being booked keeps them equal.
+//	                                                 books each mint of -pending that the chain has on the Gate wallet's hot shard (the operator's seed step), once per mint
+//	                                                 transaction, then empties the file. The books follow the chain mint by mint, so a top-up while a payment is still being booked keeps them equal.
 //
 // AgentGate's side of a payment, run in a pod, is ci/kind/tools/kindgatepay.
 package main
@@ -22,6 +23,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -50,7 +52,13 @@ import (
 	"github.com/ws4charlie/quorum-vault/internal/gateway"
 )
 
-const asset = "USDC" // the lane's x402 asset symbol, in the core's and the zone's config
+const (
+	asset = "USDC" // the lane's x402 asset symbol, in the core's and the zone's config
+	// gateShard is the hot shard Gate pays from: its own (keyset hot-1, made by gate.sh), never the lane's shard 0. Gate governs a whole shard (every
+	// asset), so Vault's own flows keep shard 0: sweeps land on the sweep destination (shard 0), and a withdrawal takes the shard with the most free
+	// balance of its asset, the first on a tie (custody pickShard), and nothing books ETH on shard 1.
+	gateShard = 1
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -102,10 +110,11 @@ func readPub(path string) (ed25519.PublicKey, error) {
 		return nil, err
 	}
 	if blk, _ := pem.Decode(b); blk != nil {
-		if len(blk.Bytes) == 44 { // SPKI of Ed25519: a 12-byte header and the key
-			return ed25519.PublicKey(blk.Bytes[12:]), nil
+		k, err := x509.ParsePKIXPublicKey(blk.Bytes)
+		if pk, ok := k.(ed25519.PublicKey); err == nil && ok && blk.Type == "PUBLIC KEY" {
+			return pk, nil
 		}
-		return nil, fmt.Errorf("%s: PEM block is not an Ed25519 public key", path)
+		return nil, fmt.Errorf("%s: PEM block is not an Ed25519 public key (SPKI, OID 1.3.101.112)", path)
 	}
 	s := strings.TrimSpace(string(b))
 	for _, dec := range []func(string) ([]byte, error){base64.RawURLEncoding.DecodeString, base64.URLEncoding.DecodeString, base64.RawStdEncoding.DecodeString, base64.StdEncoding.DecodeString, hex.DecodeString} {
@@ -167,12 +176,26 @@ func usdc(args []string) error {
 	if err := rc.CallContext(ctx, nil, "anvil_setBalance", from, (*hexutil.Big)(new(big.Int).Mul(big.NewInt(10), big.NewInt(1e18)))); err != nil {
 		return fmt.Errorf("refusing: not an anvil node: %w", err)
 	}
+	genesis, err := ec.HeaderByNumber(ctx, big.NewInt(0))
+	if err != nil {
+		return err
+	}
+	// the state names the chain it belongs to (its genesis hash): a token of another chain, or one the chain no longer has, is deployed again, and the
+	// mint journal of that chain is dropped (its mints are not on this chain)
+	var st struct {
+		Address string `json:"address"`
+		Genesis string `json:"genesis"`
+	}
 	var tok common.Address
-	if b, err := os.ReadFile(*state); err == nil {
-		tok = common.HexToAddress(strings.TrimSpace(string(b)))
-		if code, err := ec.CodeAt(ctx, tok, nil); err != nil || len(code) == 0 {
-			fmt.Fprintf(os.Stderr, "usdc: %s has no code (a new chain): deploying again\n", tok.Hex())
+	if err := readJSON(*state, &st); err == nil && common.IsHexAddress(st.Address) {
+		tok = common.HexToAddress(st.Address)
+		code, err := ec.CodeAt(ctx, tok, nil)
+		if st.Genesis != genesis.Hash().Hex() || err != nil || len(code) == 0 {
+			fmt.Fprintf(os.Stderr, "usdc: %s is not on this chain (a new anvil): deploying again, dropping the old mint journal\n", tok.Hex())
 			tok = common.Address{}
+			if err := os.Remove(*pending); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
 	}
 	if tok == (common.Address{}) {
@@ -189,7 +212,8 @@ func usdc(args []string) error {
 			return fmt.Errorf("deploy: %w", err)
 		}
 		tok = r.ContractAddress
-		if err := os.WriteFile(*state, []byte(tok.Hex()+"\n"), 0o600); err != nil {
+		st.Address, st.Genesis = tok.Hex(), genesis.Hash().Hex()
+		if err := writeJSON(*state, st); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "usdc: deployed %s\n", tok.Hex())
@@ -201,20 +225,23 @@ func usdc(args []string) error {
 	}
 	if d := new(big.Int).Sub(want, have); d.Sign() > 0 {
 		data, _ := a.Pack("mint", holder, d)
-		r, err := send(ctx, ec, key, &tok, data)
-		if err != nil {
+		// the journal line is written before the mint is sent: book books it only once its receipt shows it mined, so a crash on either side of the
+		// send leaves the books equal to the chain
+		if _, err := sendJournaled(ctx, ec, key, &tok, data, func(h common.Hash) error {
+			f, err := os.OpenFile(*pending, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(f, "%s %s\n", h.Hex(), d)
+			if cerr := f.Sync(); err == nil {
+				err = cerr
+			}
+			if cerr := f.Close(); err == nil {
+				err = cerr
+			}
+			return err
+		}); err != nil {
 			return fmt.Errorf("mint: %w", err)
-		}
-		f, err := os.OpenFile(*pending, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintf(f, "%s %s\n", r.TxHash.Hex(), d)
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return err
 		}
 		fmt.Fprintf(os.Stderr, "usdc: minted %s to %s (now %s)\n", d, holder.Hex(), want)
 	} else {
@@ -284,10 +311,20 @@ func cfg(args []string) error {
 	kid := fs.String("kid", "", "Gate's key id")
 	pubPath := fs.String("pubkey", "", "Gate's Ed25519 public key file")
 	ops := fs.String("ops", "", "directory of the zone operators' keys (made once)")
-	perPayment := fs.String("per-payment", "100000", "fast lane and x402: the largest single payment (base units; 100000 = 0.10 USDC)")
-	perHour := fs.String("per-hour", "1000000", "fast lane: the total in a rolling hour")
-	perDay := fs.String("per-day", "2000000", "fast lane: the total in a rolling day")
+	hot1Path := fs.String("hot1", "", "hot-1.json from kindctl dkg: the keyset of Gate's hot shard (keyset, public_key, address)")
+	perPayment := fs.String("per-payment", "50000", "fast lane and x402: the largest single payment (base units; 50000 = 0.05 USDC)")
+	perHour := fs.String("per-hour", "500000", "fast lane: the total in a rolling hour")
+	perDay := fs.String("per-day", "1000000", "fast lane: the total in a rolling day")
 	fs.Parse(args)
+	var hot1 struct {
+		Keyset    string `json:"keyset"`
+		PublicKey string `json:"public_key"`
+		Address   string `json:"address"`
+	}
+	if err := readJSON(*hot1Path, &hot1); err != nil || hot1.Keyset == "" || hot1.PublicKey == "" || !common.IsHexAddress(hot1.Address) {
+		return fmt.Errorf("-hot1 %s: want {keyset, public_key, address}: %v", *hot1Path, err)
+	}
+	addr1 := common.HexToAddress(hot1.Address).Hex()
 	pub, err := readPub(*pubPath)
 	if err != nil {
 		return err
@@ -307,9 +344,13 @@ func cfg(args []string) error {
 		return err
 	}
 
-	// ---- the core: USDC on the chain, x402 on hot shard 0, the gate section
+	// ---- the core: Gate's hot shard 1, USDC on the chain, x402 on shard 1, the gate section
+	if len(cf.Chain.HotShards) != 1 {
+		return fmt.Errorf("custody-evm.json: want the lane's one hot shard, found %d", len(cf.Chain.HotShards))
+	}
+	cf.Chain.HotShards = append(cf.Chain.HotShards, addr1)
 	cf.Chain.Assets[asset] = custody.AssetFile{Address: token, Decimals: 6, MinDeposit: "1000", PriceWei: "300000000"}
-	cf.Chain.X402 = map[string]custody.X402File{asset: {Name: "USDC", Version: "2", MaxWindowSeconds: 600, PerPaymentLimit: *perPayment, Shard: 0}}
+	cf.Chain.X402 = map[string]custody.X402File{asset: {Name: "USDC", Version: "2", MaxWindowSeconds: 600, PerPaymentLimit: *perPayment, Shard: gateShard}}
 	if cf.Withdrawal.Tiers == nil {
 		cf.Withdrawal.Tiers = map[string][]custody.TierFile{}
 	}
@@ -323,9 +364,12 @@ func cfg(args []string) error {
 	if err != nil {
 		return fmt.Errorf("custody.json: %w", err)
 	}
-	part := c.PartitionKey(asset, 0).String()
+	part := c.PartitionKey(asset, gateShard).String()
 	ethPart := c.PartitionKey(c.Native, 0).String()
-	wallet := cf.Chain.HotShards[0]
+	wallet := addr1
+	if c.SinkShard != 0 {
+		return fmt.Errorf("custody.json: sweeps land on shard %d, want 0 (shard 1 is Gate's)", c.SinkShard)
+	}
 	cf.Gate = &custody.GateFile{Audience: *audience, Wallets: map[string]custody.GateWalletFile{*walletID: {Partition: part}}}
 	if err := writeJSON(custodyPath, cf); err != nil {
 		return err
@@ -358,7 +402,10 @@ func cfg(args []string) error {
 			if !ok {
 				return fmt.Errorf("zone config: chain %s has no hot address for %s", name, ethPart)
 			}
-			e.HotAddresses[part] = hot
+			for _, sym := range []string{c.Native, asset} { // shard 0: the lane's key for every asset; shard 1: Gate's
+				e.HotAddresses[c.PartitionKey(sym, 0).String()] = hot
+				e.HotAddresses[c.PartitionKey(sym, gateShard).String()] = addr1
+			}
 			if _, ok := e.ColdAddresses["omnibus/token"]; !ok {
 				e.ColdAddresses["omnibus/token"] = e.ColdAddresses["omnibus/native"]
 			}
@@ -366,8 +413,13 @@ func cfg(args []string) error {
 				Tiers: []gateway.TierFile{{MinAmount: "0", Approvals: 1}}}
 			f.Chains[name] = ch
 		}
-		if s, ok := f.Signers[ethPart]; ok { // the gateway's: the USDC partition signs with hot shard 0's key (the cosigner has no signers)
-			f.Signers[part] = s
+		if s, ok := f.Signers[ethPart]; ok { // the gateway's (the cosigner has no signers): shard 0 with the lane's keyset, shard 1 with hot-1, same parties
+			s1 := s
+			s1.KeysetID, s1.PublicKey = hot1.Keyset, hot1.PublicKey
+			for _, sym := range []string{c.Native, asset} {
+				f.Signers[c.PartitionKey(sym, 0).String()] = s
+				f.Signers[c.PartitionKey(sym, gateShard).String()] = s1
+			}
 		}
 		f.Operators = opf
 		return nil
@@ -398,6 +450,29 @@ func cfg(args []string) error {
 }
 
 // ---- book ----
+
+// mintedOK reports whether transaction h is mined and succeeded. It waits a few seconds for one that is sent but not mined yet (anvil mines at once).
+func mintedOK(ctx context.Context, url string, h common.Hash) (bool, error) {
+	rc, ec, err := dialChain(ctx, url)
+	if err != nil {
+		return false, err
+	}
+	defer rc.Close()
+	for i := 0; i < 30; i++ {
+		r, err := ec.TransactionReceipt(ctx, h)
+		if err == nil {
+			return r.Status == 1, nil
+		}
+		if !errors.Is(err, ethereum.NotFound) {
+			return false, err
+		}
+		if _, pending, err := ec.TransactionByHash(ctx, h); err != nil || !pending {
+			return false, nil // unknown to the node: never sent
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false, fmt.Errorf("mint %s is still pending", h.Hex())
+}
 
 func book(args []string) error {
 	fs := flag.NewFlagSet("book", flag.ExitOnError)
@@ -436,7 +511,7 @@ func book(args []string) error {
 	}
 	defer reader.Close()
 	svc := custody.New(pool, cfg, adapter, reader)
-	part := cfg.PartitionKey(asset, 0).String()
+	part := cfg.PartitionKey(asset, gateShard).String()
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		f := strings.Fields(line)
 		amt, ok := new(big.Int), false
@@ -446,8 +521,17 @@ func book(args []string) error {
 		if !ok || amt.Sign() <= 0 {
 			return fmt.Errorf("%s: bad line %q", *pending, line)
 		}
+		// only a mint the chain has: the line is written before the send, so a run that crashed before sending leaves a line with no receipt
+		mined, err := mintedOK(ctx, *rpcURL, common.HexToHash(f[0]))
+		if err != nil {
+			return err
+		}
+		if !mined {
+			fmt.Printf("books: mint %s is not on the chain: dropped\n", f[0])
+			continue
+		}
 		// the mint's transaction names the entry: booking the same mint again books nothing
-		if err := svc.FundHotAsset(ctx, "kind-gate-mint-"+strings.ToLower(f[0]), 0, asset, amt); err != nil {
+		if err := svc.FundHotAsset(ctx, "kind-gate-mint-"+strings.ToLower(f[0]), gateShard, asset, amt); err != nil {
 			return err
 		}
 		fmt.Printf("books: %s USDC base units on hot:%s (mint %s)\n", amt, part, f[0])
@@ -461,6 +545,12 @@ func callMsg(to common.Address, data []byte) ethereum.CallMsg {
 
 // send signs and sends one transaction from key and waits for its receipt; a reverted one is an error.
 func send(ctx context.Context, ec *ethclient.Client, key *ecdsa.PrivateKey, to *common.Address, data []byte) (*types.Receipt, error) {
+	return sendJournaled(ctx, ec, key, to, data, nil)
+}
+
+// sendJournaled is send with a hook that gets the signed transaction's hash BEFORE the transaction goes out (the journal of a mint: a crash after the
+// send still leaves its record, and book checks the receipt).
+func sendJournaled(ctx context.Context, ec *ethclient.Client, key *ecdsa.PrivateKey, to *common.Address, data []byte, before func(common.Hash) error) (*types.Receipt, error) {
 	from := crypto.PubkeyToAddress(key.PublicKey)
 	id, err := ec.ChainID(ctx)
 	if err != nil {
@@ -484,6 +574,11 @@ func send(ctx context.Context, ec *ethclient.Client, key *ecdsa.PrivateKey, to *
 	signed, err := types.SignTx(tx, types.LatestSignerForChainID(id), key)
 	if err != nil {
 		return nil, err
+	}
+	if before != nil {
+		if err := before(signed.Hash()); err != nil {
+			return nil, err
+		}
 	}
 	if err := ec.SendTransaction(ctx, signed); err != nil {
 		return nil, err

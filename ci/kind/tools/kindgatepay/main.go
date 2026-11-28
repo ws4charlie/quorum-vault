@@ -1,7 +1,11 @@
 // Command kindgatepay is AgentGate's side of one x402 payment in the kind lane's gate smoke case (ci/kind/smoke/gate.sh). It runs in a pod in the Gate namespace with
 // only the onboarding output (ci/kind/gate.sh) and Gate's own key mounted, so it is built static for linux and imports nothing with cgo.
 //
-//	kindgatepay -out DIR -key FILE -kid K [-amount N]
+//	kindgatepay -out DIR -key FILE -kid K [-amount N] [-refuse no-cert|no-credential]
+//
+// -refuse sends the same request with one proof missing and succeeds only when the core refuses it with nothing signed: no-cert (Gate's token without
+// its client certificate: 403 client_not_authorized, or the TLS handshake refused), no-credential (the payment from Gate's shard without a credential:
+// 400 credential_missing). It prints {"refused": status, "code": code}.
 package main
 
 import (
@@ -57,7 +61,11 @@ func pay(args []string) error {
 	keyPath := fs.String("key", "", "Gate's Ed25519 seed (hex)")
 	kid := fs.String("kid", "", "Gate's key id")
 	amount := fs.Int64("amount", 10000, "the payment, USDC base units (10000 = 0.01 USDC)")
+	refuse := fs.String("refuse", "", "no-cert or no-credential: expect the core to refuse the request (see the command's doc)")
 	fs.Parse(args)
+	if *refuse != "" && *refuse != "no-cert" && *refuse != "no-credential" {
+		return fmt.Errorf("-refuse %q: want no-cert or no-credential", *refuse)
+	}
 	rd := func(n string) string {
 		b, err := os.ReadFile(filepath.Join(*dir, n))
 		if err != nil {
@@ -131,8 +139,18 @@ func pay(args []string) error {
 	if err != nil {
 		return err
 	}
-	vc := &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: vaultCA, Certificates: []tls.Certificate{cert}}}}
+	certs := []tls.Certificate{cert}
+	switch *refuse {
+	case "no-cert":
+		certs = nil
+	case "no-credential":
+		delete(req, "credential")
+	}
+	vc := &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: vaultCA, Certificates: certs}}}
 	b, _ := json.Marshal(req)
+	if *refuse != "" {
+		return expectRefused(ctx, vc, rd("vault_url"), tok.AccessToken, b, *refuse)
+	}
 	var signed struct {
 		CredentialID string `json:"credential_id"`
 		Signature    string `json:"signature"`
@@ -194,7 +212,8 @@ func pay(args []string) error {
 	if err != nil {
 		return err
 	}
-	if got := crypto.PubkeyToAddress(*pub); got != wallet {
+	recovered := crypto.PubkeyToAddress(*pub)
+	if got := recovered; got != wallet {
 		return fmt.Errorf("the signature recovers %s, not wallet_address %s", got.Hex(), wallet.Hex())
 	}
 
@@ -222,7 +241,7 @@ func pay(args []string) error {
 	if got := new(big.Int).SetBytes(out); got.Int64() != *amount {
 		return fmt.Errorf("payee holds %s after the transfer, want %d", got, *amount)
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"credential_id": cred.CredentialID, "signature": signed.Signature, "signer": wallet.Hex(),
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"credential_id": cred.CredentialID, "signature": signed.Signature, "recovered": recovered.Hex(),
 		"payee": payee.Hex(), "amount": *amount, "tx": rcpt.TxHash.Hex(), "block": rcpt.BlockNumber.Uint64()})
 }
 
@@ -297,3 +316,32 @@ const eip3009ABI = `[
 {"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"a","type":"address"}],"outputs":[{"type":"uint256"}]},
 {"type":"function","name":"transferWithAuthorization","stateMutability":"nonpayable","inputs":[{"name":"from","type":"address"},{"name":"to","type":"address"},{"name":"value","type":"uint256"},{"name":"validAfter","type":"uint256"},{"name":"validBefore","type":"uint256"},{"name":"nonce","type":"bytes32"},{"name":"v","type":"uint8"},{"name":"r","type":"bytes32"},{"name":"s","type":"bytes32"}],"outputs":[]}
 ]`
+
+// expectRefused sends the request once and succeeds only on the refusal the mode expects. A TLS handshake the core refuses for want of a client
+// certificate is a refusal too (the core asks for one; an empty answer may end the handshake).
+func expectRefused(ctx context.Context, c *http.Client, vaultURL, token string, body []byte, mode string) error {
+	hr, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(vaultURL, "/")+"/v2/gate/signatures", bytes.NewReader(body))
+	hr.Header.Set("Content-Type", "application/json")
+	hr.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.Do(hr)
+	if err != nil {
+		if mode == "no-cert" && strings.Contains(err.Error(), "certificate") {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"refused": "tls", "code": err.Error()})
+		}
+		return fmt.Errorf("signing API: %w", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var rf struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(raw, &rf)
+	want := map[string]struct {
+		status int
+		code   string
+	}{"no-cert": {403, "client_not_authorized"}, "no-credential": {400, "credential_missing"}}[mode]
+	if resp.StatusCode != want.status || rf.Code != want.code {
+		return fmt.Errorf("%s: want %d %s, got %d %s", mode, want.status, want.code, resp.StatusCode, raw)
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"refused": resp.StatusCode, "code": rf.Code})
+}

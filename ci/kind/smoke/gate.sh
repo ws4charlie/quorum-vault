@@ -4,11 +4,12 @@
 #   2. a pod in agentgate with ONLY the output files (and Gate's own key) mounted gets a token by client credentials, calls /v2/gate/signatures with a signed
 #      credential for a 0.01 USDC EIP-3009 payment (200), checks the signature against the token's EIP-712 domain and wallet_address, and submits
 #      transferWithAuthorization to anvil: it mines and pays the payee (tools/kindgatepay)
-#   3. gate.sh again changes nothing: same output files, no pod of the core, the gateway or the cosigners replaced, the same gate setting version
-#   4. Reconcile is clean: the books followed the chain through the payment and the top-up (the lane's gas booking first, as every paying case does)
-#   5. the network: from agentgate the business database is refused; from another namespace the core's port is refused
-# Run after the cases that withdraw ETH (withdraw, crash) and after upgrade: the gate setting makes hot shard 0 Gate-governed (every asset of it), and
-# upgrade reinstalls qv-business with values-kind.yaml alone.
+#   3. the same request without Gate's client certificate, and a payment from Gate's shard without a credential, are refused
+#   4. gate.sh again changes nothing: same output files, no pod of the core, the gateway or the cosigners replaced, the same gate setting version
+#   5. Vault's own flows keep working next to Gate: an ETH withdrawal (the withdraw case's helper) pays from shard 0, and Gate's shard 1 has sent nothing
+#   6. Reconcile is clean: the books followed the chain through the payment, the top-up and the withdrawal
+#   7. the network: from agentgate the business database is refused; from another namespace the core's port is refused
+# Gate pays from its own hot shard 1 (gate.sh), so the case runs in any order with the others and again on the same cluster.
 . "$(dirname "${BASH_SOURCE[0]}")/wd-lib.sh"; set +e
 rc=0; bad() { echo "FAIL: $*"; rc=1; }
 GNS=agentgate OTHER=qv-gate-other POD=kind-gate-smoke img=nginx:1.27-alpine
@@ -40,9 +41,15 @@ jq -n --arg ns "$GNS" --arg n "$POD" --arg img "$img" '{apiVersion:"v1",kind:"Po
   volumes:[{name:"out",secret:{secretName:"kind-gate-out",defaultMode:256}},{name:"key",secret:{secretName:"kind-gate-key",defaultMode:256}}]}}' | k apply -f - > /dev/null
 kn "$GNS" wait --for=condition=Ready "pod/$POD" --timeout=90s > /dev/null || bad "the Gate pod did not start"
 kn "$GNS" cp "$d/kindgatepay" "$POD:/tmp/kindgatepay" > /dev/null && kn "$GNS" exec "$POD" -- chmod 755 /tmp/kindgatepay || bad "copy kindgatepay into the pod"
-res="$(kn "$GNS" exec "$POD" -- /tmp/kindgatepay -out /out -key /gate/gate.key -kid "$KID" -amount 10000)"; prc=$?
+pay() { kn "$GNS" exec "$POD" -- /tmp/kindgatepay -out /out -key /gate/gate.key -kid "$KID" "$@"; }
+res="$(pay -amount 10000)"; prc=$?
 echo "payment: $res"
-[ $prc = 0 ] && [ "$(jq -r .signer <<< "$res" 2>/dev/null | tr A-Z a-z)" = "$(tr A-Z a-z < "$d/out/wallet_address")" ] || bad "the payment from the Gate pod failed"
+# kindgatepay fails unless the signature recovers wallet_address; the recovered address is checked here once more against the file the host read
+[ $prc = 0 ] && [ "$(jq -r .recovered <<< "$res" 2>/dev/null | tr A-Z a-z)" = "$(tr A-Z a-z < "$d/out/wallet_address")" ] || bad "the payment from the Gate pod failed"
+
+echo "-- refusals"
+r="$(pay -refuse no-cert)" && echo "no client certificate: $r" || bad "a call with Gate's token but without its client certificate was not refused: $r"
+r="$(pay -refuse no-credential)" && echo "no credential: $r" || bad "a payment from Gate's shard without a credential was not refused: $r"
 
 echo "-- a second run changes nothing"
 snap() {
@@ -59,23 +66,30 @@ grep -q "nothing booked\|no mint to book\|minted 10000 " "$d/rerun.log" || bad "
 after="$(snap)"
 [ "$before" = "$after" ] || { bad "the second run changed something"; diff <(echo "$before") <(echo "$after"); }
 
-echo "-- Reconcile"
+echo "-- Vault's own ETH withdrawal from shard 0, next to Gate"
 wd_up; fund_hot > /dev/null || bad "fund_hot"
-wd reconcile || bad "Reconcile is not clean after the payment and the top-up"
+wd setup -asset ETH -customer kind-gate-eth -amount 2000000000000000000 -hot "$(evm_hot)" || bad "ETH deposit"
+OUT="$(wd pay -asset ETH -customer kind-gate-eth -amount 10000000000000000)"; echo "$OUT"
+wd settle -asset ETH -id "$(jq -r .id <<< "$OUT")" -to "$(jq -r .to <<< "$OUT")" -amount 10000000000000000 || bad "an ETH withdrawal did not complete after kind-gate"
+nonce1="$(curl -s -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getTransactionCount\",\"params\":[\"$(cat "$d/out/wallet_address")\",\"latest\"]}" "http://127.0.0.1:$P_ANVIL" | jq -r .result)"
+[ "$nonce1" = 0x0 ] || bad "Gate's shard 1 sent a transaction (nonce $nonce1): a Vault flow used it"
+echo "-- Reconcile"
+wd reconcile || bad "Reconcile is not clean after the payment, the top-up and the withdrawal"
 wd_down
 
 echo "-- the network"
-probe() { # ns host port -> 0 when the TCP connect works (as smoke/netpol.sh: it waits for the pod's policy to be programmed first)
+probe() { # ns host port -> prints OPEN or CLOSED (as smoke/netpol.sh: it waits for the pod's policy to be programmed first); anything else (a pod that never ran) is an error
   local ns="$1" host="$2" port="$3" name="probe-$RANDOM" ph out
   k -n "$ns" run "$name" --image=$img --image-pull-policy=IfNotPresent --restart=Never --command -- sh -c "sleep 6; nc -z -w 3 $host $port && echo OPEN || echo CLOSED" > /dev/null
   for _ in $(seq 60); do ph="$(k -n "$ns" get pod "$name" -o jsonpath='{.status.phase}')"; [ "$ph" = Succeeded ] || [ "$ph" = Failed ] && break; sleep 1; done
   out="$(k -n "$ns" logs "$name" 2>/dev/null)"; k -n "$ns" delete pod "$name" --wait=false > /dev/null
-  [ "$out" = OPEN ]
+  case "$out" in OPEN|CLOSED) echo "$out";; *) echo "ERROR (no answer from the probe pod: phase ${ph:-none}, output ${out:-none})";; esac
 }
 core_ip="$(kn "$NS_BIZ" get svc qv-core -o jsonpath='{.spec.clusterIP}')"; db_ip="$(kn "$NS_BIZ" get svc qv-business-db-rw -o jsonpath='{.spec.clusterIP}')"
-probe "$GNS" "$core_ip" 8443 || bad "control: $GNS cannot reach the core's port: the refusals below would prove nothing"
-probe "$GNS" "$db_ip" 5432 && bad "$GNS reached the business database"
+# probe runs in $(...): its own bad() cannot reach this shell, so ERROR is checked here
+p="$(probe "$GNS" "$core_ip" 8443)"; [ "$p" = OPEN ] || bad "control: $GNS cannot reach the core's port ($p): the refusals below would prove nothing"
+p="$(probe "$GNS" "$db_ip" 5432)"; [ "$p" = CLOSED ] || bad "$GNS reached the business database, or the probe failed ($p)"
 k create namespace "$OTHER" --dry-run=client -o yaml | k apply -f - > /dev/null
-probe "$OTHER" "$core_ip" 8443 && bad "namespace $OTHER reached the core's port (only $GNS may)"
+p="$(probe "$OTHER" "$core_ip" 8443)"; [ "$p" = CLOSED ] || bad "namespace $OTHER reached the core's port (only $GNS may), or the probe failed ($p)"
 echo "gate case: $((SECONDS - t0)) s"
 exit $rc

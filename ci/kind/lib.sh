@@ -79,6 +79,14 @@ trust_args() {
   done
   return 0
 }
+# The values files of qv-business in the lane, as helm flags: values-kind.yaml, then the overlays other lane steps registered in the work dir
+# ($WORK/values-business-*.yaml; gate.sh writes values-business-gate.yaml for AgentGate). Every later upgrade of the chart (smoke/upgrade.sh, gate.sh)
+# uses it, so it installs what the cluster runs and not values-kind.yaml alone.
+biz_values() {
+  printf -- '-f %s ' deploy/helm/qv-business/values-kind.yaml
+  local f; for f in "$WORK"/values-business-*.yaml; do if [ -e "$f" ]; then printf -- '-f %s ' "$f"; fi; done
+  return 0
+}
 # Waits for each background job by pid: a bare `wait` returns 0 whatever the jobs returned, so a failed `helm upgrade ... &` would pass. Fails if any job failed (after all have ended).
 #   job_a & pa=$!; job_b & pb=$!; wait_all "$pa" "$pb"
 wait_all() { local p rc=0; for p in "$@"; do wait "$p" || rc=1; done; return $rc; }
