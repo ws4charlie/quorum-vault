@@ -45,10 +45,15 @@ S="$WORK/secrets"; C="$WORK/cfg"; G="$WORK/gate"; mkdir -p "$G"; chmod 700 "$G"
 [ -s "$C/signing.json" ] && [ -s "$C/custody-evm.json" ] || { echo "gate.sh: no lane configs in $C: run make kind-up first (cluster $QV_KIND_NAME)" >&2; exit 1; }
 # one run at a time per cluster (macOS has no flock): a lock dir with the owner's pid; a lock whose owner is gone is taken over
 LOCK="$G/lock"
+# a stale lock is first renamed to a name of this run's own, then removed: two waiters that both see it stale cannot remove each other's fresh lock
+# (only one rename of the stale dir succeeds; the other finds the name gone and tries mkdir again). A lock with no pid file yet is fresh for 10 s.
 until mkdir "$LOCK" 2>/dev/null; do
-  owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then echo "gate.sh: taking over the lock of pid $owner (gone)" >&2; rm -rf "$LOCK"; continue; fi
-  echo "gate.sh: another run (pid ${owner:-?}) holds $LOCK; waiting" >&2; sleep 5
+  owner=""; [ ! -s "$LOCK/pid" ] || owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  stale=""
+  if [ -n "$owner" ]; then kill -0 "$owner" 2>/dev/null || stale="pid $owner is gone"
+  elif [ -d "$LOCK" ] && [ $(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || stat -c %Y "$LOCK" 2>/dev/null || date +%s) )) -gt 10 ]; then stale="no pid after 10 s"; fi
+  if [ -n "$stale" ] && mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null; then echo "gate.sh: taking over a stale lock ($stale)" >&2; rm -rf "$LOCK.stale.$$"; continue; fi
+  echo "gate.sh: another run (pid ${owner:-?}) holds $LOCK; waiting" >&2; sleep 2
 done
 echo $$ > "$LOCK/pid"
 AUDIENCE=qv-kind CLIENT=agentgate

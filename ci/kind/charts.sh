@@ -27,6 +27,6 @@ log "qv-business"
 mk_secret "$NS_BIZ" qv-custody-config --from-file=config.json="$WORK/cfg/custody-evm.json"
 mk_secret "$NS_BIZ" qv-auto-approver --from-file=seed="$S/auto-approver.seed"
 mk_secret "$NS_BIZ" qv-oidc-ca --from-file=ca.crt="$S/ca-business.crt"
-hm upgrade --install qv-business deploy/helm/qv-business -n "$NS_BIZ" -f deploy/helm/qv-business/values-kind.yaml $(trust_args "$NS_BIZ") --wait --timeout 6m >/dev/null
+hm upgrade --install qv-business deploy/helm/qv-business -n "$NS_BIZ" $(biz_values) $(trust_args "$NS_BIZ") --wait --timeout 6m >/dev/null
 "$KDIR/signing.sh" core
 log "charts done"

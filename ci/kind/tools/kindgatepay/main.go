@@ -325,7 +325,9 @@ func expectRefused(ctx context.Context, c *http.Client, vaultURL, token string, 
 	hr.Header.Set("Authorization", "Bearer "+token)
 	resp, err := c.Do(hr)
 	if err != nil {
-		if mode == "no-cert" && strings.Contains(err.Error(), "certificate") {
+		// only the core's own refusal of a missing client certificate: the TLS alert certificate_required (TLS 1.3) or bad_certificate, never any
+		// other TLS failure (an untrusted server certificate also says "certificate")
+		if e := err.Error(); mode == "no-cert" && (strings.Contains(e, "certificate required") || strings.Contains(e, "bad certificate")) {
 			return json.NewEncoder(os.Stdout).Encode(map[string]any{"refused": "tls", "code": err.Error()})
 		}
 		return fmt.Errorf("signing API: %w", err)

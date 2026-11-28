@@ -14,6 +14,9 @@
 //	kindgate book   -cfg custody.json -rpc URL -dsn DSN -pending FILE
 //	                                                 books each mint of -pending that the chain has on the Gate wallet's hot shard (the operator's seed step), once per mint
 //	                                                 transaction, then empties the file. The books follow the chain mint by mint, so a top-up while a payment is still being booked keeps them equal.
+//	kindgate direct -cfg custody.json -rpc URL -dsn DSN
+//	                                                 an x402 job for Gate's shard placed straight into the queue without a credential: succeeds only when the zone
+//	                                                 refuses it (credential_missing) and nothing is signed
 //
 // AgentGate's side of a payment, run in a pod, is ci/kind/tools/kindgatepay.
 package main
@@ -62,7 +65,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: kindgate keygen|usdc|cfg|book ...")
+		fmt.Fprintln(os.Stderr, "usage: kindgate keygen|usdc|cfg|book|direct ...")
 		os.Exit(2)
 	}
 	var err error
@@ -76,6 +79,8 @@ func main() {
 		err = cfg(args)
 	case "book":
 		err = book(args)
+	case "direct":
+		err = direct(args)
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -212,6 +217,10 @@ func usdc(args []string) error {
 			return fmt.Errorf("deploy: %w", err)
 		}
 		tok = r.ContractAddress
+		// a new token: no journal line can be one of its mints (a stale journal from an earlier work dir must never be booked against it)
+		if err := os.Remove(*pending); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		st.Address, st.Genesis = tok.Hex(), genesis.Hash().Hex()
 		if err := writeJSON(*state, st); err != nil {
 			return err
@@ -449,7 +458,73 @@ func cfg(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(map[string]string{"partition": part, "wallet_address": common.HexToAddress(wallet).Hex()})
 }
 
-// ---- book ----
+// ---- book, direct ----
+
+// service is the custody service of the core's config against the business database, as the core's own role (the operator's seed step and the
+// zone test use it from the host).
+func service(ctx context.Context, cfgPath, rpcURL, dsn string) (*custody.Service, func(), error) {
+	cfg, err := custody.LoadConfig(cfgPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.EVM.RPCURL = rpcURL
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return nil, nil, err
+	}
+	adapter, err := evm.New(ctx, cfg.EVM, pool)
+	if err != nil {
+		pool.Close()
+		return nil, nil, err
+	}
+	reader, err := custody.NewEVMReader(ctx, cfg)
+	if err != nil {
+		adapter.Close()
+		pool.Close()
+		return nil, nil, err
+	}
+	return custody.New(pool, cfg, adapter, reader), func() { reader.Close(); adapter.Close(); pool.Close() }, nil
+}
+
+// direct places an x402 sign job for Gate's shard straight into the queue, WITHOUT a credential (a core that skips the signing API, as the e2e gate
+// test does), and succeeds only when the zone refuses it with credential_missing and nothing is signed: the zone itself governs shard 1, not only the
+// core's request check.
+func direct(args []string) error {
+	fs := flag.NewFlagSet("direct", flag.ExitOnError)
+	cfgPath := fs.String("cfg", "", "the core's custody config (with Gate's shard)")
+	rpcURL := fs.String("rpc", "", "the chain's RPC address as this machine sees it")
+	dsn := fs.String("dsn", "", "business database DSN of the core's role")
+	fs.Parse(args)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	svc, closeSvc, err := service(ctx, *cfgPath, *rpcURL, *dsn)
+	if err != nil {
+		return err
+	}
+	defer closeSvc()
+	payeeKey, _ := crypto.GenerateKey()
+	id := "kind-direct-" + hex.EncodeToString(crypto.Keccak256([]byte(time.Now().String()))[:6])
+	now := uint64(time.Now().Unix())
+	if _, _, err := svc.RequestX402(ctx, custody.X402Request{ID: id, Asset: asset, Partition: svc.Cfg.PartitionKey(asset, gateShard).String(),
+		Payee: crypto.PubkeyToAddress(payeeKey.PublicKey).Hex(), Amount: big.NewInt(1000), ValidAfter: now - 60, ValidBefore: now + 240}); err != nil {
+		return fmt.Errorf("request: %w", err)
+	}
+	var status, reason string
+	var signed bool
+	for i := 0; i < 120; i++ {
+		if err := svc.Pool.QueryRow(ctx, `SELECT status, coalesce(reject_reason,''), signature IS NOT NULL FROM sign_jobs WHERE id=$1`, "x402:"+id).Scan(&status, &reason, &signed); err != nil {
+			return err
+		}
+		if status == "rejected" || status == "failed" || status == "done" {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if status != "rejected" || signed || !strings.Contains(reason, "credential_missing") {
+		return fmt.Errorf("job x402:%s: %s (signed %v) %q, want rejected with credential_missing", id, status, signed, reason)
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]string{"job": "x402:" + id, "status": status, "reason": reason})
+}
 
 // mintedOK reports whether transaction h is mined and succeeded. It waits a few seconds for one that is sent but not mined yet (anvil mines at once).
 func mintedOK(ctx context.Context, url string, h common.Hash) (bool, error) {
@@ -466,8 +541,12 @@ func mintedOK(ctx context.Context, url string, h common.Hash) (bool, error) {
 		if !errors.Is(err, ethereum.NotFound) {
 			return false, err
 		}
-		if _, pending, err := ec.TransactionByHash(ctx, h); err != nil || !pending {
+		_, _, err = ec.TransactionByHash(ctx, h)
+		if errors.Is(err, ethereum.NotFound) {
 			return false, nil // unknown to the node: never sent
+		}
+		if err != nil {
+			return false, err // a failing node is not proof that the mint was never sent
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -488,29 +567,14 @@ func book(args []string) error {
 	} else if err != nil {
 		return err
 	}
-	cfg, err := custody.LoadConfig(*cfgPath)
-	if err != nil {
-		return err
-	}
-	cfg.EVM.RPCURL = *rpcURL
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, *dsn)
+	svc, closeSvc, err := service(ctx, *cfgPath, *rpcURL, *dsn)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
-	adapter, err := evm.New(ctx, cfg.EVM, pool)
-	if err != nil {
-		return err
-	}
-	defer adapter.Close()
-	reader, err := custody.NewEVMReader(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-	svc := custody.New(pool, cfg, adapter, reader)
+	defer closeSvc()
+	cfg := svc.Cfg
 	part := cfg.PartitionKey(asset, gateShard).String()
 	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		f := strings.Fields(line)

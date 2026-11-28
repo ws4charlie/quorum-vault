@@ -4,7 +4,8 @@
 #   2. a pod in agentgate with ONLY the output files (and Gate's own key) mounted gets a token by client credentials, calls /v2/gate/signatures with a signed
 #      credential for a 0.01 USDC EIP-3009 payment (200), checks the signature against the token's EIP-712 domain and wallet_address, and submits
 #      transferWithAuthorization to anvil: it mines and pays the payee (tools/kindgatepay)
-#   3. the same request without Gate's client certificate, and a payment from Gate's shard without a credential, are refused
+#   3. the same request without Gate's client certificate, and a payment from Gate's shard without a credential, are refused; and the zone itself
+#      refuses a job for Gate's shard placed straight into the queue without a credential (kindgate direct), so not only the core's check holds
 #   4. gate.sh again changes nothing: same output files, no pod of the core, the gateway or the cosigners replaced, the same gate setting version
 #   5. Vault's own flows keep working next to Gate: an ETH withdrawal (the withdraw case's helper) pays from shard 0, and Gate's shard 1 has sent nothing
 #   6. Reconcile is clean: the books followed the chain through the payment, the top-up and the withdrawal
@@ -73,6 +74,11 @@ OUT="$(wd pay -asset ETH -customer kind-gate-eth -amount 10000000000000000)"; ec
 wd settle -asset ETH -id "$(jq -r .id <<< "$OUT")" -to "$(jq -r .to <<< "$OUT")" -amount 10000000000000000 || bad "an ETH withdrawal did not complete after kind-gate"
 nonce1="$(curl -s -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getTransactionCount\",\"params\":[\"$(cat "$d/out/wallet_address")\",\"latest\"]}" "http://127.0.0.1:$P_ANVIL" | jq -r .result)"
 [ "$nonce1" = 0x0 ] || bad "Gate's shard 1 sent a transaction (nonce $nonce1): a Vault flow used it"
+echo "-- the zone refuses a job for Gate's shard without a credential"
+mkdir -p "$d/core"; for f in tls.crt tls.key ca.crt; do kn "$NS_BIZ" get secret qv-core-tls -o jsonpath="{.data.${f//./\\.}}" | base64 -d > "$d/core/$f"; done; chmod 600 "$d/core/tls.key"
+r="$(go run ./ci/kind/tools/kindgate direct -cfg "$WORK/gate/custody.json" -rpc "http://127.0.0.1:$P_ANVIL" \
+  -dsn "postgres://qv_core@127.0.0.1:$P_DB/quorumvault?sslmode=verify-ca&sslrootcert=$d/core/ca.crt&sslcert=$d/core/tls.crt&sslkey=$d/core/tls.key")" \
+  && echo "zone: $r" || bad "the zone did not refuse a credential-less job for Gate's shard: $r"
 echo "-- Reconcile"
 wd reconcile || bad "Reconcile is not clean after the payment, the top-up and the withdrawal"
 wd_down
