@@ -79,8 +79,7 @@ func (o *Observer) request(method, path string, d time.Duration, err error) {
 	}
 }
 
-func (o *Observer) setPhase(p string)  { o.mu.Lock(); o.phase = p; o.mu.Unlock() }
-func (o *Observer) setScale(s float64) { o.mu.Lock(); o.scale = s; o.mu.Unlock() }
+func (o *Observer) setPhase(p string) { o.mu.Lock(); o.phase = p; o.mu.Unlock() }
 func (o *Observer) opOffered(k string) {
 	o.mu.Lock()
 	o.offered[k]++
