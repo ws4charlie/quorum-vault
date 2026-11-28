@@ -24,6 +24,11 @@ func TestProductionAttesterFactories(t *testing.T) {
 		t.Fatalf("mock attester: %v", err)
 	}
 	cfg.Attester.Type = "nitro"
+	t.Setenv("QV_ENV", "") // production: nitro with the KMS release needs both vsock ports (TestKMSNitroWithoutVsockRefusedInProduction)
+	if _, err := NewSealerForRole("A", cfg); err == nil || !strings.Contains(err.Error(), "vsock_port is required") {
+		t.Fatalf("nitro attester without vsock ports in production: %v", err)
+	}
+	cfg.Release.KMS.VsockPort, cfg.Release.KMS.CredsVsockPort = 8000, 8001
 	if _, err := NewSealerForRole("A", cfg); err == nil || !strings.Contains(err.Error(), "/dev/nsm") {
 		t.Fatalf("nitro attester outside an enclave: %v", err)
 	}

@@ -302,6 +302,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "",
+            "cloudhsm",
+            "softhsm"
+          ]
+        },
         "token": {
           "type": "string"
         },

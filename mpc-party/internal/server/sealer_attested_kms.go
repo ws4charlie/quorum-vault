@@ -49,6 +49,16 @@ func (c SealerConfig) validateKMS() error {
 	if k.VsockPort != 0 && k.VsockPort <= 2 {
 		errs = append(errs, errors.New("sealer.release.kms.vsock_port must be above 2 (or 0 for a direct connection)"))
 	}
+	if productionEnv() && strings.TrimSpace(c.Attester.Type) == "nitro" {
+		// An enclave has no network: port 0 would mean the party is not in an enclave, or reaches KMS some way the design does not have. And
+		// credentials from AWS_* variables are not the instance role's. Both are for tests, so production refuses them instead of falling back.
+		if k.VsockPort == 0 {
+			errs = append(errs, errors.New("sealer.release.kms.vsock_port is required with attester nitro in production (QV_ENV unset, or not dev or test): 0 would connect to KMS over the network"))
+		}
+		if k.CredsVsockPort == 0 {
+			errs = append(errs, errors.New("sealer.release.kms.creds_vsock_port is required with attester nitro in production (QV_ENV unset, or not dev or test): 0 would take credentials from the AWS_* environment variables"))
+		}
+	}
 	return errors.Join(errs...)
 }
 
