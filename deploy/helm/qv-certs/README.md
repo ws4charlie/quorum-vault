@@ -32,7 +32,9 @@ Mount the ConfigMap `qv-trust-<zone>-<hash>` (key `ca.crt`; label `quorumvault.i
 ## Issuers
 
 - **Production (`issuers.mode: vault`)**: one cert-manager `Issuer` per zone, talking to Vault or OpenBao PKI with the cluster's own login (cert-manager asks Kubernetes for a token of a dedicated service account, which the chart makes with the minimal Role). **No CA key is in any cluster**, no Secret is rendered, no AppRole or token is in values. The chart refuses `http://` Vault addresses and empty settings.
-- **kind and CI (`issuers.mode: ca`)**: a self-signed bootstrap, then a CA certificate per zone made by cert-manager when the chart is installed (key in a Secret of that cluster), then a CA issuer per zone. Nothing is in the repository.
+- **kind and CI (`issuers.mode: ca`, needs `env: dev` or `test`)**: a self-signed bootstrap, then a CA certificate per zone made by cert-manager when the chart is installed (key in a Secret of that cluster), then a CA issuer per zone. Nothing is in the repository.
+
+`env` is the same value as in `qv-party` and `qv-signing-core`: empty is production, and the chart then refuses `issuers.mode: ca`. `values-kind.yaml` sets `env: dev`. The catalog's loopback names (`localhost`, `127.0.0.1`, `::1`; `devDnsNames` and `devIpAddresses` in `catalog.json`) are in a certificate only with `env: dev` or `test`, so a production Vault role is never asked for them.
 - **Link certificates** (`gateway-link` in signing-core, `cosigner-link-b` in party-b, `cosigner-link-c` in party-c) are signed by the **business** authority for a workload in a signing cluster. They use a second issuer, `qv-business-link`, that points at a Vault role which can sign only that cluster's link names. In `ca` mode, outside kind's single cluster, it points at the business CA Secret named by `issuers.ca.linkSecretName` (development only: the business CA key would be in that cluster).
 
 ### Vault roles (one per cluster and zone)
