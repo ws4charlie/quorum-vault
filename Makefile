@@ -357,19 +357,24 @@ helm-check:
 	ci/helm/check.sh
 
 # The kind lane (ci/kind/README.md): a local cluster for THIS checkout with the dependencies and the charts installed; `kind-smoke` runs the checks against it; `kind-down` removes it.
-.PHONY: kind-up kind-smoke kind-down kind-gate
+.PHONY: kind-up kind-smoke kind-down kind-gate kind-gate-forget
+# KEEP=1 (or QV_KIND_KEEP_GATE=1 in the environment): keep mode, Gate's keyset hot-1 survives kind-down in ~/.qv-kind-keep/<cluster> (ci/kind/README.md, "Keep mode")
+KIND_KEEP_ENV := $(if $(filter 1,$(KEEP)),QV_KIND_KEEP_GATE=1 )
 kind-up:
 	ci/kind/up.sh
 kind-smoke:
-	ci/kind/smoke/run.sh
+	$(KIND_KEEP_ENV)ci/kind/smoke/run.sh
 kind-down:
 	ci/kind/down.sh
 # Onboards an AgentGate into the kind cluster (after kind-up) and writes its connection files into OUT (ci/kind/README.md, "AgentGate onboarding"). Idempotent.
-#   make kind-gate PUBKEY=gate.pub KID=gate-1 FUND=1000000 OUT=/abs/out [NAMESPACE=agentgate]   (with make -C, give absolute paths)
+#   make kind-gate PUBKEY=gate.pub KID=gate-1 FUND=1000000 OUT=/abs/out [NAMESPACE=agentgate] [KEEP=1]   (with make -C, give absolute paths)
 NAMESPACE ?= agentgate
 kind-gate:
 	@test -n "$(PUBKEY)" -a -n "$(KID)" -a -n "$(FUND)" -a -n "$(OUT)" || { echo "usage: make kind-gate PUBKEY=<file> KID=<kid> FUND=<atomic USDC> OUT=<dir> [NAMESPACE=agentgate]" >&2; exit 2; }
-	ci/kind/gate.sh --pubkey "$(PUBKEY)" --kid "$(KID)" --namespace "$(NAMESPACE)" --fund "$(FUND)" --out "$(OUT)"
+	$(KIND_KEEP_ENV)ci/kind/gate.sh --pubkey "$(PUBKEY)" --kid "$(KID)" --namespace "$(NAMESPACE)" --fund "$(FUND)" --out "$(OUT)"
+# Deletes this cluster's keep dir (a new Gate key and address on the next kind-gate). Asks first unless YES=1.
+kind-gate-forget:
+	ci/kind/forget.sh
 
 # ---- The local load test (loadtest/README.md, docs/measurements/load-local.md). Not a CI gate: a real run takes minutes and its numbers depend on the machine.
 # Needs what test-e2e-evm needs (`make setup infra-up softhsm mpc-build`). The stack is the e2e stack of this checkout's lane; the generator drives the core's API.

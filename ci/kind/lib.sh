@@ -87,6 +87,22 @@ biz_values() {
   local f; for f in "$WORK"/values-business-*.yaml; do if [ -e "$f" ]; then printf -- '-f %s ' "$f"; fi; done
   return 0
 }
+# The keep dir of Gate's keyset hot-1 (keep mode, QV_KIND_KEEP_GATE=1; README "Keep mode"): outside .work, so kind-down leaves it. The one place that decides it:
+# QV_KIND_KEEP_DIR wins, else ~/.qv-kind-keep/<cluster name>. It must be absolute and outside this checkout and the repository it belongs to (it holds
+# testnet key material, which never goes near git).
+keep_dir() {
+  local d="${QV_KIND_KEEP_DIR:-$HOME/.qv-kind-keep/$QV_KIND_NAME}" r top
+  case "$d" in /*) ;; *) echo "keep dir $d: must be an absolute path" >&2; return 1;; esac
+  case "/$d/" in */../*|*/./*) echo "keep dir $d: no . or .. parts" >&2; return 1;; esac
+  d="${d%/}"
+  top="$(git -C "$QV_KIND_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"; top="${top%/.git}"
+  for r in "$QV_KIND_ROOT" "$top" "$(cd "$QV_KIND_ROOT" && pwd -P)"; do
+    [ -n "$r" ] || continue
+    case "$d/" in "$r"/*) echo "keep dir $d is inside the repository ($r): refused" >&2; return 1;; esac
+  done
+  printf %s "$d"
+}
+KEEP_MARK=.qv-kind-keep   # the file that marks a keep dir as the lane's own: forget.sh removes only a dir that has it
 # Waits for each background job by pid: a bare `wait` returns 0 whatever the jobs returned, so a failed `helm upgrade ... &` would pass. Fails if any job failed (after all have ended).
 #   job_a & pa=$!; job_b & pb=$!; wait_all "$pa" "$pb"
 wait_all() { local p rc=0; for p in "$@"; do wait "$p" || rc=1; done; return $rc; }

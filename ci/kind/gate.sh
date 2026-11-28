@@ -2,7 +2,8 @@
 # Onboards one AgentGate into this checkout's kind cluster (after `make kind-up`) and writes everything Gate needs into an output directory, one file per value
 # (README, "AgentGate onboarding"). Idempotent: run it again and it changes nothing (no second client, wallet or token; funding tops up to --fund).
 #   ci/kind/gate.sh --pubkey FILE --kid KID [--namespace agentgate] --fund ATOMIC_USDC --out DIR
-#   make kind-gate PUBKEY=FILE KID=KID NAMESPACE=agentgate FUND=ATOMIC_USDC OUT=DIR
+#   make kind-gate PUBKEY=FILE KID=KID NAMESPACE=agentgate FUND=ATOMIC_USDC OUT=DIR [KEEP=1]
+# QV_KIND_KEEP_GATE=1 (make KEEP=1): keep mode, keyset hot-1 is kept in a keep dir outside .work and restored after kind-down / kind-up (keep.sh, README "Keep mode").
 # Relative paths are read against the caller's directory, so another repository can call "$QV_REPO/ci/kind/gate.sh" from its own. QV_KIND_NAME names the cluster.
 #
 # What it does, all kind-only and from the lane's gitignored work dir (nothing secret is printed or written outside it and OUT):
@@ -66,26 +67,54 @@ mkdir -p "$G/tmp"; chmod 700 "$G/tmp"
 log "build the lane's gate helper"
 go build -o "$G/kindgate" ./ci/kind/tools/kindgate
 
-# ---- 1. Gate's hot shard 1: keyset hot-1 (once; kindctl rebuilds its public result from the party's keyset status if a run lost the file)
+# ---- 1. Gate's hot shard 1: keyset hot-1 (once; kindctl rebuilds its public result from the party's keyset status if a run lost the file). In keep mode
+# (QV_KIND_KEEP_GATE=1, keep.sh) a keep dir that holds hot-1 is restored into the parties instead of a DKG, so the address survives kind-down / kind-up.
+KEEP_MODE=""; [ "${QV_KIND_KEEP_GATE:-}" != 1 ] || { KEEP_MODE=1; . "$here/keep.sh"; keep_open; }
 if [ ! -s "$G/hot-1.json" ]; then
-  log "DKG: keyset hot-1 (Gate's hot shard 1) on parties A, B, C"
   g() { kn "$NS_SIGN" get secret qv-signing-gateway-party-tls -o jsonpath="{.data.$1}" | base64 -d; }
   g 'tls\.crt' > "$G/tmp/gwp.crt"; ( umask 077; g 'tls\.key' > "$G/tmp/gwp.key" )
   PA="$(kn "$NS_SIGN" get secret qv-signing-mpc-party-a-tls -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -pubkey | openssl pkey -pubin -outform DER | openssl dgst -sha256 -hex | awk '{print $NF}')"
+  go build -o "$G/kindctl" ./ci/kind/tools/kindctl
   fwd P_A "$NS_SIGN" svc/qv-party-a-caller 7001
-  # as dkg.sh: a pod is Ready before its peer port takes calls, so a DKG that fails before it starts is tried again
-  for i in 1 2 3 4 5 6; do
-    go run ./ci/kind/tools/kindctl dkg -addr "127.0.0.1:$P_A" -cert "$G/tmp/gwp.crt" -key "$G/tmp/gwp.key" -pin "$PA" -id hot-1 -seed "$S/admin.seed" -scheme ecdsa-2of3 > "$G/tmp/hot-1.json" && break
-    [ "$i" = 6 ] && { echo "gate.sh: DKG hot-1 failed 6 times" >&2; exit 1; }
-    sleep 10
-  done
+  kctl() { "$G/kindctl" "$1" -addr "127.0.0.1:$P_A" -cert "$G/tmp/gwp.crt" -key "$G/tmp/gwp.key" -pin "$PA" -id hot-1 "${@:2}"; }
+  if [ -n "$KEEP_MODE" ] && [ -s "$KEEP/hot-1.json" ]; then
+    rc=0; kctl status > "$G/tmp/hot-1.json" || rc=$?
+    if [ "$rc" = 3 ]; then   # party A has no hot-1: restore it from the keep dir, then read it back (status only: this path never makes a keyset)
+      keep_restore
+      fwd_stop; fwd P_A "$NS_SIGN" svc/qv-party-a-caller 7001   # the forward went with the old pod of A
+      for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        rc=0; kctl status > "$G/tmp/hot-1.json" || rc=$?
+        [ "$rc" = 0 ] && break
+        [ "$i" = 12 ] && { echo "gate.sh: keep: party A does not show a resolved hot-1 after the restore" >&2; exit 1; }
+        sleep 10
+      done
+    elif [ "$rc" != 0 ]; then echo "gate.sh: keep: cannot read keyset hot-1 from party A" >&2; exit 1; fi
+  else
+    log "DKG: keyset hot-1 (Gate's hot shard 1) on parties A, B, C"
+    # as dkg.sh: a pod is Ready before its peer port takes calls, so a DKG that fails before it starts is tried again
+    for i in 1 2 3 4 5 6; do
+      kctl dkg -seed "$S/admin.seed" -scheme ecdsa-2of3 > "$G/tmp/hot-1.json" && break
+      [ "$i" = 6 ] && { echo "gate.sh: DKG hot-1 failed 6 times" >&2; exit 1; }
+      sleep 10
+    done
+  fi
   mv "$G/tmp/hot-1.json" "$G/hot-1.json"
 fi
 
 # ---- 2. the wallet and the token
+[ -z "$KEEP_MODE" ] || [ ! -s "$KEEP/wallet_id" ] || [ -s "$G/wallet_id" ] || cp "$KEEP/wallet_id" "$G/wallet_id"   # keep mode: the kept wallet id
 [ -s "$G/wallet_id" ] || { h="$(openssl rand -hex 16)"; printf '%s-%s-4%s-%x%s-%s\n' "${h:0:8}" "${h:8:4}" "${h:13:3}" "$(( (0x${h:16:1} & 3) | 8 ))" "${h:17:3}" "${h:20:12}" > "$G/wallet_id"; }
 WALLET_ID="$(cat "$G/wallet_id")"
 WALLET="$(jq -r .address "$G/hot-1.json")"
+# keep mode: a keep dir that holds hot-1 must hold THIS address (a restored key, or one kept from this cluster); one that does not yet gets this keyset
+if [ -n "$KEEP_MODE" ]; then
+  if [ -s "$KEEP/hot-1.json" ]; then
+    keep_check_address "$G/hot-1.json"
+    [ ! -s "$KEEP/wallet_id" ] || [ "$(cat "$KEEP/wallet_id")" = "$WALLET_ID" ] || { echo "gate.sh: keep: wallet id $WALLET_ID differs from the kept $(cat "$KEEP/wallet_id")" >&2; exit 1; }
+  else
+    keep_save
+  fi
+fi
 log "mock USDC on anvil ($QV_KIND_CHAIN_ID), wallet $WALLET topped up to $FUND"
 fwd P_ANVIL "$NS_BIZ" svc/anvil 8545
 USDC="$("$G/kindgate" usdc -rpc "http://127.0.0.1:$P_ANVIL" -chain-id "$QV_KIND_CHAIN_ID" -state "$G/usdc.json" -to "$WALLET" -fund "$FUND" -pending "$G/usdc-mints")"

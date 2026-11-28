@@ -4,6 +4,8 @@
 //	kindctl adminkey -seed FILE                       makes the seed if missing, prints the public key (hex)
 //	kindctl dkg  -addr HOST:PORT -cert C -key K -pin SHA256HEX -seed FILE -id ID -scheme ecdsa-2of3|hd   prints {"keyset","public_key","address"} (JSON)
 //	kindctl xpub -addr HOST:PORT -cert C -key K -pin SHA256HEX -id ID                                      prints the regtest account xpub of an hd keyset
+//	kindctl status -addr HOST:PORT -cert C -key K -pin SHA256HEX -id ID   prints {"keyset","public_key","address"} of a keyset party A holds, resolved; exit 3 when A
+//	                                                                      has no such keyset. Read only: it never makes a keyset (gate.sh's restore checks with it)
 package main
 
 import (
@@ -13,6 +15,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -33,7 +36,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: kindctl adminkey|dkg|xpub ...")
+		fmt.Fprintln(os.Stderr, "usage: kindctl adminkey|dkg|xpub|status ...")
 		os.Exit(2)
 	}
 	var err error
@@ -44,11 +47,16 @@ func main() {
 		err = dkg(os.Args[2:])
 	case "xpub":
 		err = xpub(os.Args[2:])
+	case "status":
+		err = keysetStatus(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "kindctl:", err)
+		if errors.Is(err, errAbsent) {
+			os.Exit(3)
+		}
 		os.Exit(1)
 	}
 }
@@ -169,6 +177,29 @@ func dkg(args []string) error {
 		return fmt.Errorf("DKG: %w", err)
 	}
 	return printResult(*id, r.RootPublicKey)
+}
+
+// errAbsent: party A has no keyset of that id (kindctl status exits 3).
+var errAbsent = fmt.Errorf("no such keyset at party A")
+
+// keysetStatus prints the public result of a keyset that party A holds and has resolved. It makes nothing: a keyset that is not there is errAbsent.
+func keysetStatus(args []string) error {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	cl, closeFn, id, _, err := connect(fs, args)
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	done, err := existing(ctx, cl, *id)
+	if err != nil {
+		return err
+	}
+	if done == nil {
+		return fmt.Errorf("keyset %q: %w", *id, errAbsent)
+	}
+	return printResult(*id, done.PublicKey)
 }
 
 // existing is the status of keyset id at party A when it exists and is resolved; nil when there is none yet. An existing keyset that is not resolved is an error (the caller retries).

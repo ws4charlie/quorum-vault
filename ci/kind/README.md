@@ -80,6 +80,20 @@ What it changes, all from the gitignored work dir (`.work/<name>/gate/`): a DKG 
 
 Gate governs its whole shard (every asset), so it has its own: Vault's shard 0 keeps paying Vault's withdrawals (a withdrawal takes the shard with the most free balance of its asset, the first on a tie; nothing books ETH on shard 1) and receives the sweeps (`sweep_destination`). One gap the config cannot close: a Vault **USDC** withdrawal would pick shard 1 while it holds the most USDC, and the zone refuses it (the lane has no Vault USDC flow). `make kind-up` again puts the lane's own configs back on the zone; run `kind-gate` again after it.
 
+## Keep mode (Gate's key survives kind-down)
+
+Opt-in: `make kind-gate ... KEEP=1` (or `QV_KIND_KEEP_GATE=1` in the environment; `make kind-smoke KEEP=1` passes it to the `gate` case). Gate's keyset `hot-1`, and so `wallet_address` and `wallet_id`, then stays the same across `make kind-down` / `make kind-up`, so a testnet address funded once keeps its funds. Without it nothing changes.
+
+| Step | What happens |
+|---|---|
+| First `kind-gate` in keep mode | after the DKG each party exports its own encrypted share of `hot-1` inside its pod (`mpc-party backup export`, under a recovery key made once); the keep dir gets the three backups, the recovery key pair, `hot-1.json` (public) and `wallet_id` |
+| `kind-down` | removes the cluster and `.work`; the keep dir stays (it says so) |
+| `kind-up`, then `kind-gate` in keep mode | party A has no `hot-1`, so instead of a DKG each party restores its share (`mpc-party backup restore -no-records`: the lane never changes its admin set or recovery-key registry), the three parties restart, reconcile and prove the keyset, and party A's keyset status (read only, `kindctl status`) must give the kept address, or `kind-gate` fails. The rest of `kind-gate` runs as usual (token, zone, books, Keycloak) |
+| Again on the same cluster | nothing restored or exported; the address is checked against the keep dir |
+| `make kind-gate-forget` | deletes the keep dir (asks first unless `YES=1`; removes only a dir with the lane's mark). The next `kind-gate` makes a new key and address |
+
+The keep dir is `~/.qv-kind-keep/<cluster name>/` (`QV_KIND_KEEP_DIR` wins; `lib.sh` `keep_dir` refuses a path inside the repository), mode 0700, files 0600, with a `README`. It is **testnet-only key material**: the three backups plus `recovery.private` are the whole signing key. Nothing prints it. The cluster name comes from the checkout's path (`QV_KIND_NAME`), so the keep dir belongs to one checkout unless the name is set. A cluster whose parties already hold a different `hot-1` (for example `kind-gate` ran there without keep mode) is refused with the two addresses: `kind-down` and `kind-up`, or `kind-gate-forget`. Only `hot-1` is kept: `hot-0`, `btc-0` and everything else are new on every `kind-up`. `teesim` replaces the parties, so keep mode on that cluster ends with it (the keep dir is untouched). `ci/kind/keep_test.sh` tests the keep dir and forget guards without a cluster; CI runs it, and the `gate` case once in keep mode (the save path). The restore needs a second `kind-up` (about 3 minutes more) and is shown locally (KS1a report), not in CI.
+
 ## Trust bundles
 
 The charts take the CA file of their certificate volumes from the `qv-certs` trust bundle (`qv-trust-<zone>-<hash>`, an immutable ConfigMap) and not from the `ca.crt` cert-manager puts into each Secret: a projected volume (`tls.crt` and `tls.key` from the Secret, `ca.crt` from the bundle). `tls.trust.<zone>` names the bundle in each chart; the lane finds the names with `trust_args` in `lib.sh`. Empty, the charts behave as before.

@@ -24,6 +24,8 @@ jobs:
         run: |
           curl -sSLo kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 && chmod +x kind && sudo mv kind /usr/local/bin/
           helm version
+      - name: keep mode guards (no cluster)
+        run: ci/kind/keep_test.sh
       - name: up
         shell: bash
         run: /usr/bin/time -v make kind-up 2>&1 | tee /tmp/up.log | tail -40
@@ -32,6 +34,9 @@ jobs:
         run: |
           grep -E "Elapsed|Maximum resident" /tmp/up.log || true
           docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | grep kind || true
+      - name: gate case in keep mode (the save path; the restore needs a second kind-up and is shown locally, ci/kind/README.md "Keep mode")
+        shell: bash
+        run: QV_KIND_KEEP_GATE=1 QV_KIND_KEEP_DIR="$RUNNER_TEMP/qv-kind-keep" ci/kind/smoke/run.sh gate 2>&1 | tee /tmp/keep.log
       - name: smoke
         shell: bash
         # the whole output (a tail once hid the cause of a failed case); run.sh also prints every failed case's full output again at the end
@@ -56,6 +61,7 @@ jobs:
           path: |
             /tmp/up.log
             /tmp/smoke.log
+            /tmp/keep.log
             /tmp/smoke-logs/
           if-no-files-found: ignore
           retention-days: 14
