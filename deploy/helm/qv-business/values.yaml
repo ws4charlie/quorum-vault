@@ -83,6 +83,9 @@ custody:
 # --- Workloads ---
 core:
   replicas: 2
+  # QV_ENV of qv-core: "" (production, the default), dev or test. Never with an image referenced by digest. kind sets dev: its smoke logs in with the dev realm's
+  # test clients, which a production core refuses (internal/auth E2EClients). dev does not turn off TLS (that also needs QV_ALLOW_PLAINTEXT, which the chart never sets).
+  env: ""
   port: 8443
   resources: { requests: { cpu: 500m, memory: 512Mi }, limits: { cpu: "2", memory: 1Gi } }
   # health (default): the service's health listener (QV_HEALTH_LISTEN on healthPort, plain http, /readyz and /livez); tcp; none

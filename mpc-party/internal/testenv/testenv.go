@@ -247,17 +247,7 @@ func (e *Env) WriteConfig(t testing.TB, cfg *server.Config, name string) string 
 	return p
 }
 
-// Dial connects a caller (mTLS, pinned to serverPin) to a caller port.
-func Dial(t testing.TB, addr string, client Cert, serverPin string) (pb.MpcPartyClient, *grpc.ClientConn) {
-	t.Helper()
-	pins, err := parse(serverPin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dialWith(t, addr, client, pins, nil)
-}
-
-// DialAs is Dial for a test that signs admin calls: a request whose Admin comes from Env.Admin or Env.AdminBy is signed here, over the request
+// DialAs connects a caller (mTLS, pinned to serverPin) to a caller port, for a test that signs admin calls: a request whose Admin comes from Env.Admin or Env.AdminBy is signed here, over the request
 // as it goes out, so the test does not repeat the request body to sign it.
 func (e *Env) DialAs(t testing.TB, addr string, client Cert, serverPin string) (pb.MpcPartyClient, *grpc.ClientConn) {
 	t.Helper()

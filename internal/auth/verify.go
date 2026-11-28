@@ -115,6 +115,14 @@ func (a *Authenticator) Verify(ctx context.Context, raw string) (*Principal, err
 		return nil, errors.New("no sub")
 	}
 
+	if a.env == Production {
+		for _, id := range []string{c.AZP, c.ClientID} {
+			if isE2EClient(id) {
+				return nil, fmt.Errorf("client %q is a test client of the dev realm and is refused in production", strings.TrimSpace(id))
+			}
+		}
+	}
+
 	p := &Principal{Issuer: c.Issuer, Sub: c.Subject, Client: c.AZP, ACR: c.ACR, TokenID: c.JTI, Session: c.SID, Name: c.Name}
 	if p.Client == "" {
 		p.Client = c.ClientID

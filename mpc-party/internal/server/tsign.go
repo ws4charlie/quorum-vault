@@ -52,8 +52,6 @@ func (s *Server) link(role string) pbPeerClient {
 
 type pbPeerClient = pb.PeerClient
 
-func (s *Server) signCtxErr(err error) *Fail { return fromWrapper("sign", &transportErr{err}) }
-
 // coordinateSignT runs one signature of a 2-of-3 keyset as coordinator (A or B).
 func (s *Server) coordinateSignT(ctx context.Context, open *pb.Open, rateKey, wantPeer string) (res *opResult, err error) {
 	id := open.KeysetId

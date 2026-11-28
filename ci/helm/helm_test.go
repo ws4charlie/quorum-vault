@@ -37,14 +37,72 @@ func opts(digest bool) PolicyOptions {
 	return PolicyOptions{RequireDigest: digest, CorePort: 8443, ApprovalPort: 8090, LinkPorts: []int{5432, 9092}}
 }
 
+// kindCoreEnv is the one policy finding kind tolerates: QV_ENV=dev in qv-core's ConfigMap (core.env: dev), because the kind smoke logs in with
+// the dev realm's test clients and a production core refuses them (internal/auth E2EClients). As qv-party and the broker tolerate their
+// QV_ENV=dev in kind. Production values never set it (TestCoreEnvOnlyOutsideProduction).
+var kindCoreEnv = regexp.MustCompile(`^ConfigMap/qv-core-env-[0-9a-f]+\[QV_ENV\]: a development switch is set$`)
+
+// policyFindings is CheckPolicy and CheckMigration on a render of valuesFile, less the kind exception kindCoreEnv.
+func policyFindings(objs []Obj, valuesFile string, requireDigest, enableLogin bool) []string {
+	var out []string
+	for _, m := range append(CheckPolicy(objs, opts(requireDigest)), CheckMigration(objs, enableLogin)...) {
+		if valuesFile == "values-kind.yaml" && kindCoreEnv.MatchString(m) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 func TestPolicyPasses(t *testing.T) {
 	for _, vf := range valuesFiles {
 		t.Run(vf.file, func(t *testing.T) {
 			objs := render(t, vf.file)
-			for _, m := range append(CheckPolicy(objs, opts(vf.requireDigest)), CheckMigration(objs, vf.enableLogin)...) {
+			for _, m := range policyFindings(objs, vf.file, vf.requireDigest, vf.enableLogin) {
 				t.Error(m)
 			}
 		})
+	}
+}
+
+// core.env: production renders no QV_ENV anywhere and refuses core.env with digests; kind renders QV_ENV=dev in qv-core's ConfigMap only;
+// the kind exception covers that one finding and nothing else.
+func TestCoreEnvOnlyOutsideProduction(t *testing.T) {
+	prod, err := Render("values.yaml")
+	if err != nil {
+		t.Skip(err)
+	}
+	if strings.Contains(prod, "QV_ENV") {
+		t.Error("the production render sets QV_ENV")
+	}
+	for _, v := range []string{"dev", "test"} {
+		if _, err := Render("values.yaml", "--set", "core.env="+v); err == nil || !strings.Contains(err.Error(), "core.env") {
+			t.Errorf("production values with core.env=%s rendered: %v", v, err)
+		}
+	}
+	if _, err := Render("values-kind.yaml", "--set", "core.env=staging"); err == nil {
+		t.Error("core.env=staging rendered")
+	}
+	var found []string
+	for _, o := range render(t, "values-kind.yaml") {
+		if o.Kind == "ConfigMap" && o.Data["QV_ENV"] != nil {
+			found = append(found, o.Metadata.Name)
+			if !strings.HasPrefix(o.Metadata.Name, "qv-core-env-") || o.Data["QV_ENV"] != "dev" {
+				t.Errorf("kind: QV_ENV=%v in %s (only qv-core's ConfigMap may set it, to dev)", o.Data["QV_ENV"], o.Metadata.Name)
+			}
+		}
+	}
+	if len(found) != 1 {
+		t.Errorf("kind: want QV_ENV in exactly qv-core's ConfigMap, got %v", found)
+	}
+	for _, m := range []string{
+		"ConfigMap/qv-worker-env-0123abcd[QV_ENV]: a development switch is set",
+		"ConfigMap/qv-core-env-0123abcd[QV_ALLOW_PLAINTEXT]: a development switch is set",
+		"Deployment/qv-core/qv-core: development switch QV_ENV",
+	} {
+		if kindCoreEnv.MatchString(m) {
+			t.Errorf("the kind exception also hides %q", m)
+		}
 	}
 }
 
