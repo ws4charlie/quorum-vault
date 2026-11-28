@@ -295,9 +295,6 @@ func (a *Authenticator) RequireServiceCert(zone string, allow pki.Allow) {
 // DevHeader reports whether X-Actor is accepted.
 func (a *Authenticator) DevHeader() bool { return a != nil && a.dev }
 
-// Config returns the effective configuration (for the step-up challenge and for docs).
-func (a *Authenticator) Config() Config { return a.cfg }
-
 // Authenticate names the caller of r. A bearer token is verified. Without one, X-Actor is accepted only when the dev header is on.
 func (a *Authenticator) Authenticate(r *http.Request) (*Principal, *Failure) {
 	if a == nil {
