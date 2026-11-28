@@ -286,9 +286,13 @@ func (s *Service) freeHot(ctx context.Context, q interface {
 // pickShard returns the partition of the shard with the most free hot
 // liquidity of asset. The partition is part of the intent approvers sign, so it
 // is chosen at request time; if no shard covers the amount yet the workflow waits.
+// A Gate shard is never picked: the signing zone refuses every job on it that carries no Gate credential, so the withdrawal would stick.
 func (s *Service) pickShard(ctx context.Context, tx pgx.Tx, asset string, amount *big.Int) (string, error) {
 	best, bestFree := "", (*big.Int)(nil)
 	for i := 0; i < s.Cfg.shardCount(); i++ {
+		if s.Cfg.GateShard(i) {
+			continue
+		}
 		p := s.Cfg.PartitionKey(asset, i).String()
 		free, err := s.freeHot(ctx, tx, p)
 		if err != nil {
@@ -297,6 +301,9 @@ func (s *Service) pickShard(ctx context.Context, tx pgx.Tx, asset string, amount
 		if bestFree == nil || free.Cmp(bestFree) > 0 {
 			best, bestFree = p, free
 		}
+	}
+	if best == "" { // the config refuses this (checkGateShards); never fall back to a Gate shard
+		return "", errors.New("custody: no hot shard of Vault's own to pay from (every shard is Gate's)")
 	}
 	return best, nil
 }

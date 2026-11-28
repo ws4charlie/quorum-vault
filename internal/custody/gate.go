@@ -124,7 +124,7 @@ func (c *Config) buildGate(f *GateFile) error {
 	if len(f.Wallets) == 0 {
 		return errors.New("custody: config: gate: no wallets")
 	}
-	seen := map[string]string{}
+	seen, gs := map[string]string{}, map[int]bool{}
 	for id, w := range f.Wallets {
 		if !reGateUUID.MatchString(id) {
 			return fmt.Errorf("custody: config: gate wallet %q is not a lower-case UUID", id)
@@ -144,8 +144,9 @@ func (c *Config) buildGate(f *GateFile) error {
 		}
 		seen[w.Partition] = id
 		g.Wallets[id] = GateWallet{ID: id, Partition: w.Partition, Asset: k.Asset}
+		gs[k.Shard] = true
 	}
-	c.Gate = g
+	c.Gate, c.gateShards = g, gs
 	return nil
 }
 

@@ -137,17 +137,27 @@ func (s *Service) PlanRebalances(ctx context.Context, log *slog.Logger) ([]Rebal
 		return nil, nil
 	}
 	var created []RebalanceMove
+	// Gate shards take no part: only a Gate credential spends from one, and Vault's moves have none (GateShard). The config gives them no target.
+	var own []int
+	for i := 0; i < c.shardCount(); i++ {
+		if !c.GateShard(i) {
+			own = append(own, i)
+		}
+	}
+	if len(own) < 2 {
+		return nil, nil
+	}
 	for _, sym := range c.AssetList {
-		if _, ok := c.RebalanceTargets[c.PartitionKey(sym, 0).String()]; !ok {
+		if _, ok := c.RebalanceTargets[c.PartitionKey(sym, own[0]).String()]; !ok {
 			continue
 		}
 		var made []RebalanceMove
 		err := InTx(ctx, s.Pool, func(tx pgx.Tx) error {
 			made = nil
 			// Serialize with withdrawal reservations and the cold planner on every shard of the asset, in one order.
-			parts := make([]string, c.shardCount())
-			for i := range parts {
-				parts[i] = c.PartitionKey(sym, i).String()
+			parts := make([]string, len(own))
+			for j, i := range own {
+				parts[j] = c.PartitionKey(sym, i).String()
 			}
 			sort.Strings(parts)
 			for _, p := range parts {
@@ -155,8 +165,8 @@ func (s *Service) PlanRebalances(ctx context.Context, log *slog.Logger) ([]Rebal
 					return err
 				}
 			}
-			shards := make([]*shardState, c.shardCount())
-			for i := range shards {
+			shards := make([]*shardState, len(own))
+			for j, i := range own {
 				p := c.PartitionKey(sym, i).String()
 				tgt, ok := c.RebalanceTargets[p]
 				if !ok {
@@ -174,7 +184,7 @@ func (s *Service) PlanRebalances(ctx context.Context, log *slog.Logger) ([]Rebal
 				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM rebalance_moves WHERE partition_id=$1 AND status NOT IN ('confirmed','failed'))`, p).Scan(&st.outgoing); err != nil {
 					return err
 				}
-				shards[i] = st
+				shards[j] = st
 			}
 			for _, d := range shards {
 				if d.incoming || d.eff.Cmp(d.target) >= 0 {

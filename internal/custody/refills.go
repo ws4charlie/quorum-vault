@@ -633,13 +633,19 @@ func (s *Service) RequestAction(ctx context.Context, kind, param, signer string)
 		param = common.HexToAddress(param).Hex()
 	}
 	if kind == coldsign.KindSetDestination {
-		ok := false
+		ok, gate := false, false
 		for i := range s.Cfg.HotShards {
 			h, _, err := s.ShardAddressOf(s.Cfg.PartitionKey(s.Cfg.Native, i).String())
 			if err != nil {
 				return Refill{}, err
 			}
-			ok = ok || strings.EqualFold(h, param)
+			if strings.EqualFold(h, param) {
+				ok, gate = true, s.Cfg.GateShard(i)
+			}
+		}
+		if gate {
+			// swept funds would land where only a Gate credential spends them: Vault could never pay them out
+			return Refill{}, fmt.Errorf("%w: the sweep destination must not be a Gate shard (only Gate spends from it)", ErrInvalid)
 		}
 		if !ok {
 			return Refill{}, fmt.Errorf("%w: the sweep destination must be one of the hot shards", ErrInvalid)
