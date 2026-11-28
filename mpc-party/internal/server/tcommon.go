@@ -246,11 +246,6 @@ func (rv *groupRV) set(from string, tr *sessTransport, open *pb.Open) bool {
 
 // ---- helpers shared by the T paths ----
 
-// tOpenCtx returns the ctx of one session, with the session timeout.
-func (s *Server) sessionCtx(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, s.cfg.Limits.SessionTimeout())
-}
-
 // meshOf builds the wrapper's Mesh from the session streams to the other members.
 func meshOf(self string, links map[string]*sessTransport) *cbmpc.LinkMesh {
 	m := map[cbmpc.Member]cbmpc.Transport{}

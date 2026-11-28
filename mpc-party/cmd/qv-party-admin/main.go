@@ -642,24 +642,6 @@ func contains(l []string, x string) bool {
 	return false
 }
 
-func anyMentions(bad []string, id string) bool {
-	for _, b := range bad {
-		if strings.Contains(b, "keyset "+id+":") {
-			return true
-		}
-	}
-	return false
-}
-
-func anyUnanswered(vs []view) bool {
-	for _, v := range vs {
-		if v.err != nil {
-			return true
-		}
-	}
-	return false
-}
-
 func disagree(bad []string) error {
 	return fmt.Errorf("THE PARTIES DISAGREE, do not go on until this is understood:\n  - %s", strings.Join(bad, "\n  - "))
 }

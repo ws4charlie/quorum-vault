@@ -191,16 +191,9 @@ func (cl *cluster3) sign(t *testing.T, via, id, job string, seed int, pub []byte
 	cl.verify(t, pub, dg, r.Signature)
 }
 
-// signs counts the signing sessions a process served or started (log lines "op":"OP_SIGN" of followers).
-func (p *proc) followed(op string) int {
-	return strings.Count(p.stderr.String(), `"op":"`+op+`"`)
-}
-
 func context5(d time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), d)
 }
-
-func ctx5(t testing.TB, d time.Duration) context.Context { return ctx(t, d) }
 
 // ---- helpers ----
 
