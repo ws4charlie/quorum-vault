@@ -23,6 +23,19 @@ arch() { case "$(uname -m)" in arm64|aarch64) echo arm64;; *) echo amd64;; esac;
 # The tag of an image, from `repo:tag|digest` lines
 pinned_tag() { printf '%s\n' "$PINNED_IMAGES" | awk -F'|' 'NF==2{print $1}'; }
 pinned_digest() { printf '%s\n' "$PINNED_IMAGES" | awk -F'|' -v t="$1" '$1==t{print $2}'; }
+# docker pull with a bounded retry: 4 tries, 10s/20s/40s apart (a registry rate limit or a network blip failed the nightly of 2026-11-26). The last
+# failure stops the lane with docker's own message.
+pull_retry() {
+  local ref="$1" try out
+  for try in 1 2 3 4; do
+    if out="$(docker pull -q --platform "linux/$(arch)" "$ref" 2>&1)"; then return 0; fi
+    [ "$try" = 4 ] && break
+    echo "pull $ref failed (try $try of 4), again in $((10 * 2 ** (try - 1)))s: $out" >&2
+    sleep $((10 * 2 ** (try - 1)))
+  done
+  echo "pull $ref failed 4 times: $out" >&2
+  return 1
+}
 # Pull by digest, retag, load into the node. Docker's containerd image store cannot `kind load docker-image` a multi-arch image, so ONE archive is made for this
 # platform and loaded once (a single save is also much faster than one per image).
 pull_pinned() {
@@ -31,7 +44,7 @@ pull_pinned() {
   while IFS='|' read -r tag dig; do
     [ -n "$tag" ] || continue
     repo="${tag%:*}"
-    docker pull -q --platform "linux/$(arch)" "$repo@$dig" >/dev/null
+    pull_retry "$repo@$dig"
     docker tag "$repo@$dig" "$tag"
   done <<<"$(printf '%s\n' "$PINNED_IMAGES")"
 }

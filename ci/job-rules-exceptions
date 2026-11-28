@@ -17,3 +17,4 @@ monitoring/	ci/promtool-tests.sh	2	monitoring	checks	promtool and the Go rule te
 monitoring/	docker-compose.yml	2	profiles: ["monitoring"]	-	the compose profile's name, not a path
 monitoring/	docker-compose.yml	1	./monitoring:/etc/prometheus:ro	-	the dev Prometheus (profile monitoring, make monitoring-up); ci/infra.sh never starts it (it names its services; the profile is not one of them)
 loadtest/	ci/e2e-prebuild.sh	1	./loadtest/cmd/qv-load	e2e-evm-1,e2e-evm-2,e2e-evm-3,e2e-evm-4	the build job compiles the load generator for the e2e/custody jobs (they start it); its Go package is in their graph too
+deploy/helm/	ci/kind/check-pins.sh	2	deploy/helm/*/values-kind*.yaml	-	the kind lane's image pin check reads the values-kind files; run only by .github/workflows/helm.yml (and by hand), which runs on deploy/helm/** and ci/kind/**
