@@ -1,4 +1,4 @@
--- Key replacement, business side (K2b; research/Key-replacement.md §4.1, §6, §7).
+-- Key replacement, business side (K2b; docs/key-replacement.md).
 --
 -- keysets.successor: the generation that a draining (or compromised) generation empties into. It is set when the generation starts draining or is
 -- marked compromised, mirrors the signed record of the signing zone (the zone decides from its own record, the core only plans from this one), and

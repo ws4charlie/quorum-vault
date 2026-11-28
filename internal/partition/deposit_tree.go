@@ -10,7 +10,7 @@ import (
 )
 
 // DepositTreePool is the pool field of the registry ID of a chain's deposit key tree (Bitcoin account key, Solana deposit node). The tree is not a hot
-// shard: it holds no funds of its own and no partition. Its generations live in the same registry as the shards' (research/Key-replacement.md §6.1, role
+// shard: it holds no funds of its own and no partition. Its generations live in the same registry as the shards' (docs/key-replacement.md, role
 // "deposit-tree"), so one table says which key serves what.
 const DepositTreePool = "deposit-tree"
 

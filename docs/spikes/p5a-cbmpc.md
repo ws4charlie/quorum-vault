@@ -1,5 +1,8 @@
 # P5a — can Coinbase cb-mpc be the hot-wallet signer?
 
+> **Historical (2026-11-04).** The spike tree `spike/cbmpc/` and its scripts were never part of this repository; the signer that came out of it is `mpc-party` ([MPC](../mpc.md)).
+<!-- check_links: no-paths (the backtick paths below are of the throwaway spike tree) -->
+
 Spike by the P5a hand, 2026-11-04. Code: `spike/cbmpc/` (throwaway). Reproduce: `spike/cbmpc/scripts/demo.sh`.
 Pinned: **cb-mpc v0.2.2, commit `2f2c4f1005729bd575b6f17bce8a47478df7ce78`** (2026-08-31, MIT). Machine: Apple M3 Pro, 12 cores, macOS arm64; Linux checked in an arm64 Debian container.
 

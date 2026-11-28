@@ -1,4 +1,4 @@
--- Keyset registry (K1 of key replacement, research/Key-replacement.md §6): which key generation serves each hot shard, in which state.
+-- Keyset registry (K1 of key replacement, docs/key-replacement.md): which key generation serves each hot shard, in which state.
 -- A shard is identified by its stable shard ID (entity/chain/pool/shard index, internal/partition ShardID), never by a key or an address,
 -- so ledger accounts, holds and jobs keep pointing at the shard when its key changes. States: candidate -> active -> draining -> retired,
 -- and compromised (from candidate, active or draining; it never leaves). The database allows at most one active generation per shard.

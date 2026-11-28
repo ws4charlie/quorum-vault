@@ -1,6 +1,6 @@
 # Nitro first run: checklist for the first day on real hardware
 
-The Nitro path is **written and tested against fakes. It has never run on a Nitro host.** No AWS account existed, so nothing here needed one, and every number below that comes from AWS comes from its documentation (pages read 2026-11-20; names in the text), not from a run. This page turns what the simulation cannot prove into checks with a pass rule, in the order to do them. Design background: `research/TEE.md`; the Kubernetes question: `docs/spikes/nitro-on-kubernetes.md`.
+The Nitro path is **written and tested against fakes. It has never run on a Nitro host.** No AWS account existed, so nothing here needed one, and every number below that comes from AWS comes from its documentation (pages read 2026-11-20; names in the text), not from a run. This page turns what the simulation cannot prove into checks with a pass rule, in the order to do them. Design background: [Enclaves](../enclaves.md); the Kubernetes question: `docs/spikes/nitro-on-kubernetes.md`.
 
 ## What exists, and what is still missing
 
@@ -10,15 +10,15 @@ The Nitro path is **written and tested against fakes. It has never run on a Nitr
 | NSM attester (`/dev/nsm` ioctl, serde CBOR request) | `attest/nsm*.go` |
 | KMS release: SigV4 client, `Recipient` calls, CMS `EnvelopedData` reader, instance-role credentials, vsock dialer | `attest/kmsrelease` |
 | Sealer on KMS (`sealer.type: attested`, `attester.type: nitro`, `release.type: kms`) | `internal/server/sealer_attested_*.go` |
-| Allowlist entries with PCR1, PCR2 and PCR8; one list for the broker and the KMS key policy | `attest/allowlist.go`, `deploy/cloud/aws/nitro/` |
+| Allowlist entries with PCR1, PCR2 and PCR8; one list for the broker and the KMS key policy | `mpc-party/internal/attest/allowlist.go`, `deploy/cloud/aws/nitro/` |
 | EIF build, reproducible; probe image | `deploy/images/eif-build.sh`, `Dockerfile.eif*` |
 | Terraform: key and policy, party role, launch template | `deploy/cloud/aws/modules/nitro-enclave` |
-| First-hardware probe (`mpc-party nitro-probe`) | `internal/nitroprobe` |
+| First-hardware probe (`mpc-party nitro-probe`) | `mpc-party/internal/nitroprobe` |
 
 **Still missing: a party cannot yet run in an enclave.** The first day checks mechanisms (documents, PCRs, KMS), not a running party. Needed before a party runs, in the order they block it:
 1. **Inbound listeners.** An enclave has no network. The party's TCP listeners (gateway and peer port, health) need a bridge pair: parent side `TCP-LISTEN` to `VSOCK-CONNECT`, enclave side the reverse to `127.0.0.1` (and `lo` brought up inside the enclave).
 2. **Storage.** The enclave has no disk. The party's `data_dir` (sealed shares, state, freeze records, stored signatures) must live on the parent and reach the enclave over vsock: a blob-store service on the parent and a store backend in the party (the party already hides its storage behind `KeyStore`, `JobStore`, `FreezeStore`).
-3. **Cosigner channel.** Party B asks its cosigner over a unix socket; that needs a vsock transport or an authenticated TCP path (research/TEE.md, T5).
+3. **Cosigner channel.** Party B asks its cosigner over a unix socket; that needs a vsock transport or an authenticated TCP path (not built yet: [Limits](../limits.md)).
 4. **Logs and metrics** leave only through vsock: a relay.
 5. **The TLS identity** (`tlsident`) inside the enclave: today it reads files.
 Each is small, none exists. Plan them as a task before the second day.
@@ -103,7 +103,7 @@ Same command without `--debug-mode` and with `probe.json` without `kms`.
 deploy/cloud/aws/nitro/check-probe-report.py --report report.json --pcrs probe-out/pcrs.json     # on the parent
 ```
 
-**Pass:** the check prints `every PCR of the build is in the enclave's document and equal` (PCR0, PCR1, PCR2, and PCR8 when you signed); the report has `verified: true` and `debug: false`; the document is about 4.5 to 6 KB (a real one in the tests is 4461 bytes, `testdata/nitro`); `clock skew` within a few seconds; `rng: "nsm-hwrng"`. These show: the NSM ioctl layer works; the chain verifies to the pinned AWS root on real hardware; the PCRs a real enclave reports are the ones `nitro-cli` printed. If the clock skew is large or the rng is another source, fix that before going on (TLS to KMS needs a correct clock; the enclave kernel's clock source is **unverified** here).
+**Pass:** the check prints `every PCR of the build is in the enclave's document and equal` (PCR0, PCR1, PCR2, and PCR8 when you signed); the report has `verified: true` and `debug: false`; the document is about 4.5 to 6 KB (a real one in the tests is 4461 bytes, `mpc-party/internal/attest/testdata/nitro`); `clock skew` within a few seconds; `rng: "nsm-hwrng"`. These show: the NSM ioctl layer works; the chain verifies to the pinned AWS root on real hardware; the PCRs a real enclave reports are the ones `nitro-cli` printed. If the clock skew is large or the rng is another source, fix that before going on (TLS to KMS needs a correct clock; the enclave kernel's clock source is **unverified** here).
 
 ### 6. KMS with the probe's PCRs
 
@@ -120,7 +120,7 @@ Each must fail, and each failure is a pass:
 | Change one hex digit of PCR0 in the key policy, apply, rerun the probe | `AccessDeniedException` |
 | Remove PCR8 or PCR1 from the policy and add a wrong one | `AccessDeniedException` (a PCR in the policy that the document does not match) |
 | Upper-case the PCR0 value in the policy (hand edit) | still allowed (`StringEqualsIgnoreCase`); put it back to lower case |
-| With an administrator's credentials, call `aws kms decrypt` on a stored blob from the shell | `AccessDeniedException` (the deny statement; if this call succeeds, statement 2 of `modules/nitro-enclave/main.tf` does not work as written: report it, the other two statements still hold) |
+| With an administrator's credentials, call `aws kms decrypt` on a stored blob from the shell | `AccessDeniedException` (the deny statement; if this call succeeds, statement 2 of `deploy/cloud/aws/modules/nitro-enclave/main.tf` does not work as written: report it, the other two statements still hold) |
 | Call `aws kms decrypt` with the parent role's credentials and no recipient | `AccessDeniedException` |
 | Run the probe with the policy limited to `v1` but the probe signed with another certificate (PCR8 differs) | `AccessDeniedException` |
 
@@ -138,7 +138,7 @@ Take `probe` out of `allowed_images`, apply, check the key policy shows only rel
 | AWS KMS's own condition evaluation | Step 7 | Every row as listed |
 | vsock and proxy behaviour and limits | Run the probe's KMS round trip 200 times in a loop from the parent (`nitro-cli run-enclave` per run, or after the party exists, the start-up with 200 generations) and watch `vsock-proxy` logs (`journalctl -eu nitro-enclaves-vsock-proxy`) | No connection errors; time per call stable; note the maximum |
 | Overhead and memory (EPC does not exist on Nitro; the question is the enclave's RAM) | Probe `mem_total_mib` and `heap_alloc_mib`; later the party's resident memory inside the enclave while it signs | Record both; size `memory_mib` with 2x headroom over the party's peak. **No party RSS number exists yet** (T4 never measured one) |
-| Side channels and physical attacks | Not testable here | Accepted and listed in `research/TEE.md` and `docs/limits.md` |
+| Side channels and physical attacks | Not testable here | Accepted and listed in `docs/limits.md` |
 | Rollback with real storage | Needs the blob store (missing, above). Repeat the simulation's rollback tests (`TestAttestedRollbackOfTheDataDirectory`, `TestAttestedDeletedFreezeRecordIsStillFrozenByThePeer`) against it | Same results as in simulation |
 
 What this task added and could not test without hardware (each is covered by a step above): the NSM ioctl layer (step 5); the vsock dialer (step 6; it passes against the kernel's own loopback in a privileged container); the clock and entropy inside the enclave (step 5); the real KMS answer format (step 6); the `Recipient` freshness window of KMS, which AWS does not state (if step 6 fails with a timestamp complaint, the document is older than KMS accepts: make the document right before the call; the client already does).

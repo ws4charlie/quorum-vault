@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// The clusters of the Kubernetes deployment (research/K8s-deployment.md section 2): one cluster per trust domain. The attestation broker runs in its
+// The clusters of the Kubernetes deployment (docs/deployment.md, "One cluster for each trust domain"): one cluster per trust domain. The attestation broker runs in its
 // own trust zone (docs/runbooks/tee-broker.md), so it is a fifth place. The kind and CI lane runs all of them in one cluster (chart value cluster: all).
 const (
 	ClusterBusiness    = "business"

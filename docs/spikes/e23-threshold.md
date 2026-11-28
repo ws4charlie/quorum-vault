@@ -48,4 +48,4 @@ On a real network add rounds x RTT per signature: 9 x 20 ms = 180 ms (one region
 - No identifiable abort: a `Cryptographic` error does not name the cheater. The wrapper could attach the peer of the last receive; not done here.
 - Load does not check Q against the shares; every signing does (and the self-test).
 - Not measured: more than 3 parties, slow links (no network emulation here), memory, the time with the OS under load.
-- No change to the 2-party code or its golden fixtures. `scripts/ci.sh` is a Linux/apt script; it was not run on this macOS machine (see report).
+- No change to the 2-party code or its golden fixtures. cb-mpc's own CI script (scripts/ci.sh in the cb-mpc tree) is a Linux/apt script; it was not run on this macOS machine (see report).
