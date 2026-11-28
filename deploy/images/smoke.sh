@@ -38,12 +38,13 @@ for d in $([ "${QV_CHECK_SET:-}" = release ] || echo "$QV_DEV_IMAGES"); do
   if [ "$rc" -le 2 ] && grep -qi usage <<<"$out" && [ "$have" = yes ]; then echo "ok   $name: $b -h, SoftHSM present"
   else echo "FAIL $name: $b -h exited $rc, SoftHSM library in the image: $have"; printf '%s\n' "$out" | head -8 | sed 's/^/    /'; fail=1; fi
 done
-# test-only code is absent from production binaries. These strings exist only in files behind `//go:build devauth`.
-probe() { # probe <image> <binary> <string>
-  local cid; cid="$(docker create "${QV_IMAGE_PREFIX}$1:${QV_IMAGE_TAG}")"; docker cp "$cid:/usr/local/bin/$2" - 2>/dev/null | tar -xO 2>/dev/null | grep -c -a -F -- "$3" || true; docker rm -f "$cid" >/dev/null
+# test-only code is absent from production binaries. These strings exist only in files behind `//go:build devauth` or `//go:build teesim`.
+probe() { # probe <image> <binary> <string>; prints the count, or "no-image" (a failure, never a pass) when the container cannot be made
+  local cid; cid="$(docker create "${QV_IMAGE_PREFIX}$1:${QV_IMAGE_TAG}")" || { echo no-image; return; }; docker cp "$cid:/usr/local/bin/$2" - 2>/dev/null | tar -xO 2>/dev/null | grep -c -a -F -- "$3" || true; docker rm -f "$cid" >/dev/null
 }
 n="$(probe mpc-party mpc-party 'sealer key file must hold 64 hex chars')"; [ "$n" = 0 ] && echo "ok   mpc-party has no insecure sealer" || { echo "FAIL mpc-party contains the insecure sealer"; fail=1; }
 n="$(probe mpc-party mpc-party 'I UNDERSTAND THIS PARTY SIGNS ANYTHING')"; [ "$n" = 0 ] && echo "ok   mpc-party has no dev-allow-all authorizer" || { echo "FAIL mpc-party contains dev-allow-all"; fail=1; }
+n="$(probe mpc-party mpc-party 'attest: mock attester has no CA')"; [ "$n" = 0 ] && echo "ok   mpc-party has no mock attester (no teesim)" || { echo "FAIL mpc-party contains the teesim mock attester"; fail=1; }
 n="$(probe qv-attest-broker qv-attest-broker 'attest: mock attester has no CA')"; [ "$n" = 0 ] && echo "ok   qv-attest-broker has no mock attester (no teesim)" || { echo "FAIL qv-attest-broker contains the teesim mock attester"; fail=1; }
 n="$(probe qv-worker qv-worker 'QV_FAILPOINT')"; [ "$n" = 0 ] && echo "ok   qv-worker has no failpoints" || { echo "FAIL qv-worker contains failpoints"; fail=1; }
 # the approval page's files are in the image (the server is useless without them); output is captured, no `grep -q` on a pipe
